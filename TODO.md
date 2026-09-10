@@ -61,8 +61,8 @@ Legenda: `[ ]` pending, `[x]` selesai. Kriteria = syarat lolos.
   Kriteria: `ls`, `vim`, `htop` jalan interaktif, frame present tiap ada damage. Status: done.
 
 ## Langkah 15 — app_term resize + exit + relaunch
-- [ ] `app_on_resize/exit/relaunch @ src/app/main.odin` — Scope: §5.15.
-  Kriteria: tutup window exit bersih; child exit tampilkan kode + tombol relaunch. Status: pending.
+- [x] `app_on_resize/exit/relaunch @ src/app/main.odin` — Scope: §5.15.
+  Kriteria: tutup window exit bersih; child exit tampilkan kode + tombol relaunch. Status: done.
 
 ## Langkah 16 — Verifikasi: pty harness + bench input-to-photon
 - [ ] `pty_harness @ src/platform/pty/tests/` + `cmd_pty`, `cmd_input_photon @ src/bench/` — Scope: §5.16.

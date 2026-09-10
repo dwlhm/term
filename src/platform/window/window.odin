@@ -125,3 +125,15 @@ window_update_pixel_size :: proc(w: ^Window) {
 window_get_sdl_handle :: proc(w: ^Window) -> ^sdl3.Window {
 	return w.handle
 }
+
+// window_get_size returns the current logical window size via SDL_GetWindowSize.
+// Nil window or nil handle returns (0,0) without touching SDL.
+window_get_size :: proc(w: ^Window) -> (width: i32, height: i32) {
+	if w == nil || w.handle == nil {
+		return 0, 0
+	}
+	lw: c.int
+	lh: c.int
+	sdl3.GetWindowSize(w.handle, &lw, &lh)
+	return i32(lw), i32(lh)
+}

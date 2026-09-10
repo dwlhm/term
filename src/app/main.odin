@@ -1,17 +1,19 @@
 package main
 
-// app_term main loop (TODO Langkah 14).
+// app_term main loop (TODO Langkah 15).
 //
 // Fixed per-frame order in app_frame:
-//   (1) input pump  (keys -> pty, resize -> winsize + terminal_resize +
-//       resize_grid + pixel resize)
-//   (2) pty_drain (cap 64KB) -> parse_chunk
+//   (1) input: Running -> input pump (keys -> pty, resize -> winsize +
+//       terminal_resize + resize_grid + pixel resize); Exited ->
+//       window_poll_input routed per key via app_handle_exited_key
+//       (R relaunch, Q/Esc quit, rest ignored), drain skipped
+//   (1b) window_get_size vs last_px -> app_on_resize (both states)
+//   (2) pty_drain (cap 64KB, Running only) -> parse_chunk
 //   (3) cursor sync from terminal cursor + blink tick(now, focused,
 //       term_visible)
 //   (4) renderer_frame_auto; if the frame skipped AND the cursor changed,
 //       overlay-only present (cursor quad via the reserved slot)
-//   (5) exit poll -> Exited state (banner is step 15: here only the state
-//       is recorded and input feeding stops via pty_write's Exited guard)
+//   (5) exit poll; Running->Exited transition shows the exit banner once
 //
 // Shell decision: $SHELL when set and non-empty, /bin/sh fallback.
 // The choice is documented at _resolve_shell.
@@ -61,6 +63,12 @@ APP_SHELL_FALLBACK :: "/bin/sh"
 // APP_SHELL_ENV is the environment variable naming the login shell.
 APP_SHELL_ENV :: "SHELL"
 
+// APP_BANNER_EXIT_FMT is the one-shot exit banner; %d is the exit code.
+APP_BANNER_EXIT_FMT :: "[ process exited (%d) - press R to relaunch, Q to quit ]"
+
+// APP_BANNER_FAIL is the banner kept on screen when a relaunch fails.
+APP_BANNER_FAIL :: "[ relaunch failed - press R to retry, Q to quit ]"
+
 // Font paths to try (in order).
 FONT_PATHS :: []string{
 	"/System/Library/Fonts/Menlo.ttc",
@@ -78,6 +86,16 @@ App :: struct {
 	cursor:      render.Cursor_Overlay,
 	focused:     bool,
 	should_quit: bool,
+	// prog/argv are the child spec for (re)launch, stored as-is with
+	// caller-owned static lifetime (never freed or cloned by App).
+	prog:         string,
+	argv:         []string,
+	// banner_shown gates the exit-banner rewrite: true once the banner
+	// for the current Exited episode is on the grid.
+	banner_shown: bool,
+	// last_px_w/h is the last window size consumed by app_on_resize.
+	last_px_w:   i32,
+	last_px_h:   i32,
 	// GPU plumbing (plan-silent detail: the handles must live for the app
 	// lifetime so app_destroy can unwind in exact reverse order).
 	backend:     ^gpu.Gpu_Backend_VTable,
@@ -126,6 +144,11 @@ app_init :: proc(a: ^App, rows, cols: int, prog: string, argv: []string) -> bool
 	}
 	a.focused = true
 	a.should_quit = false
+	a.prog = prog
+	a.argv = argv
+	a.banner_shown = false
+	a.last_px_w = 0
+	a.last_px_h = 0
 
 	// (1) Window.
 	window_w := i32(cols) * i32(APP_CELL_W)
@@ -236,6 +259,7 @@ app_init :: proc(a: ^App, rows, cols: int, prog: string, argv: []string) -> bool
 
 	// Initial focus mirrors the live window state.
 	_app_sync_focus(a)
+	a.last_px_w, a.last_px_h = win.window_get_size(&a.window)
 	return true
 }
 
@@ -368,6 +392,131 @@ _app_present_overlay :: proc(a: ^App) -> bool {
 	return true
 }
 
+// App_Exit_Action is the per-key decision while the child is Exited.
+App_Exit_Action :: enum {
+	None,
+	Relaunch,
+	Quit,
+}
+
+// app_handle_exited_key routes one input event while the child is Exited.
+// Printable 'r'/'R' relaunches, Printable 'q'/'Q' and Escape quit;
+// every other kind (incl Ctrl/Alt/arrows) is ignored. No App param:
+// the caller applies the returned action.
+app_handle_exited_key :: proc(ev: input.Input_Event) -> App_Exit_Action {
+	#partial switch ev.kind {
+	case .Printable:
+		if ev.rune == 'r' || ev.rune == 'R' {
+			return .Relaunch
+		}
+		if ev.rune == 'q' || ev.rune == 'Q' {
+			return .Quit
+		}
+		return .None
+	case .Escape:
+		return .Quit
+	case:
+		return .None
+	}
+}
+
+// _app_write_banner_text draws s on the bottom row (truncated to the grid
+// width) and latches banner_shown. Shared writer behind app_show_banner
+// and app_show_banner_fail.
+_app_write_banner_text :: proc(a: ^App, s: string) {
+	if a == nil {
+		return
+	}
+	rows := a.terminal.grid.row_count
+	cols := a.terminal.grid.col_count
+	if rows <= 0 || cols <= 0 {
+		a.banner_shown = true
+		return
+	}
+	text := s
+	if len(text) > cols {
+		text = text[:cols]
+	}
+	termgrid.terminal_move_cursor(&a.terminal, rows - 1, 0)
+	termgrid.terminal_put_string(&a.terminal, text)
+	a.banner_shown = true
+}
+
+// app_show_banner draws the one-shot exit banner with the live exit code
+// on the bottom row. Called ONLY on the Running->Exited transition (the
+// caller checks the previous state); later Exited frames must not rewrite.
+app_show_banner :: proc(a: ^App) {
+	if a == nil {
+		return
+	}
+	buf: [160]u8
+	s := fmt.bprintf(buf[:], APP_BANNER_EXIT_FMT, a.pty.exit_code)
+	_app_write_banner_text(a, s)
+}
+
+// app_show_banner_fail draws the relaunch-failed banner, keeping the
+// Exited state so a retry stays possible.
+app_show_banner_fail :: proc(a: ^App) {
+	_app_write_banner_text(a, APP_BANNER_FAIL)
+}
+
+// app_relaunch closes the dead pty and spawns a fresh child from the
+// stored prog/argv at the live grid size. On success the grid is cleared,
+// the cursor homed, the parser reset, and banner_shown cleared (the LUT
+// is untouched: it auto-rebuilds on count mismatch in frame). On spawn
+// failure the Exited state is kept with the FAIL banner and false is
+// returned so the caller can offer a retry.
+app_relaunch :: proc(a: ^App) -> bool {
+	if a == nil {
+		return false
+	}
+	pty.pty_close(&a.pty)
+	rows := a.terminal.grid.row_count
+	cols := a.terminal.grid.col_count
+	if !pty.pty_spawn(&a.pty, rows, cols, a.prog, a.argv) {
+		app_show_banner_fail(a)
+		return false
+	}
+	termgrid.terminal_erase_display(&a.terminal, .Entire)
+	termgrid.terminal_move_cursor(&a.terminal, 0, 0)
+	parser.parser_init(&a.parser)
+	a.banner_shown = false
+	return true
+}
+
+// app_on_resize applies one window size in pixels: pixel dims -> grid
+// dims -> terminal_resize + renderer_resize_grid + renderer pixel resize
+// + pty_set_winsize. Degenerate (<= 0) sizes and same-dims+same-px calls
+// are no-ops returning false with zero syscalls; otherwise the new px
+// size is stored and true is returned.
+app_on_resize :: proc(a: ^App, pixel_w: i32, pixel_h: i32) -> (resized: bool) {
+	if a == nil {
+		return false
+	}
+	if pixel_w <= 0 || pixel_h <= 0 {
+		return false
+	}
+	cols := int(pixel_w) / APP_CELL_W
+	rows := int(pixel_h) / APP_CELL_H
+	if cols < 1 {
+		cols = 1
+	}
+	if rows < 1 {
+		rows = 1
+	}
+	if rows == a.terminal.grid.row_count && cols == a.terminal.grid.col_count &&
+	   pixel_w == a.last_px_w && pixel_h == a.last_px_h {
+		return false
+	}
+	termgrid.terminal_resize(&a.terminal, rows, cols)
+	render.renderer_resize_grid(&a.renderer, &a.terminal, i32(rows), i32(cols))
+	render.renderer_resize(&a.renderer, u32(pixel_w), u32(pixel_h))
+	pty.pty_set_winsize(&a.pty, rows, cols)
+	a.last_px_w = pixel_w
+	a.last_px_h = pixel_h
+	return true
+}
+
 // app_frame runs one frame in fixed order; false means quit requested
 // (destroy-safe state, main then destroys). Nil-app returns false; a
 // windowless app skips the SDL pump (headless-safe, no SDL calls).
@@ -376,24 +525,49 @@ app_frame :: proc(a: ^App) -> bool {
 		return false
 	}
 
-	// (1) Input pump (keys -> pty; resize -> winsize + terminal_resize,
-	// finished here with resize_grid + pixel resize). When the child is
-	// Exited, pty_write refuses the bytes, so feeding stops while the SDL
-	// drain (quit/resize) keeps working.
+	// (1) Input. Running keeps the existing input_pump path (keys ->
+	// pty; resize -> winsize + terminal_resize, finished here with
+	// resize_grid + pixel resize). Exited skips input_pump and the drain:
+	// window_poll_input events route per key (R relaunch, Q/Esc quit)
+	// while the close button still quits via is_open.
 	if a.window.handle != nil {
-		quit, resized, _ := input.input_pump(&a.window, &a.pty, &a.terminal)
-		if quit {
-			a.should_quit = true
-			return false
+		if a.pty.state == .Exited {
+			evs: [input.INPUT_PUMP_MAX_EVENTS]input.Input_Event
+			n := input.window_poll_input(&a.window, evs[:], input.INPUT_PUMP_MAX_EVENTS)
+			for i in 0..<n {
+				switch app_handle_exited_key(evs[i]) {
+				case .Relaunch:
+					_ = app_relaunch(a)
+				case .Quit:
+					a.should_quit = true
+				case .None:
+				}
+			}
+			if !a.window.is_open {
+				a.should_quit = true
+				return false
+			}
+			_app_sync_focus(a)
+		} else {
+			quit, resized, _ := input.input_pump(&a.window, &a.pty, &a.terminal)
+			if quit {
+				a.should_quit = true
+				return false
+			}
+			if resized {
+				_app_apply_resize(a)
+			}
+			_app_sync_focus(a)
 		}
-		if resized {
-			_app_apply_resize(a)
+		// (1b) Live window size vs last_px -> app_on_resize (both
+		// states; same-dims+same-px is a no-op inside).
+		if gw, gh := win.window_get_size(&a.window); gw != a.last_px_w || gh != a.last_px_h {
+			_ = app_on_resize(a, gw, gh)
 		}
-		_app_sync_focus(a)
 	}
 
-	// (2) PTY drain (cap 64KB) -> parse_chunk.
-	if a.pty.master >= 0 {
+	// (2) PTY drain (cap 64KB) -> parse_chunk. Skipped while Exited.
+	if a.pty.state == .Running && a.pty.master >= 0 {
 		drain_buf: [APP_DRAIN_CAP]u8
 		if n, _ := pty.pty_drain(&a.pty, drain_buf[:], APP_DRAIN_CAP); n > 0 {
 			parser.parse_chunk(&a.parser, &a.terminal, drain_buf[:n])
@@ -428,9 +602,13 @@ app_frame :: proc(a: ^App) -> bool {
 		}
 	}
 
-	// (5) Exit poll: record the Exited state, keep looping (banner is
-	// step 15). Input feeding already stopped at pty_write.
+	// (5) Exit poll: record the Exited state, keep looping. The banner
+	// draws exactly once, on the Running->Exited transition.
+	was_running := a.pty.state == .Running
 	pty.pty_poll_exit(&a.pty)
+	if was_running && a.pty.state == .Exited {
+		app_show_banner(a)
+	}
 
 	return !a.should_quit
 }

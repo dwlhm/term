@@ -201,7 +201,7 @@ test_app_frame_drain_parse_exit :: proc(t: ^testing.T) {
 	a: app.App
 	_bare_app(&a)
 	defer _bare_destroy(&a)
-	if !_dummy_window(t, &a.window, "app-test-drain", 64, 64) {
+	if !_dummy_window(t, &a.window, "app-test-drain", APP_TEST_COLS * app.APP_CELL_W, APP_TEST_ROWS * app.APP_CELL_H) {
 		testing.expect(t, true, "SKIP: dummy video unavailable after retries; infra flake, not a code defect")
 		return
 	}
