@@ -53,8 +53,8 @@ Legenda: `[ ]` pending, `[x]` selesai. Kriteria = syarat lolos.
   Kriteria: cell kursor ter-invert/overlay tanpa merusak glyph, ikut DECTCEM. Status: done.
 
 ## Langkah 13 — renderer_resize_grid (surface + grid + atlas)
-- [ ] `renderer_resize_grid(r, t, pw, ph) @ src/render/resize_grid.odin` — Scope: §5.13.
-  Kriteria: resize pixel panggil Langkah 6, re-attach surface, frame berikutnya present ok. Status: pending.
+- [x] `renderer_resize_grid(r, t, pw, ph) @ src/render/resize_grid.odin` — Scope: §5.13.
+  Kriteria: resize pixel panggil Langkah 6, re-attach surface, frame berikutnya present ok. Status: done.
 
 ## Langkah 14 — app_term loop (poll -> drain -> parse -> compile -> render)
 - [ ] `main() @ src/app/main.odin` (app_term) — Scope: §5.14.
