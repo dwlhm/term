@@ -41,8 +41,8 @@ Legenda: `[ ]` pending, `[x]` selesai. Kriteria = syarat lolos.
   Kriteria: ketik muncul di shell, resize window panggil Langkah 4+6. Status: done.
 
 ## Langkah 10 — DECTCEM (cursor show/hide CSI ?25h/l)
-- [ ] `dectcem_set(t, visible) @ src/terminal/cursor.odin` + dispatch CSI — Scope: §5.10.
-  Kriteria: `ESC[?25l` sembunyikan, `ESC[?25h` tampilkan, state bertahan. Status: pending.
+- [x] `dectcem_set(t, visible) @ src/terminal/cursor.odin` + dispatch CSI — Scope: §5.10.
+  Kriteria: `ESC[?25l` sembunyikan, `ESC[?25h` tampilkan, state bertahan. Status: done.
 
 ## Langkah 11 — Cursor overlay tick (blink state)
 - [ ] `cursor_tick(state, dt) @ src/render/cursor_overlay.odin` — Scope: §5.11.

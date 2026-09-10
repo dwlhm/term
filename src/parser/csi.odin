@@ -8,6 +8,10 @@ CSI_Params :: struct {
 	count:  u8,      // number of parameters collected
 }
 
+// DECTCEM_CURSOR_PARAM is the DEC private mode number for cursor visibility
+// (CSI ? 25 h = show, CSI ? 25 l = hide).
+DECTCEM_CURSOR_PARAM :: 25
+
 // csi_collect_param collects a CSI parameter byte.
 // Handles digits (0-9), semicolon (;), and colon (:).
 csi_collect_param :: proc(p: ^Parser, b: u8) {
@@ -31,12 +35,17 @@ csi_collect_param :: proc(p: ^Parser, b: u8) {
 
 // csi_dispatch dispatches a CSI sequence.
 // Called when the final byte of a CSI sequence is received.
+// The DEC private marker (?) arrives via the Collect action into
+// p.intermediate (vt.odin CSI_Entry/CSI_Param paths), so it is read here
+// directly — no signature change needed. intermediate is cleared alongside
+// the params so a stale marker never leaks into the next sequence.
 csi_dispatch :: proc(p: ^Parser, t: ^termgrid.Terminal, final_byte: u8) {
 	// Build CSI_Params from parser state
 	params := CSI_Params{
 		values = p.csi_values,
 		count  = p.csi_count + 1, // count is 0-indexed, so add 1
 	}
+	private := p.intermediate == '?'
 	
 	// Dispatch based on final byte
 	switch final_byte {
@@ -66,9 +75,18 @@ csi_dispatch :: proc(p: ^Parser, t: ^termgrid.Terminal, final_byte: u8) {
 		_csi_execute_ich(t, params)
 	case 'P': // DCH - Delete Characters
 		_csi_execute_dch(t, params)
+	case 'h': // SM - Set Mode (private: DECTCEM show)
+		if private {
+			_csi_execute_dectcem(t, params, true)
+		}
+	case 'l': // RM - Reset Mode (private: DECTCEM hide)
+		if private {
+			_csi_execute_dectcem(t, params, false)
+		}
 	}
 	
 	// Reset CSI state
+	p.intermediate = 0
 	csi_reset(p)
 }
 
@@ -227,6 +245,18 @@ _csi_execute_decstbm :: proc(t: ^termgrid.Terminal, params: CSI_Params) {
 	if !termgrid.terminal_set_scroll_region(t, top_0, bottom_0) {
 		// Invalid region (top>=bottom or OOR): leave margins unchanged.
 		return
+	}
+}
+
+// _csi_execute_dectcem executes DECTCEM (DEC private mode 25): sets cursor
+// visibility. Applies when mode 25 is present anywhere in the params
+// (multi-param sequences like ? 25 ; 1 h still apply); idempotent.
+_csi_execute_dectcem :: proc(t: ^termgrid.Terminal, params: CSI_Params, visible: bool) {
+	for i in 0..<int(params.count) {
+		if int(params.values[i]) == DECTCEM_CURSOR_PARAM {
+			termgrid.terminal_set_cursor_visible(t, visible)
+			return
+		}
 	}
 }
 

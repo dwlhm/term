@@ -332,6 +332,13 @@ terminal_cursor_right :: proc(t: ^Terminal, n: int) {
 	t.cursor.col = new_col
 }
 
+// terminal_set_cursor_visible sets the DECTCEM cursor visibility state.
+// Called by the parser for CSI ? 25 h (show) / CSI ? 25 l (hide).
+// Persists until the next DECTCEM sequence; plain output never changes it.
+terminal_set_cursor_visible :: proc(t: ^Terminal, visible: bool) {
+	t.cursor.visible = visible
+}
+
 // _wide_erase_repair blanks orphaned wide halves after clearing the
 // inclusive range [start, end] on row: a lead at start-1 whose continuation
 // was cleared, and a continuation at end+1 whose lead was cleared.
