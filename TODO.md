@@ -65,5 +65,5 @@ Legenda: `[ ]` pending, `[x]` selesai. Kriteria = syarat lolos.
   Kriteria: tutup window exit bersih; child exit tampilkan kode + tombol relaunch. Status: done.
 
 ## Langkah 16 — Verifikasi: pty harness + bench input-to-photon
-- [ ] `pty_harness @ src/platform/pty/tests/` + `cmd_pty`, `cmd_input_photon @ src/bench/` — Scope: §5.16.
-  Kriteria: harness spawn `printf hello` -> grid berisi `hello`; bench ukur ns input-to-photon. Status: pending.
+- [x] `pty_harness @ src/platform/pty/tests/` + `cmd_pty`, `cmd_input_photon @ src/bench/` — Scope: §5.16.
+  Kriteria: harness spawn `printf hello` -> grid berisi `hello`; bench ukur ns input-to-photon. Status: done.
