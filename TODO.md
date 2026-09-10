@@ -57,8 +57,8 @@ Legenda: `[ ]` pending, `[x]` selesai. Kriteria = syarat lolos.
   Kriteria: resize pixel panggil Langkah 6, re-attach surface, frame berikutnya present ok. Status: done.
 
 ## Langkah 14 — app_term loop (poll -> drain -> parse -> compile -> render)
-- [ ] `main() @ src/app/main.odin` (app_term) — Scope: §5.14.
-  Kriteria: `ls`, `vim`, `htop` jalan interaktif, frame present tiap ada damage. Status: pending.
+- [x] `main() @ src/app/main.odin` (app_term) — Scope: §5.14.
+  Kriteria: `ls`, `vim`, `htop` jalan interaktif, frame present tiap ada damage. Status: done.
 
 ## Langkah 15 — app_term resize + exit + relaunch
 - [ ] `app_on_resize/exit/relaunch @ src/app/main.odin` — Scope: §5.15.
