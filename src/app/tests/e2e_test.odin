@@ -170,15 +170,11 @@ _e2e_pred_abc :: proc(a: ^app.App) -> bool {
 }
 
 _e2e_pred_styled_red :: proc(a: ^app.App) -> bool {
-	// SGR colors are stubs (csi.odin SGR 30..37 sets no style), so the
-	// real-path proof is execution: a row starting with RED (shell output
-	// at col 0). Echo rows start with "printf" or the prompt, never RED.
-	for r in 0..<a.terminal.grid.row_count {
-		if _row_matches(&a.terminal, r, "RED") {
-			return true
-		}
-	}
-	return false
+	// SGR colors are live: the proof is a styled R,E,D triple
+	// (shell output at col 0). Echo rows carry literal "RED" text
+	// with style 0 and never match.
+	_, _, found := _e2e_styled_red_at(&a.terminal)
+	return found
 }
 
 _e2e_pred_blank :: proc(a: ^app.App) -> bool {
@@ -297,18 +293,16 @@ test_e2e_colored_output :: proc(t: ^testing.T) {
 		testing.expect(t, false, "no RED output row found")
 	}
 	r, cc, red_found := _e2e_styled_red_at(&a.terminal)
-	_ = r
-	_ = cc
-	_ = red_found
-	// Document the stub: every cell stays style 0 until SGR colors land.
-	for rr in 0..<a.terminal.grid.row_count {
-		for ccc in 0..<a.terminal.grid.col_count {
-			if termgrid.terminal_get_cell(&a.terminal, rr, ccc).style != 0 {
-				_e2e_dump_grid(&a.terminal)
-				testing.expect(t, false, "all styles default (SGR colors stub)")
-				break
-			}
-		}
+	if !red_found {
+		_e2e_dump_grid(&a.terminal)
+		testing.expect(t, false, "RED triple must carry non-default style")
+		return
+	}
+	// R,E,D cells must carry the red-fg style (xterm red 31).
+	for k in 0..<3 {
+		cell := termgrid.terminal_get_cell(&a.terminal, r, cc + k)
+		st := termgrid.style_table_get(&a.terminal.grid.style_table, cell.style)
+		testing.expect(t, st.fg == u32(0xFFCD0000), "RED cell fg must be xterm red")
 	}
 }
 

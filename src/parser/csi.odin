@@ -354,37 +354,173 @@ _csi_execute_dch :: proc(t: ^termgrid.Terminal, params: CSI_Params) {
 		termgrid.damage_mark_row(&t.damage, t.cursor.row, t.grid.rows[phys].generation)
 	}
 }
+// SGR palette (xterm): stored as 0xFFRRGGBB.
+_SGR_STANDARD := [8]u32{
+	0xFF000000, // black
+	0xFFCD0000, // red
+	0xFF00CD00, // green
+	0xFFCDCD00, // yellow
+	0xFF0000EE, // blue
+	0xFFCD00CD, // magenta
+	0xFF00CDCD, // cyan
+	0xFFE5E5E5, // white
+}
+
+// SGR bright palette (xterm): stored as 0xFFRRGGBB.
+_SGR_BRIGHT := [8]u32{
+	0xFF7F7F7F, // bright black
+	0xFFFF0000, // bright red
+	0xFF00FF00, // bright green
+	0xFFFFFF00, // bright yellow
+	0xFF5C5CFF, // bright blue
+	0xFFFF00FF, // bright magenta
+	0xFF00FFFF, // bright cyan
+	0xFFFFFFFF, // bright white
+}
+
+// _sgr_cube_level maps a 6x6x6 cube component (0..5) to its intensity.
+_sgr_cube_level :: proc(v: int) -> u32 {
+	levels := [6]u32{0, 95, 135, 175, 215, 255}
+	if v < 0 || v > 5 {
+		return 0
+	}
+	return levels[v]
+}
+
+// _sgr_palette_256 resolves a 256-color index to 0xFFRRGGBB:
+// 0-7 standard, 8-15 bright, 16-231 6x6x6 cube, 232-255 grayscale.
+// Out-of-range indices return default white (callers guard bounds).
+_sgr_palette_256 :: proc(idx: int) -> u32 {
+	if idx < 0 || idx > 255 {
+		return termgrid.STYLE_DEFAULT.fg
+	}
+	if idx < 8 {
+		return _SGR_STANDARD[idx]
+	}
+	if idx < 16 {
+		return _SGR_BRIGHT[idx - 8]
+	}
+	if idx < 232 {
+		i := idx - 16
+		r := _sgr_cube_level(i / 36)
+		g := _sgr_cube_level((i % 36) / 6)
+		b := _sgr_cube_level(i % 6)
+		return 0xFF000000 | (r << 16) | (g << 8) | b
+	}
+	g := u32(8 + 10 * (idx - 232))
+	return 0xFF000000 | (g << 16) | (g << 8) | g
+}
+
+// _sgr_clamp_rgb clamps an SGR truecolor component to 0..255.
+_sgr_clamp_rgb :: proc(v: u32) -> u32 {
+	if v > 255 {
+		return 255
+	}
+	return v
+}
+
 // _csi_execute_sgr executes Select Graphic Rendition (SGR).
+// Loads the current style ONCE, mutates a local copy across all params,
+// then inserts + sets ONCE (single style-table insert per sequence).
+// Unknown codes are ignored (never fail); a truncated 38/48 tail drops
+// the tail while prior params still apply.
 _csi_execute_sgr :: proc(t: ^termgrid.Terminal, params: CSI_Params) {
-	// Process each SGR parameter
-	for i in 0..<int(params.count) {
+	cur := termgrid.style_table_get(&t.grid.style_table, t.current_style)
+
+	count := int(params.count)
+	if count == 0 {
+		// Bare ESC[m with no params: treat as [0] reset.
+		cur = termgrid.STYLE_DEFAULT
+		termgrid.terminal_set_style(t, termgrid.style_table_insert(&t.grid.style_table, cur))
+		return
+	}
+
+	i := 0
+	for i < count {
 		code := int(params.values[i])
-		
+
 		switch code {
 		case 0: // Reset
-			termgrid.terminal_set_style(t, 0)
+			cur = termgrid.STYLE_DEFAULT
 		case 1: // Bold
-			// TODO: implement style attributes
-			_ = code
-		case 30..=37: // Foreground colors (black, red, green, yellow, blue, magenta, cyan, white)
-			// Simple implementation: use palette index
-			fg_color := u32(code - 30)
-			style := termgrid.Style{
-				fg        = fg_color,
-				bg        = 0,
-				underline = 0,
-				flags     = 0,
+			cur.flags |= termgrid.STYLE_FLAG_BOLD
+		case 3: // Italic
+			cur.flags |= termgrid.STYLE_FLAG_ITALIC
+		case 4: // Underline
+			cur.flags |= termgrid.STYLE_FLAG_UNDERLINE
+		case 7: // Inverse
+			cur.flags |= termgrid.STYLE_FLAG_INVERSE
+		case 9: // Strike
+			cur.flags |= termgrid.STYLE_FLAG_STRIKE
+		case 22: // Bold off
+			cur.flags = cur.flags & (~termgrid.STYLE_FLAG_BOLD)
+		case 23: // Italic off
+			cur.flags = cur.flags & (~termgrid.STYLE_FLAG_ITALIC)
+		case 24: // Underline off
+			cur.flags = cur.flags & (~termgrid.STYLE_FLAG_UNDERLINE)
+		case 27: // Inverse off
+			cur.flags = cur.flags & (~termgrid.STYLE_FLAG_INVERSE)
+		case 29: // Strike off
+			cur.flags = cur.flags & (~termgrid.STYLE_FLAG_STRIKE)
+		case 30..=37: // Standard foreground
+			cur.fg = _sgr_palette_256(code - 30)
+		case 40..=47: // Standard background
+			cur.bg = _sgr_palette_256(code - 40)
+		case 90..=97: // Bright foreground
+			cur.fg = _sgr_palette_256(code - 90 + 8)
+		case 100..=107: // Bright background
+			cur.bg = _sgr_palette_256(code - 100 + 8)
+		case 38, 48: // Extended color: 38 fg, 48 bg
+			is_fg := code == 38
+			if i + 1 >= count {
+				// Truncated: lone 38/48, ignore tail.
+				i = count
+				break
 			}
-			// TODO: need access to style table to insert and get ID
-			// For now, just set a placeholder
-			_ = style
-		case 40..=47: // Background colors
-			// TODO: implement background colors
-			_ = code
-		case 39: // Default foreground
-			termgrid.terminal_set_style(t, 0)
-		case 49: // Default background
-			termgrid.terminal_set_style(t, 0)
+			mode := int(params.values[i + 1])
+			if mode == 5 {
+				// 256-color: need 2 more values (38;5;idx).
+				if i + 2 >= count {
+					i = count
+					break
+				}
+				idx := int(params.values[i + 2])
+				if idx >= 0 && idx <= 255 {
+					c := _sgr_palette_256(idx)
+					if is_fg {
+						cur.fg = c
+					} else {
+						cur.bg = c
+					}
+				}
+				i += 2
+			} else if mode == 2 {
+				// Truecolor: need 4 more values (38;2;r;g;b).
+				if i + 4 >= count {
+					i = count
+					break
+				}
+				r := _sgr_clamp_rgb(params.values[i + 2])
+				g := _sgr_clamp_rgb(params.values[i + 3])
+				b := _sgr_clamp_rgb(params.values[i + 4])
+				c := 0xFF000000 | (r << 16) | (g << 8) | b
+				if is_fg {
+					cur.fg = c
+				} else {
+					cur.bg = c
+				}
+				i += 4
+			} else {
+				// Unknown extended mode: swallow the mode byte.
+				i += 1
+			}
+		case 39: // Default foreground (white)
+			cur.fg = termgrid.STYLE_DEFAULT.fg
+		case 49: // Default background (black)
+			cur.bg = termgrid.STYLE_DEFAULT.bg
 		}
+		i += 1
 	}
+
+	termgrid.terminal_set_style(t, termgrid.style_table_insert(&t.grid.style_table, cur))
 }
