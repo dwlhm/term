@@ -37,8 +37,8 @@ Legenda: `[ ]` pending, `[x]` selesai. Kriteria = syarat lolos.
   Kriteria: Enter=`\r`, Backspace=`\x7f`, Up=`ESC[A`, UTF-8 lolos utuh. Status: done.
 
 ## Langkah 9 — Input pump (SDL event -> PTY write + resize)
-- [ ] `input_pump(win, master, t) @ src/platform/input/input.odin` — Scope: §5.9.
-  Kriteria: ketik muncul di shell, resize window panggil Langkah 4+6. Status: pending.
+- [x] `input_pump(win, master, t) @ src/platform/input/input.odin` — Scope: §5.9.
+  Kriteria: ketik muncul di shell, resize window panggil Langkah 4+6. Status: done.
 
 ## Langkah 10 — DECTCEM (cursor show/hide CSI ?25h/l)
 - [ ] `dectcem_set(t, visible) @ src/terminal/cursor.odin` + dispatch CSI — Scope: §5.10.

@@ -55,6 +55,12 @@ window_init :: proc(w: ^Window, title: string, width, height: i32) -> bool {
 		return false
 	}
 
+	// SDL3 delivers TEXT_INPUT only after an explicit opt-in. The input
+	// pump (Langkah 9) translates TEXTINPUT into Printable runes, so text
+	// input starts here. Non-fatal on failure: the window still works, but
+	// printable typing will not arrive.
+	_ = sdl3.StartTextInput(w.handle)
+
 	w.title   = title
 	w.width   = width
 	w.height  = height
