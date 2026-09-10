@@ -25,8 +25,8 @@ Legenda: `[ ]` pending, `[x]` selesai. Kriteria = syarat lolos.
   Kriteria: child exit terkumpul (no zombie), fd tertutup, double-close aman. Status: done.
 
 ## Langkah 6 — terminal_resize (reflow grid, preservasi isi)
-- [ ] `terminal_resize(t, rows, cols) @ src/terminal/resize.odin` — Scope: §5.6.
-  Kriteria: 80x24 -> 100x30 pertahankan baris, kursor di-clamp, damage full. Status: pending.
+- [x] `terminal_resize(t, rows, cols) @ src/terminal/resize.odin` — Scope: §5.6.
+  Kriteria: 80x24 -> 100x30 pertahankan baris, kursor di-clamp, damage full. Status: done.
 
 ## Langkah 7 — Scrollback push/evict (ring buffer)
 - [ ] `scrollback_push/evict @ src/terminal/scrollback.odin` — Scope: §5.7.
