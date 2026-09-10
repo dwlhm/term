@@ -434,7 +434,13 @@ terminal_erase_display :: proc(t: ^Terminal, mode: Erase_Mode) {
 		// Erase from beginning of current line to cursor
 		terminal_erase_line(t, .To_Beginning)
 	case .Entire:
-		// Mark all rows dirty
+		// Blank every row, releasing pool handles first (mirrors
+		// .To_End/.To_Beginning discipline), then mark all rows dirty.
+		for i in 0..<t.grid.row_count {
+			phys := _grid_physical_row(&t.grid, i)
+			_terminal_release_row_handles(t, phys)
+			row_clear(&t.grid.rows[phys])
+		}
 		gens := make([]u32, t.grid.row_count)
 		for i in 0..<t.grid.row_count {
 			phys := _grid_physical_row(&t.grid, i)
