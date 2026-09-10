@@ -12,6 +12,7 @@ Terminal :: struct {
 	scroll_top:     int,
 	scroll_bottom:  int,
 	grapheme_store: Grapheme_Store,
+	scrollback:     Scrollback,
 }
 
 // Erase_Mode specifies how to erase content.
@@ -30,10 +31,12 @@ terminal_init :: proc(t: ^Terminal, rows, cols: int, allocator: runtime.Allocato
 	t.scroll_top = 0
 	t.scroll_bottom = rows - 1
 	grapheme_store_init(&t.grapheme_store)
+	scrollback_init(&t.scrollback, cols, allocator = allocator)
 }
 
 // terminal_destroy frees all terminal state.
 terminal_destroy :: proc(t: ^Terminal, allocator: runtime.Allocator = context.allocator) {
+	scrollback_destroy(&t.scrollback, &t.grapheme_store, allocator)
 	grid_destroy(&t.grid, allocator)
 	damage_destroy(&t.damage, allocator)
 }
@@ -484,11 +487,31 @@ _terminal_scroll_actual :: proc(t: ^Terminal, n: int) -> int {
 }
 
 // terminal_scroll_up scrolls the terminal up by n rows.
-// Pool handles of the discarded top rows are released before the scroll.
+// Full-grid scroll pushes each discarded top row into the scrollback
+// (handle ownership transfers to the scrollback copy, so no release here);
+// partial region scroll releases discarded handles and never pushes.
 terminal_scroll_up :: proc(t: ^Terminal, n: int) {
 	actual := _terminal_scroll_actual(t, n)
-	for i in 0..<actual {
-		_terminal_release_row_handles(t, _grid_physical_row(&t.grid, t.scroll_top + i))
+	if actual <= 0 {
+		return
+	}
+	top := t.scroll_top
+	bottom := t.scroll_bottom
+	if top < 0 {
+		top = 0
+	}
+	if bottom >= t.grid.row_count {
+		bottom = t.grid.row_count - 1
+	}
+	if top == 0 && bottom == t.grid.row_count - 1 && t.scrollback.col_count == t.grid.col_count {
+		for i in 0..<actual {
+			phys := _grid_physical_row(&t.grid, top + i)
+			scrollback_push(&t.scrollback, t.grid.rows[phys].cells, &t.grapheme_store)
+		}
+	} else {
+		for i in 0..<actual {
+			_terminal_release_row_handles(t, _grid_physical_row(&t.grid, top + i))
+		}
 	}
 	scroll_up(&t.grid, &t.damage, t.scroll_top, t.scroll_bottom, n)
 }

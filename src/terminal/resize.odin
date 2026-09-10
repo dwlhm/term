@@ -88,6 +88,14 @@ terminal_resize :: proc(t: ^Terminal, new_rows: int, new_cols: int, allocator :=
 	damage_mark_all(&t.damage, gens)
 	delete(gens)
 
+	// Scrollback rows are fixed-width: a col change invalidates every
+	// stored row, so clear (releasing its grapheme handles) and re-sync
+	// the width. Same-cols resize preserves scrollback history.
+	if new_cols != t.scrollback.col_count {
+		scrollback_clear(&t.scrollback, &t.grapheme_store, allocator)
+		t.scrollback.col_count = new_cols
+	}
+
 	// Clamp the cursor and reset the scroll region to the full grid.
 	cursor_move(&t.cursor, t.cursor.row, t.cursor.col, new_rows, new_cols)
 	terminal_reset_scroll_region(t)

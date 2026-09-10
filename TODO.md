@@ -29,8 +29,8 @@ Legenda: `[ ]` pending, `[x]` selesai. Kriteria = syarat lolos.
   Kriteria: 80x24 -> 100x30 pertahankan baris, kursor di-clamp, damage full. Status: done.
 
 ## Langkah 7 — Scrollback push/evict (ring buffer)
-- [ ] `scrollback_push/evict @ src/terminal/scrollback.odin` — Scope: §5.7.
-  Kriteria: overflow 1000 baris evict tertua, push/pop FIFO, mem bounded. Status: pending.
+- [x] `scrollback_push/evict @ src/terminal/scrollback.odin` — Scope: §5.7.
+  Kriteria: overflow 1000 baris evict tertua, push/pop FIFO, mem bounded. Status: done.
 
 ## Langkah 8 — input_encode (key/mouse -> bytes VT)
 - [ ] `input_encode(event) @ src/platform/input/input.odin` — Scope: §5.8.
