@@ -21,8 +21,8 @@ Legenda: `[ ]` pending, `[x]` selesai. Kriteria = syarat lolos.
   Kriteria: `stty size` di child lapor ukuran baru setelah resize window. Status: done.
 
 ## Langkah 5 — PTY exit/wait + close (anti-zombie, anti-fd-leak)
-- [ ] `pty_wait(pid) + pty_close(master) @ src/platform/pty/pty.odin` — Scope: §5.5.
-  Kriteria: child exit terkumpul (no zombie), fd tertutup, double-close aman. Status: pending.
+- [x] `pty_wait(pid) + pty_close(master) @ src/platform/pty/pty.odin` — Scope: §5.5.
+  Kriteria: child exit terkumpul (no zombie), fd tertutup, double-close aman. Status: done.
 
 ## Langkah 6 — terminal_resize (reflow grid, preservasi isi)
 - [ ] `terminal_resize(t, rows, cols) @ src/terminal/resize.odin` — Scope: §5.6.

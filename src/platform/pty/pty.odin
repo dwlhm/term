@@ -364,6 +364,81 @@ pty_set_winsize :: proc(p: ^Pty, rows: int, cols: int) -> bool {
 	return true
 }
 
+// PTY_SIGNAL_EXIT_BASE is added to a terminating signal number to form
+// exit_code for signaled children (shell convention: 128+signo, e.g.
+// SIGTERM (15) -> 143). Documents the signaled-exit convention.
+PTY_SIGNAL_EXIT_BASE :: 128
+
+// pty_poll_exit reaps a finished child without blocking.
+//
+// waitpid(WNOHANG) on p.pid: 0 means still running (p untouched, false).
+// A reaped child sets p.state=.Exited with exit_code=WEXITSTATUS on normal
+// exit or PTY_SIGNAL_EXIT_BASE+signo when signaled, and returns true.
+// An already-Exited pty returns true immediately (idempotent, values
+// stable) without a syscall. A nil pty or pid <= 0 returns false.
+//
+// Ordering contract with pty_close (both orders valid, no zombie either
+// way): poll never touches the master fd, close never reaps the child.
+// close->poll works because close leaves pid/state for the poller;
+// poll->close works because poll leaves master for the closer. Either
+// order leaves no zombie (waitpid reaps exactly once) and no fd leak.
+// Never blocks: only WNOHANG is used; EINTR retries internally.
+pty_poll_exit :: proc(p: ^Pty) -> bool {
+	if p == nil {
+		return false
+	}
+	if p.state == .Exited {
+		return true
+	}
+	if p.pid <= 0 {
+		return false
+	}
+	for {
+		status: c.int
+		r := posix.waitpid(posix.pid_t(p.pid), &status, posix.Wait_Flags{.NOHANG})
+		if int(r) == 0 {
+			return false
+		}
+		if int(r) < 0 {
+			#partial switch posix.errno() {
+			case .EINTR:
+				continue
+			case:
+				return false
+			}
+		}
+		if posix.WIFEXITED(status) {
+			p.exit_code = int(posix.WEXITSTATUS(status))
+			p.state = .Exited
+			return true
+		}
+		if posix.WIFSIGNALED(status) {
+			signo := int(posix.WTERMSIG(status))
+			p.exit_code = PTY_SIGNAL_EXIT_BASE + signo
+			p.state = .Exited
+			return true
+		}
+		return false
+	}
+}
+
+// pty_close closes the pty master fd exactly once.
+//
+// A nil pty or an already-closed master (master < 0) is a safe no-op, so
+// double-close is safe. pid/state/exit_code are deliberately left for the
+// poller: close never reaps, poll never closes, and close->poll as well as
+// poll->close both end with no zombie and no fd leak.
+pty_close :: proc(p: ^Pty) {
+	if p == nil {
+		return
+	}
+	if p.master < 0 {
+		return
+	}
+	posix.close(posix.FD(p.master))
+	p.master = -1
+}
+
 // _child_fail reports pre-exec failure to the parent over the error pipe
 // and exits. It must not run any parent cleanup or return.
 _child_fail :: proc(w: posix.FD) -> ! {
