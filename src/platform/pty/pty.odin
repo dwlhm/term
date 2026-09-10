@@ -224,6 +224,52 @@ pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string) -
 	return true
 }
 
+// pty_drain reads available child output from the pty master without
+// blocking.
+//
+// At most min(len(out), max_bytes) bytes are copied into out; callers pass
+// their per-frame cap (64KB) as max_bytes. Partial reads are fine: any
+// unread bytes stay in the kernel buffer for the next call.
+//
+// Returns the bytes read with eof=false on data, (0, false) when no data is
+// available (EAGAIN), and (n, true) on EOF (read returns 0) or EIO, which is
+// how the master reports a dead child. EINTR retries internally. Exit
+// collection is NOT done here (a later step owns waitpid).
+pty_drain :: proc(p: ^Pty, out: []u8, max_bytes: int) -> (n: int, eof: bool) {
+	if p == nil {
+		return 0, false
+	}
+	if p.master < 0 {
+		return 0, false
+	}
+	if len(out) == 0 || max_bytes <= 0 {
+		return 0, false
+	}
+	want := len(out)
+	if max_bytes < want {
+		want = max_bytes
+	}
+	for {
+		r := posix.read(posix.FD(p.master), raw_data(out), c.size_t(want))
+		if r > 0 {
+			return int(r), false
+		}
+		if r == 0 {
+			return 0, true
+		}
+		#partial switch posix.errno() {
+		case .EINTR:
+			continue
+		case .EAGAIN:
+			return 0, false
+		case .EIO:
+			return 0, true
+		case:
+			return 0, false
+		}
+	}
+}
+
 // _child_fail reports pre-exec failure to the parent over the error pipe
 // and exits. It must not run any parent cleanup or return.
 _child_fail :: proc(w: posix.FD) -> ! {

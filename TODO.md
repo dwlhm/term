@@ -9,8 +9,8 @@ Legenda: `[ ]` pending, `[x]` selesai. Kriteria = syarat lolos.
   Kriteria: `/bin/sh` + `ls` spawn, fd master valid, child pid > 0. Status: done.
 
 ## Langkah 2 — PTY drain/read + pump ke parser
-- [ ] `pty_drain(master, buf) @ src/platform/pty/pty.odin` — Scope: §5.2, `pty_drain`.
-  Kriteria: output `ls` terbaca penuh tanpa block, lalu `parse_chunk` mutasi grid. Status: pending.
+- [x] `pty_drain(master, buf) @ src/platform/pty/pty.odin` — Scope: §5.2, `pty_drain`.
+  Kriteria: output `ls` terbaca penuh tanpa block, lalu `parse_chunk` mutasi grid. Status: done.
 
 ## Langkah 3 — PTY write (stdin child)
 - [ ] `pty_write(master, data) @ src/platform/pty/pty.odin` — Scope: §5.3, `pty_write`.
