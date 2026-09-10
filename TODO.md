@@ -45,8 +45,8 @@ Legenda: `[ ]` pending, `[x]` selesai. Kriteria = syarat lolos.
   Kriteria: `ESC[?25l` sembunyikan, `ESC[?25h` tampilkan, state bertahan. Status: done.
 
 ## Langkah 11 — Cursor overlay tick (blink state)
-- [ ] `cursor_tick(state, dt) @ src/render/cursor_overlay.odin` — Scope: §5.11.
-  Kriteria: 530ms toggle saat visible+focused, steady saat hidden. Status: pending.
+- [x] `cursor_tick(state, dt) @ src/render/cursor_overlay.odin` — Scope: §5.11.
+  Kriteria: 530ms toggle saat visible+focused, steady saat hidden. Status: done.
 
 ## Langkah 12 — Cursor overlay draw (instance/bg pass)
 - [ ] `cursor_draw(compiled, cursor) @ src/render/cursor_overlay.odin` — Scope: §5.12.
