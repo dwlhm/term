@@ -1,5 +1,7 @@
 package render
 
+import instance "instance"
+
 // Cursor blink overlay state (TODO Langkah 11).
 //
 // The overlay mirrors the terminal cursor position (row/col, synced
@@ -76,4 +78,71 @@ cursor_overlay_tick :: proc(o: ^Cursor_Overlay, now: i64, focused: bool, term_vi
 		return true
 	}
 	return false
+}
+
+// CURSOR_OVERLAY_R/G/B is the solid block color of the cursor quad
+// (opaque white). Chosen over inverting the cell because
+// instance_renderer_fill_bg emits a flat color directly, while an invert
+// would need a compiled-cell fg/bg read that this signature cannot supply.
+CURSOR_OVERLAY_R :: 1.0
+CURSOR_OVERLAY_G :: 1.0
+CURSOR_OVERLAY_B :: 1.0
+
+// cursor_overlay_draw emits ONE solid-block quad at (o.col, o.row) into the
+// existing instance staging buffer, for a third bg-pipeline draw AFTER the
+// glyph pass (wired by the app_term loop, step 14, at offset
+// slot*INSTANCE_STRIDE with count 1; the proc itself only stages the quad
+// so it stays nil-backend safe for headless tests).
+//
+// Decisions (per locked spec, documented here):
+//   - Solid block in cursor color, not an invert: fill_bg with a color is
+//     the only fill the locked (r, o) signature can supply.
+//   - Wide-char alignment is always a single cell: the overlay carries no
+//     width and render never reads Terminal (step 11 header), so a lead
+//     covers only its lead half and a continuation only its own half.
+//     Width-aware sync is deferred to a later step if needed.
+//   - Blink off or hidden draws nothing: returns false, touches no buffer,
+//     issues no GPU work.
+//   - Out of bounds (stale after resize) is skipped, never clamped:
+//     clamping would paint the cursor on the wrong cell.
+//   - Idempotent within a frame: the quad always lands in the reserved
+//     last slot (max_instances-1), so a second call overwrites identical
+//     contents instead of appending a duplicate. Dense bg/glyph data is
+//     never touched, so the glyph beneath stays intact for the next frame.
+//
+// Guarantees: never mutates Damage, never touches terminal state, never
+// allocates. Returns true iff a quad was staged.
+cursor_overlay_draw :: proc(r: ^Renderer, o: ^Cursor_Overlay) -> bool {
+	if r == nil || o == nil {
+		return false
+	}
+	if !o.blink_on || !o.visible {
+		return false
+	}
+	rows := int(r.rows)
+	cols := int(r.cols)
+	if rows <= 0 || cols <= 0 {
+		return false
+	}
+	if o.row < 0 || o.row >= rows || o.col < 0 || o.col >= cols {
+		return false
+	}
+	inst := &r.instances
+	if inst.max_instances == 0 {
+		return false
+	}
+	if len(inst.instance_data) == 0 {
+		return false
+	}
+	slot := inst.max_instances - 1
+	if u64(slot) >= u64(len(inst.instance_data)) {
+		return false
+	}
+	x := f32(o.col) * r.cell_width
+	y := f32(o.row) * r.cell_height
+	instance.instance_renderer_fill_bg(
+		inst, slot, x, y, r.cell_width, r.cell_height,
+		CURSOR_OVERLAY_R, CURSOR_OVERLAY_G, CURSOR_OVERLAY_B,
+	)
+	return true
 }

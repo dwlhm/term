@@ -49,8 +49,8 @@ Legenda: `[ ]` pending, `[x]` selesai. Kriteria = syarat lolos.
   Kriteria: 530ms toggle saat visible+focused, steady saat hidden. Status: done.
 
 ## Langkah 12 — Cursor overlay draw (instance/bg pass)
-- [ ] `cursor_draw(compiled, cursor) @ src/render/cursor_overlay.odin` — Scope: §5.12.
-  Kriteria: cell kursor ter-invert/overlay tanpa merusak glyph, ikut DECTCEM. Status: pending.
+- [x] `cursor_draw(compiled, cursor) @ src/render/cursor_overlay.odin` — Scope: §5.12.
+  Kriteria: cell kursor ter-invert/overlay tanpa merusak glyph, ikut DECTCEM. Status: done.
 
 ## Langkah 13 — renderer_resize_grid (surface + grid + atlas)
 - [ ] `renderer_resize_grid(r, t, pw, ph) @ src/render/resize_grid.odin` — Scope: §5.13.
