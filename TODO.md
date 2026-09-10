@@ -13,8 +13,8 @@ Legenda: `[ ]` pending, `[x]` selesai. Kriteria = syarat lolos.
   Kriteria: output `ls` terbaca penuh tanpa block, lalu `parse_chunk` mutasi grid. Status: done.
 
 ## Langkah 3 — PTY write (stdin child)
-- [ ] `pty_write(master, data) @ src/platform/pty/pty.odin` — Scope: §5.3, `pty_write`.
-  Kriteria: `echo hi` tertulis, child merespons, partial-write di-loop hingga habis. Status: pending.
+- [x] `pty_write(master, data) @ src/platform/pty/pty.odin` — Scope: §5.3, `pty_write`.
+  Kriteria: `echo hi` tertulis, child merespons, partial-write di-loop hingga habis. Status: done.
 
 ## Langkah 4 — PTY winsize (TIOCSWINSZ)
 - [ ] `pty_set_winsize(master, rows, cols) @ src/platform/pty/pty.odin` — Scope: §5.4.

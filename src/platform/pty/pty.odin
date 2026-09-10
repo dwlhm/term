@@ -270,6 +270,66 @@ pty_drain :: proc(p: ^Pty, out: []u8, max_bytes: int) -> (n: int, eof: bool) {
 	}
 }
 
+// PTY_WRITE_POLL_MS is how long each EAGAIN wait polls for master
+// writability. The poll returns early as soon as the master is writable,
+// so this only costs time when the child is not reading.
+PTY_WRITE_POLL_MS :: 1
+
+// PTY_WRITE_EAGAIN_RETRIES bounds the total EAGAIN waits per pty_write
+// call (worst ~5s). The budget must cover slow consumers: a canonical-mode
+// child accepts ~1KB per write, so a 64KB payload needs dozens of
+// write/poll cycles even when everything flows.
+PTY_WRITE_EAGAIN_RETRIES :: 5000
+
+// pty_write sends child stdin through the pty master without blocking.
+//
+// All of data is written, looping over short writes. EINTR retries
+// internally with no backoff. EAGAIN (buffer full on the nonblocking
+// master) polls briefly for writability and retries, up to
+// PTY_WRITE_EAGAIN_RETRIES waits; when still blocked the result is false.
+// Any other error fails immediately with false.
+//
+// Empty data is a no-op true. A nil pty, a negative master, or Exited
+// state returns false without issuing a syscall. No byte counters are
+// kept here: on incomplete writes the caller counts what was lost.
+pty_write :: proc(p: ^Pty, data: []u8) -> bool {
+	if p == nil {
+		return false
+	}
+	if p.master < 0 {
+		return false
+	}
+	if p.state == .Exited {
+		return false
+	}
+	if len(data) == 0 {
+		return true
+	}
+	written := 0
+	waits := 0
+	for written < len(data) {
+		r := posix.write(posix.FD(p.master), raw_data(data[written:]), c.size_t(len(data[written:])))
+		if r > 0 {
+			written += int(r)
+			continue
+		}
+		#partial switch posix.errno() {
+		case .EINTR:
+			continue
+		case .EAGAIN:
+			if waits >= PTY_WRITE_EAGAIN_RETRIES {
+				return false
+			}
+			waits += 1
+			pfd := posix.pollfd{fd = posix.FD(p.master), events = {.OUT}}
+			posix.poll(&pfd, 1, PTY_WRITE_POLL_MS)
+		case:
+			return false
+		}
+	}
+	return true
+}
+
 // _child_fail reports pre-exec failure to the parent over the error pipe
 // and exits. It must not run any parent cleanup or return.
 _child_fail :: proc(w: posix.FD) -> ! {
