@@ -33,8 +33,8 @@ Legenda: `[ ]` pending, `[x]` selesai. Kriteria = syarat lolos.
   Kriteria: overflow 1000 baris evict tertua, push/pop FIFO, mem bounded. Status: done.
 
 ## Langkah 8 — input_encode (key/mouse -> bytes VT)
-- [ ] `input_encode(event) @ src/platform/input/input.odin` — Scope: §5.8.
-  Kriteria: Enter=`\r`, Backspace=`\x7f`, Up=`ESC[A`, UTF-8 lolos utuh. Status: pending.
+- [x] `input_encode(event) @ src/platform/input/input.odin` — Scope: §5.8.
+  Kriteria: Enter=`\r`, Backspace=`\x7f`, Up=`ESC[A`, UTF-8 lolos utuh. Status: done.
 
 ## Langkah 9 — Input pump (SDL event -> PTY write + resize)
 - [ ] `input_pump(win, master, t) @ src/platform/input/input.odin` — Scope: §5.9.
