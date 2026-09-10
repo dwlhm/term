@@ -151,7 +151,14 @@ pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string) -
 	defer delete(c_argv[0])
 	for arg, i in argv {
 		c_argv[i + 1] = strings.clone_to_cstring(arg)
-		defer delete(c_argv[i + 1])
+	}
+	// Hoisted out of the loop: a per-iteration `defer delete(c_argv[i+1])`
+	// miscompiles the argv stores (child observed duplicated argv entries
+	// with 2+ caller args), so the element frees live in one exit block.
+	defer {
+		for j in 1 ..< len(c_argv) - 1 {
+			delete(c_argv[j])
+		}
 	}
 	c_argv[argc - 1] = nil
 
