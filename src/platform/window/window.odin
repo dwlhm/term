@@ -1,0 +1,121 @@
+package window
+
+// SDL3 window management for the terminal emulator.
+// Creates and manages an SDL3 window with a WGPU-compatible surface.
+
+import "core:c"
+import "vendor:sdl3"
+
+// DEFAULT_WIDTH is the default window width in pixels.
+DEFAULT_WIDTH :: 800
+
+// DEFAULT_HEIGHT is the default window height in pixels.
+DEFAULT_HEIGHT :: 600
+
+// Window wraps an SDL3 window handle with metadata.
+Window :: struct {
+	handle:  ^sdl3.Window,
+	width:   i32,
+	height:  i32,
+	pixel_w: i32,
+	pixel_h: i32,
+	title:   string,
+	is_open: bool,
+	_title_buf: [256]u8, // buffer for C string title
+}
+
+// window_init initializes SDL3 and creates a window.
+// Returns true on success.
+window_init :: proc(w: ^Window, title: string, width, height: i32) -> bool {
+	// Initialize SDL3 video subsystem
+	if !sdl3.Init(sdl3.INIT_VIDEO) {
+		return false
+	}
+
+	// Convert title to C string (null-terminated)
+	title_len := len(title)
+	if title_len > 255 {
+		title_len = 255
+	}
+	for i in 0..<title_len {
+		w._title_buf[i] = title[i]
+	}
+	w._title_buf[title_len] = 0
+
+	// Create window
+	w.handle = sdl3.CreateWindow(
+		cstring(&w._title_buf[0]),
+		c.int(width),
+		c.int(height),
+		sdl3.WINDOW_HIGH_PIXEL_DENSITY | sdl3.WINDOW_RESIZABLE,
+	)
+
+	if w.handle == nil {
+		sdl3.Quit()
+		return false
+	}
+
+	w.title   = title
+	w.width   = width
+	w.height  = height
+	w.is_open = true
+
+	// Query actual pixel size (may differ on HiDPI displays)
+	window_update_pixel_size(w)
+
+	return true
+}
+
+// window_destroy closes the window and shuts down SDL3.
+window_destroy :: proc(w: ^Window) {
+	if w.handle != nil {
+		sdl3.DestroyWindow(w.handle)
+		w.handle = nil
+	}
+	w.is_open = false
+	sdl3.Quit()
+}
+
+// window_poll_events processes pending SDL events.
+// Returns false if a quit event was received.
+window_poll_events :: proc(w: ^Window) -> bool {
+	event: sdl3.Event
+	for sdl3.PollEvent(&event) {
+		if event.type == .QUIT {
+			w.is_open = false
+			return false
+		}
+		if event.type == .WINDOW_CLOSE_REQUESTED {
+			w.is_open = false
+			return false
+		}
+		if event.type == .WINDOW_RESIZED || event.type == .WINDOW_PIXEL_SIZE_CHANGED {
+			window_update_pixel_size(w)
+		}
+	}
+	return w.is_open
+}
+
+// window_update_pixel_size queries the current pixel dimensions of the window.
+window_update_pixel_size :: proc(w: ^Window) {
+	if w.handle == nil {
+		return
+	}
+	pw: c.int
+	ph: c.int
+	sdl3.GetWindowSizeInPixels(w.handle, &pw, &ph)
+	w.pixel_w = i32(pw)
+	w.pixel_h = i32(ph)
+
+	// Also update logical size
+	lw: c.int
+	lh: c.int
+	sdl3.GetWindowSize(w.handle, &lw, &lh)
+	w.width  = i32(lw)
+	w.height = i32(lh)
+}
+
+// window_get_sdl_handle returns the raw SDL3 window pointer (for WGPU surface creation).
+window_get_sdl_handle :: proc(w: ^Window) -> ^sdl3.Window {
+	return w.handle
+}

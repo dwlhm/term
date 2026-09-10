@@ -1,0 +1,38 @@
+// msl_spike/tile_blit.msl — HAND-DERIVED reference translation of tile_blit.wgsl.
+//
+// STATUS: BLOCKED-EXPLICIT — no WGSL→MSL translator available in this
+// environment (naga: not installed, tint: not installed). Entry points below
+// mirror tile_blit.wgsl (fullscreen blit of the compute framebuffer);
+// minimal hand mapping for spike reference ONLY. Not translator output, not
+// compiled by the build.
+//
+// Source: src/render/shaders/tile_blit.wgsl.
+// Maps: fullscreen triangle vs_main -> bench_blit_vs; framebuffer texture
+//       sample fs_main -> bench_blit_fs with texture(0) + sampler(0).
+
+#include <metal_stdlib>
+using namespace metal;
+
+struct BenchBlitVertexOut {
+    float4 clip_position [[position]];
+    float2 tex_coord;
+};
+
+vertex BenchBlitVertexOut bench_blit_vs(uint vid [[vertex_id]]) {
+    // Fullscreen triangle from vertex_id: mirrors tile_blit.wgsl vs_main.
+    float2 pos[3] = { float2(-1.0, -1.0), float2(3.0, -1.0), float2(-1.0, 3.0) };
+    float2 uv[3] = { float2(0.0, 1.0), float2(2.0, 1.0), float2(0.0, -1.0) };
+    BenchBlitVertexOut out;
+    out.clip_position = float4(pos[vid % 3], 0.0, 1.0);
+    out.tex_coord = uv[vid % 3];
+    return out;
+}
+
+fragment float4 bench_blit_fs(
+    BenchBlitVertexOut in [[stage_in]],
+    texture2d<float>   framebuffer [[texture(0)]],
+    sampler            fb_sampler  [[sampler(0)]])
+{
+    constexpr sampler s(address::clamp_to_edge, filter::nearest);
+    return framebuffer.sample(s, in.tex_coord);
+}

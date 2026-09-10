@@ -1,0 +1,64 @@
+// msl_spike/glyph.msl — HAND-DERIVED reference translation of glyph.wgsl.
+//
+// STATUS: BLOCKED-EXPLICIT — no WGSL→MSL translator available in this
+// environment (naga: not installed, tint: not installed). Entry points and
+// bindings below mirror glyph.wgsl (vs_main + fs_main with atlas texture +
+// sampler); bodies are the minimal hand mapping for spike reference ONLY.
+// Not translator output, not compiled by the build.
+//
+// Source: src/render/shaders/glyph.wgsl.
+// Maps: @group(0)@binding(0) uniforms -> buffer(0);
+//       @binding(1) atlas_texture -> texture(0); @binding(2) atlas_sampler
+//       -> sampler(0); textureSample -> atlas.sample(...).
+
+#include <metal_stdlib>
+using namespace metal;
+
+struct BenchUniforms {
+    float2 screen_size;
+    float2 cell_size;
+};
+
+struct BenchGlyphVertexIn {
+    float2 position [[attribute(0)]];
+    float2 cell_size [[attribute(1)]];
+    float4 uv_rect   [[attribute(2)]];
+    float4 fg_color  [[attribute(3)]];
+};
+
+struct BenchGlyphVertexOut {
+    float4 clip_position [[position]];
+    float2 tex_coord;
+    float4 color;
+};
+
+vertex BenchGlyphVertexOut bench_glyph_vs(
+    BenchGlyphVertexIn   in       [[stage_in]],
+    constant BenchUniforms &uniforms [[buffer(0)]],
+    uint                 vid      [[vertex_id]])
+{
+    float2 corners[6] = {
+        float2(0.0, 0.0), float2(1.0, 0.0), float2(0.0, 1.0),
+        float2(0.0, 1.0), float2(1.0, 0.0), float2(1.0, 1.0)
+    };
+    float2 corner = corners[vid % 6];
+    float2 world_pos = in.position + corner * in.cell_size;
+    float clip_x = (world_pos.x / uniforms.screen_size.x) * 2.0 - 1.0;
+    float clip_y = 1.0 - (world_pos.y / uniforms.screen_size.y) * 2.0;
+    BenchGlyphVertexOut out;
+    out.clip_position = float4(clip_x, clip_y, 0.0, 1.0);
+    // uv_rect (u0,v0,u1,v1) lerp by corner: mirrors glyph.wgsl tex_coord.
+    out.tex_coord = mix(in.uv_rect.xy, in.uv_rect.zw, corner);
+    out.color = in.fg_color;
+    return out;
+}
+
+fragment float4 bench_glyph_fs(
+    BenchGlyphVertexOut  in      [[stage_in]],
+    texture2d<float>     atlas   [[texture(0)]],
+    sampler              atlas_sampler [[sampler(0)]])
+{
+    constexpr sampler s(address::clamp_to_edge, filter::nearest);
+    float alpha = atlas.sample(s, in.tex_coord).r;
+    return float4(in.color.rgb, in.color.a * alpha);
+}

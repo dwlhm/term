@@ -1,0 +1,22 @@
+// msl_spike/TRANSLATION_STATUS.txt — Phase 17 offline-translation record.
+//
+// Translator availability (checked 2026-09-10, darwin/arm64):
+//   naga:  NOT INSTALLED (which naga / naga-cli -> not found)
+//   tint:  NOT INSTALLED (which tint -> not found)
+//
+// Consequence per locked plan §5.4: full WGSL→MSL translation is
+// BLOCKED-EXPLICIT. The five .msl files in this directory are hand-derived
+// reference text, NOT translator output, and are NOT compiled by the build:
+//
+//   bg.msl           minimal hand translation of bg.wgsl quad (COMPLETE)
+//   glyph.msl        minimal hand translation of glyph.wgsl (COMPLETE)
+//   tile_blit.msl    minimal hand translation of tile_blit.wgsl (COMPLETE)
+//   fullscreen.msl   minimal hand translation of fullscreen.wgsl (COMPLETE)
+//   tile_compute.msl BLOCKED — names the blocked construct explicitly:
+//                    texture_storage_2d<rgba8unorm, write> + textureStore()
+//                    per-pixel writes in an 8x8 workgroup compute entry
+//                    (cs_main) with SDL3-GPU compute feasibility TBD.
+//
+// The sdl3 spike embeds its own minimal inline MSL quad and stays
+// graphics-only until the compute solution exists. DecisionGate: ADOPT of
+// SDL3-GPU needs a compute solution for tile_compute; otherwise KEEP.

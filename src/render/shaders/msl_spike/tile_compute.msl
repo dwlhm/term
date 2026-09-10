@@ -1,0 +1,26 @@
+// msl_spike/tile_compute.msl — BLOCKED-EXPLICIT. NOT translated.
+//
+// STATUS: BLOCKED — the compute shader is untranslatable by hand with
+// confidence and no WGSL→MSL translator is available (naga: not installed,
+// tint: not installed). Per the locked plan this names the blocked construct
+// instead of guessing:
+//
+//   BLOCKED CONSTRUCT: texture_storage_2d<rgba8unorm, write> framebuffer +
+//   textureStore() per-pixel writes inside an 8x8 workgroup compute entry
+//   (cs_main, @workgroup_size(8, 8, 1)) combined with SDL3-GPU compute
+//   pipeline feasibility (storage-texture write access + workgroup Shared
+//   Memory parity under the Metal driver).
+//
+// Source: src/render/shaders/tile_compute.wgsl (cs_main + helpers
+// r5g6b5_to_rgb, lut_fg, lut_bg, pinned_slot, slot_uv).
+// Entry mapping (for the future translator run):
+//   @group(0)@binding(0) params uniform        -> buffer(0)
+//   @binding(1) tile_list read storage         -> buffer(1)
+//   @binding(2) cells read storage             -> buffer(2)
+//   @binding(3) lut[1024] read storage         -> buffer(3)
+//   @binding(4) atlas_texture                  -> texture(0)
+//   @binding(5) atlas_sampler                  -> sampler(0)
+//   @binding(6) framebuffer write storage tex  -> texture(1, access::write)
+//
+// DecisionGate consequence: ADOPT of SDL3-GPU needs a compute solution for
+// this shader; until then the spike stays graphics-only.

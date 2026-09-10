@@ -1,0 +1,14 @@
+# Odin build artifacts
+*.o
+*.obj
+*.lib
+
+# Root binaries (build outputs, never committed)
+app
+bench_app
+fbbench
+pressure_run
+atlas_test
+term_bench*
+app_phase5
+app_phase6

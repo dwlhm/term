@@ -1,0 +1,51 @@
+// msl_spike/fullscreen.msl — HAND-DERIVED reference translation of fullscreen.wgsl.
+//
+// STATUS: BLOCKED-EXPLICIT — no WGSL→MSL translator available in this
+// environment (naga: not installed, tint: not installed). Entry points below
+// mirror fullscreen.wgsl (grid + LUT upload, one fullscreen fragment draw);
+// minimal hand mapping for spike reference ONLY. Not translator output, not
+// compiled by the build.
+//
+// Source: src/render/shaders/fullscreen.wgsl.
+// Maps: grid/LUT storage buffers -> buffer(0)/buffer(1); atlas texture +
+//       sampler -> texture(0) + sampler(0); fullscreen triangle vertex entry
+//       -> bench_fullscreen_vs; fragment entry -> bench_fullscreen_fs.
+
+#include <metal_stdlib>
+using namespace metal;
+
+struct BenchFullscreenParams {
+    float2 screen_size;
+    float2 cell_size;
+    uint   cols;
+    uint   rows;
+};
+
+struct BenchFullscreenVertexOut {
+    float4 clip_position [[position]];
+    float2 tex_coord;
+};
+
+vertex BenchFullscreenVertexOut bench_fullscreen_vs(uint vid [[vertex_id]]) {
+    float2 pos[3] = { float2(-1.0, -1.0), float2(3.0, -1.0), float2(-1.0, 3.0) };
+    float2 uv[3] = { float2(0.0, 1.0), float2(2.0, 1.0), float2(0.0, -1.0) };
+    BenchFullscreenVertexOut out;
+    out.clip_position = float4(pos[vid % 3], 0.0, 1.0);
+    out.tex_coord = uv[vid % 3];
+    return out;
+}
+
+fragment float4 bench_fullscreen_fs(
+    BenchFullscreenVertexOut in [[stage_in]],
+    constant BenchFullscreenParams &params [[buffer(0)]],
+    texture2d<float> atlas [[texture(0)]],
+    sampler          atlas_sampler [[sampler(0)]])
+{
+    // Cell id from fragment position; LUT/grid decode lives in the real
+    // translator output. Reference shape only.
+    constexpr sampler s(address::clamp_to_edge, filter::nearest);
+    float2 cell = floor(in.tex_coord * float2(params.cols, params.rows));
+    float2 f = fract(in.tex_coord * float2(params.cols, params.rows));
+    float2 uv = (cell + f) / float2(params.cols, params.rows);
+    return float4(atlas.sample(s, uv).rrr, 1.0);
+}
