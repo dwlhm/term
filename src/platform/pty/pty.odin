@@ -330,6 +330,40 @@ pty_write :: proc(p: ^Pty, data: []u8) -> bool {
 	return true
 }
 
+// pty_set_winsize resizes the live pty via TIOCSWINSZ on the master fd.
+//
+// Non-positive rows/cols are clamped to PTY_DEFAULT_ROWS/COLS, mirroring
+// pty_spawn. On success p.rows/p.cols are updated and the result is true.
+// A nil pty, a negative master, or Exited state returns false without
+// issuing a syscall; an ioctl error returns false with p.rows/p.cols
+// unchanged.
+pty_set_winsize :: proc(p: ^Pty, rows: int, cols: int) -> bool {
+	if p == nil {
+		return false
+	}
+	if p.master < 0 {
+		return false
+	}
+	if p.state == .Exited {
+		return false
+	}
+	r := rows
+	if r <= 0 {
+		r = PTY_DEFAULT_ROWS
+	}
+	ncols := cols
+	if ncols <= 0 {
+		ncols = PTY_DEFAULT_COLS
+	}
+	ws := Winsize{ws_row = c.ushort(r), ws_col = c.ushort(ncols)}
+	if sys_darwin.syscall_ioctl(c.int(p.master), TIOCSWINSZ, rawptr(&ws)) != 0 {
+		return false
+	}
+	p.rows = r
+	p.cols = ncols
+	return true
+}
+
 // _child_fail reports pre-exec failure to the parent over the error pipe
 // and exits. It must not run any parent cleanup or return.
 _child_fail :: proc(w: posix.FD) -> ! {

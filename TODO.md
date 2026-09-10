@@ -17,8 +17,8 @@ Legenda: `[ ]` pending, `[x]` selesai. Kriteria = syarat lolos.
   Kriteria: `echo hi` tertulis, child merespons, partial-write di-loop hingga habis. Status: done.
 
 ## Langkah 4 — PTY winsize (TIOCSWINSZ)
-- [ ] `pty_set_winsize(master, rows, cols) @ src/platform/pty/pty.odin` — Scope: §5.4.
-  Kriteria: `stty size` di child lapor ukuran baru setelah resize window. Status: pending.
+- [x] `pty_set_winsize(master, rows, cols) @ src/platform/pty/pty.odin` — Scope: §5.4.
+  Kriteria: `stty size` di child lapor ukuran baru setelah resize window. Status: done.
 
 ## Langkah 5 — PTY exit/wait + close (anti-zombie, anti-fd-leak)
 - [ ] `pty_wait(pid) + pty_close(master) @ src/platform/pty/pty.odin` — Scope: §5.5.
