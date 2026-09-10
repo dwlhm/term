@@ -120,7 +120,7 @@ find_font :: proc() -> (path: string, ok: bool) {
 // The returned string is allocated only when $SHELL is used; the caller
 // frees it exactly in that case (see main).
 _resolve_shell :: proc() -> (shell: string, allocated: bool) {
-	if val, found := os.lookup_env(APP_SHELL_ENV, context.allocator); found {
+	if val, found := os.lookup_env_alloc(APP_SHELL_ENV, context.allocator); found {
 		if len(val) > 0 {
 			return val, true
 		}
@@ -160,6 +160,7 @@ app_init :: proc(a: ^App, rows, cols: int, prog: string, argv: []string) -> bool
 		window_h = 1
 	}
 	if !win.window_init(&a.window, APP_TITLE, window_w, window_h) {
+		fmt.eprintf("app_init: window_init failed\n")
 		return false
 	}
 
@@ -168,6 +169,7 @@ app_init :: proc(a: ^App, rows, cols: int, prog: string, argv: []string) -> bool
 	a.instance = a.backend.create_instance()
 	if a.instance == nil {
 		win.window_destroy(&a.window)
+		fmt.eprintf("app_init: create_instance failed\n")
 		return false
 	}
 
@@ -177,6 +179,7 @@ app_init :: proc(a: ^App, rows, cols: int, prog: string, argv: []string) -> bool
 		a.backend.destroy_instance(a.instance)
 		a.instance = nil
 		win.window_destroy(&a.window)
+		fmt.eprintf("app_init: GetSurface failed\n")
 		return false
 	}
 
@@ -190,6 +193,7 @@ app_init :: proc(a: ^App, rows, cols: int, prog: string, argv: []string) -> bool
 		a.backend.destroy_instance(a.instance)
 		a.instance = nil
 		win.window_destroy(&a.window)
+		fmt.eprintf("app_init: request_device failed\n")
 		return false
 	}
 
@@ -204,6 +208,7 @@ app_init :: proc(a: ^App, rows, cols: int, prog: string, argv: []string) -> bool
 		a.backend.destroy_instance(a.instance)
 		a.instance = nil
 		win.window_destroy(&a.window)
+		fmt.eprintf("app_init: no usable font found\n")
 		return false
 	}
 	format := a.backend.get_preferred_format(rawptr(a.surface), a.device)
@@ -230,6 +235,7 @@ app_init :: proc(a: ^App, rows, cols: int, prog: string, argv: []string) -> bool
 		a.backend.destroy_instance(a.instance)
 		a.instance = nil
 		win.window_destroy(&a.window)
+		fmt.eprintf("app_init: renderer_init failed\n")
 		return false
 	}
 
@@ -249,6 +255,7 @@ app_init :: proc(a: ^App, rows, cols: int, prog: string, argv: []string) -> bool
 		a.backend.destroy_instance(a.instance)
 		a.instance = nil
 		win.window_destroy(&a.window)
+		fmt.eprintf("app_init: pty_spawn failed for '%s'\n", prog)
 		return false
 	}
 
@@ -615,9 +622,7 @@ app_frame :: proc(a: ^App) -> bool {
 
 main :: proc() {
 	shell, shell_allocated := _resolve_shell()
-	if shell_allocated {
-		defer delete(shell)
-	}
+	defer if shell_allocated { delete(shell) }
 	fmt.printf("Term: starting %s (%dx%d)\n", shell, APP_DEFAULT_COLS, APP_DEFAULT_ROWS)
 
 	app: App
