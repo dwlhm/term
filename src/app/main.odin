@@ -63,6 +63,11 @@ APP_SHELL_FALLBACK :: "/bin/sh"
 // APP_SHELL_ENV is the environment variable naming the login shell.
 APP_SHELL_ENV :: "SHELL"
 
+// APP_DEBUG_ENV gates frame diagnostics; APP_DEBUG_VALUE enables them.
+// The flag is cached once at init (zero per-frame env lookups when unset).
+APP_DEBUG_ENV :: "TERM_DEBUG"
+APP_DEBUG_VALUE :: "1"
+
 // APP_BANNER_EXIT_FMT is the one-shot exit banner; %d is the exit code.
 APP_BANNER_EXIT_FMT :: "[ process exited (%d) - press R to relaunch, Q to quit ]"
 
@@ -96,6 +101,10 @@ App :: struct {
 	// last_px_w/h is the last window size consumed by app_on_resize.
 	last_px_w:   i32,
 	last_px_h:   i32,
+	// debug_frames gates TERM_DEBUG=1 frame diagnostics (init dump +
+	// per-frame line + first-damage grid dump). Cached once in app_init;
+	// when false the only per-frame cost is one bool check.
+	debug_frames: bool,
 	// GPU plumbing (plan-silent detail: the handles must live for the app
 	// lifetime so app_destroy can unwind in exact reverse order).
 	backend:     ^gpu.Gpu_Backend_VTable,
@@ -149,6 +158,13 @@ app_init :: proc(a: ^App, rows, cols: int, prog: string, argv: []string) -> bool
 	a.banner_shown = false
 	a.last_px_w = 0
 	a.last_px_h = 0
+	// TERM_DEBUG gate, cached once (precedent: os.lookup_env_alloc in
+	// _resolve_shell). Only the exact value "1" enables diagnostics.
+	a.debug_frames = false
+	if val, found := os.lookup_env_alloc(APP_DEBUG_ENV, context.allocator); found {
+		a.debug_frames = (val == APP_DEBUG_VALUE)
+		delete(val)
+	}
 
 	// (1) Window.
 	window_w := i32(cols) * i32(APP_CELL_W)
@@ -267,6 +283,27 @@ app_init :: proc(a: ^App, rows, cols: int, prog: string, argv: []string) -> bool
 	// Initial focus mirrors the live window state.
 	_app_sync_focus(a)
 	a.last_px_w, a.last_px_h = win.window_get_size(&a.window)
+	// Init dump (once, TERM_DEBUG=1 only): proves GPU resources exist.
+	// Atlas valid count is a read-only scan of the slot metadata.
+	if a.debug_frames {
+		valid := 0
+		for i in 0..<len(a.renderer.atlas.slots) {
+			if a.renderer.atlas.slots[i].valid {
+				valid += 1
+			}
+		}
+		fmt.eprintf(
+			"app_debug: init rows=%d cols=%d atlas_valid=%d/%d surface=%dx%d strategy=%v font='%s'\n",
+			a.terminal.grid.row_count,
+			a.terminal.grid.col_count,
+			valid,
+			len(a.renderer.atlas.slots),
+			a.renderer.surface_w,
+			a.renderer.surface_h,
+			a.renderer.strategy,
+			font_path,
+		)
+	}
 	return true
 }
 
@@ -340,6 +377,45 @@ _app_mark_cursor_dirty :: proc(a: ^App, row, col: int) -> bool {
 	}
 	termgrid.damage_mark_cell(&a.terminal.damage, row, col, g.rows[phys].generation)
 	return true
+}
+
+// _app_debug_grid_dumped guards the first-nonempty-damage grid dump
+// (once per process; package-level so App gains only the specified
+// debug_frames field).
+_app_debug_grid_dumped: bool
+
+// _app_debug_dump_grid prints the first 3 grid rows as text via
+// terminal_get_cell (read-only; proves bytes reached the grid in the LIVE
+// app vs headless tests). Non-printable content renders as '?', blank as
+// ' '. Rows are truncated at 127 cells.
+_app_debug_dump_grid :: proc(a: ^App) {
+	if a == nil {
+		return
+	}
+	rows := a.terminal.grid.row_count
+	cols := a.terminal.grid.col_count
+	if rows > 3 {
+		rows = 3
+	}
+	for r in 0..<rows {
+		buf: [128]u8
+		n := 0
+		for c in 0..<cols {
+			if n >= len(buf) - 1 {
+				break
+			}
+			cell := termgrid.terminal_get_cell(&a.terminal, r, c)
+			ch := u8('?')
+			if cell.content == 0 || cell.content == 0x20 {
+				ch = u8(' ')
+			} else if cell.content >= 0x20 && cell.content < 0x7F {
+				ch = u8(cell.content)
+			}
+			buf[n] = ch
+			n += 1
+		}
+		fmt.eprintf("app_debug: grid row %d: '%s'\n", r, string(buf[:n]))
+	}
 }
 
 // _app_present_overlay presents one overlay-only frame: the staged cursor
@@ -587,13 +663,25 @@ app_frame :: proc(a: ^App) -> bool {
 	now := platform.platform_ticks_to_ns(platform.platform_now())
 	cursor_changed := render.cursor_overlay_tick(&a.cursor, now, a.focused, cur.visible)
 
+	// Frame diagnostics pre-scan (TERM_DEBUG=1 only): read-only damage
+	// estimate via strategy_estimate_inputs, which never takes or clears.
+	// The take/skip discipline inside renderer_frame_auto is undisturbed.
+	dbg_dmg, dbg_total := 0, 0
+	if a.debug_frames {
+		inp := render.strategy_estimate_inputs(&a.terminal.damage, a.renderer.rows, a.renderer.cols)
+		dbg_dmg, dbg_total = inp.dirty_cells, inp.total_cells
+	}
+
 	// (4) Render. On a damage present with a lit cursor the quad rides in
 	// a second (overlay) present in the same frame; on a skipped frame
 	// with a toggled-ON cursor the overlay-only present fires with the
 	// journal untouched. A toggled-OFF cursor cannot erase overlay-only
 	// (Load preserves ghost pixels), so it erases via one damaged cell +
 	// a full frame.
-	if render.renderer_frame_auto(&a.renderer, &a.terminal, &a.lut) {
+	// frame_ok binds the present result for the debug line below; the
+	// branch shape is otherwise unchanged (no behavior change).
+	frame_ok := render.renderer_frame_auto(&a.renderer, &a.terminal, &a.lut)
+	if frame_ok {
 		if render.cursor_overlay_draw(&a.renderer, &a.cursor) {
 			_app_present_overlay(a)
 		}
@@ -601,11 +689,41 @@ app_frame :: proc(a: ^App) -> bool {
 		if render.cursor_overlay_draw(&a.renderer, &a.cursor) {
 			_app_present_overlay(a)
 		} else if _app_mark_cursor_dirty(a, cur.row, cur.col) {
-			if render.renderer_frame_auto(&a.renderer, &a.terminal, &a.lut) {
+			frame_ok = render.renderer_frame_auto(&a.renderer, &a.terminal, &a.lut)
+			if frame_ok {
 				if render.cursor_overlay_draw(&a.renderer, &a.cursor) {
 					_app_present_overlay(a)
 				}
 			}
+		}
+	}
+
+	// Per-frame line (TERM_DEBUG=1 only): dmg>0 + present=false =
+	// present-fail; dmg==0 + present=false = healthy skip; dmg>0 +
+	// present=true with a black screen = 0-instances/GPU path (see the
+	// grid dump + S5 audit). Exact bg/glyph counts are frame-locals
+	// inside renderer_frame_v2 (_prepare_instances_v2 return) and are not
+	// persisted, so upload_est bounds one frame at 2 instances (bg+glyph)
+	// per dirty cell; atlas_dirty/dirty_armed disambiguate stale uploads.
+	if a.debug_frames {
+		upload_est := u64(dbg_dmg) * 2 * u64(instance.INSTANCE_STRIDE)
+		fmt.eprintf(
+			"app_debug: frame dmg=%d/%d strategy=%v count=%d dirty=%v surface=%dx%d atlas_dirty=%v dirty_armed=%v present=%v upload_est=%dB\n",
+			dbg_dmg,
+			dbg_total,
+			a.renderer.strategy,
+			a.renderer.frame_count,
+			a.renderer.last_dirty,
+			a.renderer.surface_w,
+			a.renderer.surface_h,
+			a.renderer.atlas.gpu_dirty,
+			a.renderer.dirty.armed,
+			frame_ok,
+			upload_est,
+		)
+		if !_app_debug_grid_dumped && dbg_dmg > 0 {
+			_app_debug_grid_dumped = true
+			_app_debug_dump_grid(a)
 		}
 	}
 
