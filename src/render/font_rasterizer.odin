@@ -206,9 +206,14 @@ font_rasterize_glyph_into :: proc(
 			dst_px := offset_x + gx
 			dst_py := offset_y + gy
 
-			if dst_px >= 0 && dst_px < dst_stride && dst_py >= 0 && dst_py < slot_h {
+			// Slot-relative clamp: dst_px/dst_py are absolute buffer
+			// coordinates, so compare against the slot rect origin
+			// plus size (comparing against slot_w/slot_h alone
+			// clips every slot past row 0 to nothing).
+			if dst_px >= dst_x && dst_px < dst_x + slot_w &&
+			   dst_py >= dst_y && dst_py < dst_y + slot_h {
 				dst_idx := dst_py * dst_stride + dst_px
-				if dst_idx < len(dst) {
+				if dst_idx >= 0 && dst_idx < len(dst) {
 					dst[dst_idx] = temp_pixels[src_idx]
 				}
 			}

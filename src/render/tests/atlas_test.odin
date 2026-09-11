@@ -207,6 +207,106 @@ test_atlas_prewarm_all_ascii_valid :: proc(t: ^testing.T) {
 	testing.expect(t, valid_count == 95, "All 95 ASCII glyphs should be valid after prewarm")
 }
 
+// slot_nonzero_count counts nonzero pixels in a slot's glyph rect.
+slot_nonzero_count :: proc(atlas: ^render.Atlas, slot_index: int) -> int {
+	gs := render.ATLAS_GLYPH_SIZE
+	cols := render.ATLAS_COLS
+	col := slot_index % cols
+	row := slot_index / cols
+	x0 := col * gs
+	y0 := row * gs
+	n := 0
+	for y in 0..<gs {
+		for x in 0..<gs {
+			di := (y0 + y) * atlas.tex_width + (x0 + x)
+			if di < len(atlas.pixels) && atlas.pixels[di] != 0 {
+				n += 1
+			}
+		}
+	}
+	return n
+}
+
+@(test)
+test_atlas_slots_have_ink :: proc(t: ^testing.T) {
+	font_path, ok := find_test_font()
+	if !ok {
+		fmt.printf("no test font found; skipping ink test\n")
+		return
+	}
+
+	r: render.Font_Rasterizer
+	success := render.font_rasterizer_init(&r, font_path, 16.0)
+	testing.expect(t, success, "font_rasterizer_init should succeed")
+	if !success {
+		return
+	}
+	defer render.font_rasterizer_destroy(&r)
+
+	atlas: render.Atlas
+	render.atlas_init(&atlas, &r)
+	defer render.atlas_destroy(&atlas)
+
+	// Every non-space ASCII slot must hold ink (space has no bitmap by design).
+	for cp in rune(33) ..< rune(127) {
+		idx, slot := render.atlas_lookup(&atlas, u32(cp))
+		testing.expect(t, slot != nil && slot.valid, "ASCII slot should be valid")
+		n := slot_nonzero_count(&atlas, idx)
+		testing.expect(t, n > 0, "non-space ASCII slot should contain ink")
+	}
+
+	// Quantitative proof output.
+	probes := [5]rune{'A', 'h', 'e', 'l', 'o'}
+	for cp in probes {
+		idx, _ := render.atlas_lookup(&atlas, u32(cp))
+		fmt.printf("slot cp=%d idx=%d nonzero=%d\n", int(cp), idx, slot_nonzero_count(&atlas, idx))
+	}
+	atlas_total := 0
+	for px in atlas.pixels {
+		if px != 0 {
+			atlas_total += 1
+		}
+	}
+	fmt.printf("atlas total nonzero=%d\n", atlas_total)
+
+	// Atlas total must be within 10% of summed per-glyph counts (no silent clipping).
+	// The sum covers the full prewarm set to match the atlas-wide total,
+	// skipping codepoints the font does not cover (the slot path skips
+	// those too; font_rasterize_glyph would return .notdef ink for them).
+	glyph_sum := 0
+	covered_count := 0
+	chain: render.Fallback_Chain
+	render.fallback_chain_init(&chain, &r, nil, 16.0, context.allocator)
+	defer render.fallback_chain_destroy(&chain)
+	prewarm := render.atlas_prewarm_set()
+	defer delete(prewarm)
+	for cp in prewarm {
+		_, covered := render.fallback_resolve(&chain, u32(cp), nil)
+		if !covered {
+			continue
+		}
+		covered_count += 1
+		g := render.font_rasterize_glyph(&r, u32(cp))
+		if g.pixels != nil {
+			for px in g.pixels {
+				if px != 0 {
+					glyph_sum += 1
+				}
+			}
+			delete(g.pixels)
+		}
+	}
+	fmt.printf("summed per-glyph nonzero=%d (covered=%d)\n", glyph_sum, covered_count)
+	testing.expect(t, glyph_sum > 0, "per-glyph sum should be positive")
+	if glyph_sum > 0 {
+		diff := atlas_total - glyph_sum
+		if diff < 0 {
+			diff = -diff
+		}
+		testing.expect(t, diff * 10 <= glyph_sum, "atlas total within 10% of per-glyph sum")
+	}
+}
+
 @(test)
 test_atlas_lookup_pinned_o1 :: proc(t: ^testing.T) {
 	font_path, ok := find_test_font()
