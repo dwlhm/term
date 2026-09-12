@@ -3,7 +3,7 @@
 *.obj
 *.lib
 
-# Root binaries (build outputs, never committed)
+# Build artifacts & binaries
 /app
 /bench_app
 /fbbench
@@ -12,3 +12,28 @@
 /term_bench*
 /app_phase5
 /app_phase6
+/term-app
+/app_hello
+/tests
+/app_tests
+/render_tests
+bin/
+
+# Debug artifacts & symbols
+*.dSYM/
+*.log
+debug.log
+
+# Scratch & patch leftovers
+*.rej
+*.orig
+*.diff
+*.patch
+scratch_test.odin
+run_lldb.sh
+scratch/
+
+# OS & Editor artifacts
+.DS_Store
+.vscode/
+.idea/
