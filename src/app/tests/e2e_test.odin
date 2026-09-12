@@ -298,11 +298,11 @@ test_e2e_colored_output :: proc(t: ^testing.T) {
 		testing.expect(t, false, "RED triple must carry non-default style")
 		return
 	}
-	// R,E,D cells must carry the red-fg style (xterm red 31).
+	// R,E,D cells must carry the active theme's ANSI red style.
 	for k in 0..<3 {
 		cell := termgrid.terminal_get_cell(&a.terminal, r, cc + k)
 		st := termgrid.style_table_get(&a.terminal.grid.style_table, cell.style)
-		testing.expect(t, st.fg == u32(0xFFCD0000), "RED cell fg must be xterm red")
+		testing.expect(t, st.fg == termgrid.THEME_CATPPUCCIN_MOCHA.ansi16[1], "RED cell fg must be theme red")
 	}
 }
 

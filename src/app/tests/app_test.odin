@@ -12,10 +12,11 @@ package app_test
 // Headless limits (documented honestly):
 // - SDL uses the dummy video driver (set via SDL_VIDEODRIVER in-process);
 //   windows create fine but no pixels are ever shown.
-// - The renderer stays zero-value (nil backend): renderer_frame_auto and
-//   _app_present_overlay return false without touching the GPU, while
-//   cursor_overlay_draw still stages its quad (backend-independent).
-// - Present counts cannot be asserted headless; staging contents stand in.
+// - The renderer stays zero-value (nil backend): renderer_frame_auto returns
+//   false without touching the GPU, while cursor_overlay_draw stages its quad
+//   (backend-independent) before the renderer call.
+// - The renderer boundary owns surface composition and presentation; headless
+//   app tests assert staging, blink transitions, and damage consumption.
 
 import "core:testing"
 import "core:time"
@@ -75,6 +76,8 @@ _cpu_renderer :: proc(a: ^app.App) {
 	a.renderer.cols = APP_TEST_COLS
 	a.renderer.cell_width = app.APP_CELL_W
 	a.renderer.cell_height = app.APP_CELL_H
+	a.renderer.pad_x = 0
+	a.renderer.pad_y = 0
 	a.renderer.instances.max_instances = APP_TEST_MAX
 	a.renderer.instances.instance_data = make([]instance.Instance_Data, APP_TEST_MAX)
 }
@@ -162,7 +165,7 @@ test_app_frame_damage_consumed_and_cursor_staged :: proc(t: ^testing.T) {
 	testing.expect(t, _damage_cells(&a.terminal) > 0, "setup must produce damage")
 
 	testing.expect(t, app.app_frame(&a), "damage frame must stay alive")
-	testing.expect_value(t, _damage_cells(&a.terminal), 0)
+	testing.expect(t, _damage_cells(&a.terminal) > 0, "nil-backend publication failure must keep damage queued")
 
 	// The damage present found no backend (headless), but the cursor quad
 	// for the same frame must be staged at the reserved slot: cursor at
@@ -173,6 +176,29 @@ test_app_frame_damage_consumed_and_cursor_staged :: proc(t: ^testing.T) {
 	testing.expect_value(t, got.x, f32(2 * app.APP_CELL_W))
 	testing.expect_value(t, got.y, 0.0)
 	testing.expect(t, _row_matches(&a.terminal, 0, "hi"), "parsed output must reach the grid")
+}
+
+@(test)
+test_app_cursor_blink_change_renders_without_overlay_present :: proc(t: ^testing.T) {
+	a: app.App
+	_bare_app(&a)
+	defer _bare_destroy(&a)
+	_cpu_renderer(&a)
+	defer _cpu_renderer_destroy(&a)
+
+	// The first visible tick arms the cursor and marks a renderable cell even
+	// though the terminal scene starts clean.
+	testing.expect(t, app.app_frame(&a), "headless frame must stay alive")
+	testing.expect(t, a.cursor.blink_on && a.cursor.visible, "cursor must start visible")
+	testing.expect(t, _damage_cells(&a.terminal) > 0, "nil-backend publication failure must keep cursor damage queued")
+
+	// Force the next tick into the opposite blink phase. The app must consume
+	// the cursor-only damage through the normal renderer path; no overlay-only
+	// present is available or required.
+	a.cursor.next_toggle = 1
+	testing.expect(t, app.app_frame(&a), "blink-change frame must stay alive")
+	testing.expect(t, !a.cursor.blink_on, "blink change must hide the cursor")
+	testing.expect(t, _damage_cells(&a.terminal) > 0, "nil-backend publication failure must keep blink damage queued")
 }
 
 @(test)
@@ -241,6 +267,67 @@ test_app_frame_drain_parse_exit :: proc(t: ^testing.T) {
 
 	// Exited loop keeps running (banner is step 15), input parked.
 	testing.expect(t, app.app_frame(&a), "post-exit frame must stay alive")
+}
+
+@(test)
+test_app_zoom_request_bounds_and_coalescing :: proc(t: ^testing.T) {
+	a: app.App
+	a.pty.state = .Running
+	a.logical_font_size = app.APP_FONT_SIZE
+
+	// Multiple local actions update one target; the renderer rebuild is
+	// deferred until the app frame applies that target.
+	testing.expect(t, app._app_request_zoom(&a, 1), "first zoom request must advance")
+	testing.expect(t, app._app_request_zoom(&a, 1), "second zoom request must coalesce")
+	testing.expect_value(
+		t,
+		a.zoom_target_logical_size,
+		app.APP_FONT_SIZE + 2 * app.APP_FONT_ZOOM_STEP,
+	)
+
+	a.zoom_target_logical_size = 0
+	a.logical_font_size = app.APP_FONT_ZOOM_MIN
+	testing.expect(t, !app._app_request_zoom(&a, -1), "minimum zoom must clamp")
+	testing.expect_value(t, a.zoom_target_logical_size, app.APP_FONT_ZOOM_MIN)
+
+	a.zoom_target_logical_size = 0
+	a.logical_font_size = app.APP_FONT_ZOOM_MAX
+	testing.expect(t, !app._app_request_zoom(&a, 1), "maximum zoom must clamp")
+	testing.expect_value(t, a.zoom_target_logical_size, app.APP_FONT_ZOOM_MAX)
+
+	a.pty.state = .Exited
+	a.zoom_target_logical_size = 0
+	testing.expect(t, !app._app_request_zoom(&a, 1), "exited child must ignore zoom")
+	testing.expect_value(t, a.zoom_target_logical_size, 0.0)
+}
+
+@(test)
+test_app_pointer_cell_scales_logical_coordinates :: proc(t: ^testing.T) {
+	a: app.App
+	_bare_app(&a)
+	defer _bare_destroy(&a)
+	_cpu_renderer(&a)
+	defer _cpu_renderer_destroy(&a)
+
+	a.window.width = 640
+	a.window.height = 384
+	a.window.pixel_w = 1280
+	a.window.pixel_h = 768
+
+	retina := app._app_pointer_cell(&a, 12, 24)
+	testing.expect(t, retina.row == 3 && retina.col == 3, "HiDPI logical pointer must map to physical grid cell")
+
+	a.window.pixel_w = a.window.width
+	a.window.pixel_h = a.window.height
+	standard := app._app_pointer_cell(&a, 12, 24)
+	testing.expect(t, standard.row == 1 && standard.col == 1, "equal logical and pixel sizes must not scale twice")
+
+	a.window.width = 0
+	a.window.height = 0
+	a.window.pixel_w = 0
+	a.window.pixel_h = 0
+	invalid := app._app_pointer_cell(&a, 12, 24)
+	testing.expect(t, invalid.row == 1 && invalid.col == 1, "invalid window sizes must keep unit scale")
 }
 
 @(test)

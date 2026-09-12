@@ -3,23 +3,25 @@ package main
 // app_term main loop (TODO Langkah 15).
 //
 // Fixed per-frame order in app_frame:
-//   (1) input: Running -> input pump (keys -> pty, resize -> winsize +
-//       terminal_resize + resize_grid + pixel resize); Exited ->
-//       window_poll_input routed per key via app_handle_exited_key
+//   (1) input: window_poll_input -> app_dispatch_input_events (keys -> pty,
+//       local actions -> app, pointer -> view/capture, resize -> app resize);
+//       Exited -> routed per key via app_handle_exited_key
 //       (R relaunch, Q/Esc quit, rest ignored), drain skipped
 //   (1b) window_get_size vs last_px -> app_on_resize (both states)
 //   (2) pty_drain (cap 64KB, Running only) -> parse_chunk
 //   (3) cursor sync from terminal cursor + blink tick(now, focused,
-//       term_visible)
-//   (4) renderer_frame_auto; if the frame skipped AND the cursor changed,
-//       overlay-only present (cursor quad via the reserved slot)
+//       term_visible), then stage the cursor before rendering
+//   (4) renderer_frame composes the staged cursor into the acquired
+//       surface and presents the successful frame exactly once
 //   (5) exit poll; Running->Exited transition shows the exit banner once
 //
 // Shell decision: $SHELL when set and non-empty, /bin/sh fallback.
 // The choice is documented at _resolve_shell.
 
+import "base:runtime"
 import "core:fmt"
-import "core:mem"
+import "core:time"
+
 import "core:os"
 
 import "vendor:sdl3"
@@ -45,14 +47,23 @@ APP_DEFAULT_COLS :: 80
 // the kernel buffer for the next frame.
 APP_DRAIN_CAP :: 65536
 
+// APP_FRAME_INTERVAL_MS bounds the time spent polling when no event is ready
+// and caps the render cadence while the child continuously produces output.
+APP_FRAME_INTERVAL_MS :: 8
+
 // APP_CELL_W/H is the cell size in pixels. Must match the renderer's cell
 // metrics and the input pump's fallback grid math, or the grid and the
 // window drift apart.
-APP_CELL_W :: 16
+APP_CELL_W :: 8
 APP_CELL_H :: 16
 
 // APP_FONT_SIZE is the requested font size in pixels.
-APP_FONT_SIZE :: f32(16)
+APP_FONT_SIZE :: f32(13)
+
+// APP_FONT_ZOOM_* bounds the logical font size requested by local zoom.
+APP_FONT_ZOOM_MIN :: f32(8)
+APP_FONT_ZOOM_MAX :: f32(32)
+APP_FONT_ZOOM_STEP :: f32(1)
 
 // APP_TITLE is the window title.
 APP_TITLE :: "Term"
@@ -80,6 +91,13 @@ FONT_PATHS :: []string{
 	"/System/Library/Fonts/Supplemental/Courier New.ttf",
 }
 
+// Fallback font paths (in order).
+FALLBACK_FONT_PATHS :: []string{
+	"/System/Library/Fonts/Apple Symbols.ttf",
+	"/System/Library/Fonts/SFNSMono.ttf",
+	"/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+}
+
 // App owns every subsystem handle of the running terminal.
 App :: struct {
 	window:      win.Window,
@@ -89,8 +107,14 @@ App :: struct {
 	lut:         render.Style_LUT,
 	pty:         pty.Pty,
 	cursor:      render.Cursor_Overlay,
+	view:        termgrid.Terminal_View,
 	focused:     bool,
 	should_quit: bool,
+	font_path:   string,
+	logical_font_size:  f32,
+	physical_font_size: f32,
+	zoom_target_logical_size: f32,
+	view_generation: u64,
 	// prog/argv are the child spec for (re)launch, stored as-is with
 	// caller-owned static lifetime (never freed or cloned by App).
 	prog:         string,
@@ -153,6 +177,12 @@ app_init :: proc(a: ^App, rows, cols: int, prog: string, argv: []string) -> bool
 	}
 	a.focused = true
 	a.should_quit = false
+	a.view = termgrid.Terminal_View{}
+	a.font_path = ""
+	a.logical_font_size = APP_FONT_SIZE
+	a.physical_font_size = APP_FONT_SIZE
+	a.zoom_target_logical_size = 0
+	a.view_generation = 0
 	a.prog = prog
 	a.argv = argv
 	a.banner_shown = false
@@ -227,21 +257,33 @@ app_init :: proc(a: ^App, rows, cols: int, prog: string, argv: []string) -> bool
 		fmt.eprintf("app_init: no usable font found\n")
 		return false
 	}
+	a.font_path = font_path
+	scale := f32(1.0)
+	if a.window.width > 0 {
+		scale = f32(a.window.pixel_w) / f32(a.window.width)
+	}
+	phys_font_size := APP_FONT_SIZE * scale
+	a.logical_font_size = APP_FONT_SIZE
+	a.physical_font_size = phys_font_size
 	format := a.backend.get_preferred_format(rawptr(a.surface), a.device)
+	screen_w := f32(a.window.pixel_w) if a.window.pixel_w > 0 else f32(window_w)
+	screen_h := f32(a.window.pixel_h) if a.window.pixel_h > 0 else f32(window_h)
 	if !render.renderer_init(
 		&a.renderer,
 		font_path,
-		APP_FONT_SIZE,
+		phys_font_size,
 		a.backend,
 		a.device,
 		a.queue,
 		i32(rows),
 		i32(cols),
-		f32(APP_CELL_W),
-		f32(APP_CELL_H),
-		f32(window_w),
-		f32(window_h),
+		0,
+		0,
+		screen_w,
+		screen_h,
 		format,
+		fallback_paths = FALLBACK_FONT_PATHS,
+		theme = termgrid.THEME_CATPPUCCIN_MOCHA,
 	) {
 		a.backend.destroy_device(a.device)
 		a.device = gpu.Gpu_Device(nil)
@@ -255,12 +297,43 @@ app_init :: proc(a: ^App, rows, cols: int, prog: string, argv: []string) -> bool
 		return false
 	}
 
+	cw := a.renderer.cell_width
+	if cw <= 0 {
+		cw = 8
+	}
+	ch := a.renderer.cell_height
+	if ch <= 0 {
+		ch = 16
+	}
+	avail_w := int(a.window.pixel_w) - int(2 * a.renderer.pad_x)
+	avail_h := int(a.window.pixel_h) - int(2 * a.renderer.pad_y)
+	if avail_w < int(cw) {
+		avail_w = int(cw)
+	}
+	if avail_h < int(ch) {
+		avail_h = int(ch)
+	}
+	init_cols := avail_w / int(cw)
+	init_rows := avail_h / int(ch)
+	if init_cols < 1 {
+		init_cols = 1
+	}
+	if init_rows < 1 {
+		init_rows = 1
+	}
+
 	// (6) Terminal + parser (infallible: make() panics on OOM).
-	termgrid.terminal_init(&a.terminal, rows, cols)
+	termgrid.terminal_init(
+		&a.terminal,
+		init_rows,
+		init_cols,
+		theme = termgrid.THEME_CATPPUCCIN_MOCHA,
+	)
 	parser.parser_init(&a.parser)
+	render.renderer_resize_grid(&a.renderer, &a.terminal, i32(init_rows), i32(init_cols))
 
 	// (7) PTY child.
-	if !pty.pty_spawn(&a.pty, rows, cols, prog, argv) {
+	if !pty.pty_spawn(&a.pty, init_rows, init_cols, prog, argv) {
 		termgrid.terminal_destroy(&a.terminal)
 		render.renderer_destroy(&a.renderer)
 		a.backend.destroy_device(a.device)
@@ -282,7 +355,8 @@ app_init :: proc(a: ^App, rows, cols: int, prog: string, argv: []string) -> bool
 
 	// Initial focus mirrors the live window state.
 	_app_sync_focus(a)
-	a.last_px_w, a.last_px_h = win.window_get_size(&a.window)
+	a.last_px_w = a.window.pixel_w
+	a.last_px_h = a.window.pixel_h
 	// Init dump (once, TERM_DEBUG=1 only): proves GPU resources exist.
 	// Atlas valid count is a read-only scan of the slot metadata.
 	if a.debug_frames {
@@ -336,13 +410,297 @@ app_destroy :: proc(a: ^App) {
 
 // _app_sync_focus mirrors the live SDL input-focus state into a.focused
 // (parks the blink via tick). Flag polling (not event translation) keeps
-// the SDL pump ownership single: input_pump stays the only event drain.
+// window_poll_input as the only SDL event drain.
 _app_sync_focus :: proc(a: ^App) {
 	if a == nil || a.window.handle == nil {
 		return
 	}
 	flags := sdl3.GetWindowFlags(a.window.handle)
 	a.focused = .INPUT_FOCUS in flags
+}
+
+_app_grid_for_pixels :: proc(
+	pixel_w, pixel_h: i32,
+	cell_w, cell_h, pad_x, pad_y: f32,
+) -> (rows, cols: int) {
+	cw := int(cell_w)
+	if cw <= 0 {
+		cw = APP_CELL_W
+	}
+	ch := int(cell_h)
+	if ch <= 0 {
+		ch = APP_CELL_H
+	}
+	avail_w := int(pixel_w) - int(2 * pad_x)
+	avail_h := int(pixel_h) - int(2 * pad_y)
+	if avail_w < cw {
+		avail_w = cw
+	}
+	if avail_h < ch {
+		avail_h = ch
+	}
+	cols = avail_w / cw
+	rows = avail_h / ch
+	if cols < 1 {
+		cols = 1
+	}
+	if rows < 1 {
+		rows = 1
+	}
+	return rows, cols
+}
+
+_app_pointer_cell :: proc(a: ^App, x, y: f32) -> termgrid.Terminal_Point {
+	if a == nil || a.terminal.grid.row_count <= 0 || a.terminal.grid.col_count <= 0 {
+		return termgrid.Terminal_Point{}
+	}
+	cw := a.renderer.cell_width
+	if cw <= 0 {
+		cw = f32(APP_CELL_W)
+	}
+	ch := a.renderer.cell_height
+	if ch <= 0 {
+		ch = f32(APP_CELL_H)
+	}
+	pointer_x := x
+	if a.window.width > 0 && a.window.pixel_w > 0 && a.window.width != a.window.pixel_w {
+		pointer_x *= f32(a.window.pixel_w) / f32(a.window.width)
+	}
+	pointer_y := y
+	if a.window.height > 0 && a.window.pixel_h > 0 && a.window.height != a.window.pixel_h {
+		pointer_y *= f32(a.window.pixel_h) / f32(a.window.height)
+	}
+	col := 0
+	if pointer_x > a.renderer.pad_x {
+		col = int((pointer_x - a.renderer.pad_x) / cw)
+	}
+	row := 0
+	if pointer_y > a.renderer.pad_y {
+		row = int((pointer_y - a.renderer.pad_y) / ch)
+	}
+	return termgrid.Terminal_Point{
+		row = clamp(row, 0, a.terminal.grid.row_count-1),
+		col = clamp(col, 0, a.terminal.grid.col_count-1),
+	}
+}
+
+_app_pointer_point :: proc(a: ^App, x, y: f32) -> termgrid.Terminal_Point {
+	viewport := _app_pointer_cell(a, x, y)
+	return termgrid.terminal_view_point_from_viewport(
+		&a.terminal,
+		&a.view,
+		viewport,
+	)
+}
+
+_app_pointer_wheel_delta :: proc(pointer: input.Input_Pointer_Event) -> int {
+	delta := pointer.wheel_integer_y
+	if delta == 0 {
+		if pointer.wheel_y > 0 {
+			delta = 1
+		} else if pointer.wheel_y < 0 {
+			delta = -1
+		}
+	}
+	if pointer.wheel_flipped {
+		delta = -delta
+	}
+	return int(delta)
+}
+
+_app_pointer_selection_changed :: proc(a: ^App, point: termgrid.Terminal_Point, anchor: bool) -> bool {
+	if a == nil {
+		return false
+	}
+	changed := false
+	if anchor {
+		changed = !a.view.selection.active ||
+			a.view.selection.anchor != point ||
+			a.view.selection.focus != point
+		a.view.selection.active = true
+		a.view.selection.anchor = point
+		a.view.selection.focus = point
+	} else if a.view.selection.active {
+		changed = a.view.selection.focus != point
+		a.view.selection.focus = point
+	}
+	if changed {
+		a.view_generation += 1
+	}
+	return changed
+}
+
+_app_route_pointer :: proc(a: ^App, pointer: input.Input_Pointer_Event) -> bool {
+	if a == nil {
+		return false
+	}
+	switch pointer.kind {
+	case .Wheel:
+		delta := _app_pointer_wheel_delta(pointer)
+		old_offset := a.view.scrollback_offset
+		_ = termgrid.terminal_view_scroll(&a.view, &a.terminal, delta)
+		if old_offset != a.view.scrollback_offset {
+			a.view_generation += 1
+		}
+	case .Button_Down:
+		if pointer.button != 1 {
+			return true
+		}
+		point := _app_pointer_point(a, pointer.x, pointer.y)
+		_ = _app_pointer_selection_changed(a, point, true)
+		_ = win.window_capture_mouse(&a.window, true)
+	case .Motion:
+		if a.view.selection.active && a.view.selection.anchor != a.view.selection.focus && !pointer.primary_down {
+			return true
+		}
+		if a.view.selection.active && pointer.primary_down {
+			point := _app_pointer_point(a, pointer.x, pointer.y)
+			_ = _app_pointer_selection_changed(a, point, false)
+		}
+	case .Button_Up:
+		if pointer.button != 1 {
+			return true
+		}
+		if a.view.selection.active {
+			point := _app_pointer_point(a, pointer.x, pointer.y)
+			_ = _app_pointer_selection_changed(a, point, false)
+		}
+		_ = win.window_capture_mouse(&a.window, false)
+	}
+	return true
+}
+
+_app_copy_selection :: proc(a: ^App) -> bool {
+	if a == nil {
+		return false
+	}
+	copied := termgrid.terminal_view_copy(&a.terminal, &a.view)
+	defer delete(copied)
+	if len(copied) == 0 {
+		return false
+	}
+	return win.window_set_clipboard_text(&a.window, copied)
+}
+
+_app_request_zoom :: proc(a: ^App, direction: int) -> bool {
+	if a == nil || a.pty.state == .Exited || direction == 0 {
+		return false
+	}
+	if a.zoom_target_logical_size <= 0 {
+		a.zoom_target_logical_size = a.logical_font_size
+		if a.zoom_target_logical_size <= 0 {
+			a.zoom_target_logical_size = APP_FONT_SIZE
+		}
+	}
+	step := 1
+	if direction < 0 {
+		step = -1
+	}
+	next := a.zoom_target_logical_size + f32(step) * APP_FONT_ZOOM_STEP
+	next = clamp(next, APP_FONT_ZOOM_MIN, APP_FONT_ZOOM_MAX)
+	if next == a.zoom_target_logical_size {
+		return false
+	}
+	a.zoom_target_logical_size = next
+	return true
+}
+
+_app_apply_zoom :: proc(a: ^App) -> bool {
+	if a == nil || a.pty.state == .Exited || a.zoom_target_logical_size <= 0 {
+		return false
+	}
+	target := a.zoom_target_logical_size
+	if target == a.logical_font_size {
+		a.zoom_target_logical_size = 0
+		return false
+	}
+	scale := f32(1)
+	if a.window.width > 0 && a.window.pixel_w > 0 {
+		scale = f32(a.window.pixel_w) / f32(a.window.width)
+	}
+	physical := target * scale
+	if !render.renderer_rebuild_font(
+		&a.renderer,
+		a.font_path,
+		physical,
+		FALLBACK_FONT_PATHS,
+	) {
+		a.zoom_target_logical_size = 0
+		return false
+	}
+	pixel_w := a.window.pixel_w
+	pixel_h := a.window.pixel_h
+	if pixel_w <= 0 {
+		pixel_w = i32(a.renderer.screen_w)
+	}
+	if pixel_h <= 0 {
+		pixel_h = i32(a.renderer.screen_h)
+	}
+	rows, cols := _app_grid_for_pixels(
+		pixel_w,
+		pixel_h,
+		a.renderer.cell_width,
+		a.renderer.cell_height,
+		a.renderer.pad_x,
+		a.renderer.pad_y,
+	)
+	termgrid.terminal_resize(&a.terminal, rows, cols)
+	render.renderer_resize_grid(&a.renderer, &a.terminal, i32(rows), i32(cols))
+	pty.pty_set_winsize(&a.pty, rows, cols)
+	if pixel_w > 0 && pixel_h > 0 {
+		render.renderer_resize(&a.renderer, u32(pixel_w), u32(pixel_h))
+	}
+	a.logical_font_size = target
+	a.physical_font_size = physical
+	a.zoom_target_logical_size = 0
+	return true
+}
+
+app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: bool, ok: bool) {
+	if a == nil {
+		return true, false
+	}
+	key_evs: [input.INPUT_PUMP_MAX_EVENTS]input.Input_Event
+	key_count := 0
+	ok = true
+	for ev in evs {
+		switch ev.event_type {
+		case .Key:
+			if a.pty.state == .Exited {
+				switch app_handle_exited_key(ev) {
+				case .Relaunch:
+					_ = app_relaunch(a)
+				case .Quit:
+					a.should_quit = true
+				case .None:
+				}
+			} else if key_count < len(key_evs) {
+				key_evs[key_count] = ev
+				key_count += 1
+			}
+		case .Local:
+			switch ev.action {
+			case .Copy:
+				if !_app_copy_selection(a) {
+					ok = false
+				}
+			case .Zoom_In:
+				_ = _app_request_zoom(a, 1)
+			case .Zoom_Out:
+				_ = _app_request_zoom(a, -1)
+			case .None:
+			}
+		case .Pointer:
+			if !_app_route_pointer(a, ev.pointer) {
+				ok = false
+			}
+		}
+	}
+	if key_count > 0 {
+		ok = input.input_pump_events(&a.pty, key_evs[:key_count]) && ok
+	}
+	quit = a.should_quit || !a.window.is_open
+	return quit, ok
 }
 
 // _app_apply_resize runs the renderer side of a resize the input pump
@@ -358,6 +716,8 @@ _app_apply_resize :: proc(a: ^App) {
 	if a.window.pixel_w > 0 && a.window.pixel_h > 0 {
 		render.renderer_resize(&a.renderer, u32(a.window.pixel_w), u32(a.window.pixel_h))
 	}
+	a.last_px_w = a.window.pixel_w
+	a.last_px_h = a.window.pixel_h
 }
 
 // _app_mark_cursor_dirty marks the cursor cell with its live generation
@@ -418,62 +778,6 @@ _app_debug_dump_grid :: proc(a: ^App) {
 	}
 }
 
-// _app_present_overlay presents one overlay-only frame: the staged cursor
-// quad (reserved slot max_instances-1) is uploaded through the ring and
-// drawn with count 1 over the retained surface contents (Load, never
-// Clear). Nil-backend safe: returns false without touching the GPU.
-_app_present_overlay :: proc(a: ^App) -> bool {
-	r := &a.renderer
-	if r.backend == nil || rawptr(r.device) == nil || rawptr(r.queue) == nil {
-		return false
-	}
-	if rawptr(r.surface) == nil {
-		return false
-	}
-	if rawptr(r.instances.bg_pipeline) == nil {
-		return false
-	}
-	if r.instances.max_instances == 0 || len(r.instances.instance_data) == 0 {
-		return false
-	}
-	slot := r.instances.max_instances - 1
-	if u64(slot) >= u64(len(r.instances.instance_data)) {
-		return false
-	}
-	staging := render.upload_ring_get_staging(&r.upload_ring)
-	if u64(len(staging)) < instance.INSTANCE_STRIDE {
-		return false
-	}
-	mem.copy(raw_data(staging), &r.instances.instance_data[slot], int(instance.INSTANCE_STRIDE))
-	ring_slot := render.upload_ring_current_slot(&r.upload_ring)
-	render.upload_ring_submit(&r.upload_ring, instance.INSTANCE_STRIDE)
-	buffer := render.upload_ring_get_buffer(&r.upload_ring, ring_slot)
-	if rawptr(buffer) == nil {
-		return false
-	}
-	texture, view, _ := r.backend.get_surface_texture(rawptr(r.surface))
-	if rawptr(view) == nil {
-		if rawptr(texture) != nil {
-			r.backend.release_surface_texture(texture, view)
-		}
-		if r.surface_w != 0 && r.surface_h != 0 {
-			r.backend.configure_surface(rawptr(r.surface), r.device, r.format, r.surface_w, r.surface_h)
-		}
-		return false
-	}
-	encoder := r.backend.create_command_encoder(r.device)
-	pass := r.backend.begin_render_pass(encoder, view, {0, 0, 0, 1}, .Load)
-	r.backend.render_set_pipeline(pass, r.instances.bg_pipeline)
-	r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_bg)
-	r.backend.render_set_vertex_buffer(pass, 0, buffer, 0)
-	r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, 1)
-	r.backend.end_render_pass(pass)
-	cmd := r.backend.finish_command_buffer(encoder)
-	r.backend.submit(r.queue, cmd)
-	r.backend.present_surface(rawptr(r.surface))
-	r.backend.release_surface_texture(texture, view)
-	return true
-}
 
 // App_Exit_Action is the per-key decision while the child is Exited.
 App_Exit_Action :: enum {
@@ -579,14 +883,14 @@ app_on_resize :: proc(a: ^App, pixel_w: i32, pixel_h: i32) -> (resized: bool) {
 	if pixel_w <= 0 || pixel_h <= 0 {
 		return false
 	}
-	cols := int(pixel_w) / APP_CELL_W
-	rows := int(pixel_h) / APP_CELL_H
-	if cols < 1 {
-		cols = 1
-	}
-	if rows < 1 {
-		rows = 1
-	}
+	rows, cols := _app_grid_for_pixels(
+		pixel_w,
+		pixel_h,
+		a.renderer.cell_width,
+		a.renderer.cell_height,
+		a.renderer.pad_x,
+		a.renderer.pad_y,
+	)
 	if rows == a.terminal.grid.row_count && cols == a.terminal.grid.col_count &&
 	   pixel_w == a.last_px_w && pixel_h == a.last_px_h {
 		return false
@@ -608,45 +912,24 @@ app_frame :: proc(a: ^App) -> bool {
 		return false
 	}
 
-	// (1) Input. Running keeps the existing input_pump path (keys ->
-	// pty; resize -> winsize + terminal_resize, finished here with
-	// resize_grid + pixel resize). Exited skips input_pump and the drain:
-	// window_poll_input events route per key (R relaunch, Q/Esc quit)
-	// while the close button still quits via is_open.
+	// (1) Input. One SDL drain feeds the app dispatcher. Running keys are
+	// encoded to the pty, local actions stay in the app, and pointer events
+	// update the view. Exited keys retain app_handle_exited_key semantics.
 	if a.window.handle != nil {
-		if a.pty.state == .Exited {
-			evs: [input.INPUT_PUMP_MAX_EVENTS]input.Input_Event
-			n := input.window_poll_input(&a.window, evs[:], input.INPUT_PUMP_MAX_EVENTS)
-			for i in 0..<n {
-				switch app_handle_exited_key(evs[i]) {
-				case .Relaunch:
-					_ = app_relaunch(a)
-				case .Quit:
-					a.should_quit = true
-				case .None:
-				}
-			}
-			if !a.window.is_open {
-				a.should_quit = true
-				return false
-			}
-			_app_sync_focus(a)
-		} else {
-			quit, resized, _ := input.input_pump(&a.window, &a.pty, &a.terminal)
-			if quit {
-				a.should_quit = true
-				return false
-			}
-			if resized {
-				_app_apply_resize(a)
-			}
-			_app_sync_focus(a)
+		evs: [input.INPUT_PUMP_MAX_EVENTS]input.Input_Event
+		n := input.window_poll_input(&a.window, evs[:], input.INPUT_PUMP_MAX_EVENTS)
+		quit, _ := app_dispatch_input_events(a, evs[:n])
+		if quit {
+			a.should_quit = true
+			return false
 		}
+		_app_sync_focus(a)
 		// (1b) Live window size vs last_px -> app_on_resize (both
 		// states; same-dims+same-px is a no-op inside).
-		if gw, gh := win.window_get_size(&a.window); gw != a.last_px_w || gh != a.last_px_h {
-			_ = app_on_resize(a, gw, gh)
+		if a.window.pixel_w != a.last_px_w || a.window.pixel_h != a.last_px_h {
+			_ = app_on_resize(a, a.window.pixel_w, a.window.pixel_h)
 		}
+		_ = _app_apply_zoom(a)
 	}
 
 	// (2) PTY drain (cap 64KB) -> parse_chunk. Skipped while Exited.
@@ -659,44 +942,37 @@ app_frame :: proc(a: ^App) -> bool {
 
 	// (3) Cursor sync from the terminal cursor + blink tick.
 	cur := termgrid.terminal_get_cursor(&a.terminal)
+	position_changed := a.cursor.row != cur.row || a.cursor.col != cur.col
+	old_cursor_row := a.cursor.row
+	old_cursor_col := a.cursor.col
 	render.cursor_overlay_sync(&a.cursor, cur.row, cur.col)
 	now := platform.platform_ticks_to_ns(platform.platform_now())
 	cursor_changed := render.cursor_overlay_tick(&a.cursor, now, a.focused, cur.visible)
 
 	// Frame diagnostics pre-scan (TERM_DEBUG=1 only): read-only damage
 	// estimate via strategy_estimate_inputs, which never takes or clears.
-	// The take/skip discipline inside renderer_frame_auto is undisturbed.
+	// The take/skip discipline inside renderer_frame is undisturbed.
 	dbg_dmg, dbg_total := 0, 0
 	if a.debug_frames {
 		inp := render.strategy_estimate_inputs(&a.terminal.damage, a.renderer.rows, a.renderer.cols)
 		dbg_dmg, dbg_total = inp.dirty_cells, inp.total_cells
 	}
 
-	// (4) Render. On a damage present with a lit cursor the quad rides in
-	// a second (overlay) present in the same frame; on a skipped frame
-	// with a toggled-ON cursor the overlay-only present fires with the
-	// journal untouched. A toggled-OFF cursor cannot erase overlay-only
-	// (Load preserves ghost pixels), so it erases via one damaged cell +
-	// a full frame.
-	// frame_ok binds the present result for the debug line below; the
-	// branch shape is otherwise unchanged (no behavior change).
-	frame_ok := render.renderer_frame_auto(&a.renderer, &a.terminal, &a.lut)
-	if frame_ok {
-		if render.cursor_overlay_draw(&a.renderer, &a.cursor) {
-			_app_present_overlay(a)
-		}
-	} else if cursor_changed {
-		if render.cursor_overlay_draw(&a.renderer, &a.cursor) {
-			_app_present_overlay(a)
-		} else if _app_mark_cursor_dirty(a, cur.row, cur.col) {
-			frame_ok = render.renderer_frame_auto(&a.renderer, &a.terminal, &a.lut)
-			if frame_ok {
-				if render.cursor_overlay_draw(&a.renderer, &a.cursor) {
-					_app_present_overlay(a)
-				}
-			}
-		}
+	// (4) Render. Stage the cursor before the selected renderer path so the
+	// renderer can compose it into the same acquired surface. A cursor blink
+	// transition marks its cell, making a no-damage scene renderable without a
+	// second acquisition or present. Every successful renderer frame owns the
+	// single present for the frame.
+	_ = render.cursor_overlay_draw(&a.renderer, &a.cursor)
+	if cursor_changed {
+		_ = _app_mark_cursor_dirty(a, old_cursor_row, old_cursor_col)
+		_ = _app_mark_cursor_dirty(a, cur.row, cur.col)
 	}
+	if position_changed {
+		_ = _app_mark_cursor_dirty(a, old_cursor_row, old_cursor_col)
+		_ = _app_mark_cursor_dirty(a, cur.row, cur.col)
+	}
+	frame_ok := render.renderer_frame(&a.renderer, &a.terminal, &a.view)
 
 	// Per-frame line (TERM_DEBUG=1 only): dmg>0 + present=false =
 	// present-fail; dmg==0 + present=false = healthy skip; dmg>0 +
@@ -743,14 +1019,19 @@ main :: proc() {
 	defer if shell_allocated { delete(shell) }
 	fmt.printf("Term: starting %s (%dx%d)\n", shell, APP_DEFAULT_COLS, APP_DEFAULT_ROWS)
 
-	app: App
-	if !app_init(&app, APP_DEFAULT_ROWS, APP_DEFAULT_COLS, shell, nil) {
+	app := new(App, runtime.heap_allocator())
+	if !app_init(app, APP_DEFAULT_ROWS, APP_DEFAULT_COLS, shell, nil) {
+		free(app, runtime.heap_allocator())
 		fmt.println("ERROR: app_init failed")
 		return
 	}
-	defer app_destroy(&app)
+	defer {
+		app_destroy(app)
+		free(app, runtime.heap_allocator())
+	}
 
-	for app_frame(&app) {
+	for app_frame(app) {
+		time.sleep(APP_FRAME_INTERVAL_MS * time.Millisecond)
 	}
 	fmt.println("Term: quit")
 }
