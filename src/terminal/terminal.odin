@@ -18,6 +18,8 @@ Terminal :: struct {
 	grapheme_store:     Grapheme_Store,
 	scrollback:         Scrollback,
 	render_epoch:       u64,
+	in_prompt_zone:     bool,
+	has_osc_133:        bool,
 }
 
 // Erase_Mode specifies how to erase content.
@@ -47,6 +49,8 @@ terminal_init :: proc(
 	t.render_epoch = 1
 	grapheme_store_init(&t.grapheme_store)
 	scrollback_init(&t.scrollback, cols, allocator = allocator)
+	t.in_prompt_zone = false
+	t.has_osc_133 = false
 }
 
 // terminal_destroy frees all terminal state.
@@ -621,6 +625,10 @@ terminal_scroll_up :: proc(t: ^Terminal, n: int) {
 		}
 	}
 	scroll_up(&t.grid, &t.damage, t.scroll_top, t.scroll_bottom, n)
+	if t.in_prompt_zone {
+		phys := _grid_physical_row(&t.grid, t.cursor.row)
+		t.grid.rows[phys].is_prompt = true
+	}
 	t.render_epoch += 1
 }
 
@@ -656,6 +664,10 @@ terminal_newline :: proc(t: ^Terminal) {
 		if t.cursor.row >= t.grid.row_count {
 			t.cursor.row = t.grid.row_count - 1
 		}
+	}
+	if t.in_prompt_zone {
+		phys := _grid_physical_row(&t.grid, t.cursor.row)
+		t.grid.rows[phys].is_prompt = true
 	}
 }
 
@@ -849,3 +861,31 @@ terminal_next_line :: proc(t: ^Terminal) {
 		terminal_cursor_down(t, 1)
 	}
 }
+
+// OSC 133 semantic prompt mark procedures
+terminal_osc_133_prompt_start :: proc(t: ^Terminal) {
+	if t == nil { return }
+	t.has_osc_133 = true
+	t.in_prompt_zone = true
+	phys := _grid_physical_row(&t.grid, t.cursor.row)
+	t.grid.rows[phys].is_prompt = true
+}
+
+terminal_osc_133_prompt_end :: proc(t: ^Terminal) {
+	if t == nil { return }
+	t.has_osc_133 = true
+	t.in_prompt_zone = false
+}
+
+terminal_osc_133_command_start :: proc(t: ^Terminal) {
+	if t == nil { return }
+	t.has_osc_133 = true
+	t.in_prompt_zone = false
+}
+
+terminal_osc_133_command_end :: proc(t: ^Terminal) {
+	if t == nil { return }
+	t.has_osc_133 = true
+	t.in_prompt_zone = false
+}
+

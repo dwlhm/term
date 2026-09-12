@@ -52,6 +52,71 @@ scrollback_clear :: proc(s: ^Scrollback, store: ^Grapheme_Store, allocator: runt
 	clear(&s.rows)
 }
 
+// scrollback_resize reflows scrollback rows to new_cols width.
+// Existing rows have their active cells wrapped or padded into new_cols rows.
+// Keeps memory bounded to max_lines, evicting oldest rows if needed.
+scrollback_resize :: proc(s: ^Scrollback, new_cols: int, store: ^Grapheme_Store, allocator: runtime.Allocator = context.allocator) {
+	if s == nil || new_cols <= 0 || new_cols == s.col_count {
+		if s != nil && new_cols > 0 { s.col_count = new_cols }
+		return
+	}
+	if len(s.rows) == 0 {
+		s.col_count = new_cols
+		return
+	}
+
+	new_rows := make([dynamic]Scrollback_Row, allocator)
+
+	for &old_row in s.rows {
+		old_cells := old_row.cells
+		// Find last active column in old_cells
+		last_active := -1
+		for c in 0..<len(old_cells) {
+			cell := old_cells[c]
+			if (cell.content != 0 && cell.content != ' ') || cell.style != 0 {
+				last_active = c
+			}
+		}
+		active_len := last_active >= 0 ? last_active + 1 : 0
+
+		if active_len == 0 {
+			// Empty row: store 1 empty row of new_cols
+			empty_row := make([]Semantic_Cell, new_cols, allocator)
+			for k in 0..<new_cols { empty_row[k] = CELL_DEFAULT }
+			append(&new_rows, Scrollback_Row{cells = empty_row})
+		} else {
+			ci := 0
+			for ci < active_len {
+				take := min(active_len - ci, new_cols)
+				chunk := make([]Semantic_Cell, new_cols, allocator)
+				for k in 0..<take {
+					chunk[k] = old_cells[ci + k]
+				}
+				for k in take..<new_cols {
+					chunk[k] = CELL_DEFAULT
+				}
+				append(&new_rows, Scrollback_Row{cells = chunk})
+				ci += take
+			}
+		}
+		// Clean up old_row.cells backing (we copied handles, so don't release handles, just delete slice)
+		delete(old_row.cells, allocator)
+	}
+
+	// Keep memory bounded to s.max_lines
+	for len(new_rows) > s.max_lines {
+		old := new_rows[0]
+		_scrollback_release_row(&old, store)
+		delete(old.cells, allocator)
+		ordered_remove(&new_rows, 0)
+	}
+
+	delete(s.rows)
+	s.rows = new_rows
+	s.col_count = new_cols
+}
+
+
 // scrollback_push appends a COPY of cells as the newest row.
 // A cols mismatch (resize changed cols without a clear) drops the row
 // instead of storing a ragged row. Past max_lines the oldest row is

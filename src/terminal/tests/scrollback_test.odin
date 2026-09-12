@@ -105,7 +105,7 @@ test_scrollback_region_scroll_never_pushes :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_scrollback_resize_col_change_clears :: proc(t: ^testing.T) {
+test_scrollback_resize_col_change_preserves :: proc(t: ^testing.T) {
 	term: tg.Terminal
 	tg.terminal_init(&term, 4, 4)
 	defer tg.terminal_destroy(&term)
@@ -118,15 +118,15 @@ test_scrollback_resize_col_change_clears :: proc(t: ^testing.T) {
 	testing.expect(t, term.grapheme_store.live_count == 1, "scrolled handle stays live in scrollback")
 
 	tg.terminal_resize(&term, 4, 8)
-	testing.expect(t, len(term.scrollback.rows) == 0, "col change must clear scrollback")
+	testing.expect(t, len(term.scrollback.rows) == 2, "col change must preserve scrollback")
 	testing.expect(t, term.scrollback.col_count == 8, "col_count must re-sync to new cols")
-	testing.expect(t, term.grapheme_store.live_count == 0, "cleared rows must release handles")
+	testing.expect(t, term.grapheme_store.live_count == 1, "preserved rows keep handles live")
 
 	// Same-cols resize preserves history.
 	tg.terminal_scroll_up(&term, 1)
-	testing.expect(t, len(term.scrollback.rows) == 1, "scroll after resize pushes again")
+	testing.expect(t, len(term.scrollback.rows) == 3, "scroll after resize pushes again")
 	tg.terminal_resize(&term, 6, 8)
-	testing.expect(t, len(term.scrollback.rows) == 1, "same-cols resize must preserve scrollback")
+	testing.expect(t, len(term.scrollback.rows) == 3, "same-cols resize must preserve scrollback")
 	testing.expect(t, term.scrollback.col_count == 8, "col_count unchanged")
 }
 

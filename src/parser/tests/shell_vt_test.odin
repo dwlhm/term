@@ -96,3 +96,54 @@ test_shell_lf_preserves_column_and_cr_resets_it :: proc(t: ^testing.T) {
 	parser.parse_chunk(&p, &term, []u8{'\r', 'Y'})
 	testing.expect_value(t, termgrid.terminal_get_cell(&term, 1, 0).content, u32('Y'))
 }
+
+@(test)
+test_osc_133_prompt_and_command_lifecycle :: proc(t: ^testing.T) {
+	term := _shell_term(4, 20)
+	defer termgrid.terminal_destroy(&term)
+	p: parser.Parser
+	parser.parser_init(&p)
+
+	testing.expect(t, !term.has_osc_133, "initially has_osc_133 is false")
+	testing.expect(t, !term.in_prompt_zone, "initially in_prompt_zone is false")
+
+	// Emit prompt start: \x1b]133;A\x07
+	parser.parse_chunk(&p, &term, []u8{0x1B, ']', '1', '3', '3', ';', 'A', 0x07})
+	testing.expect(t, term.has_osc_133, "has_osc_133 is true after OSC 133")
+	testing.expect(t, term.in_prompt_zone, "in_prompt_zone is true after 133;A")
+	testing.expect(t, term.grid.rows[0].is_prompt, "row 0 is marked as prompt")
+
+	// Print prompt text
+	parser.parse_chunk(&p, &term, []u8{'>', ' '})
+
+	// Emit prompt end: \x1b]133;B\x07
+	parser.parse_chunk(&p, &term, []u8{0x1B, ']', '1', '3', '3', ';', 'B', 0x07})
+	testing.expect(t, !term.in_prompt_zone, "in_prompt_zone is false after 133;B")
+
+	// User enters command: emit command start \x1b]133;C\x07
+	parser.parse_chunk(&p, &term, []u8{0x1B, ']', '1', '3', '3', ';', 'C', 0x07})
+	testing.expect(t, !term.in_prompt_zone, "in_prompt_zone is false during command execution")
+
+	// Command prints newline and output
+	parser.parse_chunk(&p, &term, []u8{'\r', '\n', 'h', 'e', 'l', 'l', 'o'})
+	testing.expect(t, !term.grid.rows[1].is_prompt, "output row 1 is not prompt")
+
+	// Emit command end: \x1b]133;D;0\x07 (with exit code)
+	parser.parse_chunk(&p, &term, []u8{0x1B, ']', '1', '3', '3', ';', 'D', ';', '0', 0x07})
+	testing.expect(t, !term.in_prompt_zone, "in_prompt_zone is false after 133;D")
+}
+
+@(test)
+test_osc_133_st_terminator :: proc(t: ^testing.T) {
+	term := _shell_term(4, 20)
+	defer termgrid.terminal_destroy(&term)
+	p: parser.Parser
+	parser.parser_init(&p)
+
+	// Emit prompt start with ST terminator: \x1b]133;A\x1b\
+	parser.parse_chunk(&p, &term, []u8{0x1B, ']', '1', '3', '3', ';', 'A', 0x1B, '\\'})
+	testing.expect(t, term.has_osc_133, "has_osc_133 is true with ST")
+	testing.expect(t, term.in_prompt_zone, "in_prompt_zone is true with ST")
+	testing.expect(t, term.grid.rows[0].is_prompt, "row 0 is marked as prompt with ST")
+}
+

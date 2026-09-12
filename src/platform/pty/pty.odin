@@ -163,7 +163,7 @@ pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string) -
 	c_argv[argc - 1] = nil
 
 	// Clean environment for absolute/relative prog paths.
-	c_env: [5]cstring = {"TERM=xterm-256color", "COLORTERM=truecolor", "PATH=/usr/bin:/bin:/usr/sbin:/sbin", "PROMPT_EOL_MARK=", nil}
+	c_env: [6]cstring = {"TERM=xterm-256color", "COLORTERM=truecolor", "PATH=/usr/bin:/bin:/usr/sbin:/sbin", "PROMPT_EOL_MARK=", "TERM_PROGRAM=WezTerm", nil}
 	has_slash := strings.contains(prog, "/")
 
 	pid := posix.fork()

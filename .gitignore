@@ -18,6 +18,7 @@
 /app_tests
 /render_tests
 bin/
+build/
 
 # Debug artifacts & symbols
 *.dSYM/

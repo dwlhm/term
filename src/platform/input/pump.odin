@@ -237,7 +237,7 @@ _translate_key :: proc(key: sdl3.Keycode, mod: sdl3.Keymod, out: []Input_Event) 
 	}
 	if ctrl || gui {
 		switch key {
-		case sdl3.K_PLUS, sdl3.K_KP_PLUS:
+		case sdl3.K_PLUS, sdl3.K_KP_PLUS, sdl3.K_EQUALS:
 			out[0] = Input_Event{event_type = .Local, action = .Zoom_In, ctrl = ctrl, gui = gui, shift = shift}
 			return true
 		case sdl3.K_MINUS, sdl3.K_KP_MINUS:

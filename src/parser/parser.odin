@@ -19,6 +19,8 @@ Parser :: struct {
 	// Small persistent state
 	intermediate: u8,
 	string_esc_pending: bool,
+	osc_buffer: [512]u8,
+	osc_len:    int,
 	
 	// Print run accumulator (for Level 1 fast path)
 	print_run_start: int,
@@ -38,6 +40,7 @@ parser_init :: proc(p: ^Parser) {
 	p.string_esc_pending = false
 	p.print_run_start = 0
 	p.print_run_len = 0
+	p.osc_len = 0
 	
 	// Clear CSI values
 	for i in 0..<16 {
@@ -68,7 +71,12 @@ parse_chunk :: proc(p: ^Parser, t: ^termgrid.Terminal, input: []u8) {
 			if p.string_esc_pending {
 				p.string_esc_pending = false
 				if byte == '\\' {
+					is_osc := p.state == .OSC
 					p.state = .Ground
+					if is_osc {
+						osc_dispatch(p, t, p.osc_buffer[:p.osc_len])
+						p.osc_len = 0
+					}
 					pos += 1
 					continue
 				}
@@ -79,7 +87,12 @@ parse_chunk :: proc(p: ^Parser, t: ^termgrid.Terminal, input: []u8) {
 				continue
 			}
 			if byte == 0x07 || byte == 0x9C {
+				is_osc := p.state == .OSC
 				p.state = .Ground
+				if is_osc {
+					osc_dispatch(p, t, p.osc_buffer[:p.osc_len])
+					p.osc_len = 0
+				}
 				pos += 1
 				continue
 			}
@@ -90,6 +103,14 @@ parse_chunk :: proc(p: ^Parser, t: ^termgrid.Terminal, input: []u8) {
 			}
 			if byte == 0x1B {
 				p.string_esc_pending = true
+				pos += 1
+				continue
+			}
+			if p.state == .OSC {
+				if p.osc_len < len(p.osc_buffer) {
+					p.osc_buffer[p.osc_len] = byte
+					p.osc_len += 1
+				}
 			}
 			pos += 1
 			continue
@@ -128,6 +149,7 @@ parse_chunk :: proc(p: ^Parser, t: ^termgrid.Terminal, input: []u8) {
 		case .OscStart:
 			p.state = .OSC
 			p.string_esc_pending = false
+			p.osc_len = 0
 		case .OscPut:
 			// Discard OSC payload
 		case .OscEnd:
@@ -184,6 +206,7 @@ parser_reset :: proc(p: ^Parser) {
 	p.string_esc_pending = false
 	p.print_run_start = 0
 	p.print_run_len = 0
+	p.osc_len = 0
 }
 
 // accumulate_print_run accumulates a byte into the print run buffer.
@@ -242,3 +265,18 @@ esc_dispatch :: proc(p: ^Parser, t: ^termgrid.Terminal, final_byte: u8) {
 		termgrid.terminal_next_line(t)
 	}
 }
+
+// osc_dispatch dispatches an Operating System Command sequence.
+osc_dispatch :: proc(p: ^Parser, t: ^termgrid.Terminal, payload: []u8) {
+	_ = p
+	if t == nil || len(payload) < 5 { return }
+	if payload[0] == '1' && payload[1] == '3' && payload[2] == '3' && payload[3] == ';' {
+		switch payload[4] {
+		case 'A': termgrid.terminal_osc_133_prompt_start(t)
+		case 'B': termgrid.terminal_osc_133_prompt_end(t)
+		case 'C': termgrid.terminal_osc_133_command_start(t)
+		case 'D': termgrid.terminal_osc_133_command_end(t)
+		}
+	}
+}
+
