@@ -7,6 +7,7 @@ import "base:runtime"
 Row :: struct {
 	cells:      []Semantic_Cell, // length = grid.col_count
 	generation: u32,             // incremented on every mutation
+	wrapped:    bool,            // true if this row soft-wrapped into the next row
 }
 
 // row_init initializes a row with the specified number of columns.
@@ -17,6 +18,7 @@ row_init :: proc(r: ^Row, cols: int, allocator: runtime.Allocator = context.allo
 		r.cells[i] = CELL_DEFAULT
 	}
 	r.generation = 0
+	r.wrapped = false
 }
 
 // row_destroy frees the cells array.
@@ -26,6 +28,7 @@ row_destroy :: proc(r: ^Row, allocator: runtime.Allocator = context.allocator) {
 		r.cells = nil
 	}
 	r.generation = 0
+	r.wrapped = false
 }
 
 // row_clear resets all cells to CELL_DEFAULT and increments generation.
@@ -34,6 +37,7 @@ row_clear :: proc(r: ^Row) {
 		r.cells[i] = CELL_DEFAULT
 	}
 	r.generation += 1
+	r.wrapped = false
 }
 
 // row_set_cell sets a cell at the specified column and increments generation.

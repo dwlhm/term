@@ -13,8 +13,45 @@ test_style_table_init :: proc(t: ^testing.T) {
 
 	testing.expect(t, st.count == 1, "Style table should have 1 entry after init")
 	def := tg.style_table_get(&st, 0)
-	testing.expect(t, def.fg == 0xFFFFFFFF, "Default style fg should be white")
-	testing.expect(t, def.bg == 0xFF000000, "Default style bg should be black")
+	testing.expect(t, def.fg == tg.CATPPUCCIN_MOCHA_TEXT, "Default style fg should use Catppuccin text")
+	testing.expect(t, def.bg == tg.CATPPUCCIN_MOCHA_BASE, "Default style bg should use Catppuccin base")
+}
+
+@(test)
+test_style_table_catppuccin_theme :: proc(t: ^testing.T) {
+	st: tg.Style_Table
+	tg.style_table_init(&st, tg.THEME_CATPPUCCIN_MOCHA)
+
+	testing.expect(t, st.theme.name == "Catppuccin Mocha", "Default theme should be Catppuccin Mocha")
+	testing.expect(t, st.theme.selection_foreground == tg.CATPPUCCIN_MOCHA_BASE, "Selection foreground should use base")
+	testing.expect(t, st.theme.selection_background == tg.CATPPUCCIN_MOCHA_SURFACE2, "Selection background should use surface2")
+	testing.expect(t, tg.style_table_default(&st).fg == st.theme.foreground, "Theme default fg should be active")
+	testing.expect(t, tg.style_table_default(&st).bg == st.theme.background, "Theme default bg should be active")
+}
+
+@(test)
+test_theme_palette_ansi16 :: proc(t: ^testing.T) {
+	theme := tg.THEME_CATPPUCCIN_MOCHA
+	for i in 0..<tg.THEME_ANSI16_COUNT {
+		testing.expect(t, tg.theme_palette_256(theme, i) == theme.ansi16[i], "ANSI16 palette should use theme mapping")
+	}
+}
+
+@(test)
+test_theme_palette_xterm_cube_and_grayscale :: proc(t: ^testing.T) {
+	theme := tg.THEME_CATPPUCCIN_MOCHA
+
+	testing.expect(t, tg.theme_palette_256(theme, tg.THEME_256_CUBE_START) == 0xFF000000, "Cube origin should be black")
+	testing.expect(t, tg.theme_palette_256(theme, 196) == 0xFFFF0000, "Cube index 196 should be canonical red")
+	testing.expect(t, tg.theme_palette_256(theme, tg.THEME_256_GRAYSCALE_START) == 0xFF080808, "Grayscale origin should be 8")
+	testing.expect(t, tg.theme_palette_256(theme, 255) == 0xFFEEEEEE, "Grayscale end should be 238")
+}
+
+@(test)
+test_theme_palette_invalid_index :: proc(t: ^testing.T) {
+	theme := tg.THEME_CATPPUCCIN_MOCHA
+	testing.expect(t, tg.theme_palette_256(theme, -1) == theme.foreground, "Negative palette index should use theme fg")
+	testing.expect(t, tg.theme_palette_256(theme, tg.THEME_256_COUNT) == theme.foreground, "Large palette index should use theme fg")
 }
 
 @(test)
@@ -78,7 +115,36 @@ test_style_table_get_invalid_id :: proc(t: ^testing.T) {
 	tg.style_table_init(&st)
 
 	s := tg.style_table_get(&st, 999)
-	testing.expect(t, s.fg == tg.STYLE_DEFAULT.fg, "Invalid id should return default style")
+	testing.expect(t, s.fg == st.theme.foreground, "Invalid id should return active theme fg")
+	testing.expect(t, s.bg == st.theme.background, "Invalid id should return active theme bg")
+}
+
+@(test)
+test_style_table_invalid_id_custom_theme :: proc(t: ^testing.T) {
+	theme := tg.THEME_CATPPUCCIN_MOCHA
+	theme.foreground = 0xFF123456
+	theme.background = 0xFF654321
+
+	st: tg.Style_Table
+	tg.style_table_init(&st, theme)
+	invalid := tg.style_table_get(&st, tg.Style_Id(tg.STYLE_TABLE_CAPACITY))
+	testing.expect(t, invalid.fg == theme.foreground, "Invalid id should use custom theme fg")
+	testing.expect(t, invalid.bg == theme.background, "Invalid id should use custom theme bg")
+}
+
+@(test)
+test_terminal_init_custom_theme :: proc(t: ^testing.T) {
+	theme := tg.THEME_CATPPUCCIN_MOCHA
+	theme.foreground = 0xFF112233
+	theme.background = 0xFF445566
+
+	term: tg.Terminal
+	tg.terminal_init(&term, 1, 1, theme = theme)
+	defer tg.terminal_destroy(&term)
+
+	def := tg.style_table_get(&term.grid.style_table, term.current_style)
+	testing.expect(t, def.fg == theme.foreground, "Terminal current style should use custom theme fg")
+	testing.expect(t, def.bg == theme.background, "Terminal current style should use custom theme bg")
 }
 
 // --- Row Tests ---
@@ -257,6 +323,7 @@ test_damage_init :: proc(t: ^testing.T) {
 	testing.expect(t, d.row_count == 24, "row_count should be 24")
 	testing.expect(t, d.col_count == 80, "col_count should be 80")
 	testing.expect(t, len(d.dirty_rows) == 24, "dirty_rows length should be 24")
+	testing.expect(t, len(d.journal_rows) == 24, "journal_rows length should be 24")
 }
 
 @(test)
@@ -349,6 +416,76 @@ test_damage_take_journal :: proc(t: ^testing.T) {
 	// Damage should be cleared
 	testing.expect(t, d.dirty_rows[5].span_count == 0, "Damage should be cleared")
 	testing.expect(t, !d.dirty_rows[10].full, "Damage should be cleared")
+}
+
+@(test)
+test_damage_journal_reuse_and_empty :: proc(t: ^testing.T) {
+	d: tg.Damage
+	tg.damage_init(&d, 8, 40)
+	defer tg.damage_destroy(&d)
+
+	empty := tg.damage_take_journal(&d)
+	testing.expect(t, len(empty.dirty_rows) == 8, "Empty journal should retain row shape")
+	testing.expect(t, len(empty.scroll_ops) == 0, "Empty journal should have no scroll ops")
+	tg.damage_journal_destroy(&empty)
+
+	tg.damage_mark_span(&d, 2, 4, 7, 11)
+	tg.damage_record_scroll(&d, 1, 6, 2)
+	tg.damage_record_scroll(&d, 1, 6, -1)
+	journal := tg.damage_take_journal(&d)
+	rows_ptr := rawptr(&journal.dirty_rows[0])
+	ops_ptr := rawptr(&journal.scroll_ops[0])
+	testing.expect(t, journal.borrowed, "Taken journal should be marked borrowed")
+	testing.expect(t, d.journal_active, "Damage should mark its journal active")
+	testing.expect(t, journal.dirty_rows[2].generation == 11, "Span generation should survive take")
+	testing.expect(t, journal.dirty_rows[2].spans[0].col_start == 4, "Span start should survive take")
+	testing.expect(t, journal.dirty_rows[2].spans[0].col_end == 8, "Span end should survive take")
+	testing.expect(t, journal.scroll_ops[0].rows == 2, "First scroll op should preserve order")
+	testing.expect(t, journal.scroll_ops[1].rows == -1, "Second scroll op should preserve order")
+	tg.damage_journal_destroy(&journal)
+
+	tg.damage_mark_cell(&d, 1, 3, 12)
+	tg.damage_record_scroll(&d, 1, 6, 3)
+	journal2 := tg.damage_take_journal(&d)
+	testing.expect(t, rawptr(&journal2.dirty_rows[0]) == rows_ptr, "Rows should use reusable storage")
+	testing.expect(t, rawptr(&journal2.scroll_ops[0]) == ops_ptr, "Ops should use reusable storage")
+	testing.expect(t, len(journal2.scroll_ops) == 1, "Reuse after destroy should retain new ops")
+	tg.damage_journal_destroy(&journal2)
+	testing.expect(t, !d.journal_active, "Destroy should release the journal borrow")
+}
+
+@(test)
+test_damage_requeue_journal_preserves_snapshot :: proc(t: ^testing.T) {
+	d: tg.Damage
+	tg.damage_init(&d, 6, 20)
+	defer tg.damage_destroy(&d)
+
+	tg.damage_mark_span(&d, 2, 3, 5, 21)
+	tg.damage_mark_row(&d, 4, 22)
+	tg.damage_record_scroll(&d, 1, 5, 2)
+	tg.damage_record_scroll(&d, 1, 5, -1)
+
+	journal := tg.damage_take_journal(&d)
+	tg.damage_requeue_journal(&d, &journal)
+
+	testing.expect(t, d.dirty_rows[2].generation == 21, "Requeue should preserve span generation")
+	testing.expect(t, d.dirty_rows[2].span_count == 1, "Requeue should preserve spans")
+	testing.expect(t, d.dirty_rows[4].full && d.dirty_rows[4].generation == 22, "Requeue should preserve full row generation")
+	testing.expect(t, len(d.scroll_ops) == 2, "Requeue should preserve scroll count")
+	testing.expect(t, d.scroll_ops[0].rows == 2 && d.scroll_ops[1].rows == -1, "Requeue should preserve scroll order")
+	tg.damage_journal_destroy(&journal)
+}
+
+@(test)
+test_damage_owned_manual_journal_destroy :: proc(t: ^testing.T) {
+	journal := tg.Damage_Journal{
+		dirty_rows = make([]tg.Dirty_Row, 1),
+		scroll_ops = make([]tg.Scroll_Op, 1),
+	}
+	tg.damage_journal_destroy(&journal)
+
+	testing.expect(t, journal.dirty_rows == nil, "Owned journal rows should be released")
+	testing.expect(t, journal.scroll_ops == nil, "Owned journal ops should be released")
 }
 
 // --- Cursor Tests ---
@@ -490,6 +627,40 @@ test_terminal_scroll :: proc(t: ^testing.T) {
 	// Row 1 should be cleared (it's the new bottom row after scroll)
 	cell = tg.terminal_get_cell(&term, 1, 0)
 	testing.expect(t, cell.content == 0, "Row 1 should be cleared after scroll")
+}
+
+@(test)
+test_terminal_damage_target_validation :: proc(t: ^testing.T) {
+	term: tg.Terminal
+	tg.terminal_init(&term, 3, 4)
+	defer tg.terminal_destroy(&term)
+
+	target := tg.terminal_damage_target(&term, 1, 2)
+	testing.expect(t, tg.terminal_apply_damage_target(&term, target), "matching target must apply")
+	tg.damage_clear(&term.damage)
+
+	stale_generation := tg.terminal_damage_target(&term, 1, 2)
+	_ = tg.grid_set_cell(&term.grid, 1, 0, tg.Semantic_Cell{content = 'x', width = 1})
+	testing.expect(t, !tg.terminal_apply_damage_target(&term, stale_generation), "stale generation must reject")
+
+	stale_epoch := tg.terminal_damage_target(&term, 0, 0)
+	tg.terminal_scroll_up(&term, 1)
+	testing.expect(t, !tg.terminal_apply_damage_target(&term, stale_epoch), "stale epoch must reject")
+	testing.expect(t, !tg.terminal_apply_damage_target(&term, tg.Damage_Target{row = -1, col = 0, epoch = term.render_epoch}), "negative row must reject")
+	testing.expect(t, !tg.terminal_apply_damage_target(&term, tg.Damage_Target{row = 0, col = 4, epoch = term.render_epoch}), "out of bounds col must reject")
+}
+
+@(test)
+test_terminal_damage_epoch_structural_changes :: proc(t: ^testing.T) {
+	term: tg.Terminal
+	tg.terminal_init(&term, 3, 4)
+	defer tg.terminal_destroy(&term)
+	initial := term.render_epoch
+	tg.terminal_resize(&term, 4, 4)
+	testing.expect(t, term.render_epoch != initial, "resize must advance epoch")
+	before_scroll := term.render_epoch
+	tg.terminal_scroll_down(&term, 1)
+	testing.expect(t, term.render_epoch != before_scroll, "scroll must advance epoch")
 }
 
 @(test)

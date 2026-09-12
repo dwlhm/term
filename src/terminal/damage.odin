@@ -2,6 +2,14 @@ package termgrid
 
 import "base:runtime"
 
+// Damage_Target identifies a cell observed by an async render request.
+Damage_Target :: struct {
+	row:            int,
+	col:            int,
+	row_generation: u32,
+	epoch:          u64,
+}
+
 // Span represents a contiguous range of dirty cells in a row.
 Span :: struct {
 	col_start: u16,
@@ -31,6 +39,9 @@ Scroll_Op :: struct {
 Damage :: struct {
 	dirty_rows: []Dirty_Row,        // length = grid.row_count
 	scroll_ops: [dynamic]Scroll_Op, // dynamic array (rarely used)
+	journal_rows: []Dirty_Row,      // reusable renderer journal storage
+	journal_ops: [dynamic]Scroll_Op, // reusable renderer journal storage
+	journal_active: bool,           // true while a borrowed journal is live
 	row_count:  int,
 	col_count:  int,                // for col bounds checking in mark operations
 }
@@ -39,18 +50,24 @@ Damage :: struct {
 Damage_Journal :: struct {
 	dirty_rows: []Dirty_Row,
 	scroll_ops: []Scroll_Op,
+	borrowed:   bool,
+	owner:      ^Damage, // non-nil for a borrowed journal
 }
 
 // damage_init initializes damage tracking for the specified number of rows.
 damage_init :: proc(d: ^Damage, rows, cols: int, allocator: runtime.Allocator = context.allocator) {
 	d.dirty_rows = make([]Dirty_Row, rows, allocator)
 	d.scroll_ops = make([dynamic]Scroll_Op, 0, allocator)
+	d.journal_rows = make([]Dirty_Row, rows, allocator)
+	d.journal_ops = make([dynamic]Scroll_Op, 0, allocator)
+	reserve(&d.journal_ops, max(rows * DIRTY_ROW_MAX_SPANS, 1))
 	d.row_count = rows
 	d.col_count = cols
 }
 
 // damage_destroy frees all damage tracking state.
 damage_destroy :: proc(d: ^Damage, allocator: runtime.Allocator = context.allocator) {
+	assert(!d.journal_active)
 	if d.dirty_rows != nil {
 		delete(d.dirty_rows)
 		d.dirty_rows = nil
@@ -59,6 +76,15 @@ damage_destroy :: proc(d: ^Damage, allocator: runtime.Allocator = context.alloca
 		delete(d.scroll_ops)
 		d.scroll_ops = nil
 	}
+	if d.journal_rows != nil {
+		delete(d.journal_rows)
+		d.journal_rows = nil
+	}
+	if d.journal_ops != nil {
+		delete(d.journal_ops)
+		d.journal_ops = nil
+	}
+	d.journal_active = false
 	d.row_count = 0
 	d.col_count = 0
 }
@@ -167,29 +193,38 @@ damage_record_scroll :: proc(d: ^Damage, top, bottom: int, rows: int) {
 	append(&d.scroll_ops, op)
 }
 
-// damage_take_journal returns a snapshot of all damage and clears it.
-// The caller owns the returned journal and must call damage_journal_destroy.
+// damage_take_journal returns a borrowed snapshot of all damage and clears it.
+// The journal remains valid until damage_journal_destroy is called.
 damage_take_journal :: proc(d: ^Damage, allocator: runtime.Allocator = context.allocator) -> Damage_Journal {
-	// Copy dirty_rows
-	journal_rows := make([]Dirty_Row, len(d.dirty_rows), allocator)
-	copy(journal_rows, d.dirty_rows)
+	assert(!d.journal_active)
+	d.journal_active = true
 
-	// Copy scroll_ops from dynamic array to regular slice
-	ops_slice := d.scroll_ops[:]
-	journal_ops := make([]Scroll_Op, len(ops_slice), allocator)
-	copy(journal_ops, ops_slice)
+	copy(d.journal_rows, d.dirty_rows)
+	resize(&d.journal_ops, len(d.scroll_ops))
+	copy(d.journal_ops[:], d.scroll_ops[:])
 
 	// Clear damage state
 	damage_clear(d)
 
 	return Damage_Journal{
-		dirty_rows = journal_rows,
-		scroll_ops = journal_ops,
+		dirty_rows = d.journal_rows,
+		scroll_ops = d.journal_ops[:],
+		borrowed   = true,
+		owner      = d,
 	}
 }
 
 // damage_journal_destroy frees the journal.
 damage_journal_destroy :: proc(j: ^Damage_Journal, allocator: runtime.Allocator = context.allocator) {
+	if j.borrowed {
+		assert(j.owner != nil)
+		j.owner.journal_active = false
+		j.borrowed = false
+		j.owner = nil
+		j.dirty_rows = nil
+		j.scroll_ops = nil
+		return
+	}
 	if j.dirty_rows != nil {
 		delete(j.dirty_rows)
 		j.dirty_rows = nil
@@ -200,13 +235,77 @@ damage_journal_destroy :: proc(j: ^Damage_Journal, allocator: runtime.Allocator 
 	}
 }
 
+// damage_requeue_journal restores a failed frame journal to the live damage
+// state. Existing damage is preserved and merged; invalid rows, spans, and
+// scroll regions are ignored at the boundary.
+damage_requeue_journal :: proc(d: ^Damage, journal: ^Damage_Journal) {
+	if d == nil || journal == nil || d.row_count <= 0 || d.col_count <= 0 {
+		return
+	}
+	row_limit := min(d.row_count, len(journal.dirty_rows))
+	for row in 0..<row_limit {
+		source := journal.dirty_rows[row]
+		target := &d.dirty_rows[row]
+		if source.full {
+			target.full = true
+			target.span_count = 0
+			target.generation = source.generation
+			continue
+		}
+		if target.full {
+			continue
+		}
+		if source.span_count == 0 {
+			continue
+		}
+		if source.generation != 0 || target.generation == 0 {
+			target.generation = source.generation
+		}
+		span_limit := min(int(source.span_count), len(source.spans))
+		for i in 0..<span_limit {
+			span := source.spans[i]
+			start := int(span.col_start)
+			end := int(span.col_end)
+			if start >= d.col_count || end <= 0 { continue }
+			if start < 0 { start = 0 }
+			if end > d.col_count { end = d.col_count }
+			if start >= end { continue }
+			if target.span_count < DIRTY_ROW_MAX_SPANS {
+				target.spans[target.span_count] = Span{
+					col_start = u16(start),
+					col_end = u16(end),
+				}
+				target.span_count += 1
+			} else {
+				target.full = true
+				target.span_count = 0
+				break
+			}
+		}
+	}
+
+	for source in journal.scroll_ops {
+		if source.rows == 0 { continue }
+		top := int(source.top)
+		bottom := int(source.bottom)
+		if top >= d.row_count || bottom < 0 || top > bottom { continue }
+		if top < 0 { top = 0 }
+		if bottom >= d.row_count { bottom = d.row_count - 1 }
+		if top > bottom { continue }
+		append(&d.scroll_ops, Scroll_Op{
+			top = u16(top),
+			bottom = u16(bottom),
+			rows = source.rows,
+		})
+	}
+}
+
 // damage_clear clears all damage without returning a journal.
 damage_clear :: proc(d: ^Damage) {
 	for i in 0..<len(d.dirty_rows) {
 		d.dirty_rows[i] = Dirty_Row{}
 	}
 	if len(d.scroll_ops) > 0 {
-		delete(d.scroll_ops)
-		d.scroll_ops = make([dynamic]Scroll_Op, 0, context.allocator)
+		resize(&d.scroll_ops, 0)
 	}
 }

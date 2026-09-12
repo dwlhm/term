@@ -26,9 +26,14 @@ _next_pow2 :: proc(n: int) -> int {
 	return p
 }
 
-// grid_init initializes a grid with the specified dimensions.
+// grid_init initializes a grid with the specified dimensions and theme.
 // Capacity is rounded up to the next power of 2.
-grid_init :: proc(g: ^Grid, rows, cols: int, allocator: runtime.Allocator = context.allocator) {
+grid_init :: proc(
+	g: ^Grid,
+	rows, cols: int,
+	allocator: runtime.Allocator = context.allocator,
+	theme: Theme = THEME_CATPPUCCIN_MOCHA,
+) {
 	g.row_count = rows
 	g.col_count = cols
 	g.capacity = _next_pow2(rows)
@@ -40,7 +45,7 @@ grid_init :: proc(g: ^Grid, rows, cols: int, allocator: runtime.Allocator = cont
 		row_init(&g.rows[i], cols, allocator)
 	}
 
-	style_table_init(&g.style_table)
+	style_table_init(&g.style_table, theme)
 }
 
 // grid_destroy frees all rows and the style table.

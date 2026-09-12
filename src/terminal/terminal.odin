@@ -5,14 +5,19 @@ import "core:unicode/utf8"
 
 // Terminal is the top-level terminal emulator state.
 Terminal :: struct {
-	grid:           Grid,
-	cursor:         Cursor,
-	current_style:  Style_Id,
-	damage:         Damage,
-	scroll_top:     int,
-	scroll_bottom:  int,
-	grapheme_store: Grapheme_Store,
-	scrollback:     Scrollback,
+	grid:               Grid,
+	alt_grid:           Grid,
+	is_alt_screen:      bool,
+	cursor:             Cursor,
+	saved_cursor:       Cursor,
+	saved_cursor_valid: bool,
+	current_style:      Style_Id,
+	damage:             Damage,
+	scroll_top:         int,
+	scroll_bottom:      int,
+	grapheme_store:     Grapheme_Store,
+	scrollback:         Scrollback,
+	render_epoch:       u64,
 }
 
 // Erase_Mode specifies how to erase content.
@@ -22,14 +27,24 @@ Erase_Mode :: enum {
 	Entire,        // erase entire line/display
 }
 
-// terminal_init initializes a terminal with the specified dimensions.
-terminal_init :: proc(t: ^Terminal, rows, cols: int, allocator: runtime.Allocator = context.allocator) {
-	grid_init(&t.grid, rows, cols, allocator)
+// terminal_init initializes a terminal with the specified dimensions and theme.
+terminal_init :: proc(
+	t: ^Terminal,
+	rows, cols: int,
+	allocator: runtime.Allocator = context.allocator,
+	theme: Theme = THEME_CATPPUCCIN_MOCHA,
+) {
+	grid_init(&t.grid, rows, cols, allocator, theme)
+	grid_init(&t.alt_grid, rows, cols, allocator, theme)
+	t.is_alt_screen = false
 	cursor_init(&t.cursor)
+	t.saved_cursor = t.cursor
+	t.saved_cursor_valid = false
 	t.current_style = 0
 	damage_init(&t.damage, rows, cols, allocator)
 	t.scroll_top = 0
 	t.scroll_bottom = rows - 1
+	t.render_epoch = 1
 	grapheme_store_init(&t.grapheme_store)
 	scrollback_init(&t.scrollback, cols, allocator = allocator)
 }
@@ -38,6 +53,7 @@ terminal_init :: proc(t: ^Terminal, rows, cols: int, allocator: runtime.Allocato
 terminal_destroy :: proc(t: ^Terminal, allocator: runtime.Allocator = context.allocator) {
 	scrollback_destroy(&t.scrollback, &t.grapheme_store, allocator)
 	grid_destroy(&t.grid, allocator)
+	grid_destroy(&t.alt_grid, allocator)
 	damage_destroy(&t.damage, allocator)
 }
 
@@ -68,6 +84,9 @@ terminal_put_char :: proc(t: ^Terminal, c: rune) {
 		scroll_needed: bool
 		cursor_advance(&t.cursor, 1, t.grid.row_count, t.grid.col_count, &scroll_needed)
 
+		if t.cursor.row != row || scroll_needed {
+			t.grid.rows[_grid_physical_row(&t.grid, row)].wrapped = true
+		}
 		if scroll_needed {
 			terminal_scroll_up(t, 1)
 		}
@@ -110,6 +129,9 @@ terminal_put_char_slow :: proc(t: ^Terminal, c: rune) {
 	scroll_needed: bool
 	cursor_advance(&t.cursor, 1, t.grid.row_count, t.grid.col_count, &scroll_needed)
 
+	if t.cursor.row != row || scroll_needed {
+		t.grid.rows[_grid_physical_row(&t.grid, row)].wrapped = true
+	}
 	if scroll_needed {
 		terminal_scroll_up(t, 1)
 	}
@@ -129,7 +151,14 @@ terminal_put_wide :: proc(t: ^Terminal, c: rune) {
 			gen := t.grid.rows[_grid_physical_row(&t.grid, row)].generation
 			damage_mark_cell(&t.damage, row, col, gen)
 		}
-		terminal_newline(t)
+		scroll_needed: bool
+		cursor_advance(&t.cursor, 1, t.grid.row_count, t.grid.col_count, &scroll_needed)
+		if t.cursor.row != row || scroll_needed {
+			t.grid.rows[_grid_physical_row(&t.grid, row)].wrapped = true
+		}
+		if scroll_needed {
+			terminal_scroll_up(t, 1)
+		}
 		row = t.cursor.row
 		col = t.cursor.col
 	}
@@ -167,6 +196,9 @@ terminal_put_wide :: proc(t: ^Terminal, c: rune) {
 	scroll_needed: bool
 	cursor_advance(&t.cursor, 2, t.grid.row_count, t.grid.col_count, &scroll_needed)
 
+	if t.cursor.row != row || scroll_needed {
+		t.grid.rows[_grid_physical_row(&t.grid, row)].wrapped = true
+	}
 	if scroll_needed {
 		terminal_scroll_up(t, 1)
 	}
@@ -403,6 +435,7 @@ terminal_erase_line :: proc(t: ^Terminal, mode: Erase_Mode) {
 
 	_wide_erase_repair(t, row, start, end)
 
+	t.grid.rows[phys].wrapped = false
 	t.grid.rows[phys].generation += 1
 	gen := t.grid.rows[phys].generation
 	damage_mark_row(&t.damage, row, gen)
@@ -449,6 +482,44 @@ terminal_erase_display :: proc(t: ^Terminal, mode: Erase_Mode) {
 		damage_mark_all(&t.damage, gens)
 		delete(gens)
 	}
+}
+
+// terminal_save_cursor stores the current cursor position for DECSC.
+terminal_save_cursor :: proc(t: ^Terminal) {
+	if t == nil { return }
+	t.saved_cursor = t.cursor
+	t.saved_cursor_valid = true
+}
+
+// terminal_restore_cursor restores the last DECSC position when available.
+terminal_restore_cursor :: proc(t: ^Terminal) {
+	if t == nil || !t.saved_cursor_valid { return }
+	t.cursor.row = t.saved_cursor.row
+	t.cursor.col = t.saved_cursor.col
+	if t.grid.row_count > 0 && t.grid.col_count > 0 {
+		cursor_move(&t.cursor, t.cursor.row, t.cursor.col, t.grid.row_count, t.grid.col_count)
+	}
+}
+
+// terminal_clear_scrollback erases off-screen rows without changing the
+// visible cursor or grid.
+terminal_clear_scrollback :: proc(t: ^Terminal) {
+	if t == nil { return }
+	scrollback_clear(&t.scrollback, &t.grapheme_store)
+}
+
+// terminal_reset implements RIS for the terminal state owned by this model.
+terminal_reset :: proc(t: ^Terminal) {
+	if t == nil { return }
+	terminal_erase_display(t, .Entire)
+	terminal_clear_scrollback(t)
+	if t.grid.row_count > 0 && t.grid.col_count > 0 {
+		t.cursor = Cursor{row = 0, col = 0, visible = true}
+	}
+	t.current_style = 0
+	t.scroll_top = 0
+	t.scroll_bottom = t.grid.row_count - 1
+	t.saved_cursor_valid = false
 }
 
 // terminal_set_scroll_region sets the scroll margins (0-indexed, inclusive).
@@ -499,6 +570,29 @@ _terminal_scroll_actual :: proc(t: ^Terminal, n: int) -> int {
 	return actual
 }
 
+// terminal_damage_target snapshots the current validation state for a cell.
+terminal_damage_target :: proc(t: ^Terminal, row, col: int) -> Damage_Target {
+	target := Damage_Target{row = row, col = col, epoch = t.render_epoch}
+	if row >= 0 && row < t.grid.row_count {
+		physical := _grid_physical_row(&t.grid, row)
+		target.row_generation = t.grid.rows[physical].generation
+	}
+	return target
+}
+
+// terminal_apply_damage_target validates and publishes precise cell damage.
+terminal_apply_damage_target :: proc(t: ^Terminal, target: Damage_Target) -> bool {
+	if target.epoch != t.render_epoch || target.row < 0 || target.row >= t.grid.row_count || target.col < 0 || target.col >= t.grid.col_count {
+		return false
+	}
+	physical := _grid_physical_row(&t.grid, target.row)
+	if t.grid.rows[physical].generation != target.row_generation {
+		return false
+	}
+	damage_mark_cell(&t.damage, target.row, target.col, target.row_generation)
+	return true
+}
+
 // terminal_scroll_up scrolls the terminal up by n rows.
 // Full-grid scroll pushes each discarded top row into the scrollback
 // (handle ownership transfers to the scrollback copy, so no release here);
@@ -516,7 +610,7 @@ terminal_scroll_up :: proc(t: ^Terminal, n: int) {
 	if bottom >= t.grid.row_count {
 		bottom = t.grid.row_count - 1
 	}
-	if top == 0 && bottom == t.grid.row_count - 1 && t.scrollback.col_count == t.grid.col_count {
+	if !t.is_alt_screen && top == 0 && bottom == t.grid.row_count - 1 && t.scrollback.col_count == t.grid.col_count {
 		for i in 0..<actual {
 			phys := _grid_physical_row(&t.grid, top + i)
 			scrollback_push(&t.scrollback, t.grid.rows[phys].cells, &t.grapheme_store)
@@ -527,6 +621,7 @@ terminal_scroll_up :: proc(t: ^Terminal, n: int) {
 		}
 	}
 	scroll_up(&t.grid, &t.damage, t.scroll_top, t.scroll_bottom, n)
+	t.render_epoch += 1
 }
 
 // terminal_scroll_down scrolls the terminal down by n rows.
@@ -537,10 +632,15 @@ terminal_scroll_down :: proc(t: ^Terminal, n: int) {
 		_terminal_release_row_handles(t, _grid_physical_row(&t.grid, t.scroll_bottom - actual + 1 + i))
 	}
 	scroll_down(&t.grid, &t.damage, t.scroll_top, t.scroll_bottom, n)
+	if actual > 0 {
+		t.render_epoch += 1
+	}
 }
 
 // terminal_newline moves the cursor to the beginning of the next line, scrolling if needed.
 terminal_newline :: proc(t: ^Terminal) {
+	if t == nil || t.grid.row_count == 0 { return }
+	t.grid.rows[_grid_physical_row(&t.grid, t.cursor.row)].wrapped = false
 	t.cursor.col = 0
 	if t.cursor.row >= t.scroll_top && t.cursor.row <= t.scroll_bottom {
 		// Inside the scroll region.
@@ -552,6 +652,25 @@ terminal_newline :: proc(t: ^Terminal) {
 		}
 	} else {
 		// Outside the scroll region: advance without scrolling.
+		t.cursor.row += 1
+		if t.cursor.row >= t.grid.row_count {
+			t.cursor.row = t.grid.row_count - 1
+		}
+	}
+}
+
+// terminal_linefeed advances vertically without changing the column.
+terminal_linefeed :: proc(t: ^Terminal) {
+	if t == nil || t.grid.row_count == 0 { return }
+	t.grid.rows[_grid_physical_row(&t.grid, t.cursor.row)].wrapped = false
+	if t.cursor.row >= t.scroll_top && t.cursor.row <= t.scroll_bottom {
+		if t.cursor.row == t.scroll_bottom {
+			terminal_scroll_up(t, 1)
+			t.cursor.row = t.scroll_bottom
+		} else {
+			t.cursor.row += 1
+		}
+	} else {
 		t.cursor.row += 1
 		if t.cursor.row >= t.grid.row_count {
 			t.cursor.row = t.grid.row_count - 1
@@ -587,4 +706,146 @@ terminal_take_damage :: proc(t: ^Terminal, allocator: runtime.Allocator = contex
 // terminal_clear_damage clears all damage without returning a journal.
 terminal_clear_damage :: proc(t: ^Terminal) {
 	damage_clear(&t.damage)
+}
+
+// terminal_enter_alt_screen switches to the alternate screen buffer.
+// Saves cursor, swaps active grid with alt_grid, clears active grid,
+// resets cursor to (0, 0), marks all damage, and bumps render_epoch.
+terminal_enter_alt_screen :: proc(t: ^Terminal) {
+	if t == nil || t.is_alt_screen {
+		return
+	}
+	terminal_save_cursor(t)
+	t.grid, t.alt_grid = t.alt_grid, t.grid
+	for i in 0..<len(t.grid.rows) {
+		_terminal_release_row_handles(t, i)
+	}
+	grid_clear(&t.grid)
+	t.cursor = Cursor{row = 0, col = 0, visible = t.cursor.visible}
+	t.scroll_top = 0
+	t.scroll_bottom = t.grid.row_count - 1
+	t.is_alt_screen = true
+
+	gens := make([]u32, t.grid.row_count)
+	for i in 0..<t.grid.row_count {
+		phys := _grid_physical_row(&t.grid, i)
+		gens[i] = t.grid.rows[phys].generation
+	}
+	damage_mark_all(&t.damage, gens)
+	delete(gens)
+	t.render_epoch += 1
+}
+
+// terminal_leave_alt_screen switches back to the primary screen buffer.
+// Swaps active grid with alt_grid, restores cursor, resets scroll region,
+// marks all damage, and bumps render_epoch.
+terminal_leave_alt_screen :: proc(t: ^Terminal) {
+	if t == nil || !t.is_alt_screen {
+		return
+	}
+	t.grid, t.alt_grid = t.alt_grid, t.grid
+	t.is_alt_screen = false
+	terminal_restore_cursor(t)
+	t.scroll_top = 0
+	t.scroll_bottom = t.grid.row_count - 1
+
+	gens := make([]u32, t.grid.row_count)
+	for i in 0..<t.grid.row_count {
+		phys := _grid_physical_row(&t.grid, i)
+		gens[i] = t.grid.rows[phys].generation
+	}
+	damage_mark_all(&t.damage, gens)
+	delete(gens)
+	t.render_epoch += 1
+}
+
+// terminal_erase_chars erases n cells starting at the cursor column on the cursor row.
+// Cells are reset to CELL_DEFAULT and any grapheme handles released. Cursor does not move.
+terminal_erase_chars :: proc(t: ^Terminal, n: int) {
+	if t == nil || n <= 0 || t.grid.row_count == 0 || t.grid.col_count == 0 {
+		return
+	}
+	row := t.cursor.row
+	col := t.cursor.col
+	if row < 0 || row >= t.grid.row_count || col < 0 || col >= t.grid.col_count {
+		return
+	}
+	actual := min(n, t.grid.col_count - col)
+	if actual <= 0 {
+		return
+	}
+
+	phys := _grid_physical_row(&t.grid, row)
+	if t.grapheme_store.live_count > 0 {
+		for c in col..<(col + actual) {
+			grapheme_store_release(&t.grapheme_store, t.grid.rows[phys].cells[c].content)
+		}
+	}
+	for c in col..<(col + actual) {
+		t.grid.rows[phys].cells[c] = CELL_DEFAULT
+	}
+	_wide_erase_repair(t, row, col, col + actual - 1)
+
+	t.grid.rows[phys].generation += 1
+	gen := t.grid.rows[phys].generation
+	damage_mark_span(&t.damage, row, col, col + actual - 1, gen)
+}
+
+// terminal_insert_lines inserts n blank lines at the cursor row within the scroll region.
+terminal_insert_lines :: proc(t: ^Terminal, n: int) {
+	if t == nil || n <= 0 { return }
+	if t.cursor.row < t.scroll_top || t.cursor.row > t.scroll_bottom { return }
+	region_size := t.scroll_bottom - t.cursor.row + 1
+	actual := min(n, region_size)
+	for i in 0..<actual {
+		_terminal_release_row_handles(t, _grid_physical_row(&t.grid, t.scroll_bottom - actual + 1 + i))
+	}
+	scroll_down(&t.grid, &t.damage, t.cursor.row, t.scroll_bottom, n)
+	t.cursor.col = 0
+	t.render_epoch += 1
+}
+
+// terminal_delete_lines deletes n lines at the cursor row within the scroll region.
+terminal_delete_lines :: proc(t: ^Terminal, n: int) {
+	if t == nil || n <= 0 { return }
+	if t.cursor.row < t.scroll_top || t.cursor.row > t.scroll_bottom { return }
+	region_size := t.scroll_bottom - t.cursor.row + 1
+	actual := min(n, region_size)
+	for i in 0..<actual {
+		_terminal_release_row_handles(t, _grid_physical_row(&t.grid, t.cursor.row + i))
+	}
+	scroll_up(&t.grid, &t.damage, t.cursor.row, t.scroll_bottom, n)
+	t.cursor.col = 0
+	t.render_epoch += 1
+}
+
+// terminal_reverse_index moves cursor up, or scrolls down if at the top scroll margin.
+terminal_reverse_index :: proc(t: ^Terminal) {
+	if t == nil { return }
+	if t.cursor.row == t.scroll_top {
+		terminal_scroll_down(t, 1)
+	} else {
+		terminal_cursor_up(t, 1)
+	}
+}
+
+// terminal_index moves cursor down, or scrolls up if at the bottom scroll margin.
+terminal_index :: proc(t: ^Terminal) {
+	if t == nil { return }
+	if t.cursor.row == t.scroll_bottom {
+		terminal_scroll_up(t, 1)
+	} else {
+		terminal_cursor_down(t, 1)
+	}
+}
+
+// terminal_next_line moves cursor to beginning of next line, scrolling if at bottom margin.
+terminal_next_line :: proc(t: ^Terminal) {
+	if t == nil { return }
+	t.cursor.col = 0
+	if t.cursor.row == t.scroll_bottom {
+		terminal_scroll_up(t, 1)
+	} else {
+		terminal_cursor_down(t, 1)
+	}
 }
