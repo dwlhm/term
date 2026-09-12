@@ -197,10 +197,11 @@ test_pump_translate_ctrl_alt_printable :: proc(t: ^testing.T) {
 	n, _, _ := input.input_translate_sdl(_pump_key(sdl3.K_A, sdl3.KMOD_NONE), out[:])
 	testing.expect(t, n == 0, "bare printable KEYDOWN must be ignored (TEXTINPUT owns it)")
 
-	// Ctrl combos ride KEYDOWN (TEXTINPUT never fires for them).
+	// Ctrl combos ride KEYDOWN (TEXTINPUT never fires for them), except
+	// Ctrl+C, which is reserved for local copy handling.
 	n, _, _ = input.input_translate_sdl(_pump_key(sdl3.K_C, sdl3.KMOD_CTRL), out[:])
-	testing.expect(t, n == 1, "Ctrl+C must yield one event")
-	testing.expect(t, out[0].kind == .Ctrl && out[0].rune == 'c', "Ctrl+C must be Ctrl{c}")
+	testing.expect(t, n == 1, "Ctrl+C must yield one local event")
+	testing.expect(t, out[0].event_type == .Local && out[0].action == .Copy, "Ctrl+C must be Local Copy")
 
 	n, _, _ = input.input_translate_sdl(_pump_key(sdl3.K_SPACE, sdl3.KMOD_CTRL), out[:])
 	testing.expect(t, n == 1 && out[0].kind == .Ctrl && out[0].rune == ' ', "Ctrl+Space must be Ctrl{space}")
@@ -268,6 +269,78 @@ test_pump_translate_out_cap :: proc(t: ^testing.T) {
 
 	n, _, _ = input.input_translate_sdl(_pump_key(sdl3.K_UP, sdl3.KMOD_NONE), empty[:])
 	testing.expect(t, n == 0, "key event with empty out must yield nothing")
+}
+
+@(test)
+test_pump_translate_delete_and_local_actions :: proc(t: ^testing.T) {
+	out: [2]input.Input_Event
+
+	n, _, _ := input.input_translate_sdl(_pump_key(sdl3.K_DELETE, sdl3.KMOD_SHIFT|sdl3.KMOD_CTRL|sdl3.KMOD_GUI), out[:])
+	testing.expect(t, n == 1, "Delete must yield one event")
+	if n == 1 {
+		testing.expect(t, out[0].kind == .Delete, "Delete must map to Delete")
+		testing.expect(t, out[0].shift && out[0].ctrl && out[0].gui, "Delete must preserve Shift/Ctrl/GUI")
+	}
+
+	n, _, _ = input.input_translate_sdl(_pump_key(sdl3.K_C, sdl3.KMOD_CTRL), out[:])
+	testing.expect(t, n == 1 && out[0].event_type == .Local && out[0].action == .Copy, "Ctrl+C must be local Copy")
+
+	n, _, _ = input.input_translate_sdl(_pump_key(sdl3.K_PLUS, sdl3.KMOD_GUI), out[:])
+	testing.expect(t, n == 1 && out[0].event_type == .Local && out[0].action == .Zoom_In, "GUI+plus must be local zoom in")
+
+	n, _, _ = input.input_translate_sdl(_pump_key(sdl3.K_EQUALS, sdl3.KMOD_GUI|sdl3.KMOD_SHIFT), out[:])
+	testing.expect(t, n == 1 && out[0].event_type == .Local && out[0].action == .Zoom_In, "GUI+Shift+equals must be local zoom in")
+
+	n, _, _ = input.input_translate_sdl(_pump_key(sdl3.K_EQUALS, sdl3.KMOD_NONE), out[:])
+	testing.expect(t, n == 0, "bare equals must remain owned by TEXTINPUT")
+
+	n, _, _ = input.input_translate_sdl(_pump_key(sdl3.K_KP_MINUS, sdl3.KMOD_CTRL), out[:])
+	testing.expect(t, n == 1 && out[0].event_type == .Local && out[0].action == .Zoom_Out, "Ctrl+keypad minus must be local zoom out")
+}
+
+@(test)
+test_pump_translate_mouse_events :: proc(t: ^testing.T) {
+	out: [2]input.Input_Event
+
+	motion := sdl3.MouseMotionEvent{
+		type = .MOUSE_MOTION,
+		x = 12.5,
+		y = 7.25,
+		xrel = 1.5,
+		yrel = -2.0,
+		state = sdl3.BUTTON_LMASK,
+	}
+	ev: sdl3.Event
+	ev.motion = motion
+	n, _, _ := input.input_translate_sdl(ev, out[:])
+	testing.expect(t, n == 1 && out[0].event_type == .Pointer, "mouse motion must be a pointer event")
+	if n == 1 {
+		testing.expect(t, out[0].pointer.kind == .Motion, "motion kind must be preserved")
+		testing.expect(t, out[0].pointer.x == 12.5 && out[0].pointer.y == 7.25, "motion position must use SDL coordinates")
+		testing.expect(t, out[0].pointer.dx == 1.5 && out[0].pointer.dy == -2.0, "motion delta must use SDL relative fields")
+		testing.expect(t, out[0].pointer.primary_down, "motion must preserve primary-button state")
+	}
+
+	button := sdl3.MouseButtonEvent{type = .MOUSE_BUTTON_DOWN, button = sdl3.BUTTON_LEFT, down = true, x = 4, y = 5}
+	ev.button = button
+	n, _, _ = input.input_translate_sdl(ev, out[:])
+	testing.expect(t, n == 1 && out[0].pointer.kind == .Button_Down, "primary press must be a button-down event")
+	testing.expect(t, out[0].pointer.button == sdl3.BUTTON_LEFT && out[0].pointer.primary_down, "button fields must be preserved")
+
+	wheel := sdl3.MouseWheelEvent{type = .MOUSE_WHEEL, x = 0, y = -2, integer_y = -2, direction = .FLIPPED, mouse_x = 4, mouse_y = 5}
+	ev.wheel = wheel
+	n, _, _ = input.input_translate_sdl(ev, out[:])
+	testing.expect(t, n == 1 && out[0].pointer.kind == .Wheel, "wheel must be a pointer wheel event")
+	testing.expect(t, out[0].pointer.wheel_y == -2 && out[0].pointer.wheel_integer_y == -2 && out[0].pointer.wheel_flipped, "wheel deltas and direction must use SDL fields")
+}
+
+@(test)
+test_pump_events_local_pointer_are_not_pty_bytes :: proc(t: ^testing.T) {
+	evs := [?]input.Input_Event{
+		{event_type = .Pointer, pointer = {kind = .Wheel, wheel_integer_y = 1}},
+		{event_type = .Local, action = .Copy},
+	}
+	testing.expect(t, input.input_pump_events(nil, evs[:]), "local events must not require a PTY")
 }
 
 @(test)
@@ -372,6 +445,32 @@ test_pump_resize_applies :: proc(t: ^testing.T) {
 	testing.expect(t, !resized && !wok, "nil pty must fail without syscalls")
 	resized, wok = input.input_pump_resize(&p, nil, 1600, 480)
 	testing.expect(t, !resized && !wok, "nil terminal must fail without syscalls")
+}
+
+@(test)
+test_pump_resize_dynamic_cell_metrics :: proc(t: ^testing.T) {
+	p: pty.Pty
+	ok := pty.pty_spawn(&p, 24, 80, "/bin/cat", {})
+	testing.expect(t, ok, "pty_spawn /bin/cat must succeed")
+	if !ok {
+		return
+	}
+	defer _pump_teardown(&p)
+	term: termgrid.Terminal
+	termgrid.terminal_init(&term, 24, 80)
+	defer termgrid.terminal_destroy(&term)
+
+	// Retina cell metrics: 16x32 with 1600x960 pixels -> 30x100
+	resized, wok := input.input_pump_resize(&p, &term, 1600, 960, 16, 32)
+	testing.expect(t, resized && wok, "retina pixel resize with 16x32 must succeed")
+	testing.expect(t, p.rows == 30 && p.cols == 100, "pty winsize must track 30x100 on retina")
+	testing.expect(t, term.grid.row_count == 30 && term.grid.col_count == 100, "grid must track 30x100 on retina")
+
+	// Standard cell metrics: 8x16 with 640x384 pixels -> 24x80
+	resized, wok = input.input_pump_resize(&p, &term, 640, 384, 8, 16)
+	testing.expect(t, resized && wok, "standard pixel resize with 8x16 must succeed")
+	testing.expect(t, p.rows == 24 && p.cols == 80, "pty winsize must track 24x80 on standard")
+	testing.expect(t, term.grid.row_count == 24 && term.grid.col_count == 80, "grid must track 24x80 on standard")
 }
 
 @(test)

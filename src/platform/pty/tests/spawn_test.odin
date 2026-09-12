@@ -2,6 +2,7 @@ package pty_test
 
 import "core:c"
 import "core:testing"
+import "core:time"
 import posix "core:sys/posix"
 import sys_darwin "core:sys/darwin"
 import pty "../"
@@ -139,4 +140,24 @@ test_spawn_rejects_bad_input :: proc(t: ^testing.T) {
 	testing.expect(t, !pty.pty_spawn(&p, 24, 80, "", {}), "empty prog must fail")
 	testing.expect(t, p.master == 0, "failed spawn leaves Pty untouched")
 	testing.expect(t, p.pid == 0, "failed spawn leaves Pty untouched")
+}
+
+@(test)
+test_spawn_clears_prompt_eol_marker :: proc(t: ^testing.T) {
+	p: pty.Pty
+	ok := pty.pty_spawn(&p, 24, 80, "/bin/sh", {"-c", "printf '%s' \"$PROMPT_EOL_MARK\""})
+	testing.expect(t, ok, "absolute shell must spawn")
+	if !ok { return }
+	defer _teardown(&p)
+	buf: [64]u8
+	saw_percent := false
+	for _ in 0..<200 {
+		n, eof := pty.pty_drain(&p, buf[:], len(buf))
+		for b in buf[:n] {
+			if b == '%' { saw_percent = true }
+		}
+		if eof { break }
+		time.sleep(1 * time.Millisecond)
+	}
+	testing.expect(t, !saw_percent, "absolute shell environment must clear PROMPT_EOL_MARK")
 }

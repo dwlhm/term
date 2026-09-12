@@ -2,7 +2,7 @@ package input
 
 import "core:unicode/utf8"
 
-// Input encode (Langkah 8): key/mouse -> bytes VT, normal mode only.
+// Input encode (Phase 8): key/mouse -> bytes VT, normal mode only.
 // No app-cursor, no bracketed paste, no mouse reporting.
 
 // INPUT_ENCODE_MAX is the largest sequence input_encode can emit.
@@ -11,11 +11,54 @@ import "core:unicode/utf8"
 // Alt + 4-byte rune (ESC + 4 = 5 bytes); both fit with margin.
 INPUT_ENCODE_MAX :: 8
 
-// Input_Key_Kind names the key carried by an Input_Event.
+// INPUT_DELETE_CSI_PARAM is the xterm parameter for the Delete key.
+INPUT_DELETE_CSI_PARAM :: u8('3')
+
+// Input_Event_Type distinguishes PTY keys from terminal-local events.
+Input_Event_Type :: enum u8 {
+	Key,
+	Pointer,
+	Local,
+}
+
+// Input_Pointer_Kind identifies one terminal-local pointer transition.
+Input_Pointer_Kind :: enum u8 {
+	Motion,
+	Button_Down,
+	Button_Up,
+	Wheel,
+}
+
+// Input_Local_Action identifies an action handled by the application.
+Input_Local_Action :: enum u8 {
+	None,
+	Copy,
+	Zoom_In,
+	Zoom_Out,
+}
+
+// Input_Pointer_Event carries SDL mouse data without terminal mouse-reporting
+// bytes. Coordinates are in window pixels; wheel_integer_* are SDL's whole
+// scroll ticks and wheel_* preserve the high-resolution deltas.
+Input_Pointer_Event :: struct {
+	kind:              Input_Pointer_Kind,
+	x, y:              f32,
+	dx, dy:            f32,
+	button:            u8,
+	pressed:           bool,
+	primary_down:      bool,
+	wheel_x, wheel_y:  f32,
+	wheel_integer_x:   i32,
+	wheel_integer_y:   i32,
+	wheel_flipped:     bool,
+}
+
+// Input_Key_Kind names the key carried by a key Input_Event.
 Input_Key_Kind :: enum u8 {
 	Printable,
 	Enter,
 	Backspace,
+	Delete,
 	Tab,
 	Escape,
 	Arrow_Up,
@@ -30,18 +73,20 @@ Input_Key_Kind :: enum u8 {
 	Alt_Mod,
 }
 
-// Input_Event is one decoded key press plus held modifiers.
-// kind selects the key; rune carries the codepoint for Printable,
-// the Ctrl target letter for Ctrl, and the base key for Alt_Mod.
-// ctrl/alt/shift report held modifiers: on arrows they select the
-// xterm modifier parameter, on Printable+ctrl they select the
-// control-code mapping. alt/shift on other kinds are ignored.
+// Input_Event is one translated SDL event. Key events retain the original
+// key-oriented fields; pointer and local events use pointer/action instead.
+// Non-key events are local to the terminal application and encode to zero
+// PTY bytes.
 Input_Event :: struct {
-	kind:  Input_Key_Kind,
-	rune:  rune,
-	ctrl:  bool,
-	alt:   bool,
-	shift: bool,
+	event_type: Input_Event_Type,
+	kind:       Input_Key_Kind,
+	rune:       rune,
+	ctrl:       bool,
+	alt:        bool,
+	shift:      bool,
+	gui:        bool,
+	pointer:    Input_Pointer_Event,
+	action:     Input_Local_Action,
 }
 
 // _MOD_SHIFT/_MOD_ALT/_MOD_CTRL are the xterm modifier bit weights.
@@ -64,12 +109,16 @@ _MOD_CTRL :: 4
 //   Enter -> 0x0D, Backspace -> 0x7F, Tab -> 0x09, Escape -> 0x1B
 //   arrows -> ESC [ X, or ESC [ 1 ; m X with modifiers per xterm
 //   Home -> ESC [ H, End -> ESC [ F, PgUp -> ESC [ 5 ~, PgDn -> ESC [ 6 ~
+//   Delete -> ESC [ 3 ~, or ESC [ 3 ; m ~ with modifiers per xterm
 //   Ctrl (+ ctrl flag + letter) -> 0x01-0x1A; Ctrl+Space -> 0x00;
 //     Ctrl+@ -> 0x00, Ctrl+[ -> 0x1B, Ctrl+\ -> 0x1C, Ctrl+] -> 0x1D,
 //     Ctrl+^ -> 0x1E, Ctrl+_/?// -> 0x1F (xterm: Ctrl+/ emits 0x1F)
 //   Alt_Mod -> ESC prefix + key bytes (Alt+x -> ESC x, Alt+Enter -> ESC CR)
 input_encode :: proc(ev: Input_Event, out: []u8) -> int {
 	if len(out) == 0 {
+		return 0
+	}
+	if ev.event_type != .Key {
 		return 0
 	}
 	#partial switch ev.kind {
@@ -90,6 +139,8 @@ input_encode :: proc(ev: Input_Event, out: []u8) -> int {
 		return _encode_byte(0x0D, out)
 	case .Backspace:
 		return _encode_byte(0x7F, out)
+	case .Delete:
+		return _encode_csi_tilde(INPUT_DELETE_CSI_PARAM, ev, out)
 	case .Tab:
 		return _encode_byte(0x09, out)
 	case .Escape:
@@ -149,6 +200,41 @@ _encode_csi4 :: proc(param: u8, final: u8, out: []u8) -> int {
 	out[2] = param
 	out[3] = final
 	return 4
+}
+
+// _encode_csi_tilde writes ESC [ p ~, adding the xterm modifier parameter
+// when Shift, Alt, or Ctrl is held.
+_encode_csi_tilde :: proc(param: u8, ev: Input_Event, out: []u8) -> int {
+	m := 1
+	if ev.shift {
+		m += _MOD_SHIFT
+	}
+	if ev.alt {
+		m += _MOD_ALT
+	}
+	if ev.ctrl {
+		m += _MOD_CTRL
+	}
+	if m == 1 {
+		if len(out) < 4 {
+			return 0
+		}
+		out[0] = 0x1B
+		out[1] = '['
+		out[2] = param
+		out[3] = '~'
+		return 4
+	}
+	if len(out) < 6 {
+		return 0
+	}
+	out[0] = 0x1B
+	out[1] = '['
+	out[2] = param
+	out[3] = ';'
+	out[4] = '0' + u8(m)
+	out[5] = '~'
+	return 6
 }
 
 // _encode_arrow writes ESC [ X unmodified, else ESC [ 1 ; m X

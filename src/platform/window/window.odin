@@ -4,6 +4,7 @@ package window
 // Creates and manages an SDL3 window with a WGPU-compatible surface.
 
 import "core:c"
+import "core:strings"
 import "vendor:sdl3"
 
 // DEFAULT_WIDTH is the default window width in pixels.
@@ -56,7 +57,7 @@ window_init :: proc(w: ^Window, title: string, width, height: i32) -> bool {
 	}
 
 	// SDL3 delivers TEXT_INPUT only after an explicit opt-in. The input
-	// pump (Langkah 9) translates TEXTINPUT into Printable runes, so text
+	// pump (Phase 9) translates TEXTINPUT into Printable runes, so text
 	// input starts here. Non-fatal on failure: the window still works, but
 	// printable typing will not arrive.
 	_ = sdl3.StartTextInput(w.handle)
@@ -75,11 +76,49 @@ window_init :: proc(w: ^Window, title: string, width, height: i32) -> bool {
 // window_destroy closes the window and shuts down SDL3.
 window_destroy :: proc(w: ^Window) {
 	if w.handle != nil {
+		window_capture_mouse(w, false)
 		sdl3.DestroyWindow(w.handle)
 		w.handle = nil
 	}
 	w.is_open = false
 	sdl3.Quit()
+}
+
+// window_capture_mouse enables or releases SDL's global mouse capture.
+// Invalid windows return false without touching SDL.
+window_capture_mouse :: proc(w: ^Window, enabled: bool) -> bool {
+	if w == nil || w.handle == nil {
+		return false
+	}
+	return sdl3.CaptureMouse(enabled)
+}
+
+// window_set_clipboard_text copies text to SDL's system clipboard.
+// Invalid windows return false; the temporary C string is released locally.
+window_set_clipboard_text :: proc(w: ^Window, text: string) -> bool {
+	if w == nil || w.handle == nil {
+		return false
+	}
+	c_text := strings.clone_to_cstring(text)
+	defer delete(c_text)
+	return sdl3.SetClipboardText(c_text)
+}
+
+// window_get_clipboard_text returns a caller-owned copy of SDL clipboard
+// text. Invalid windows or an empty/unavailable clipboard return an empty
+// string. SDL's returned buffer is released before this procedure returns.
+window_get_clipboard_text :: proc(w: ^Window) -> string {
+	if w == nil || w.handle == nil {
+		return ""
+	}
+	raw := sdl3.GetClipboardText()
+	if raw == nil {
+		return ""
+	}
+	text := string(cast(cstring)raw)
+	result := strings.clone(text)
+	sdl3.free(rawptr(raw))
+	return result
 }
 
 // window_poll_events processes pending SDL events.

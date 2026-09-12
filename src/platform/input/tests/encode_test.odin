@@ -190,3 +190,31 @@ test_encode_unknown_kind :: proc(t: ^testing.T) {
 	n := input.input_encode({kind = input.Input_Key_Kind(255)}, buf[:])
 	testing.expect(t, n == 0, "unknown kind must return 0")
 }
+
+@(test)
+test_encode_delete_modifier_table :: proc(t: ^testing.T) {
+	cases := [?]struct {
+		ev:   input.Input_Event,
+		want: []u8,
+	}{
+		{{kind = .Delete}, {0x1B, '[', '3', '~'}},
+		{{kind = .Delete, shift = true}, {0x1B, '[', '3', ';', '2', '~'}},
+		{{kind = .Delete, ctrl = true}, {0x1B, '[', '3', ';', '5', '~'}},
+		{{kind = .Delete, shift = true, ctrl = true}, {0x1B, '[', '3', ';', '6', '~'}},
+	}
+	for c in cases {
+		buf, n := _enc(c.ev)
+		_expect_bytes(t, buf, n, c.want, "Delete must use the xterm CSI-tilde modifier table")
+	}
+}
+
+@(test)
+test_encode_delete_buffer_boundary :: proc(t: ^testing.T) {
+	tiny: [5]u8
+	n := _enc_cap({kind = .Delete, shift = true, ctrl = true}, tiny[:])
+	testing.expect(t, n == 0, "short Delete output must fail atomically")
+
+	exact: [6]u8
+	n = _enc_cap({kind = .Delete, shift = true, ctrl = true}, exact[:])
+	testing.expect(t, n == 6, "exact Delete output buffer must succeed")
+}

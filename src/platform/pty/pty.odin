@@ -163,7 +163,7 @@ pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string) -
 	c_argv[argc - 1] = nil
 
 	// Clean environment for absolute/relative prog paths.
-	c_env: [3]cstring = {"TERM=xterm-256color", "PATH=/usr/bin:/bin:/usr/sbin:/sbin", nil}
+	c_env: [5]cstring = {"TERM=xterm-256color", "COLORTERM=truecolor", "PATH=/usr/bin:/bin:/usr/sbin:/sbin", "PROMPT_EOL_MARK=", nil}
 	has_slash := strings.contains(prog, "/")
 
 	pid := posix.fork()
@@ -273,6 +273,32 @@ pty_drain :: proc(p: ^Pty, out: []u8, max_bytes: int) -> (n: int, eof: bool) {
 			return 0, true
 		case:
 			return 0, false
+		}
+	}
+}
+
+// pty_wait_readable waits for input or terminal completion without draining
+// or mutating the pty. Nil, exited, invalid, timeout, and poll errors return
+// false. Readable, hangup, and error events return true. EINTR retries.
+pty_wait_readable :: proc(p: ^Pty, timeout_ms: int) -> bool {
+	if p == nil || p.state == .Exited || p.master < 0 || timeout_ms < 0 {
+		return false
+	}
+	pfd := posix.pollfd{fd = posix.FD(p.master), events = {.IN}}
+	for {
+		r := posix.poll(&pfd, 1, c.int(timeout_ms))
+		if r > 0 {
+			return (pfd.revents & {.IN, .HUP, .ERR}) != {}
+		}
+		if r == 0 {
+			return false
+		}
+		#partial switch posix.errno() {
+		case .EINTR:
+			pfd.revents = {}
+			continue
+		case:
+			return false
 		}
 	}
 }

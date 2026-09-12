@@ -83,6 +83,21 @@ test_drain_empty_is_eagain :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_wait_readable_timeout_and_input :: proc(t: ^testing.T) {
+	p: pty.Pty
+	ok := pty.pty_spawn(&p, 24, 80, "/bin/cat", {})
+	testing.expect(t, ok, "pty_spawn /bin/cat must succeed")
+	if !ok {
+		return
+	}
+	defer _teardown(&p)
+
+	testing.expect(t, !pty.pty_wait_readable(&p, 0), "quiet pty must time out")
+	_ = pty.pty_write(&p, transmute([]u8)string("wake"))
+	testing.expect(t, pty.pty_wait_readable(&p, 100), "pty input must wake the wait")
+}
+
+@(test)
 test_drain_eof_after_child_exit :: proc(t: ^testing.T) {
 	// /usr/bin/true exits immediately with no output: once the child is gone
 	// the master read reports EOF (0) or EIO, never EAGAIN forever.
