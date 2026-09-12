@@ -212,7 +212,7 @@ _bench_submit_once :: proc(b: ^Bench_Backend_Under_Test) -> u64 {
 	start := platform.platform_now()
 	enc := vt.create_command_encoder(b.device)
 	cmd := vt.finish_command_buffer(enc)
-	vt.submit(b.queue, cmd)
+	_ = vt.submit(b.queue, cmd)
 	end := platform.platform_now()
 	delta := platform.platform_ticks_to_ns(end - start)
 	if delta < 0 {

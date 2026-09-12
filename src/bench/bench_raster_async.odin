@@ -143,7 +143,7 @@ _ra_popin_drain_ns :: proc() -> (drain_ns: f64, applied: int) {
 	render.raster_worker_start(&q, &_ra_chain)
 	for i in 0..<len(_ra_drain_keys) {
 		k := render.Cluster_Key{base = _ra_drain_keys[i], join_form = .Isolated}
-		for !render.raster_request_async(&q, k, _ra_drain_fi[i], u32(_ra_drain_keys[i]), nil, true) {
+		for render.raster_request_async(&q, k, _ra_drain_fi[i], u32(_ra_drain_keys[i]), nil, true, termgrid.Damage_Target{}) != .Enqueued {
 			thread.yield()
 		}
 	}
@@ -155,7 +155,7 @@ _ra_popin_drain_ns :: proc() -> (drain_ns: f64, applied: int) {
 		thread.yield()
 	}
 	start := time.tick_now()
-	applied = render.raster_drain_completions(&q, &_ra_atlas, &cache, &_ra_chain, &counters)
+	applied = render.raster_drain_completions(&q, &_ra_atlas, &cache, nil, &_ra_chain, &counters)
 	drain_ns = f64(time.tick_since(start))
 	// Settle: the last pop-to-push may still be in flight when reqs hits
 	// zero; retry until the queues are empty (drain calls only on timer).
@@ -165,7 +165,7 @@ _ra_popin_drain_ns :: proc() -> (drain_ns: f64, applied: int) {
 			break
 		}
 		start = time.tick_now()
-		applied += render.raster_drain_completions(&q, &_ra_atlas, &cache, &_ra_chain, &counters)
+		applied += render.raster_drain_completions(&q, &_ra_atlas, &cache, nil, &_ra_chain, &counters)
 		drain_ns += f64(time.tick_since(start))
 	}
 	render.raster_worker_shutdown(&q)

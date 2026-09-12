@@ -319,7 +319,7 @@ bench_atlas_pressure_replay :: proc(
 		start := time.tick_now()
 		render.render_compile_full_v2(&frame, &term, &_ap_chain, &cache, &_ap_atlas, &counters)
 		total_ns += i64(time.tick_since(start))
-		render.raster_drain_completions(&q, &_ap_atlas, &cache, &_ap_chain, &counters)
+		render.raster_drain_completions(&q, &_ap_atlas, &cache, nil, &_ap_chain, &counters)
 
 		for i in 0..<render.FALLBACK_SLOT_COUNT {
 			old, new := prev[i], _ap_atlas.fallback_tag[i]

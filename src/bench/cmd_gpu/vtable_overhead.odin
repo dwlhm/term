@@ -59,8 +59,8 @@ bench_measure_vtable_overhead :: proc(frames: u64) -> u64 {
 		vt.render_draw(pass, instance.QUAD_VERTEX_COUNT, BENCH_NULL_INSTANCES)
 		vt.end_render_pass(pass)
 		cmd := vt.finish_command_buffer(enc)
-		vt.submit(gpu.Gpu_Queue(nil), cmd)
-		vt.present_surface(_NULL_SURFACE)
+		_ = vt.submit(gpu.Gpu_Queue(nil), cmd)
+		_ = vt.present_surface(_NULL_SURFACE)
 		vt.release_surface_texture(tex, view)
 	}
 	end := platform.platform_now()
@@ -152,8 +152,9 @@ _null_get_surface_texture :: proc(surface: rawptr) -> (texture: gpu.Gpu_Texture,
 	return gpu.Gpu_Texture(_NULL_TEX), gpu.Gpu_TextureView(_NULL_VIEW), .BGRA8_Unorm
 }
 
-_null_present_surface :: proc(surface: rawptr) {
+_null_present_surface :: proc(surface: rawptr) -> bool {
 	_null_sink += 1
+	return true
 }
 
 _null_get_preferred_format :: proc(surface: rawptr, device: gpu.Gpu_Device) -> gpu.Gpu_Format {
@@ -279,8 +280,9 @@ _null_finish_command_buffer :: proc(encoder: gpu.Gpu_CommandEncoder) -> rawptr {
 	return nil
 }
 
-_null_submit :: proc(queue: gpu.Gpu_Queue, command_buffer: rawptr) {
+_null_submit :: proc(queue: gpu.Gpu_Queue, command_buffer: rawptr) -> bool {
 	_null_sink += 1
+	return true
 }
 
 _null_render_set_pipeline :: proc(pass: gpu.Gpu_RenderPassEncoder, pipeline: gpu.Gpu_RenderPipeline) {
