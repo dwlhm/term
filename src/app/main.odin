@@ -536,6 +536,9 @@ _app_route_pointer :: proc(a: ^App, pointer: input.Input_Pointer_Event) -> bool 
 	}
 	switch pointer.kind {
 	case .Wheel:
+		if a.terminal.is_alt_screen {
+			return true
+		}
 		delta := _app_pointer_wheel_delta(pointer)
 		old_offset := a.view.scrollback_offset
 		_ = termgrid.terminal_view_scroll(&a.view, &a.terminal, delta)
@@ -963,7 +966,7 @@ app_frame :: proc(a: ^App) -> bool {
 	// transition marks its cell, making a no-damage scene renderable without a
 	// second acquisition or present. Every successful renderer frame owns the
 	// single present for the frame.
-	_ = render.cursor_overlay_draw(&a.renderer, &a.cursor)
+	_ = render.cursor_overlay_draw(&a.renderer, &a.cursor, a.view.scrollback_offset)
 	if cursor_changed {
 		_ = _app_mark_cursor_dirty(a, old_cursor_row, old_cursor_col)
 		_ = _app_mark_cursor_dirty(a, cur.row, cur.col)

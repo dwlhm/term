@@ -104,3 +104,22 @@ test_view_inactive_selection_copy_is_empty :: proc(t: ^testing.T) {
 	testing.expect(t, len(got) == 0, "inactive selection must copy empty text")
 	delete(got)
 }
+
+@(test)
+test_view_alt_screen_max_offset_zero :: proc(t: ^testing.T) {
+	term: tg.Terminal
+	tg.terminal_init(&term, 2, 3)
+	defer tg.terminal_destroy(&term)
+	term.scrollback.max_lines = 3
+
+	cells := _view_marker_row('A', 3)
+	tg.scrollback_push(&term.scrollback, cells, &term.grapheme_store)
+	delete(cells)
+
+	testing.expect(t, len(term.scrollback.rows) > 0, "scrollback must be non-empty")
+	testing.expect_value(t, tg.terminal_view_max_offset(&term), len(term.scrollback.rows))
+
+	term.is_alt_screen = true
+	testing.expect_value(t, tg.terminal_view_max_offset(&term), 0)
+}
+

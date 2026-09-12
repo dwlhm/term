@@ -111,7 +111,7 @@ CURSOR_OVERLAY_B :: 1.0
 //
 // Guarantees: never mutates Damage, never touches terminal state, never
 // allocates. Returns true iff a quad was staged.
-cursor_overlay_draw :: proc(r: ^Renderer, o: ^Cursor_Overlay) -> bool {
+cursor_overlay_draw :: proc(r: ^Renderer, o: ^Cursor_Overlay, scrollback_offset: int = 0) -> bool {
 	if r == nil {
 		return false
 	}
@@ -127,7 +127,8 @@ cursor_overlay_draw :: proc(r: ^Renderer, o: ^Cursor_Overlay) -> bool {
 	if rows <= 0 || cols <= 0 {
 		return false
 	}
-	if o.row < 0 || o.row >= rows || o.col < 0 || o.col >= cols {
+	viewport_row := o.row + scrollback_offset
+	if viewport_row < 0 || viewport_row >= rows || o.col < 0 || o.col >= cols {
 		return false
 	}
 	inst := &r.instances
@@ -142,7 +143,7 @@ cursor_overlay_draw :: proc(r: ^Renderer, o: ^Cursor_Overlay) -> bool {
 		return false
 	}
 	x := r.pad_x + f32(o.col) * r.cell_width
-	y := r.pad_y + f32(o.row) * r.cell_height
+	y := r.pad_y + f32(viewport_row) * r.cell_height
 	instance.instance_renderer_fill_bg(
 		inst, slot, x, y, r.cell_width, r.cell_height,
 		CURSOR_OVERLAY_R, CURSOR_OVERLAY_G, CURSOR_OVERLAY_B,

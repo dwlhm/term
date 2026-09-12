@@ -247,3 +247,40 @@ test_cursor_draw_nil_safe :: proc(t: ^testing.T) {
 	no_staging.instances.instance_data = nil
 	testing.expect(t, !render.cursor_overlay_draw(&no_staging, &o), "nil staging must skip")
 }
+
+@(test)
+test_cursor_draw_with_scrollback_offset :: proc(t: ^testing.T) {
+	r := _cursor_draw_renderer(CURSOR_DRAW_ROWS, CURSOR_DRAW_COLS, CURSOR_DRAW_MAX)
+	defer delete(r.instances.instance_data)
+
+	o: render.Cursor_Overlay
+	_cursor_draw_lit(&o, 2, 3)
+
+	offset := 5
+	drew := render.cursor_overlay_draw(&r, &o, offset)
+	testing.expect(t, drew, "cursor with offset within viewport must draw")
+	testing.expect(t, r.cursor_staged, "cursor must be staged")
+
+	slot := r.instances.max_instances - 1
+	got := r.instances.instance_data[slot]
+	expected_y := r.pad_y + f32(o.row + offset) * r.cell_height
+	testing.expect_value(t, got.y, expected_y)
+	testing.expect_value(t, got.x, r.pad_x + f32(o.col) * r.cell_width)
+}
+
+@(test)
+test_cursor_draw_clipped_when_scrolled_offscreen :: proc(t: ^testing.T) {
+	r := _cursor_draw_renderer(CURSOR_DRAW_ROWS, CURSOR_DRAW_COLS, CURSOR_DRAW_MAX)
+	defer delete(r.instances.instance_data)
+
+	o: render.Cursor_Overlay
+	_cursor_draw_lit(&o, 20, 3)
+
+	// offset pushes cursor row past CURSOR_DRAW_ROWS: 20 + 5 = 25 >= 24
+	offset := 5
+	drew := render.cursor_overlay_draw(&r, &o, offset)
+	testing.expect(t, !drew, "cursor scrolled beyond bottom of viewport must be clipped")
+	testing.expect(t, !r.cursor_staged, "clipped cursor must not be staged")
+	testing.expect_value(t, _cursor_draw_nonzero(&r), 0)
+}
+

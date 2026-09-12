@@ -381,7 +381,7 @@ raster_worker_main :: proc(t: ^thread.Thread) {
 			if comp.pixels != nil { delete(comp.pixels, heap) }
 			continue
 		}
-		q.groups[req.group_index].state = .Completion_Ready;
+		q.groups[req.group_index].state = .Completion_Ready
 		q.comps[q.comp_tail] = comp
 		q.comp_tail = (q.comp_tail + 1) % RASTER_COMPLETION_CAP
 		q.comp_count += 1

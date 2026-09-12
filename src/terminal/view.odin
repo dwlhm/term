@@ -27,7 +27,7 @@ Terminal_View :: struct {
 // terminal_view_max_offset returns the number of retained history rows that
 // can be placed above the live grid viewport.
 terminal_view_max_offset :: proc(t: ^Terminal) -> int {
-	if t == nil {
+	if t == nil || t.is_alt_screen {
 		return 0
 	}
 	return len(t.scrollback.rows)
