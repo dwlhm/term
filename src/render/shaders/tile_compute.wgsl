@@ -25,6 +25,8 @@ struct Tile_Params {
     rows: u32,
     cell_w: f32,
     cell_h: f32,
+    pad_x: f32,
+    pad_y: f32,
     tile_w: u32,
     tile_h: u32,
     tiles_x: u32,
@@ -119,8 +121,8 @@ fn cs_main(
     if (cw == 0u || ch == 0u) {
         return;
     }
-    let fb_w = i32(f32(params.cols) * params.cell_w);
-    let fb_h = i32(f32(params.rows) * params.cell_h);
+    let fb_w = i32(params.screen_w);
+    let fb_h = i32(params.screen_h);
 
     let lane = lid.y * 8u + lid.x;
     let n_cells = cw * ch;
@@ -137,8 +139,8 @@ fn cs_main(
 
         let bg_rgb = r5g6b5_to_rgb(lut_bg(style));
 
-        let x0 = i32(f32(lc) * params.cell_w);
-        let y0 = i32(f32(lr) * params.cell_h);
+        let x0 = max(i32(params.pad_x + f32(lc) * params.cell_w), 0);
+        let y0 = max(i32(params.pad_y + f32(lr) * params.cell_h), 0);
         let x1 = min(x0 + i32(params.cell_w), fb_w);
         let y1 = min(y0 + i32(params.cell_h), fb_h);
 

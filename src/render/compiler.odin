@@ -11,7 +11,7 @@ package render
 // R5G6B5 fg/bg + flags), and writes them into a flat output array.
 
 import "base:runtime"
-import "core:sync"
+
 import termgrid "../terminal"
 
 // Compiled_Frame holds the output of the render compiler.
@@ -187,12 +187,13 @@ render_compile_full_v2 :: proc(
 	atlas: ^Atlas = nil,
 	counters: ^Fallback_Counters = nil,
 	rq: ^Raster_Queue = nil,
+	view: ^termgrid.Terminal_View = nil,
 ) {
 	rows := int(f.rows)
 	cols := int(f.cols)
 
 	for row in 0..<rows {
-		_compile_row_range_v2(f, terminal, row, 0, cols, chain, cache, atlas, counters, rq)
+		_compile_row_range_v2(f, terminal, row, 0, cols, chain, cache, atlas, counters, rq, view)
 	}
 	f.cell_count = i32(rows * cols)
 }
@@ -213,6 +214,7 @@ _compile_row_range_v2 :: proc(
 	atlas: ^Atlas = nil,
 	counters: ^Fallback_Counters = nil,
 	rq: ^Raster_Queue = nil,
+	view: ^termgrid.Terminal_View = nil,
 ) {
 	cols := int(f.cols)
 	cs := col_start
@@ -222,9 +224,38 @@ _compile_row_range_v2 :: proc(
 
 	shaping := chain != nil && cache != nil && atlas != nil && counters != nil
 	store := &terminal.grapheme_store
+	document_row := row
+	historical := false
+	if view != nil {
+		document_row = termgrid.terminal_view_document_row(terminal, view, row)
+		historical = document_row >= 0 && document_row < len(terminal.scrollback.rows)
+	}
+	source_row := row
+	if view != nil && !historical {
+		source_row = document_row - len(terminal.scrollback.rows)
+	}
+	row_snapshot := termgrid.terminal_damage_target(terminal, source_row, 0)
+	row_generation := row_snapshot.row_generation
+	row_epoch := row_snapshot.epoch
 
 	for col in cs..<ce {
 		cell := termgrid.grid_get_cell(&terminal.grid, row, col)
+		if view != nil {
+			cell = termgrid.terminal_view_get_cell(terminal, view, row, col)
+		}
+		selection_point := termgrid.Terminal_Point{row = document_row, col = col}
+		if view != nil {
+			selection_point = termgrid.terminal_view_point_from_viewport(
+				terminal, view, termgrid.Terminal_Point{row = row, col = col})
+		}
+		selected := view != nil && document_row >= 0 && termgrid.terminal_view_selection_contains(
+			terminal, view, selection_point)
+		shape_rq := rq
+		if historical {
+			// Historical cells are view-only. Do not enqueue a raster request whose
+			// completion would later apply a damage target to the live grid.
+			shape_rq = nil
+		}
 		rc: Render_Cell_V2
 		if shaping && cell.content >= 0x80 {
 			handle := termgrid.Content_Handle(cell.content)
@@ -234,22 +265,29 @@ _compile_row_range_v2 :: proc(
 				needs_shape = !pinned
 			}
 			if needs_shape {
+				target := termgrid.Damage_Target{row = source_row, col = col, row_generation = row_generation, epoch = row_epoch}
+				request_result: Raster_Request_Result = .Enqueued
 				left_cp, right_cp := rune(0), rune(0)
 				if col > 0 {
 					left_cp = termgrid.grapheme_resolve_base(
-						termgrid.grid_get_cell(&terminal.grid, row, col - 1).content, store)
+						(view == nil ? termgrid.grid_get_cell(&terminal.grid, row, col - 1) :
+						termgrid.terminal_view_get_cell(terminal, view, row, col - 1)).content, store)
 				}
 				if col + 1 < cols {
 					right_cp = termgrid.grapheme_resolve_base(
-						termgrid.grid_get_cell(&terminal.grid, row, col + 1).content, store)
+						(view == nil ? termgrid.grid_get_cell(&terminal.grid, row, col + 1) :
+						termgrid.terminal_view_get_cell(terminal, view, row, col + 1)).content, store)
 				}
-			rc = shaped_cell_from_cluster(
-				cell, left_cp, right_cp, store, chain, cache, atlas, counters, rq)
+				rc = shaped_cell_from_cluster(
+					cell, left_cp, right_cp, store, chain, cache, atlas, counters, shape_rq, target, &request_result, selected)
+				if shape_rq != nil && request_result == .Retry && !historical {
+					termgrid.terminal_apply_damage_target(terminal, target)
+				}
 			} else {
-				rc = render_cell_from_semantic(cell)
+				rc = render_cell_from_semantic(cell, selected)
 			}
 		} else {
-			rc = render_cell_from_semantic(cell)
+			rc = render_cell_from_semantic(cell, selected)
 		}
 
 		idx := row * cols + col
@@ -275,15 +313,21 @@ shaped_cell_from_cluster :: proc(
 	atlas: ^Atlas,
 	counters: ^Fallback_Counters,
 	rq: ^Raster_Queue = nil,
+	target: termgrid.Damage_Target,
+	result: ^Raster_Request_Result = nil,
+	selected: bool = false,
 ) -> Render_Cell_V2 {
 	handle := termgrid.Content_Handle(cell.content)
 	base := termgrid.grapheme_resolve_base(handle, store)
 	if base == 0 || base == 0x20 {
-		return render_cell_from_semantic(cell)
+		return render_cell_from_semantic(cell, selected)
 	}
 
 	w := RENDER_CELL_V2_WIDTH_NARROW
 	cf := u8(0)
+	if selected {
+		cf |= RENDER_CELL_V2_CFLAG_SELECTED
+	}
 	if cell.width == 2 {
 		w = RENDER_CELL_V2_WIDTH_WIDE_LEAD
 	}
@@ -347,27 +391,6 @@ shaped_cell_from_cluster :: proc(
 		// Stale FIFO slot: fall through and lazily re-resolve.
 	}
 
-	// Async duplicate short-circuit: an in-flight key packs the blank
-	// UNRESOLVED placeholder with no resolve and no second enqueue, so one
-	// raster serves every cell sharing the cluster. Contended try_lock
-	// skips with bounded time (contended += 1, retry next frame).
-	if rq != nil {
-		if sync.mutex_try_lock(&rq.mutex) {
-			dup := raster_inflight_contains(rq, key)
-			if dup && rq.counters != nil {
-				rq.counters.coalesced += 1
-			}
-			sync.mutex_unlock(&rq.mutex)
-			if dup {
-				return render_cell_pack_v2(0, style, RENDER_CELL_V2_WIDTH_NARROW, 0, RENDER_CELL_V2_SLOT_UNRESOLVED)
-			}
-		} else {
-			if rq.counters != nil {
-				rq.counters.contended += 1
-			}
-			return render_cell_pack_v2(0, style, RENDER_CELL_V2_WIDTH_NARROW, 0, RENDER_CELL_V2_SLOT_UNRESOLVED)
-		}
-	}
 
 	// Resolve: presentation form first for joining Arabic (retry logical
 	// when the presentation is uncovered), logical otherwise.
@@ -403,7 +426,7 @@ shaped_cell_from_cluster :: proc(
 			if counters != nil {
 				counters.tofu_missing += 1
 			}
-			return render_cell_pack_v2(0, style, RENDER_CELL_V2_WIDTH_NARROW, 0, RENDER_CELL_V2_SLOT_UNRESOLVED)
+			return render_cell_pack_v2(0, style, RENDER_CELL_V2_WIDTH_NARROW, cf, RENDER_CELL_V2_SLOT_UNRESOLVED)
 		}
 	} else {
 		// Keep only covered marks (independent probes, nil counters: a
@@ -427,12 +450,13 @@ shaped_cell_from_cluster :: proc(
 	// frame). Chain exhaustion above stays fully sync (no enqueue).
 	if rq != nil {
 		wide := termgrid.wcwidth(rune(key.base)) == 2
-		raster_request_async(rq, key, font_index, shaped, marks, wide)
-		return render_cell_pack_v2(0, style, RENDER_CELL_V2_WIDTH_NARROW, 0, RENDER_CELL_V2_SLOT_UNRESOLVED)
+		request_result := raster_request_async(rq, key, font_index, shaped, marks, wide, target)
+		if result != nil { result^ = request_result }
+		return render_cell_pack_v2(0, style, RENDER_CELL_V2_WIDTH_NARROW, cf, RENDER_CELL_V2_SLOT_UNRESOLVED)
 	}
 	g := atlas_ensure_glyph(atlas, chain, cache, key, font_index, shaped, marks, counters)
 	if g.atlas_slot == RENDER_CELL_V2_SLOT_UNRESOLVED {
-		return render_cell_pack_v2(0, style, RENDER_CELL_V2_WIDTH_NARROW, 0, RENDER_CELL_V2_SLOT_UNRESOLVED)
+		return render_cell_pack_v2(0, style, RENDER_CELL_V2_WIDTH_NARROW, cf, RENDER_CELL_V2_SLOT_UNRESOLVED)
 	}
 	return render_cell_pack_v2(cell.content, style, w, cf, g.atlas_slot)
 }

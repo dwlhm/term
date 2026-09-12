@@ -89,10 +89,9 @@ CURSOR_OVERLAY_G :: 1.0
 CURSOR_OVERLAY_B :: 1.0
 
 // cursor_overlay_draw emits ONE solid-block quad at (o.col, o.row) into the
-// existing instance staging buffer, for a third bg-pipeline draw AFTER the
-// glyph pass (wired by the app_term loop, step 14, at offset
-// slot*INSTANCE_STRIDE with count 1; the proc itself only stages the quad
-// so it stays nil-backend safe for headless tests).
+// existing instance staging buffer. The renderer composes this staged quad
+// into its already-acquired surface before the frame's single present; this
+// proc never acquires or presents and remains nil-backend safe.
 //
 // Decisions (per locked spec, documented here):
 //   - Solid block in cursor color, not an invert: fill_bg with a color is
@@ -113,7 +112,11 @@ CURSOR_OVERLAY_B :: 1.0
 // Guarantees: never mutates Damage, never touches terminal state, never
 // allocates. Returns true iff a quad was staged.
 cursor_overlay_draw :: proc(r: ^Renderer, o: ^Cursor_Overlay) -> bool {
-	if r == nil || o == nil {
+	if r == nil {
+		return false
+	}
+	r.cursor_staged = false
+	if o == nil {
 		return false
 	}
 	if !o.blink_on || !o.visible {
@@ -138,11 +141,12 @@ cursor_overlay_draw :: proc(r: ^Renderer, o: ^Cursor_Overlay) -> bool {
 	if u64(slot) >= u64(len(inst.instance_data)) {
 		return false
 	}
-	x := f32(o.col) * r.cell_width
-	y := f32(o.row) * r.cell_height
+	x := r.pad_x + f32(o.col) * r.cell_width
+	y := r.pad_y + f32(o.row) * r.cell_height
 	instance.instance_renderer_fill_bg(
 		inst, slot, x, y, r.cell_width, r.cell_height,
 		CURSOR_OVERLAY_R, CURSOR_OVERLAY_G, CURSOR_OVERLAY_B,
 	)
+	r.cursor_staged = true
 	return true
 }

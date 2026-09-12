@@ -124,7 +124,8 @@ Gpu_Backend_VTable :: struct {
 	// Surface
 	configure_surface:  proc(surface: rawptr, device: Gpu_Device, format: Gpu_Format, width, height: u32),
 	get_surface_texture: proc(surface: rawptr) -> (texture: Gpu_Texture, view: Gpu_TextureView, format: Gpu_Format),
-	present_surface:    proc(surface: rawptr),
+	// Returns false when the surface cannot be presented.
+	present_surface:    proc(surface: rawptr) -> bool,
 	get_preferred_format: proc(surface: rawptr, device: Gpu_Device) -> Gpu_Format,
 
 	// Buffers
@@ -171,10 +172,18 @@ Gpu_Backend_VTable :: struct {
 
 	// Command encoding
 	create_command_encoder: proc(device: Gpu_Device) -> Gpu_CommandEncoder,
+	// Releases an encoder that has not been consumed by finish.
+	release_command_encoder: proc(encoder: Gpu_CommandEncoder),
 	begin_render_pass: proc(encoder: Gpu_CommandEncoder, color_view: Gpu_TextureView, clear_color: [4]f64, load_op: Gpu_Load_Op) -> Gpu_RenderPassEncoder,
 	end_render_pass: proc(pass: Gpu_RenderPassEncoder),
 	finish_command_buffer: proc(encoder: Gpu_CommandEncoder) -> rawptr,
-	submit: proc(queue: Gpu_Queue, command_buffer: rawptr),
+	// Releases a finished command buffer after queue submission or rejection.
+	release_command_buffer: proc(command_buffer: rawptr),
+	// Returns false when queue or command_buffer is invalid or submission fails.
+	submit: proc(queue: Gpu_Queue, command_buffer: rawptr) -> bool,
+	// Blocks until all work submitted to the device queue has completed.
+	// Implementations must return false when completion cannot be verified.
+	wait_for_idle: proc(device: Gpu_Device) -> bool,
 
 	// Render pass commands
 	render_set_pipeline: proc(pass: Gpu_RenderPassEncoder, pipeline: Gpu_RenderPipeline),

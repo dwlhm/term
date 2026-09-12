@@ -51,10 +51,13 @@ _wgpu_vtable: gpu.Gpu_Backend_VTable = gpu.Gpu_Backend_VTable{
 	create_sampler      = _wgpu_create_sampler,
 	destroy_sampler     = _wgpu_destroy_sampler,
 	create_command_encoder = _wgpu_create_command_encoder,
+	release_command_encoder = _wgpu_release_command_encoder,
 	begin_render_pass   = _wgpu_begin_render_pass,
 	end_render_pass     = _wgpu_end_render_pass,
 	finish_command_buffer = _wgpu_finish_command_buffer,
+	release_command_buffer = _wgpu_release_command_buffer,
 	submit              = _wgpu_submit,
+	wait_for_idle       = _wgpu_wait_for_idle,
 	render_set_pipeline = _wgpu_render_set_pipeline,
 	render_set_bind_group = _wgpu_render_set_bind_group,
 	render_set_vertex_buffer = _wgpu_render_set_vertex_buffer,
@@ -241,9 +244,12 @@ _wgpu_get_surface_texture :: proc(surface: rawptr) -> (texture: gpu.Gpu_Texture,
 	return
 }
 
-_wgpu_present_surface :: proc(surface: rawptr) {
+_wgpu_present_surface :: proc(surface: rawptr) -> bool {
+	if surface == nil {
+		return false
+	}
 	surf := wgpu.Surface(surface)
-	wgpu.SurfacePresent(surf)
+	return wgpu.SurfacePresent(surf) == .Success
 }
 
 _wgpu_get_preferred_format :: proc(surface: rawptr, device: gpu.Gpu_Device) -> gpu.Gpu_Format {
@@ -633,6 +639,13 @@ _wgpu_create_command_encoder :: proc(device: gpu.Gpu_Device) -> gpu.Gpu_CommandE
 	return gpu.Gpu_CommandEncoder(rawptr(enc))
 }
 
+// _wgpu_release_command_encoder releases an encoder abandoned before finish.
+_wgpu_release_command_encoder :: proc(encoder: gpu.Gpu_CommandEncoder) {
+	if rawptr(encoder) != nil {
+		wgpu.CommandEncoderRelease(wgpu.CommandEncoder(encoder))
+	}
+}
+
 _wgpu_begin_render_pass :: proc(encoder: gpu.Gpu_CommandEncoder, color_view: gpu.Gpu_TextureView, clear_color: [4]f64, load_op: gpu.Gpu_Load_Op) -> gpu.Gpu_RenderPassEncoder {
 	enc := wgpu.CommandEncoder(encoder)
 
@@ -670,11 +683,31 @@ _wgpu_finish_command_buffer :: proc(encoder: gpu.Gpu_CommandEncoder) -> rawptr {
 	return rawptr(cmd)
 }
 
-_wgpu_submit :: proc(queue: gpu.Gpu_Queue, command_buffer: rawptr) {
+// _wgpu_release_command_buffer releases the application reference after submit.
+_wgpu_release_command_buffer :: proc(command_buffer: rawptr) {
+	if command_buffer != nil {
+		wgpu.CommandBufferRelease(wgpu.CommandBuffer(command_buffer))
+	}
+}
+
+_wgpu_submit :: proc(queue: gpu.Gpu_Queue, command_buffer: rawptr) -> bool {
+	if rawptr(queue) == nil || command_buffer == nil {
+		return false
+	}
 	q := wgpu.Queue(queue)
 	cmd := wgpu.CommandBuffer(command_buffer)
 	cmds := [1]wgpu.CommandBuffer{cmd}
 	wgpu.QueueSubmit(q, cmds[:])
+	return true
+}
+
+// _wgpu_wait_for_idle uses the installed native WGPU completion primitive.
+// DevicePoll(wait=true) does not return until the device queue is idle.
+_wgpu_wait_for_idle :: proc(device: gpu.Gpu_Device) -> bool {
+	if rawptr(device) == nil {
+		return false
+	}
+	return wgpu.DevicePoll(wgpu.Device(device), true, nil) != false
 }
 
 // --- Render Pass Commands ---

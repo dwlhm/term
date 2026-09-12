@@ -58,6 +58,7 @@ test_dirty_upload_1cell :: proc(t: ^testing.T) {
 	testing.expect(t, render.dirty_upload_init(&d, &r), "dirty init must arm on small grid")
 	defer render.dirty_upload_destroy(&d)
 	testing.expect(t, d.armed, "dirty must be armed after init")
+	testing.expect(t, render.dirty_upload_validate_mirror(&d, &r), "dirty mirror must preserve bg/glyph layout")
 
 	lut := _dirty_test_lut()
 	termgrid.terminal_move_cursor(&term, 0, 3)
@@ -73,6 +74,7 @@ test_dirty_upload_1cell :: proc(t: ^testing.T) {
 	// Stable slots: bg slot i=3, glyph slot N+3.
 	testing.expect(t, d.mirror[3] != instance.Instance_Data{}, "dirty bg slot must hold the cell instance")
 	testing.expect(t, d.mirror[DIRTY_TEST_N+3] != instance.Instance_Data{}, "dirty glyph slot must hold the cell instance")
+	testing.expect(t, render.dirty_upload_validate_mirror(&d, &r), "single-cell update must keep mirror valid")
 }
 
 @(test)
@@ -132,6 +134,7 @@ test_dirty_upload_occupied_to_empty :: proc(t: ^testing.T) {
 	testing.expect_value(t, flushed, 2)
 	testing.expect(t, d.mirror[0] == instance.Instance_Data{}, "emptied bg slot must be zeroed (no ghost)")
 	testing.expect(t, d.mirror[DIRTY_TEST_N] == instance.Instance_Data{}, "emptied glyph slot must be zeroed (no ghost)")
+	testing.expect(t, render.dirty_upload_validate_mirror(&d, &r), "glyph-to-empty update must keep mirror valid")
 }
 
 @(test)

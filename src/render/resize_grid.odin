@@ -45,6 +45,9 @@ renderer_resize_grid :: proc(r: ^Renderer, t: ^termgrid.Terminal, rows: i32, col
 	if rows == r.rows && cols == r.cols {
 		return
 	}
+	if !_renderer_wait_for_gpu(r) {
+		return
+	}
 
 	// 1. Compiled frames: allocate new backing before freeing old.
 	new_compiled: Compiled_Frame
@@ -74,11 +77,15 @@ renderer_resize_grid :: proc(r: ^Renderer, t: ^termgrid.Terminal, rows: i32, col
 	// 4. Compute + fullscreen cell buffers. Nil backend (CPU-only) returns
 	// false with old state intact; mirror renderer_resize and drop
 	// availability so frames keep the instance fallback.
-	if !tile.compute_tile_resize(&r.compute_tiles, rows, cols, r.cell_width, r.cell_height, r.format) {
-		r.compute_tiles.available = false
+	if r.compute_tiles.available {
+		if !tile.compute_tile_resize(&r.compute_tiles, rows, cols, r.cell_width, r.cell_height, r.pad_x, r.pad_y, r.screen_w, r.screen_h, r.format) {
+			r.compute_tiles.available = false
+		}
 	}
-	if !fullscreen.fullscreen_resize(&r.fullscreen, rows, cols, r.cell_width, r.cell_height, r.format) {
-		r.fullscreen.available = false
+	if r.fullscreen.available {
+		if !fullscreen.fullscreen_resize(&r.fullscreen, rows, cols, r.cell_width, r.cell_height, r.pad_x, r.pad_y, r.format) {
+			r.fullscreen.available = false
+		}
 	}
 
 	// 5. Dirty mirror: rebuild against the committed dims (rebase + arm
@@ -108,4 +115,6 @@ renderer_resize_grid :: proc(r: ^Renderer, t: ^termgrid.Terminal, rows: i32, col
 	// Tail: full rewrite next frame.
 	tile.tile_map_mark_all(&r.tile_map)
 	r.dirty.armed = false
+	r.first_frame_pending = false
+	r.full_redraw_pending = true
 }

@@ -9,6 +9,7 @@ import "core:testing"
 import render "../"
 import instance "../instance"
 import tile "../tile"
+import gpu "../gpu"
 import termgrid "../../terminal"
 
 COMPUTE_TILE_TEST_ROWS :: 24
@@ -141,7 +142,7 @@ test_compute_tile_fallback_nil_pipeline :: proc(t: ^testing.T) {
 	testing.expect(t, tile.tile_map_init(&m, COMPUTE_TILE_TEST_ROWS, COMPUTE_TILE_TEST_COLS, 8, 4), "tile map init must succeed")
 	defer tile.tile_map_destroy(&m)
 
-	dispatches, invocations := tile.compute_tile_dispatch(&r, &m)
+	dispatches, invocations := tile.compute_tile_dispatch(&r, &m, gpu.Gpu_CommandEncoder(nil))
 	testing.expect_value(t, dispatches, u32(0))
 	testing.expect_value(t, invocations, u32(0))
 

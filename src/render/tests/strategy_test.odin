@@ -230,6 +230,38 @@ test_strategy_pin_fallback :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_strategy_cell_origin_contract :: proc(t: ^testing.T) {
+	r: render.Renderer
+	r.pad_x = 3.5
+	r.pad_y = 2.25
+	r.cell_width = 9.0
+	r.cell_height = 17.0
+	r.compute_tiles.pad_x = r.pad_x
+	r.compute_tiles.pad_y = r.pad_y
+	r.fullscreen.pad_x = r.pad_x
+	r.fullscreen.pad_y = r.pad_y
+
+	row := 4
+	col := 7
+	want_x := r.pad_x + f32(col) * r.cell_width
+	want_y := r.pad_y + f32(row) * r.cell_height
+	instance_x := r.pad_x + f32(col) * r.cell_width
+	instance_y := r.pad_y + f32(row) * r.cell_height
+	compute_x := r.compute_tiles.pad_x + f32(col) * r.cell_width
+	compute_y := r.compute_tiles.pad_y + f32(row) * r.cell_height
+	fullscreen_x := r.fullscreen.pad_x + f32(col) * r.cell_width
+	fullscreen_y := r.fullscreen.pad_y + f32(row) * r.cell_height
+
+	testing.expect_value(t, instance_x, want_x)
+	testing.expect_value(t, instance_y, want_y)
+	testing.expect_value(t, compute_x, want_x)
+	testing.expect_value(t, compute_y, want_y)
+	testing.expect_value(t, fullscreen_x, want_x)
+	testing.expect_value(t, fullscreen_y, want_y)
+}
+
+
+@(test)
 test_strategy_no_record_on_skip :: proc(t: ^testing.T) {
 	term: termgrid.Terminal
 	termgrid.terminal_init(&term, 24, 80)

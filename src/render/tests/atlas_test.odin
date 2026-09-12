@@ -49,6 +49,26 @@ test_font_rasterizer_init_valid :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_atlas_zoomed_metrics_fit_slot :: proc(t: ^testing.T) {
+	font_path, ok := find_test_font()
+	if !ok {
+		fmt.printf("no test font found; skipping zoomed metrics test\n")
+		return
+	}
+
+	r: render.Font_Rasterizer
+	success := render.font_rasterizer_init(&r, font_path, 32.0)
+	testing.expect(t, success, "font_rasterizer_init should succeed at maximum zoom")
+	if !success {
+		return
+	}
+	defer render.font_rasterizer_destroy(&r)
+
+	testing.expect(t, r.metrics.cell_width <= render.ATLAS_GLYPH_SIZE, "Zoomed cell width should fit in atlas slot")
+	testing.expect(t, r.metrics.cell_height <= render.ATLAS_GLYPH_SIZE, "Zoomed cell height should fit in atlas slot")
+}
+
+@(test)
 test_font_rasterizer_init_missing :: proc(t: ^testing.T) {
 	err: render.Font_Error
 	r: render.Font_Rasterizer

@@ -29,6 +29,8 @@ struct Fullscreen_Params {
     rows: u32,
     cell_w: f32,
     cell_h: f32,
+    pad_x: f32,
+    pad_y: f32,
     atlas_w: u32,
     atlas_h: u32,
 };
@@ -119,8 +121,15 @@ fn fullscreen_vs_main(@builtin(vertex_index) vertex_index: u32) -> Fullscreen_Ou
 fn fullscreen_fs_main(input: Fullscreen_Output) -> @location(0) vec4<f32> {
     let px = i32(input.clip_position.x);
     let py = i32(input.clip_position.y);
-    let lc = u32(px) / u32(params.cell_w);
-    let lr = u32(py) / u32(params.cell_h);
+    if (f32(px) < params.pad_x || f32(py) < params.pad_y ||
+        f32(px) >= params.pad_x + f32(params.cols) * params.cell_w ||
+        f32(py) >= params.pad_y + f32(params.rows) * params.cell_h) {
+        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    }
+    let content_px = f32(px) - params.pad_x;
+    let content_py = f32(py) - params.pad_y;
+    let lc = u32(content_px / params.cell_w);
+    let lr = u32(content_py / params.cell_h);
     if (lc >= params.cols || lr >= params.rows) {
         return vec4<f32>(0.0, 0.0, 0.0, 1.0);
     }
@@ -134,8 +143,8 @@ fn fullscreen_fs_main(input: Fullscreen_Output) -> @location(0) vec4<f32> {
 
     let bg_rgb = r5g6b5_to_rgb(lut_bg(style));
 
-    let x0 = f32(lc) * params.cell_w;
-    let y0 = f32(lr) * params.cell_h;
+    let x0 = params.pad_x + f32(lc) * params.cell_w;
+    let y0 = params.pad_y + f32(lr) * params.cell_h;
 
     // Continuation cell: black fill, plus the left neighbor's wide-lead
     // right half when present (instance-path parity).

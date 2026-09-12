@@ -72,6 +72,7 @@ test_cursor_draw_narrow_emits_one_quad :: proc(t: ^testing.T) {
 
 	drew := render.cursor_overlay_draw(&r, &o)
 	testing.expect(t, drew, "blink_on && visible narrow cell must stage one quad")
+	testing.expect(t, r.cursor_staged, "lit cursor must be marked for same-surface composition")
 
 	slot := r.instances.max_instances - 1
 	got := r.instances.instance_data[slot]
@@ -112,6 +113,7 @@ test_cursor_draw_blink_off_skips :: proc(t: ^testing.T) {
 
 	drew := render.cursor_overlay_draw(&r, &o)
 	testing.expect(t, !drew, "blink off must draw nothing")
+	testing.expect(t, !r.cursor_staged, "blink-off cursor must not be composed")
 	testing.expect_value(t, _cursor_draw_nonzero(&r), 0)
 }
 
@@ -126,6 +128,7 @@ test_cursor_draw_hidden_skips :: proc(t: ^testing.T) {
 	render.cursor_overlay_tick(&o, 2000, true, false)
 	drew := render.cursor_overlay_draw(&r, &o)
 	testing.expect(t, !drew, "DECTCEM-hidden cursor must draw nothing")
+	testing.expect(t, !r.cursor_staged, "hidden cursor must not be composed")
 
 	// Inconsistent phase honoring: blink_on without visible still skips.
 	o.blink_on = true

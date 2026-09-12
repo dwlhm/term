@@ -23,7 +23,7 @@ import "core:mem"
 import gpu "../gpu"
 
 // FULLSCREEN_PARAMS_SIZE is the params uniform buffer size in bytes.
-// size_of(Fullscreen_Params) == 32; the trailing 32 bytes stay zero.
+// size_of(Fullscreen_Params) == 40; the trailing 24 bytes stay zero.
 FULLSCREEN_PARAMS_SIZE :: 64
 
 // FULLSCREEN_CELL_BYTES is one packed V2 cell (u64).
@@ -46,7 +46,7 @@ FULLSCREEN_VERTEX_ENTRY :: "fullscreen_vs_main"
 FULLSCREEN_FRAGMENT_ENTRY :: "fullscreen_fs_main"
 
 // Fullscreen_Params mirrors the WGSL Fullscreen_Params struct field for
-// field (32 bytes, all 4-byte scalars, no padding). screen_w/h carry the
+// field (40 bytes, all 4-byte scalars, no padding). screen_w/h carry the
 // framebuffer size in pixels.
 Fullscreen_Params :: struct {
 	screen_w: f32,
@@ -55,11 +55,13 @@ Fullscreen_Params :: struct {
 	rows:     u32,
 	cell_w:   f32,
 	cell_h:   f32,
+	pad_x:    f32,
+	pad_y:    f32,
 	atlas_w:  u32,
 	atlas_h:  u32,
 }
 
-#assert(size_of(Fullscreen_Params) == 32)
+#assert(size_of(Fullscreen_Params) == 40)
 
 // Fullscreen_Renderer holds the fullscreen path GPU state.
 // available == false means every frame must take the instance fallback;
@@ -72,6 +74,8 @@ Fullscreen_Renderer :: struct {
 	cols:          i32,
 	cell_w:        f32,
 	cell_h:        f32,
+	pad_x:         f32,
+	pad_y:         f32,
 	available:     bool,
 	pipeline:      gpu.Gpu_RenderPipeline,
 	params_buffer: gpu.Gpu_Buffer,
@@ -95,6 +99,8 @@ _fullscreen_params :: proc(r: ^Fullscreen_Renderer) -> Fullscreen_Params {
 		rows     = u32(r.rows),
 		cell_w   = r.cell_w,
 		cell_h   = r.cell_h,
+		pad_x    = r.pad_x,
+		pad_y    = r.pad_y,
 		atlas_w  = FULLSCREEN_ATLAS_TEX_W,
 		atlas_h  = FULLSCREEN_ATLAS_TEX_H,
 	}
@@ -114,6 +120,8 @@ fullscreen_init :: proc(
 	cols: i32,
 	cell_w: f32,
 	cell_h: f32,
+	pad_x: f32,
+	pad_y: f32,
 	format: gpu.Gpu_Format,
 	atlas_view: gpu.Gpu_TextureView,
 	wgsl: string,
@@ -126,7 +134,7 @@ fullscreen_init :: proc(
 	if rawptr(atlas_view) == nil {
 		return false
 	}
-	if rows <= 0 || cols <= 0 || cell_w <= 0 || cell_h <= 0 {
+	if rows <= 0 || cols <= 0 || cell_w <= 0 || cell_h <= 0 || pad_x < 0 || pad_y < 0 {
 		return false
 	}
 	fb_w := u32(f32(cols) * cell_w)
@@ -143,6 +151,8 @@ fullscreen_init :: proc(
 	r.cols = cols
 	r.cell_w = cell_w
 	r.cell_h = cell_h
+	r.pad_x = pad_x
+	r.pad_y = pad_y
 	r.format = format
 	r.fb_w_px = fb_w
 	r.fb_h_px = fb_h
@@ -196,7 +206,7 @@ fullscreen_init :: proc(
 }
 
 // fullscreen_write_params uploads the current geometry to the params buffer
-// (full 64 bytes: 32-byte params + trailing zero pad).
+// (full 64 bytes: 40-byte params + trailing zero pad).
 fullscreen_write_params :: proc(r: ^Fullscreen_Renderer) {
 	if r.backend == nil || rawptr(r.queue) == nil || rawptr(r.params_buffer) == nil {
 		return
@@ -249,8 +259,8 @@ fullscreen_destroy :: proc(r: ^Fullscreen_Renderer) {
 // change returns false (old resources intact; the caller disables
 // fullscreen). Returns false as well when the geometry is degenerate or a
 // recreation fails.
-fullscreen_resize :: proc(r: ^Fullscreen_Renderer, rows: i32, cols: i32, cell_w: f32, cell_h: f32, format: gpu.Gpu_Format) -> bool {
-	if rows <= 0 || cols <= 0 || cell_w <= 0 || cell_h <= 0 {
+fullscreen_resize :: proc(r: ^Fullscreen_Renderer, rows: i32, cols: i32, cell_w: f32, cell_h: f32, pad_x: f32, pad_y: f32, format: gpu.Gpu_Format) -> bool {
+	if rows <= 0 || cols <= 0 || cell_w <= 0 || cell_h <= 0 || pad_x < 0 || pad_y < 0 {
 		return false
 	}
 	if format != r.format {
@@ -313,6 +323,8 @@ fullscreen_resize :: proc(r: ^Fullscreen_Renderer, rows: i32, cols: i32, cell_w:
 	r.cols = cols
 	r.cell_w = cell_w
 	r.cell_h = cell_h
+	r.pad_x = pad_x
+	r.pad_y = pad_y
 	r.fb_w_px = fb_w
 	r.fb_h_px = fb_h
 	r.format = format
@@ -347,15 +359,23 @@ fullscreen_upload_grid :: proc(r: ^Fullscreen_Renderer, cells: []u64, lut_words:
 	return bytes
 }
 
-// fullscreen_draw shades the whole surface from the grid buffers with a
-// fullscreen triangle (3 vertices, no vertex buffer) in a self-contained
-// encoder + submit. The caller acquires, presents, and releases the view.
-// Returns true iff a command buffer was submitted.
-fullscreen_draw :: proc(r: ^Fullscreen_Renderer, surface_view: gpu.Gpu_TextureView) -> bool {
+// fullscreen_draw appends the fullscreen shade and optional cursor draw to
+// encoder. It does not finish or submit the encoder; the caller owns the
+// shared command buffer and surface lifecycle. Returns true iff encoding
+// completed successfully.
+fullscreen_draw :: proc(
+	r: ^Fullscreen_Renderer,
+	surface_view: gpu.Gpu_TextureView,
+	encoder: gpu.Gpu_CommandEncoder,
+	cursor_pipeline: gpu.Gpu_RenderPipeline,
+	cursor_bind_group: gpu.Gpu_BindGroup,
+	cursor_buffer: gpu.Gpu_Buffer,
+	cursor_offset: u64,
+) -> bool {
 	if !r.available {
 		return false
 	}
-	if r.backend == nil || rawptr(r.device) == nil || rawptr(r.queue) == nil {
+	if r.backend == nil || rawptr(r.device) == nil || rawptr(r.queue) == nil || rawptr(encoder) == nil {
 		return false
 	}
 	if rawptr(r.pipeline) == nil || rawptr(r.bind_group) == nil {
@@ -364,16 +384,23 @@ fullscreen_draw :: proc(r: ^Fullscreen_Renderer, surface_view: gpu.Gpu_TextureVi
 	if rawptr(surface_view) == nil {
 		return false
 	}
-	encoder := r.backend.create_command_encoder(r.device)
-	if rawptr(encoder) == nil {
+	pass := r.backend.begin_render_pass(encoder, surface_view, {0, 0, 0, 1}, .Clear)
+	if rawptr(pass) == nil {
 		return false
 	}
-	pass := r.backend.begin_render_pass(encoder, surface_view, {0, 0, 0, 1}, .Clear)
 	r.backend.render_set_pipeline(pass, r.pipeline)
 	r.backend.render_set_bind_group(pass, 0, r.bind_group)
 	r.backend.render_draw(pass, 3, 1)
+	if rawptr(cursor_pipeline) != nil || rawptr(cursor_bind_group) != nil || rawptr(cursor_buffer) != nil {
+		if rawptr(cursor_pipeline) == nil || rawptr(cursor_bind_group) == nil || rawptr(cursor_buffer) == nil {
+			r.backend.end_render_pass(pass)
+			return false
+		}
+		r.backend.render_set_pipeline(pass, cursor_pipeline)
+		r.backend.render_set_bind_group(pass, 0, cursor_bind_group)
+		r.backend.render_set_vertex_buffer(pass, 0, cursor_buffer, cursor_offset)
+		r.backend.render_draw(pass, 6, 1)
+	}
 	r.backend.end_render_pass(pass)
-	cmd := r.backend.finish_command_buffer(encoder)
-	r.backend.submit(r.queue, cmd)
 	return true
 }

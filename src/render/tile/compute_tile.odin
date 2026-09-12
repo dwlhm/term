@@ -23,7 +23,7 @@ import "base:runtime"
 import gpu "../gpu"
 
 // TILE_PARAMS_SIZE is the params uniform buffer size in bytes.
-// size_of(Tile_Params) == 48; the trailing 16 bytes stay zero.
+// size_of(Tile_Params) == 56; the trailing 8 bytes stay zero.
 TILE_PARAMS_SIZE :: 64
 
 // TILE_CELL_BYTES is one packed V2 cell (u64).
@@ -52,7 +52,7 @@ TILE_COMPUTE_ENTRY :: "cs_main"
 TILE_BLIT_VERTEX_ENTRY :: "vs_main"
 TILE_BLIT_FRAGMENT_ENTRY :: "fs_main"
 
-// Tile_Params mirrors the WGSL Tile_Params struct field for field (48 bytes,
+// Tile_Params mirrors the WGSL Tile_Params struct field for field (56 bytes,
 // all 4-byte scalars, no padding). screen_w/h carry the framebuffer size.
 Tile_Params :: struct {
 	screen_w: f32,
@@ -61,6 +61,8 @@ Tile_Params :: struct {
 	rows:     u32,
 	cell_w:   f32,
 	cell_h:   f32,
+	pad_x:    f32,
+	pad_y:    f32,
 	tile_w:   u32,
 	tile_h:   u32,
 	tiles_x:  u32,
@@ -69,7 +71,7 @@ Tile_Params :: struct {
 	atlas_h:  u32,
 }
 
-#assert(size_of(Tile_Params) == 48)
+#assert(size_of(Tile_Params) == 56)
 
 // Compute_Tile_Renderer holds the tiled compute path GPU state.
 // available == false means every frame must take the instance fallback;
@@ -84,6 +86,8 @@ Compute_Tile_Renderer :: struct {
 	cols:               i32,
 	cell_w:             f32,
 	cell_h:             f32,
+	pad_x:              f32,
+	pad_y:              f32,
 	available:          bool,
 	compute_pipeline:   gpu.Gpu_ComputePipeline,
 	blit_pipeline:      gpu.Gpu_RenderPipeline,
@@ -114,6 +118,8 @@ _compute_tile_params :: proc(r: ^Compute_Tile_Renderer) -> Tile_Params {
 		rows     = u32(r.rows),
 		cell_w   = r.cell_w,
 		cell_h   = r.cell_h,
+		pad_x    = r.pad_x,
+		pad_y    = r.pad_y,
 		tile_w   = r.tile_w,
 		tile_h   = r.tile_h,
 		tiles_x  = tiles_x,
@@ -138,6 +144,10 @@ compute_tile_init :: proc(
 	cols: i32,
 	cell_w: f32,
 	cell_h: f32,
+	pad_x: f32,
+	pad_y: f32,
+	screen_w: f32,
+	screen_h: f32,
 	format: gpu.Gpu_Format,
 	atlas_view: gpu.Gpu_TextureView,
 	compute_wgsl: string,
@@ -153,7 +163,7 @@ compute_tile_init :: proc(
 	if rawptr(atlas_view) == nil {
 		return false
 	}
-	if rows <= 0 || cols <= 0 || cell_w <= 0 || cell_h <= 0 || tile_w == 0 || tile_h == 0 {
+	if rows <= 0 || cols <= 0 || cell_w <= 0 || cell_h <= 0 || pad_x < 0 || pad_y < 0 || screen_w <= 0 || screen_h <= 0 || tile_w == 0 || tile_h == 0 {
 		return false
 	}
 	tiles_x, tiles_y := _tile_grid_extent(cols, rows, tile_w, tile_h)
@@ -163,8 +173,8 @@ compute_tile_init :: proc(
 	if u64(tiles_x) * u64(tiles_y) > TILE_MAX_TILES {
 		return false
 	}
-	fb_w := u32(f32(cols) * cell_w)
-	fb_h := u32(f32(rows) * cell_h)
+	fb_w := u32(screen_w)
+	fb_h := u32(screen_h)
 	if fb_w == 0 || fb_h == 0 {
 		return false
 	}
@@ -179,6 +189,8 @@ compute_tile_init :: proc(
 	r.cols = cols
 	r.cell_w = cell_w
 	r.cell_h = cell_h
+	r.pad_x = pad_x
+	r.pad_y = pad_y
 	r.format = format
 	r.fb_w_px = fb_w
 	r.fb_h_px = fb_h
@@ -329,24 +341,26 @@ compute_tile_destroy :: proc(r: ^Compute_Tile_Renderer) {
 // into the blit pipeline, so a format change returns false (old resources
 // intact; the caller disables compute). Returns false as well when the
 // geometry is degenerate or a recreation fails.
-compute_tile_resize :: proc(r: ^Compute_Tile_Renderer, rows: i32, cols: i32, cell_w: f32, cell_h: f32, format: gpu.Gpu_Format) -> bool {
+compute_tile_resize :: proc(r: ^Compute_Tile_Renderer, rows: i32, cols: i32, cell_w: f32, cell_h: f32, pad_x: f32, pad_y: f32, screen_w: f32, screen_h: f32, format: gpu.Gpu_Format) -> bool {
 	if r.backend == nil || rawptr(r.device) == nil || rawptr(r.queue) == nil {
 		return false
 	}
-	if rows <= 0 || cols <= 0 || cell_w <= 0 || cell_h <= 0 {
+	if rows <= 0 || cols <= 0 || cell_w <= 0 || cell_h <= 0 || pad_x < 0 || pad_y < 0 || screen_w <= 0 || screen_h <= 0 {
 		return false
 	}
 	if format != r.format {
 		return false
 	}
-	fb_w := u32(f32(cols) * cell_w)
-	fb_h := u32(f32(rows) * cell_h)
+	fb_w := u32(screen_w)
+	fb_h := u32(screen_h)
 	if fb_w == 0 || fb_h == 0 {
 		return false
 	}
 	n := int(rows) * int(cols)
 	old_n := int(r.rows) * int(r.cols)
 	if n == old_n && fb_w == r.fb_w_px && fb_h == r.fb_h_px && rows == r.rows && cols == r.cols {
+		r.pad_x = pad_x
+		r.pad_y = pad_y
 		compute_tile_write_params(r)
 		return true
 	}
@@ -448,6 +462,8 @@ compute_tile_resize :: proc(r: ^Compute_Tile_Renderer, rows: i32, cols: i32, cel
 	r.cols = cols
 	r.cell_w = cell_w
 	r.cell_h = cell_h
+	r.pad_x = pad_x
+	r.pad_y = pad_y
 	r.fb_w_px = fb_w
 	r.fb_h_px = fb_h
 	r.format = format
@@ -541,14 +557,14 @@ compute_tile_upload_cells :: proc(r: ^Compute_Tile_Renderer, m: ^Tile_Map, cells
 	return bytes
 }
 
-// compute_tile_dispatch runs one compute dispatch over the dirty tiles
-// (count workgroups, one tile each) in a self-contained encoder + submit.
-// Returns (dispatches, invocations); (0, 0) when unavailable or empty.
-compute_tile_dispatch :: proc(r: ^Compute_Tile_Renderer, m: ^Tile_Map) -> (dispatches: u32, invocations: u32) {
+// compute_tile_dispatch appends one compute dispatch to encoder. It does not
+// finish or submit the encoder. Returns (dispatches, invocations); (0, 0)
+// when unavailable, empty, or the shared encoder cannot be used.
+compute_tile_dispatch :: proc(r: ^Compute_Tile_Renderer, m: ^Tile_Map, encoder: gpu.Gpu_CommandEncoder) -> (dispatches: u32, invocations: u32) {
 	if !r.available {
 		return 0, 0
 	}
-	if r.backend == nil || rawptr(r.device) == nil || rawptr(r.queue) == nil {
+	if r.backend == nil || rawptr(r.device) == nil || rawptr(r.queue) == nil || rawptr(encoder) == nil {
 		return 0, 0
 	}
 	if rawptr(r.compute_pipeline) == nil || rawptr(r.compute_bind_group) == nil {
@@ -558,45 +574,58 @@ compute_tile_dispatch :: proc(r: ^Compute_Tile_Renderer, m: ^Tile_Map) -> (dispa
 		return 0, 0
 	}
 	count := u32(m.count)
-	encoder := r.backend.create_command_encoder(r.device)
-	if rawptr(encoder) == nil {
+	pass := r.backend.begin_compute_pass(encoder)
+	if rawptr(pass) == nil {
 		return 0, 0
 	}
-	pass := r.backend.begin_compute_pass(encoder)
 	r.backend.compute_set_pipeline(pass, r.compute_pipeline)
 	r.backend.compute_set_bind_group(pass, 0, r.compute_bind_group)
 	r.backend.compute_dispatch(pass, count, 1, 1)
 	r.backend.end_compute_pass(pass)
-	cmd := r.backend.finish_command_buffer(encoder)
-	r.backend.submit(r.queue, cmd)
 	return 1, count
 }
 
-// compute_tile_blit draws the framebuffer onto surface_view with a
-// fullscreen triangle (3 vertices, no vertex buffer) in a self-contained
-// encoder + submit. The caller acquires, presents, and releases the view.
-compute_tile_blit :: proc(r: ^Compute_Tile_Renderer, surface_view: gpu.Gpu_TextureView) {
+// compute_tile_blit appends the framebuffer blit and optional cursor draw to
+// encoder. It does not finish or submit the encoder. The caller owns the
+// shared command buffer and surface lifecycle.
+compute_tile_blit :: proc(
+	r: ^Compute_Tile_Renderer,
+	surface_view: gpu.Gpu_TextureView,
+	encoder: gpu.Gpu_CommandEncoder,
+	cursor_pipeline: gpu.Gpu_RenderPipeline,
+	cursor_bind_group: gpu.Gpu_BindGroup,
+	cursor_buffer: gpu.Gpu_Buffer,
+	cursor_offset: u64,
+) -> bool {
 	if !r.available {
-		return
+		return false
 	}
-	if r.backend == nil || rawptr(r.device) == nil || rawptr(r.queue) == nil {
-		return
+	if r.backend == nil || rawptr(r.device) == nil || rawptr(r.queue) == nil || rawptr(encoder) == nil {
+		return false
 	}
 	if rawptr(r.blit_pipeline) == nil || rawptr(r.blit_bind_group) == nil {
-		return
+		return false
 	}
 	if rawptr(surface_view) == nil {
-		return
-	}
-	encoder := r.backend.create_command_encoder(r.device)
-	if rawptr(encoder) == nil {
-		return
+		return false
 	}
 	pass := r.backend.begin_render_pass(encoder, surface_view, {0, 0, 0, 1}, .Clear)
+	if rawptr(pass) == nil {
+		return false
+	}
 	r.backend.render_set_pipeline(pass, r.blit_pipeline)
 	r.backend.render_set_bind_group(pass, 0, r.blit_bind_group)
 	r.backend.render_draw(pass, 3, 1)
+	if rawptr(cursor_pipeline) != nil || rawptr(cursor_bind_group) != nil || rawptr(cursor_buffer) != nil {
+		if rawptr(cursor_pipeline) == nil || rawptr(cursor_bind_group) == nil || rawptr(cursor_buffer) == nil {
+			r.backend.end_render_pass(pass)
+			return false
+		}
+		r.backend.render_set_pipeline(pass, cursor_pipeline)
+		r.backend.render_set_bind_group(pass, 0, cursor_bind_group)
+		r.backend.render_set_vertex_buffer(pass, 0, cursor_buffer, cursor_offset)
+		r.backend.render_draw(pass, 6, 1)
+	}
 	r.backend.end_render_pass(pass)
-	cmd := r.backend.finish_command_buffer(encoder)
-	r.backend.submit(r.queue, cmd)
+	return true
 }

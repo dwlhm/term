@@ -52,9 +52,10 @@ test_fullscreen_empty_skip :: proc(t: ^testing.T) {
 	testing.expect(t, !render.renderer_frame_fullscreen(&r, &term, &lut), "nil-backend dirty frame must return false")
 	testing.expect(t, r.last_dirty, "dirty frame must arm last_dirty")
 
-	// Empty first-clean: flip last_dirty=false, still no upload/draw.
-	testing.expect(t, !render.renderer_frame_fullscreen(&r, &term, &lut), "first clean frame must skip")
-	testing.expect(t, !r.last_dirty, "first clean frame must flip last_dirty false")
+	// A failed frame retains its damage so a later backend recovery cannot lose it.
+	termgrid.terminal_clear_damage(&term)
+	testing.expect(t, !render.renderer_frame_fullscreen(&r, &term, &lut), "clean frame must skip")
+	testing.expect(t, !r.last_dirty, "clean frame must leave last_dirty false")
 }
 
 @(test)
@@ -112,10 +113,11 @@ test_fullscreen_unavailable_fallback :: proc(t: ^testing.T) {
 
 	lut := _dirty_test_lut()
 
-	// Zero renderer: strategy defaults to Instance, fullscreen unavailable.
+	// Zero renderer: no damage means no frame work, even when fullscreen is
+	// unavailable.
 	r: render.Renderer
 	testing.expect(t, !render.renderer_frame_fullscreen(&r, &term, &lut), "unavailable fullscreen must fall back and skip")
-	testing.expect_value(t, r.frame_count, u64(1))
+	testing.expect_value(t, r.frame_count, u64(0))
 	testing.expect(t, !r.fullscreen.available, "fallback must never latch available")
 
 	// Fullscreen strategy but unavailable: same verbatim delegation.
@@ -123,7 +125,7 @@ test_fullscreen_unavailable_fallback :: proc(t: ^testing.T) {
 	r2.strategy = render.Render_Strategy.Fullscreen
 	testing.expect(t, !r2.fullscreen.available, "zero fullscreen must be unavailable")
 	testing.expect(t, !render.renderer_frame_fullscreen(&r2, &term, &lut), "unavailable strategy frame must fall back and skip")
-	testing.expect_value(t, r2.frame_count, u64(1))
+	testing.expect_value(t, r2.frame_count, u64(0))
 	testing.expect(t, !r2.fullscreen.available, "fallback must never latch available")
 }
 
@@ -132,14 +134,14 @@ test_fullscreen_resize :: proc(t: ^testing.T) {
 	fr := _fullscreen_test_state()
 
 	// Nil backend: every resize fails without touching geometry.
-	testing.expect(t, !fullscreen.fullscreen_resize(&fr, FULLSCREEN_TEST_ROWS, FULLSCREEN_TEST_COLS, 8, 16, gpu.Gpu_Format.BGRA8_Unorm), "nil-backend resize must fail")
+	testing.expect(t, !fullscreen.fullscreen_resize(&fr, FULLSCREEN_TEST_ROWS, FULLSCREEN_TEST_COLS, 8, 16, 6, 4, gpu.Gpu_Format.BGRA8_Unorm), "nil-backend resize must fail")
 	testing.expect_value(t, fr.rows, i32(FULLSCREEN_TEST_ROWS))
 	testing.expect_value(t, fr.cols, i32(FULLSCREEN_TEST_COLS))
 	testing.expect_value(t, fr.fb_w_px, u32(FULLSCREEN_TEST_COLS * 8))
 	testing.expect_value(t, fr.fb_h_px, u32(FULLSCREEN_TEST_ROWS * 16))
 
 	// Degenerate geometry fails even before the backend check.
-	testing.expect(t, !fullscreen.fullscreen_resize(&fr, 0, FULLSCREEN_TEST_COLS, 8, 16, gpu.Gpu_Format.BGRA8_Unorm), "degenerate resize must fail")
+	testing.expect(t, !fullscreen.fullscreen_resize(&fr, 0, FULLSCREEN_TEST_COLS, 8, 16, 6, 4, gpu.Gpu_Format.BGRA8_Unorm), "degenerate resize must fail")
 
 	// Renderer-level resize disables fullscreen on failure (never latches).
 	r: render.Renderer
@@ -160,7 +162,7 @@ test_fullscreen_format_reject :: proc(t: ^testing.T) {
 	fr := _fullscreen_test_state()
 
 	// Format change rejects with old resources intact.
-	testing.expect(t, !fullscreen.fullscreen_resize(&fr, FULLSCREEN_TEST_ROWS, FULLSCREEN_TEST_COLS, 8, 16, gpu.Gpu_Format.RGBA8_Unorm), "format change must reject")
+	testing.expect(t, !fullscreen.fullscreen_resize(&fr, FULLSCREEN_TEST_ROWS, FULLSCREEN_TEST_COLS, 8, 16, 6, 4, gpu.Gpu_Format.RGBA8_Unorm), "format change must reject")
 	testing.expect_value(t, fr.rows, i32(FULLSCREEN_TEST_ROWS))
 	testing.expect_value(t, fr.cols, i32(FULLSCREEN_TEST_COLS))
 	testing.expect_value(t, fr.cell_w, f32(8))

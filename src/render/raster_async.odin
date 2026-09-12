@@ -12,9 +12,11 @@ package render
 //     -> atlas_apply_completion -> Shape_Insert + Gpu_Dirty_Set
 
 import "base:runtime"
+import "core:math"
 import "core:sync"
 import "core:thread"
 import "vendor:stb/truetype"
+import termgrid "../terminal"
 
 // RASTER_QUEUE_CAP bounds pending requests. Overflow drops the incoming
 // request (raster_overflow += 1, key NOT marked in-flight) so the next
@@ -23,17 +25,28 @@ RASTER_QUEUE_CAP :: 256
 
 // RASTER_COMPLETION_CAP bounds finished bitmaps awaiting drain.
 RASTER_COMPLETION_CAP :: 256
+RASTER_TARGETS_PER_GROUP :: 32
+
+Raster_Request_Result :: enum { Retry, Enqueued, Coalesced }
+Raster_Group_State :: enum { Queued, Running, Completion_Ready, Retry }
+
+Raster_Target_Group :: struct {
+	key:          Cluster_Key,
+	font_index:   int,
+	shaped:       u32,
+	marks:        [4]rune,
+	mark_n:       int,
+	wide:         bool,
+	targets:      [RASTER_TARGETS_PER_GROUP]termgrid.Damage_Target,
+	target_count: int,
+	state:        Raster_Group_State,
+}
 
 // Raster_Request is one off-thread raster job. By value only: key, shaped
 // codepoint, and covering marks are copied at enqueue, so grapheme-pool
 // recycling or atlas FIFO eviction before completion cannot corrupt it.
 Raster_Request :: struct {
-	key:        Cluster_Key,
-	font_index: int,
-	shaped:     u32,
-	marks:      [4]rune,
-	mark_n:     int,
-	wide:       bool,
+	group_index: int,
 }
 
 // Raster_Completion is one rasterized bitmap. pixels is a heap
@@ -49,6 +62,7 @@ Raster_Completion :: struct {
 	pixels:     []u8,
 	advance:    f32,
 	ok:         bool,
+	group_index: int,
 }
 
 // Raster_Counters tracks async queue activity. Separate from
@@ -79,8 +93,12 @@ Raster_Queue :: struct {
 	comp_head:      int,
 	comp_tail:      int,
 	comp_count:     int,
-	inflight:       [RASTER_QUEUE_CAP]Cluster_Key,
-	inflight_count: int,
+	groups:         [RASTER_QUEUE_CAP]Raster_Target_Group,
+	group_next:     [RASTER_QUEUE_CAP]int,
+	lookup_next:    [RASTER_QUEUE_CAP]int,
+	group_lookup:   [RASTER_QUEUE_CAP]int,
+	group_free:     [RASTER_QUEUE_CAP]int,
+	group_free_n:   int,
 	shutdown:       bool,
 	worker:         ^thread.Thread,
 	counters:       ^Raster_Counters,
@@ -101,6 +119,13 @@ raster_queue_init :: proc(q: ^Raster_Queue, counters: ^Raster_Counters) {
 	}
 	q^ = Raster_Queue{}
 	q.counters = counters
+	q.group_free_n = RASTER_QUEUE_CAP
+	for i in 0..<RASTER_QUEUE_CAP {
+		q.group_free[i] = RASTER_QUEUE_CAP - 1 - i
+		q.group_next[i] = -1
+		q.lookup_next[i] = -1
+		q.group_lookup[i] = -1
+	}
 }
 
 // raster_queue_destroy frees orphan completion pixels. The worker must be
@@ -129,7 +154,13 @@ raster_queue_destroy :: proc(q: ^Raster_Queue, allocator: runtime.Allocator = co
 	q.req_head = 0
 	q.req_tail = 0
 	q.req_count = 0
-	q.inflight_count = 0
+	q.group_free_n = RASTER_QUEUE_CAP
+	for i in 0..<RASTER_QUEUE_CAP {
+		q.group_free[i] = RASTER_QUEUE_CAP - 1 - i
+		q.group_next[i] = -1
+		q.lookup_next[i] = -1
+		q.group_lookup[i] = -1
+	}
 	q.shutdown = false
 }
 
@@ -170,10 +201,28 @@ raster_worker_shutdown :: proc(q: ^Raster_Queue) {
 	}
 }
 
-// raster_request_async enqueues one raster job from the render thread.
-// try_lock: never blocks. Returns false (no enqueue, blank placeholder,
-// retry next frame) on contention, duplicate in-flight, full ring, or
-// shutdown. Marks are truncated to 4 (GRAPHEME_MAX_MARKS).
+_raster_key_hash :: proc(key: Cluster_Key) -> int {
+	h := u64(u32(key.base)) * 0x9E3779B1
+	h = h ~ (u64(u8(key.join_form)) * 0x85EBCA6B)
+	return int(h % u64(RASTER_QUEUE_CAP))
+}
+
+_raster_lookup_slot_locked :: proc(q: ^Raster_Queue, key: Cluster_Key) -> (slot: int, found: bool) {
+	slot = _raster_key_hash(key)
+	gi := q.group_lookup[slot]
+	for gi >= 0 {
+		if q.groups[gi].key == key { return slot, true }
+		gi = q.lookup_next[gi]
+	}
+	return slot, false
+}
+
+_raster_group_for_key_locked :: proc(q: ^Raster_Queue, key: Cluster_Key) -> (group_index: int, slot: int) {
+	lookup_slot, found := _raster_lookup_slot_locked(q, key)
+	if !found || lookup_slot < 0 { return -1, lookup_slot }
+	return q.group_lookup[lookup_slot], lookup_slot
+}
+
 raster_request_async :: proc(
 	q: ^Raster_Queue,
 	key: Cluster_Key,
@@ -181,86 +230,111 @@ raster_request_async :: proc(
 	shaped: u32,
 	marks: []rune,
 	wide: bool,
-) -> (enqueued: bool) {
-	if q == nil {
-		return false
-	}
+	target: termgrid.Damage_Target,
+) -> Raster_Request_Result {
+	if q == nil { return .Retry }
 	if !sync.mutex_try_lock(&q.mutex) {
-		if q.counters != nil {
-			q.counters.contended += 1
-		}
-		return false
+		if q.counters != nil { q.counters.contended += 1 }
+		return .Retry
 	}
 	defer sync.mutex_unlock(&q.mutex)
-	if q.shutdown {
-		return false
-	}
-	if raster_inflight_contains(q, key) {
-		if q.counters != nil {
-			q.counters.coalesced += 1
+	if q.shutdown { return .Retry }
+	group_index, lookup_slot := _raster_group_for_key_locked(q, key)
+	if group_index >= 0 {
+		last := group_index
+		for last >= 0 {
+			g := &q.groups[last]
+			if g.state != .Retry && g.target_count < RASTER_TARGETS_PER_GROUP {
+				g.targets[g.target_count] = target
+				g.target_count += 1
+				if q.counters != nil { q.counters.coalesced += 1 }
+				return .Coalesced
+			}
+			if q.group_next[last] < 0 { break }
+			last = q.group_next[last]
 		}
-		return false
 	}
-	if q.req_count >= RASTER_QUEUE_CAP {
-		if q.counters != nil {
-			q.counters.overflow += 1
-		}
-		return false
+	if group_index < 0 && lookup_slot < 0 {
+		if q.counters != nil { q.counters.overflow += 1 }
+		return .Retry
 	}
-	if q.inflight_count >= RASTER_QUEUE_CAP {
-		// In-flight set full: entries clear only at drain, so heavy
-		// pre-drain re-enqueue can fill the set while the request ring
-		// still has room (popped requests stay in-flight until drain).
-		// Same drop-and-retry as ring overflow; the key is NOT marked.
-		if q.counters != nil {
-			q.counters.overflow += 1
-		}
-		return false
+	if q.req_count >= RASTER_QUEUE_CAP || q.group_free_n <= 0 {
+		if q.counters != nil { q.counters.overflow += 1 }
+		return .Retry
 	}
-	req := Raster_Request{key = key, font_index = font_index, shaped = shaped, wide = wide}
+	gi := q.group_free[q.group_free_n - 1]
+	q.group_free_n -= 1
+	g := &q.groups[gi]
+	g.key = key
+	g.font_index = font_index
+	g.shaped = shaped
+	g.mark_n = 0
+	g.wide = wide
+	g.target_count = 0
+	g.state = .Queued
+	q.group_next[gi] = -1
+	if group_index >= 0 {
+		last := group_index
+		for q.group_next[last] >= 0 { last = q.group_next[last] }
+		q.group_next[last] = gi
+	} else {
+		if lookup_slot < 0 { return .Retry }
+		q.lookup_next[gi] = q.group_lookup[lookup_slot]
+		q.group_lookup[lookup_slot] = gi
+	}
 	n := len(marks)
-	if n > len(req.marks) {
-		n = len(req.marks)
-	}
-	for i in 0..<n {
-		req.marks[i] = marks[i]
-	}
-	req.mark_n = n
-	q.reqs[q.req_tail] = req
+	if n > len(g.marks) { n = len(g.marks) }
+	for i in 0..<n { g.marks[i] = marks[i] }
+	g.mark_n = n
+	g.targets[0] = target
+	g.target_count = 1
+	q.reqs[q.req_tail] = Raster_Request{group_index = gi}
 	q.req_tail = (q.req_tail + 1) % RASTER_QUEUE_CAP
 	q.req_count += 1
-	q.inflight[q.inflight_count] = key
-	q.inflight_count += 1
-	if q.counters != nil {
-		q.counters.enqueued += 1
-	}
+	if q.counters != nil { q.counters.enqueued += 1 }
 	sync.cond_signal(&q.cond)
-	return true
+	return .Enqueued
 }
 
-// raster_inflight_contains reports whether key is already queued or
-// rasterizing. The caller must hold q.mutex. Linear scan, bounded by 256.
-raster_inflight_contains :: proc(q: ^Raster_Queue, key: Cluster_Key) -> bool {
-	if q == nil {
-		return false
+_raster_group_release :: proc(q: ^Raster_Queue, group_index: int) {
+	if q == nil || group_index < 0 || group_index >= RASTER_QUEUE_CAP { return }
+	key := q.groups[group_index].key
+
+	lookup_slot := _raster_key_hash(key)
+	prev_lookup := -1
+	lookup := q.group_lookup[lookup_slot]
+	for lookup >= 0 && lookup != group_index {
+		prev_lookup = lookup
+		lookup = q.lookup_next[lookup]
 	}
-	for i in 0..<q.inflight_count {
-		if q.inflight[i] == key {
-			return true
-		}
+	if lookup == group_index {
+		if prev_lookup < 0 { q.group_lookup[lookup_slot] = q.lookup_next[group_index] }
+		else { q.lookup_next[prev_lookup] = q.lookup_next[group_index] }
 	}
-	return false
+	q.lookup_next[group_index] = -1
+	q.group_next[group_index] = -1
+	q.groups[group_index] = Raster_Target_Group{}
+	if q.group_free_n < RASTER_QUEUE_CAP {
+		q.group_free[q.group_free_n] = group_index
+		q.group_free_n += 1
+	}
 }
 
-// _raster_inflight_remove drops one key from the in-flight set
-// (swap-remove, orderless). The caller must hold q.mutex.
-_raster_inflight_remove :: proc(q: ^Raster_Queue, key: Cluster_Key) {
-	for i in 0..<q.inflight_count {
-		if q.inflight[i] == key {
-			q.inflight_count -= 1
-			q.inflight[i] = q.inflight[q.inflight_count]
-			return
-		}
+_raster_mark_group_retry :: proc(q: ^Raster_Queue, group_index: int) {
+	if q == nil || group_index < 0 || group_index >= RASTER_QUEUE_CAP { return }
+	q.groups[group_index].state = .Retry
+}
+
+_raster_retry_groups_locked :: proc(q: ^Raster_Queue) {
+	if q == nil { return }
+	for i in 0..<RASTER_QUEUE_CAP {
+		g := &q.groups[i]
+		if g.state != .Retry || g.target_count <= 0 { continue }
+		if q.req_count >= RASTER_QUEUE_CAP { return }
+		q.reqs[q.req_tail] = Raster_Request{group_index = i}
+		q.req_tail = (q.req_tail + 1) % RASTER_QUEUE_CAP
+		q.req_count += 1
+		g.state = .Queued
 	}
 }
 
@@ -290,26 +364,24 @@ raster_worker_main :: proc(t: ^thread.Thread) {
 			return
 		}
 		req := q.reqs[q.req_head]
+		group := q.groups[req.group_index]
+		q.groups[req.group_index].state = .Running
 		q.req_head = (q.req_head + 1) % RASTER_QUEUE_CAP
 		q.req_count -= 1
 		sync.mutex_unlock(&q.mutex)
 
-		comp := _raster_rasterize(chain, &req, heap)
+		comp := _raster_rasterize(chain, &group, heap)
+		comp.group_index = req.group_index
 
 		sync.mutex_lock(&q.mutex)
 		if q.comp_count >= RASTER_COMPLETION_CAP {
-			// Completion ring full (drain lags): drop the bitmap but clear
-			// the in-flight key so a later frame retries. Never blocks.
-			if q.counters != nil {
-				q.counters.apply_fail += 1
-			}
-			_raster_inflight_remove(q, req.key)
+			if q.counters != nil { q.counters.apply_fail += 1 }
+			_raster_mark_group_retry(q, req.group_index)
 			sync.mutex_unlock(&q.mutex)
-			if comp.pixels != nil {
-				delete(comp.pixels, heap)
-			}
+			if comp.pixels != nil { delete(comp.pixels, heap) }
 			continue
 		}
+		q.groups[req.group_index].state = .Completion_Ready;
 		q.comps[q.comp_tail] = comp
 		q.comp_tail = (q.comp_tail + 1) % RASTER_COMPLETION_CAP
 		q.comp_count += 1
@@ -326,32 +398,32 @@ raster_worker_main :: proc(t: ^thread.Thread) {
 // GPU access. ok=false carries no pixels (drain takes the tofu path).
 _raster_rasterize :: proc(
 	chain: ^Fallback_Chain,
-	req: ^Raster_Request,
+	group: ^Raster_Target_Group,
 	heap: runtime.Allocator,
 ) -> Raster_Completion {
-	comp := Raster_Completion{key = req.key, font_index = req.font_index, shaped = req.shaped}
-	if chain == nil || req == nil {
+	comp := Raster_Completion{key = group.key, font_index = group.font_index, shaped = group.shaped}
+	if chain == nil || group == nil {
 		return comp
 	}
-	if req.font_index < 0 || req.font_index >= chain.count {
+	if group.font_index < 0 || group.font_index >= chain.count {
 		return comp
 	}
-	f := &chain.fonts[req.font_index]
+	f := &chain.fonts[group.font_index]
 	if f.font_data == nil {
 		return comp
 	}
-	if truetype.FindGlyphIndex(&f.info, rune(req.shaped)) == 0 {
+	if truetype.FindGlyphIndex(&f.info, rune(group.shaped)) == 0 {
 		return comp
 	}
 
 	rect: [ATLAS_GLYPH_SIZE * ATLAS_GLYPH_SIZE]u8
-	base := font_rasterize_glyph(f, req.shaped, heap)
+	base := font_rasterize_glyph(f, group.shaped, heap)
 	if base.pixels != nil {
-		_raster_blit_rect(rect[:], ATLAS_GLYPH_SIZE, &base, false)
+		_raster_blit_rect(rect[:], ATLAS_GLYPH_SIZE, &base, false, int(math.round(f.metrics.ascent)))
 		delete(base.pixels, heap)
 	}
-	for i in 0..<req.mark_n {
-		m := req.marks[i]
+	for i in 0..<group.mark_n {
+		m := group.marks[i]
 		if m == 0 {
 			continue
 		}
@@ -361,7 +433,7 @@ _raster_rasterize :: proc(
 		}
 		mb := font_rasterize_glyph(mf, u32(m), heap)
 		if mb.pixels != nil {
-			_raster_blit_rect(rect[:], ATLAS_GLYPH_SIZE, &mb, true)
+			_raster_blit_rect(rect[:], ATLAS_GLYPH_SIZE, &mb, true, int(math.round(mf.metrics.ascent)))
 			delete(mb.pixels, heap)
 		}
 	}
@@ -373,7 +445,7 @@ _raster_rasterize :: proc(
 			break
 		}
 	}
-	if empty && req.shaped != 0x20 {
+	if empty && group.shaped != 0x20 {
 		return comp
 	}
 	pixels := make([]u8, len(rect), heap)
@@ -386,16 +458,15 @@ _raster_rasterize :: proc(
 	return comp
 }
 
-// _raster_blit_rect copies a tight glyph bitmap centered into a slot-size
-// rect. Same centering math as _atlas_blit_bitmap (origin 0,0), so worker
-// output matches sync-claimed pixels exactly. blend_max overstrikes marks.
-_raster_blit_rect :: proc(dst: []u8, stride: int, bmp: ^Glyph_Bitmap, blend_max: bool) {
+// _raster_blit_rect copies a tight glyph bitmap into a slot-size
+// rect using baseline anchoring. blend_max overstrikes marks.
+_raster_blit_rect :: proc(dst: []u8, stride: int, bmp: ^Glyph_Bitmap, blend_max: bool, ascent_px: int) {
 	if bmp.width <= 0 || bmp.height <= 0 || bmp.pixels == nil {
 		return
 	}
 	gs := ATLAS_GLYPH_SIZE
-	ox := (gs - bmp.width) / 2
-	oy := (gs - bmp.height) / 2
+	ox := int(bmp.bearing_x)
+	oy := ascent_px + int(bmp.bearing_y)
 	for gy in 0..<bmp.height {
 		for gx in 0..<bmp.width {
 			dx := ox + gx
@@ -418,46 +489,43 @@ _raster_blit_rect :: proc(dst: []u8, stride: int, bmp: ^Glyph_Bitmap, blend_max:
 	}
 }
 
-// raster_drain_completions pops all completions, applies each to the atlas
-// (FIFO claim at drain, clear + copy + tag + shape_cache_insert +
-// gpu_dirty), frees worker pixels, and clears in-flight keys. Render
-// thread only. try_lock: a worker mid-push defers the drain one frame;
-// after join the lock is always free. Returns drained count.
 raster_drain_completions :: proc(
 	q: ^Raster_Queue,
 	atlas: ^Atlas,
 	cache: ^Shape_Cache,
+	terminal: ^termgrid.Terminal,
 	chain: ^Fallback_Chain = nil,
 	counters: ^Fallback_Counters = nil,
 ) -> (applied: int) {
-	if q == nil {
-		return 0
-	}
-	if !sync.mutex_try_lock(&q.mutex) {
-		return 0
-	}
+	if q == nil { return 0 }
+	if !sync.mutex_try_lock(&q.mutex) { return 0 }
 	batch: [RASTER_COMPLETION_CAP]Raster_Completion
 	n := q.comp_count
-	if n > RASTER_COMPLETION_CAP {
-		n = RASTER_COMPLETION_CAP
-	}
+	if n > RASTER_COMPLETION_CAP { n = RASTER_COMPLETION_CAP }
 	for i in 0..<n {
 		idx := (q.comp_head + i) % RASTER_COMPLETION_CAP
 		batch[i] = q.comps[idx]
-		_raster_inflight_remove(q, batch[i].key)
 	}
 	q.comp_head = 0
 	q.comp_tail = 0
 	q.comp_count = 0
+	_raster_retry_groups_locked(q)
 	sync.mutex_unlock(&q.mutex)
 
 	heap := runtime.heap_allocator()
 	for i in 0..<n {
-		atlas_apply_completion(atlas, cache, &batch[i], chain, counters)
-		if batch[i].pixels != nil {
-			delete(batch[i].pixels, heap)
-			batch[i].pixels = nil
+		comp := &batch[i]
+		atlas_apply_completion(atlas, cache, comp, chain, counters)
+		if comp.group_index >= 0 && comp.group_index < RASTER_QUEUE_CAP {
+			g := &q.groups[comp.group_index]
+			for j in 0..<g.target_count {
+				if terminal != nil { termgrid.terminal_apply_damage_target(terminal, g.targets[j]) }
+			}
+			sync.mutex_lock(&q.mutex)
+			_raster_group_release(q, comp.group_index)
+			sync.mutex_unlock(&q.mutex)
 		}
+		if comp.pixels != nil { delete(comp.pixels, heap); comp.pixels = nil }
 		applied += 1
 	}
 	return applied

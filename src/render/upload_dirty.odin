@@ -81,6 +81,21 @@ dirty_upload_destroy :: proc(d: ^Dirty_Upload, allocator: runtime.Allocator = co
 	d.armed = false
 }
 
+// dirty_upload_validate_mirror checks the fixed bg/glyph mirror contract.
+dirty_upload_validate_mirror :: proc(d: ^Dirty_Upload, r: ^Renderer) -> bool {
+	if d == nil || r == nil || d.mirror == nil { return false }
+	n := int(r.rows) * int(r.cols)
+	if n <= 0 || d.cells != n || len(d.mirror) != 2 * n { return false }
+	mirror_bytes := u64(len(d.mirror)) * instance.INSTANCE_STRIDE
+	if mirror_bytes != u64(2 * n) * instance.INSTANCE_STRIDE { return false }
+	for i in 0..<n {
+		bg := i
+		glyph := n + i
+		if bg < 0 || bg >= len(d.mirror) || glyph < n || glyph >= len(d.mirror) { return false }
+	}
+	return true
+}
+
 // dirty_upload_rebase fully expands r.compiled_v2 into the mirror and
 // performs ONE full write_buffer at offset 0, then arms the upload.
 // Skipped cells (empty/continuation) are zeroed so no stale data survives.
@@ -98,8 +113,8 @@ dirty_upload_rebase :: proc(d: ^Dirty_Upload, r: ^Renderer, lut: ^Style_LUT) {
 	for idx in 0..<n {
 		row := idx / cols
 		col := idx % cols
-		x := f32(col) * cw
-		y := f32(row) * ch
+		x := r.pad_x + f32(col) * cw
+		y := r.pad_y + f32(row) * ch
 		emit_bg, emit_glyph := render_cell_expand_instance(
 			r.compiled_v2.cells[idx], lut, &r.atlas, x, y, cw, ch,
 			&d.mirror[idx], &d.mirror[n+idx],
@@ -265,8 +280,8 @@ _dirty_expand_row :: proc(
 	ch := r.cell_height
 	for col in cs..<ce {
 		idx := row * cols + col
-		x := f32(col) * cw
-		y := f32(row) * ch
+		x := r.pad_x + f32(col) * cw
+		y := r.pad_y + f32(row) * ch
 		emit_bg, emit_glyph := render_cell_expand_instance(
 			r.compiled_v2.cells[idx], lut, &r.atlas, x, y, cw, ch,
 			&d.mirror[idx], &d.mirror[n+idx],

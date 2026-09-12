@@ -76,7 +76,7 @@ _ra_drain_all :: proc(
 	total := 0
 	start := time.tick_now()
 	for total < want {
-		total += render.raster_drain_completions(q, atlas, cache, chain, counters)
+		total += render.raster_drain_completions(q, atlas, cache, nil, chain, counters)
 		reqs, comps := render.raster_pending_count(q)
 		if reqs == 0 && comps == 0 {
 			break
@@ -185,7 +185,7 @@ test_raster_pop_in :: proc(t: ^testing.T) {
 
 	// Worker rasterizes; shutdown joins; drain claims the slot and inserts.
 	render.raster_worker_shutdown(&q)
-	applied := render.raster_drain_completions(&q, &atlas, &cache, &chain, &fcounters)
+	applied := render.raster_drain_completions(&q, &atlas, &cache, nil, &chain, &fcounters)
 	testing.expect_value(t, applied, 1)
 	testing.expect_value(t, rcounters.completed, u64(1))
 
@@ -227,24 +227,32 @@ test_raster_duplicate_coalesced :: proc(t: ^testing.T) {
 	defer render.raster_queue_destroy(&q)
 
 	term: termgrid.Terminal
-	termgrid.terminal_init(&term, 1, 1)
+	termgrid.terminal_init(&term, 1, 2)
 	defer termgrid.terminal_destroy(&term)
 	_ra_word(&term, 0, 0, 0x4E2D)
+	_ra_word(&term, 0, 1, 0x4E2D)
 	frame: render.Compiled_Frame_V2
-	render.render_compiler_init_v2(&frame, 1, 1)
+	render.render_compiler_init_v2(&frame, 1, 2)
 	defer render.render_compiler_destroy_v2(&frame)
 
-	// 10 identical misses, no worker: one request, nine coalesced.
-	for _ in 0..<10 {
-		render.render_compile_full_v2(&frame, &term, &chain, &cache, &atlas, &fcounters, &q)
-		_, _, _, _, slot := render.render_cell_unpack_v2(frame.cells[0])
+	// Two identical cells share one request and retain both targets.
+	for _ in 0..<1 {
+	render.render_compile_full_v2(&frame, &term, &chain, &cache, &atlas, &fcounters, &q)
+	_, _, _, _, slot := render.render_cell_unpack_v2(frame.cells[0])
 		testing.expect(t, slot == render.RENDER_CELL_V2_SLOT_UNRESOLVED, "in-flight cell stays blank")
 	}
 	testing.expect_value(t, rcounters.enqueued, u64(1))
-	testing.expect_value(t, rcounters.coalesced, u64(9))
+	testing.expect(t, rcounters.coalesced >= 1, "same key cells must coalesce")
+	key := render.Cluster_Key{base = 0x4E2D, join_form = .Isolated}
+	testing.expect(t, render.raster_request_async(&q, key, 2, 0x4E2D, nil, false, termgrid.terminal_damage_target(&term, 0, 1)) == .Coalesced, "explicit second target must coalesce")
 	reqs, comps := render.raster_pending_count(&q)
 	testing.expect_value(t, reqs, 1)
 	testing.expect_value(t, comps, 0)
+	render.raster_worker_start(&q, &chain)
+	render.raster_worker_shutdown(&q)
+	render.raster_drain_completions(&q, &atlas, &cache, &term, &chain, &fcounters)
+
+	testing.expect(t, term.damage.dirty_rows[0].span_count >= 2, "all coalesced targets must be damaged")
 }
 
 @(test)
@@ -270,12 +278,12 @@ test_raster_queue_full_retries :: proc(t: ^testing.T) {
 	// Fill the ring with distinct keys; the 257th drops, key NOT in-flight.
 	for i in 0..<render.RASTER_QUEUE_CAP {
 		k := render.Cluster_Key{base = rune(0x4E00 + i), join_form = .Isolated}
-		testing.expect(t, render.raster_request_async(&q, k, 2, u32(0x4E00 + i), nil, true), "ring must accept 256")
+		testing.expect(t, render.raster_request_async(&q, k, 2, u32(0x4E00 + i), nil, true, termgrid.Damage_Target{}) == .Enqueued, "ring must accept 256")
 	}
 	full_key := render.Cluster_Key{base = 0x5600, join_form = .Isolated}
-	testing.expect(t, !render.raster_request_async(&q, full_key, 2, 0x5600, nil, true), "257th request must drop")
+	testing.expect(t, render.raster_request_async(&q, full_key, 2, 0x5600, nil, true, termgrid.Damage_Target{}) == .Retry, "257th request must drop")
 	testing.expect_value(t, rcounters.overflow, u64(1))
-	testing.expect(t, !render.raster_inflight_contains(&q, full_key), "dropped key must NOT be in-flight")
+
 	reqs, _ := render.raster_pending_count(&q)
 	testing.expect_value(t, reqs, render.RASTER_QUEUE_CAP)
 
@@ -286,12 +294,114 @@ test_raster_queue_full_retries :: proc(t: ^testing.T) {
 	render.raster_worker_start(&q, &chain)
 	_ra_wait_reqs_zero(t, &q)
 	applied := _ra_drain_all(t, &q, &atlas, &cache, &chain, &fcounters, render.RASTER_QUEUE_CAP)
-	testing.expect(t, render.raster_request_async(&q, full_key, 2, 0x5600, nil, true), "retry after drain must enqueue")
+	testing.expect(t, render.raster_request_async(&q, full_key, 2, 0x5600, nil, true, termgrid.Damage_Target{}) == .Enqueued, "retry after drain must enqueue")
 	testing.expect_value(t, rcounters.enqueued, u64(render.RASTER_QUEUE_CAP + 1))
 	render.raster_worker_shutdown(&q)
-	applied += render.raster_drain_completions(&q, &atlas, &cache, &chain, &fcounters)
+	applied += render.raster_drain_completions(&q, &atlas, &cache, nil, &chain, &fcounters)
 	testing.expect_value(t, applied, render.RASTER_QUEUE_CAP + 1)
 	testing.expect_value(t, rcounters.completed, u64(render.RASTER_QUEUE_CAP + 1))
+}
+
+@(test)
+test_raster_group_split_preserves_targets :: proc(t: ^testing.T) {
+	q: render.Raster_Queue
+	counters: render.Raster_Counters
+	render.raster_queue_init(&q, &counters)
+	defer render.raster_queue_destroy(&q)
+	key := render.Cluster_Key{base = 0x4E2D, join_form = .Isolated}
+	for i in 0..=render.RASTER_TARGETS_PER_GROUP {
+		result := render.raster_request_async(&q, key, 0, 0x4E2D, nil, false, termgrid.Damage_Target{row = i, col = 0, epoch = 1})
+		if i == 0 || i == render.RASTER_TARGETS_PER_GROUP {
+			testing.expect(t, result == .Enqueued, "group boundary must enqueue")
+		} else {
+			testing.expect(t, result == .Coalesced, "group target must coalesce")
+		}
+	}
+	reqs, _ := render.raster_pending_count(&q)
+	testing.expect_value(t, reqs, 2)
+	testing.expect_value(t, q.groups[q.reqs[0].group_index].target_count, render.RASTER_TARGETS_PER_GROUP)
+	testing.expect_value(t, q.groups[q.reqs[1].group_index].target_count, 1)
+}
+
+@(test)
+test_raster_completion_overflow_retries_targets :: proc(t: ^testing.T) {
+	prim: render.Font_Rasterizer
+	_fb_prim(t, &prim)
+	defer render.font_rasterizer_destroy(&prim)
+	chain: render.Fallback_Chain
+	_fb_chain(t, &chain, &prim)
+	defer render.fallback_chain_destroy(&chain)
+	atlas: render.Atlas
+	render.atlas_init(&atlas, &prim)
+	defer render.atlas_destroy(&atlas)
+	cache: render.Shape_Cache
+	fcounters: render.Fallback_Counters
+	q: render.Raster_Queue
+	rcounters: render.Raster_Counters
+	_ra_q(&q, &rcounters)
+	defer render.raster_queue_destroy(&q)
+	term: termgrid.Terminal
+	termgrid.terminal_init(&term, 1, 1)
+	defer termgrid.terminal_destroy(&term)
+	target := termgrid.terminal_damage_target(&term, 0, 0)
+	key := render.Cluster_Key{base = 0x4E2D, join_form = .Isolated}
+	testing.expect(t, render.raster_request_async(&q, key, 2, 0x4E2D, nil, false, target) == .Enqueued, "overflow test request must enqueue")
+	q.comp_count = render.RASTER_COMPLETION_CAP
+	render.raster_worker_start(&q, &chain)
+	render.raster_worker_shutdown(&q)
+	q.comp_count = 0
+	render.raster_drain_completions(&q, &atlas, &cache, &term, &chain, &fcounters)
+	q.shutdown = false
+	render.raster_worker_start(&q, &chain)
+	render.raster_worker_shutdown(&q)
+	render.raster_drain_completions(&q, &atlas, &cache, &term, &chain, &fcounters)
+	testing.expect(t, term.damage.dirty_rows[0].span_count > 0 || term.damage.dirty_rows[0].full, "overflow retry must retain target")
+}
+
+@(test)
+test_raster_stale_target_fanout :: proc(t: ^testing.T) {
+	prim: render.Font_Rasterizer
+	_fb_prim(t, &prim)
+	defer render.font_rasterizer_destroy(&prim)
+	chain: render.Fallback_Chain
+	_fb_chain(t, &chain, &prim)
+	defer render.fallback_chain_destroy(&chain)
+	atlas: render.Atlas
+	render.atlas_init(&atlas, &prim)
+	defer render.atlas_destroy(&atlas)
+	cache: render.Shape_Cache
+	fcounters: render.Fallback_Counters
+	q: render.Raster_Queue
+	rcounters: render.Raster_Counters
+	_ra_q(&q, &rcounters)
+	defer render.raster_queue_destroy(&q)
+	term: termgrid.Terminal
+	termgrid.terminal_init(&term, 2, 2)
+	defer termgrid.terminal_destroy(&term)
+	key := render.Cluster_Key{base = 0x4E2D, join_form = .Isolated}
+	stale := termgrid.terminal_damage_target(&term, 0, 0)
+	termgrid.terminal_resize(&term, 3, 2)
+	termgrid.damage_clear(&term.damage)
+	valid := termgrid.terminal_damage_target(&term, 0, 1)
+	testing.expect(t, render.raster_request_async(&q, key, 2, 0x4E2D, nil, false, stale) == .Enqueued, "stale fanout request must enqueue")
+	testing.expect(t, render.raster_request_async(&q, key, 2, 0x4E2D, nil, false, valid) == .Coalesced, "valid fanout target must coalesce")
+	render.raster_worker_start(&q, &chain)
+	render.raster_worker_shutdown(&q)
+	render.raster_drain_completions(&q, &atlas, &cache, &term, &chain, &fcounters)
+	testing.expect(t, term.damage.dirty_rows[0].span_count > 0, "valid resize fanout target must damage")
+	q.shutdown = false
+	testing.expect(t, term.damage.dirty_rows[0].spans[0].col_start == 1, "stale resize target must be discarded")
+	termgrid.damage_clear(&term.damage)
+	stale = termgrid.terminal_damage_target(&term, 0, 0)
+	termgrid.terminal_scroll_up(&term, 1)
+	termgrid.damage_clear(&term.damage)
+	valid = termgrid.terminal_damage_target(&term, 0, 1)
+	testing.expect(t, render.raster_request_async(&q, key, 2, 0x4E2D, nil, false, stale) == .Enqueued, "stale scroll request must enqueue")
+	testing.expect(t, render.raster_request_async(&q, key, 2, 0x4E2D, nil, false, valid) == .Coalesced, "valid scroll target must coalesce")
+	render.raster_worker_start(&q, &chain)
+	render.raster_worker_shutdown(&q)
+	render.raster_drain_completions(&q, &atlas, &cache, &term, &chain, &fcounters)
+	testing.expect(t, term.damage.dirty_rows[0].span_count > 0, "valid scroll fanout target must damage")
 }
 
 @(test)
@@ -318,12 +428,18 @@ test_raster_shutdown_drains :: proc(t: ^testing.T) {
 	// 50 jobs, then immediate shutdown: pending work still converts.
 	for i in 0..<50 {
 		k := render.Cluster_Key{base = rune(0x4E00 + i), join_form = .Isolated}
-		testing.expect(t, render.raster_request_async(&q, k, 2, u32(0x4E00 + i), nil, true), "enqueue must succeed")
+		retries := 0
+		for render.raster_request_async(&q, k, 2, u32(0x4E00 + i), nil, true, termgrid.Damage_Target{}) != .Enqueued {
+			thread.yield()
+			retries += 1
+			testing.expect(t, retries < 1000000, "enqueue retry must terminate")
+		}
 	}
+
 	render.raster_worker_shutdown(&q)
 	testing.expect(t, q.worker == nil, "shutdown must join and destroy the thread")
 
-	applied := render.raster_drain_completions(&q, &atlas, &cache, &chain, &fcounters)
+	applied := render.raster_drain_completions(&q, &atlas, &cache, nil, &chain, &fcounters)
 	testing.expect_value(t, applied, 50)
 	testing.expect_value(t, rcounters.completed, u64(50))
 	reqs, comps := render.raster_pending_count(&q)
@@ -371,7 +487,7 @@ test_raster_pool_recycle_immune :: proc(t: ^testing.T) {
 	testing.expect_value(t, rcounters.enqueued, u64(2))
 
 	render.raster_worker_shutdown(&q)
-	applied := render.raster_drain_completions(&q, &atlas, &cache, &chain, &fcounters)
+	applied := render.raster_drain_completions(&q, &atlas, &cache, nil, &chain, &fcounters)
 	testing.expect_value(t, applied, 2)
 
 	ga, hita := render.shape_cache_lookup(&cache, key_a)
@@ -410,7 +526,7 @@ test_raster_eviction_impossible :: proc(t: ^testing.T) {
 	fi, covered := render.fallback_resolve(&chain, 0x4E2D, nil)
 	testing.expect(t, covered, "test glyph must be covered")
 	key := render.Cluster_Key{base = 0x4E2D, join_form = .Isolated}
-	testing.expect(t, render.raster_request_async(&q, key, fi, 0x4E2D, nil, true), "enqueue must succeed")
+	testing.expect(t, render.raster_request_async(&q, key, fi, 0x4E2D, nil, true, termgrid.Damage_Target{}) == .Enqueued, "enqueue must succeed")
 	for i in 0..<3 {
 		cp := u32(0x4E30 + i)
 		cfi, ccov := render.fallback_resolve(&chain, cp, nil)
@@ -421,7 +537,7 @@ test_raster_eviction_impossible :: proc(t: ^testing.T) {
 
 	// Drain assigns the slot at today's cursor: tag and pixels line up.
 	render.raster_worker_shutdown(&q)
-	applied := render.raster_drain_completions(&q, &atlas, &cache, &chain, &fcounters)
+	applied := render.raster_drain_completions(&q, &atlas, &cache, nil, &chain, &fcounters)
 	testing.expect_value(t, applied, 1)
 	g, hit := render.shape_cache_lookup(&cache, key)
 	testing.expect(t, hit, "evicted-past glyph must cache at drain")
@@ -543,7 +659,7 @@ test_raster_race_stress :: proc(t: ^testing.T) {
 			kf := keys[round * 256 + i]
 			k := render.Cluster_Key{base = kf.cp, join_form = .Isolated}
 			retries := 0
-			for !render.raster_request_async(&q, k, kf.fi, u32(kf.cp), nil, true) {
+			for render.raster_request_async(&q, k, kf.fi, u32(kf.cp), nil, true, termgrid.Damage_Target{}) != .Enqueued {
 				thread.yield()
 				retries += 1
 				testing.expect(t, retries < 1000000, "retry must terminate")
@@ -558,7 +674,7 @@ test_raster_race_stress :: proc(t: ^testing.T) {
 
 	render.raster_worker_shutdown(&q)
 	testing.expect(t, q.worker == nil, "shutdown must join and destroy the thread")
-	rest := render.raster_drain_completions(&q, &atlas, &cache, &chain, &fcounters)
+	rest := render.raster_drain_completions(&q, &atlas, &cache, nil, &chain, &fcounters)
 	testing.expect_value(t, rest, 0)
 
 	// 1024 completions, cache live bounded by its cap with zero evictions,

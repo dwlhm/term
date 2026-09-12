@@ -4,8 +4,9 @@ package render
 // Provides a clean interface for the atlas to consume bitmap data.
 
 import "base:runtime"
-import "core:os"
 import "core:c"
+import "core:math"
+import "core:os"
 import "vendor:stb/truetype"
 
 // Font_Error represents font loading errors.
@@ -94,13 +95,13 @@ font_rasterizer_init :: proc(
 	r.metrics.ascent = f32(ascent) * r.scale
 	r.metrics.descent = f32(descent) * r.scale
 	r.metrics.line_gap = f32(line_gap) * r.scale
-	r.metrics.cell_height = r.metrics.ascent - r.metrics.descent + r.metrics.line_gap
+	r.metrics.cell_height = math.ceil(r.metrics.ascent - r.metrics.descent + r.metrics.line_gap)
 
 	// For monospace fonts, all glyphs have the same advance width
 	// Use a representative glyph (e.g., 'M' = 0x4D) to get the advance
 	advance_width, lsb: c.int
 	truetype.GetCodepointHMetrics(&r.info, rune(0x4D), &advance_width, &lsb)
-	r.metrics.cell_width = f32(advance_width) * r.scale
+	r.metrics.cell_width = math.ceil(f32(advance_width) * r.scale)
 
 	return true
 }
@@ -196,9 +197,10 @@ font_rasterize_glyph_into :: proc(
 	truetype.MakeCodepointBitmap(&r.info, &temp_pixels[0], c.int(width), c.int(height), c.int(width), r.scale, r.scale, rune(codepoint))
 
 	// Copy into destination with offset
-	// Center the glyph in the slot
-	offset_x := dst_x + (slot_w - width) / 2
-	offset_y := dst_y + (slot_h - height) / 2
+	// Baseline-anchored typography
+	ascent_px := int(math.round(r.metrics.ascent))
+	offset_x := dst_x + int(x0)
+	offset_y := dst_y + ascent_px + int(y0)
 
 	for gy in 0..<height {
 		for gx in 0..<width {

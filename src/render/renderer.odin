@@ -8,9 +8,11 @@ package render
 //   3. Prepare instance data (bg + glyph instances)
 //   4. Upload instance data via triple-buffered ring
 //   5. Encode render commands (2-pass: bg + glyph)
-//   6. Submit to GPU and present
+//   6. Compose the staged cursor into the acquired surface, if present
+//   7. Submit to GPU and present exactly once
 //
 // Static scene optimization: if no damage, skip the frame entirely (~0μs).
+// The cursor never acquires or presents a surface independently.
 
 import "base:runtime"
 import "core:mem"
@@ -23,9 +25,6 @@ import termgrid "../terminal"
 
 BG_WGSL :: #load("shaders/bg.wgsl")
 GLYPH_WGSL :: #load("shaders/glyph.wgsl")
-TILE_COMPUTE_WGSL :: #load("shaders/tile_compute.wgsl")
-TILE_BLIT_WGSL :: #load("shaders/tile_blit.wgsl")
-FULLSCREEN_WGSL :: #load("shaders/fullscreen.wgsl")
 
 // Render_Strategy selects the frame path. Instance is the zero value and the
 // default; Compute_Tiles routes renderer_frame_compute through the tiled
@@ -36,6 +35,38 @@ Render_Strategy :: enum int {
 	Instance,
 	Compute_Tiles,
 	Fullscreen,
+}
+
+// Render_Frame_State tracks the publication transaction. A frame can only
+// reach Presented after encode and submit succeed, and every acquired surface
+// reaches Released exactly once.
+Render_Frame_State :: enum int {
+	Idle,
+	Acquired,
+	Encoded,
+	Submitted,
+	Presented,
+	Released,
+	Aborted,
+}
+
+// Render_Frame_Transaction owns one acquired surface and one shared encoder.
+// cursor_buffer/cursor_offset identify the optional cursor instance appended
+// to the same upload-ring submission as legacy instance data.
+Render_Frame_Transaction :: struct {
+	state:         Render_Frame_State,
+	texture:       gpu.Gpu_Texture,
+	view:          gpu.Gpu_TextureView,
+	format:        gpu.Gpu_Format,
+	encoder:       gpu.Gpu_CommandEncoder,
+	pass:          gpu.Gpu_RenderPassEncoder,
+	cursor_buffer: gpu.Gpu_Buffer,
+	cursor_offset: u64,
+	upload:        Upload_Ring_Frame,
+	upload_committed: bool,
+	command_buffer: rawptr,
+	encoder_released: bool,
+	command_released: bool,
 }
 
 // Renderer is the top-level render state.
@@ -65,9 +96,12 @@ Renderer :: struct {
 	cols:       i32,
 	cell_width:  f32,
 	cell_height: f32,
+	pad_x:       f32,
+	pad_y:       f32,
 	screen_w:   f32,
 	screen_h:   f32,
 	format:     gpu.Gpu_Format,
+	theme:      termgrid.Theme,
 
 	// Surface
 	surface:    gpu.Gpu_Surface,
@@ -75,9 +109,11 @@ Renderer :: struct {
 	surface_h:  u32,
 
 	// State
-	frame_count: u64,
-	last_dirty:  bool,  // whether the last frame had damage
-	device:      gpu.Gpu_Device,
+	frame_count:     u64,
+	last_dirty:      bool,  // whether the last frame had damage
+	frame_prepared:  bool,
+	cursor_staged: bool, // cursor_overlay_draw staged the reserved instance
+	device:        gpu.Gpu_Device,
 	queue:       gpu.Gpu_Queue,
 	backend:     ^gpu.Gpu_Backend_VTable,
 
@@ -91,6 +127,12 @@ Renderer :: struct {
 
 	// Phase 16: adaptive strategy state (online submit-ns rings + pin).
 	strategy_state: Strategy_State,
+	fallback_pending: bool,
+	first_frame_pending: bool,
+	full_redraw_pending: bool,
+	last_view:           ^termgrid.Terminal_View,
+	last_view_fingerprint: u64,
+	last_view_valid:     bool,
 }
 
 // RENDER_MAX_INSTANCES is the maximum number of instances per draw call.
@@ -113,6 +155,7 @@ renderer_init :: proc(
 	format: gpu.Gpu_Format,
 	fallback_paths: []string = nil,
 	allocator: runtime.Allocator = context.allocator,
+	theme: termgrid.Theme = termgrid.THEME_CATPPUCCIN_MOCHA,
 ) -> bool {
 	if backend == nil || rawptr(device) == nil || rawptr(queue) == nil {
 		return false
@@ -121,9 +164,12 @@ renderer_init :: proc(
 	r.cols = cols
 	r.cell_width  = cell_width
 	r.cell_height = cell_height
+	r.pad_x       = 6.0
+	r.pad_y       = 4.0
 	r.screen_w    = screen_w
 	r.screen_h    = screen_h
 	r.format      = format
+	r.theme       = theme
 	r.device      = device
 	r.queue       = queue
 	r.backend     = backend
@@ -132,12 +178,20 @@ renderer_init :: proc(
 	r.surface     = gpu.Gpu_Surface(nil)
 	r.surface_w   = 0
 	r.surface_h   = 0
+	r.first_frame_pending = true
+	r.full_redraw_pending = false
 
 	// Initialize font rasterizer
 	font_error: Font_Error
 	if !font_rasterizer_init(&r.rasterizer, font_path, pixel_size, &font_error, allocator) {
-		// Font loading failed, but we continue with an uninitialized rasterizer
-		// The atlas will have no prewarmed glyphs
+		return false
+	}
+
+	if r.cell_width <= 0 && r.rasterizer.metrics.cell_width > 0 {
+		r.cell_width = r.rasterizer.metrics.cell_width
+	}
+	if r.cell_height <= 0 && r.rasterizer.metrics.cell_height > 0 {
+		r.cell_height = r.rasterizer.metrics.cell_height
 	}
 
 	// Initialize font atlas (prewarms pinned glyphs)
@@ -180,6 +234,7 @@ renderer_init :: proc(
 		allocator,
 	)
 	if !ok {
+		renderer_destroy(r, allocator)
 		return false
 	}
 
@@ -188,24 +243,6 @@ renderer_init :: proc(
 	// fallback path has valid buffers.
 	dirty_upload_init(&r.dirty, r, allocator)
 	upload_ring_init(&r.upload_ring, backend, device, queue, RENDER_UPLOAD_CAPACITY, allocator)
-
-	// Phase 14: tiled compute sibling path (best-effort; failure leaves
-	// compute unavailable and the instance default untouched).
-	tile.tile_map_init(&r.tile_map, rows, cols, tile.TILE_W_DEFAULT, tile.TILE_H_DEFAULT, allocator)
-	tile.compute_tile_init(
-		&r.compute_tiles, backend, device, queue, rows, cols,
-		cell_width, cell_height, format, r.atlas.gpu_view,
-		string(TILE_COMPUTE_WGSL), string(TILE_BLIT_WGSL),
-		tile.TILE_W_DEFAULT, tile.TILE_H_DEFAULT, allocator,
-	)
-
-	// Phase 15: fullscreen fragment sibling path (best-effort; failure
-	// leaves fullscreen unavailable and the instance default untouched).
-	fullscreen.fullscreen_init(
-		&r.fullscreen, backend, device, queue, rows, cols,
-		cell_width, cell_height, format, r.atlas.gpu_view,
-		string(FULLSCREEN_WGSL), allocator,
-	)
 
 	// Phase 12: async raster queue, worker start LAST (after the chain the
 	// worker reads and every other subsystem is ready).
@@ -216,11 +253,15 @@ renderer_init :: proc(
 
 // renderer_destroy frees all renderer resources.
 renderer_destroy :: proc(r: ^Renderer, allocator: runtime.Allocator = context.allocator) {
+	if r == nil { return }
+	// No GPU-owned resource may be destroyed while a submitted frame can still
+	// reference it. The concrete backend supplies the verified barrier.
+	if !_renderer_wait_for_gpu(r) { return }
 	// Phase 12 first: join the worker, apply every pending completion to
 	// the atlas (no loss), then free the queue — before the atlas, chain,
 	// and cache below are torn down.
 	raster_worker_shutdown(&r.raster)
-	raster_drain_completions(&r.raster, &r.atlas, &r.shape_cache, &r.fallback, &r.fallback_counters)
+	raster_drain_completions(&r.raster, &r.atlas, &r.shape_cache, nil, &r.fallback, &r.fallback_counters)
 	raster_queue_destroy(&r.raster, allocator)
 
 	atlas_destroy(&r.atlas, allocator)
@@ -234,18 +275,139 @@ renderer_destroy :: proc(r: ^Renderer, allocator: runtime.Allocator = context.al
 	upload_ring_destroy(&r.upload_ring, allocator)
 	instance.instance_renderer_destroy(&r.instances, allocator)
 
-	// Phase 14 compute path teardown.
-	tile.compute_tile_destroy(&r.compute_tiles)
-	tile.tile_map_destroy(&r.tile_map, allocator)
-
-	// Phase 15 fullscreen path teardown.
-	fullscreen.fullscreen_destroy(&r.fullscreen)
+	// Optional sibling renderers are not initialized by the production path;
+	// their destroy routines remain nil-safe for benchmark/test instances.
+	if r.compute_tiles.available || r.compute_tiles.backend != nil {
+		tile.compute_tile_destroy(&r.compute_tiles)
+	}
+	if r.tile_map.bits != nil {
+		tile.tile_map_destroy(&r.tile_map, allocator)
+	}
+	if r.fullscreen.available || r.fullscreen.backend != nil {
+		fullscreen.fullscreen_destroy(&r.fullscreen)
+	}
 
 	// Free fallback fonts (slots 1..; slot 0 aliases the rasterizer below)
 	fallback_chain_destroy(&r.fallback)
 
 	// Free rasterizer resources
 	font_rasterizer_destroy(&r.rasterizer)
+}
+
+// renderer_rebuild_font builds a complete font-dependent renderer candidate
+// before changing the live renderer. The candidate worker is stopped and its
+// queue is reinitialized before its state moves into the live address, so no
+// worker retains a pointer to the temporary candidate.
+renderer_rebuild_font :: proc(
+	r: ^Renderer,
+	font_path: string,
+	pixel_size: f32,
+	fallback_paths: []string = nil,
+	allocator: runtime.Allocator = context.allocator,
+) -> bool {
+	if r == nil || r.backend == nil || rawptr(r.device) == nil || rawptr(r.queue) == nil {
+		return false
+	}
+	if !_renderer_wait_for_gpu(r) {
+		return false
+	}
+
+	candidate_storage := make([]Renderer, 1, allocator)
+	defer delete(candidate_storage)
+	candidate := &candidate_storage[0]
+	if !renderer_init(
+		candidate,
+		font_path,
+		pixel_size,
+		r.backend,
+		r.device,
+		r.queue,
+		r.rows,
+		r.cols,
+		r.cell_width,
+		r.cell_height,
+		r.screen_w,
+		r.screen_h,
+		r.format,
+		fallback_paths,
+		allocator,
+		r.theme,
+	) {
+		renderer_destroy(candidate, allocator)
+		return false
+	}
+	if candidate.rasterizer.metrics.cell_width > 0 {
+		candidate.cell_width = candidate.rasterizer.metrics.cell_width
+	}
+	if candidate.rasterizer.metrics.cell_height > 0 {
+		candidate.cell_height = candidate.rasterizer.metrics.cell_height
+	}
+
+	// The worker context points into candidate. Stop it before moving the queue,
+	// then rebuild the empty queue in place so the new worker can use live state.
+	raster_worker_shutdown(&candidate.raster)
+	raster_queue_init(&candidate.raster, &candidate.raster_counters)
+
+	// Stop the old worker while its queue still lives at the renderer address,
+	// and apply any completion it produced before ownership is moved.
+	raster_worker_shutdown(&r.raster)
+	raster_drain_completions(&r.raster, &r.atlas, &r.shape_cache, nil, &r.fallback, &r.fallback_counters)
+
+	old_storage := make([]Renderer, 1, allocator)
+	defer delete(old_storage)
+	old := &old_storage[0]
+	old.atlas = r.atlas
+	old.compiled = r.compiled
+	old.compiled_v2 = r.compiled_v2
+	old.dirty = r.dirty
+	old.upload_ring = r.upload_ring
+	old.instances = r.instances
+	old.rasterizer = r.rasterizer
+	old.fallback = r.fallback
+	old.shape_cache = r.shape_cache
+	old.fallback_counters = r.fallback_counters
+	old.raster = r.raster
+	old.raster_counters = r.raster_counters
+	old.backend = r.backend
+	old.device = r.device
+	old.queue = r.queue
+
+	new_cell_width := candidate.cell_width
+	new_cell_height := candidate.cell_height
+	r.atlas = candidate.atlas
+	r.compiled = candidate.compiled
+	r.compiled_v2 = candidate.compiled_v2
+	r.dirty = candidate.dirty
+	r.style_lut = candidate.style_lut
+	r.upload_ring = candidate.upload_ring
+	r.instances = candidate.instances
+	r.rasterizer = candidate.rasterizer
+	r.fallback = candidate.fallback
+	r.shape_cache = candidate.shape_cache
+	r.fallback_counters = candidate.fallback_counters
+	r.raster = candidate.raster
+	r.raster_counters = candidate.raster_counters
+	r.cell_width = new_cell_width
+	r.cell_height = new_cell_height
+	r.raster.counters = &r.raster_counters
+	r.dirty.armed = false
+
+	// Candidate ownership is now live; prevent any accidental cleanup of moved
+	// fields if this scope grows a candidate cleanup path later.
+	candidate.atlas = Atlas{}
+	candidate.compiled = Compiled_Frame{}
+	candidate.compiled_v2 = Compiled_Frame_V2{}
+	candidate.dirty = Dirty_Upload{}
+	candidate.upload_ring = Upload_Ring{}
+	candidate.instances = instance.Instance_Renderer{}
+	candidate.rasterizer = Font_Rasterizer{}
+	candidate.fallback = Fallback_Chain{}
+	candidate.raster = Raster_Queue{}
+
+	raster_worker_start(&r.raster, &r.fallback)
+	renderer_destroy(old, allocator)
+	r.full_redraw_pending = true
+	return true
 }
 
 // renderer_attach_surface configures the surface for presentation.
@@ -262,109 +424,267 @@ renderer_attach_surface :: proc(r: ^Renderer, surface: gpu.Gpu_Surface, width: u
 	r.backend.configure_surface(rawptr(surface), r.device, r.format, width, height)
 }
 
-// renderer_frame executes one render frame.
-// Returns true if a frame was actually rendered (had damage), false if skipped.
+// renderer_frame keeps the original entry point while using the transaction
+// path and the renderer-owned style LUT.
 renderer_frame :: proc(
 	r: ^Renderer,
 	terminal: ^termgrid.Terminal,
+	view: ^termgrid.Terminal_View = nil,
 ) -> bool {
-	r.frame_count += 1
+	if r == nil { return false }
+	return renderer_frame_v2(r, terminal, nil, &r.style_lut, view)
+}
 
-	// Take damage journal
-	journal := termgrid.terminal_take_damage(terminal)
-	defer termgrid.damage_journal_destroy(&journal)
+_renderer_journal_has_damage :: proc(journal: ^termgrid.Damage_Journal) -> bool {
+	if journal == nil { return false }
+	for row in journal.dirty_rows {
+		if row.full || row.span_count > 0 { return true }
+	}
+	return len(journal.scroll_ops) > 0
+}
 
-	// Check if there is any damage
-	has_damage := false
-	for i in 0..<len(journal.dirty_rows) {
-		if journal.dirty_rows[i].full || journal.dirty_rows[i].span_count > 0 {
-			has_damage = true
-			break
+_renderer_view_fingerprint :: proc(view: ^termgrid.Terminal_View) -> u64 {
+	if view == nil {
+		return 0
+	}
+	h := u64(14695981039346656037)
+	mix :: proc(value: u64, part: u64) -> u64 {
+		return (value ~ part) * u64(1099511628211)
+	}
+	h = mix(h, u64(view.scrollback_offset))
+	h = mix(h, view.selection.active ? u64(1) : u64(0))
+	h = mix(h, u64(view.selection.anchor.row))
+	h = mix(h, u64(view.selection.anchor.col))
+	h = mix(h, u64(view.selection.focus.row))
+	h = mix(h, u64(view.selection.focus.col))
+	return h
+}
+
+_renderer_view_changed :: proc(r: ^Renderer, view: ^termgrid.Terminal_View) -> bool {
+	if r == nil {
+		return true
+	}
+	if view == nil {
+		// Legacy nil-view frames are not pending merely because no view has
+		// been published yet. A transition out of a previously rendered view
+		// still needs one complete live-grid redraw.
+		return r.last_view_valid && r.last_view != nil
+	}
+	fingerprint := _renderer_view_fingerprint(view)
+	return !r.last_view_valid || r.last_view != view || r.last_view_fingerprint != fingerprint
+}
+
+_style_lut_needs_rebuild :: proc(lut: ^Style_LUT, table: ^termgrid.Style_Table) -> bool {
+	if lut == nil || table == nil {
+		return false
+	}
+	if lut.count != table.count {
+		return true
+	}
+	default_style := termgrid.style_table_default(table)
+	return lut.fg_r5g6b5[0] != color_to_r5g6b5(default_style.fg) ||
+		lut.bg_r5g6b5[0] != color_to_r5g6b5(default_style.bg) ||
+		lut.selection_fg_r5g6b5 != color_to_r5g6b5(table.theme.selection_foreground) ||
+		lut.selection_bg_r5g6b5 != color_to_r5g6b5(table.theme.selection_background)
+}
+
+_renderer_theme_clear_color :: proc(theme: termgrid.Theme) -> [4]f64 {
+	argb := theme.background
+	return [4]f64{
+		f64((argb >> 16) & 0xFF) / 255.0,
+		f64((argb >> 8) & 0xFF) / 255.0,
+		f64(argb & 0xFF) / 255.0,
+		f64((argb >> 24) & 0xFF) / 255.0,
+	}
+}
+
+// _renderer_wait_for_gpu is the publication barrier for CPU-side resource
+// mutation. A live backend must provide a verified queue-idle primitive;
+// otherwise the renderer refuses to touch resources whose ownership is
+// unknown.
+_renderer_wait_for_gpu :: proc(r: ^Renderer) -> bool {
+	if r == nil || r.backend == nil || rawptr(r.device) == nil || rawptr(r.queue) == nil {
+		return true
+	}
+	if r.backend.wait_for_idle == nil {
+		return false
+	}
+	return r.backend.wait_for_idle(r.device)
+}
+
+_renderer_force_pending_redraw :: proc(r: ^Renderer, terminal: ^termgrid.Terminal) {
+	if r == nil || terminal == nil || (!r.first_frame_pending && !r.full_redraw_pending) {
+		return
+	}
+	gens := make([]u32, terminal.grid.row_count)
+	for row in 0..<terminal.grid.row_count {
+		gens[row] = termgrid.terminal_damage_target(terminal, row, 0).row_generation
+	}
+	termgrid.damage_mark_all(&terminal.damage, gens)
+	delete(gens)
+}
+
+// _renderer_has_pending_work checks only state that can make a frame useful.
+// It does not drain queues, acquire a surface, or wait for the GPU.
+_renderer_has_pending_work :: proc(
+	r: ^Renderer,
+	terminal: ^termgrid.Terminal,
+	view: ^termgrid.Terminal_View = nil,
+) -> bool {
+	if r == nil || terminal == nil {
+		return false
+	}
+	if r.first_frame_pending || r.full_redraw_pending || r.atlas.gpu_dirty || r.fallback_pending ||
+		_renderer_view_changed(r, view) {
+		return true
+	}
+	for row in terminal.damage.dirty_rows {
+		if row.full || row.span_count > 0 {
+			return true
 		}
 	}
-	if len(journal.scroll_ops) > 0 {
-		has_damage = true
+	if len(terminal.damage.scroll_ops) > 0 {
+		return true
 	}
+	reqs, comps := raster_pending_count(&r.raster)
+	return reqs > 0 || comps > 0
+}
 
-	// Static scene optimization: skip frame if no damage
-	if !has_damage && r.last_dirty {
-		// First clean frame after dirty: render once more to ensure consistency
-		r.last_dirty = false
-	} else if !has_damage {
-		// Skip frame entirely
-		return false
-	} else {
-		r.last_dirty = true
+_renderer_surface_begin :: proc(r: ^Renderer) -> (frame: Render_Frame_Transaction, ok: bool) {
+	frame.state = .Idle
+	if r == nil || r.backend == nil || rawptr(r.device) == nil || rawptr(r.queue) == nil || rawptr(r.surface) == nil {
+		frame.state = .Aborted
+		return frame, false
 	}
-
-	if r.backend == nil || rawptr(r.device) == nil || rawptr(r.queue) == nil {
-		return false
-	}
-	if rawptr(r.instances.bg_pipeline) == nil || rawptr(r.instances.glyph_pipeline) == nil {
-		return false
-	}
-
-	// Step 1: Compile full grid → packed render cells
-	style_table := &terminal.grid.style_table
-	render_compile_full(&r.compiled, terminal, style_table)
-
-	// Step 2: Prepare instance data
-	bg_count, glyph_count := _prepare_instances(r, terminal, style_table)
-
-	// Step 3: Upload instance data via ring buffer
-	total := u64(bg_count + glyph_count)
-	byte_count := total * instance.INSTANCE_STRIDE
-	staging := upload_ring_get_staging(&r.upload_ring)
-	copy_size := byte_count
-	if copy_size > u64(len(staging)) {
-		copy_size = u64(len(staging))
-	}
-	if copy_size > 0 && len(r.instances.instance_data) > 0 {
-		mem.copy(raw_data(staging), raw_data(r.instances.instance_data), int(copy_size))
-	}
-	submitted_slot := upload_ring_current_slot(&r.upload_ring)
-	upload_ring_submit(&r.upload_ring, byte_count)
-	buffer := upload_ring_get_buffer(&r.upload_ring, submitted_slot)
-
-	// Step 4: Get surface texture
-	if rawptr(r.surface) == nil {
-		return false
-	}
-	texture, view, _ := r.backend.get_surface_texture(rawptr(r.surface))
-	if rawptr(view) == nil {
-		// Lost/Outdated/Timeout/Error → reconfigure and skip
-		if rawptr(texture) != nil {
+	texture, view, format := r.backend.get_surface_texture(rawptr(r.surface))
+	if rawptr(texture) == nil || rawptr(view) == nil ||
+		(format != .Undefined && r.format != .Undefined && format != r.format) {
+		if rawptr(texture) != nil || rawptr(view) != nil {
 			r.backend.release_surface_texture(texture, view)
 		}
 		if r.surface_w != 0 && r.surface_h != 0 {
 			r.backend.configure_surface(rawptr(r.surface), r.device, r.format, r.surface_w, r.surface_h)
 		}
+		frame.state = .Aborted
+		return frame, false
+	}
+	encoder := r.backend.create_command_encoder(r.device)
+	if rawptr(encoder) == nil {
+		r.backend.release_surface_texture(texture, view)
+		frame.state = .Aborted
+		return frame, false
+	}
+	frame.texture = texture
+	frame.view = view
+	frame.format = format
+	frame.encoder = encoder
+	frame.state = .Acquired
+	return frame, true
+}
+
+_renderer_surface_abort :: proc(r: ^Renderer, frame: ^Render_Frame_Transaction) {
+	if frame == nil || frame.state == .Released || frame.state == .Aborted {
+		return
+	}
+	if r != nil && r.backend != nil && !frame.command_released && frame.command_buffer != nil {
+		r.backend.release_command_buffer(frame.command_buffer)
+		frame.command_buffer = nil
+		frame.command_released = true
+	}
+	if r != nil && r.backend != nil && !frame.encoder_released && rawptr(frame.encoder) != nil {
+		r.backend.release_command_encoder(frame.encoder)
+		frame.encoder = gpu.Gpu_CommandEncoder(nil)
+		frame.encoder_released = true
+	}
+	if r != nil && r.backend != nil && !frame.upload_committed && frame.upload.reserved {
+		upload_ring_abort(&r.upload_ring, &frame.upload)
+	}
+	if r != nil && r.backend != nil && (rawptr(frame.texture) != nil || rawptr(frame.view) != nil) {
+		r.backend.release_surface_texture(frame.texture, frame.view)
+	}
+	frame.texture = gpu.Gpu_Texture(nil)
+	frame.view = gpu.Gpu_TextureView(nil)
+	frame.state = .Aborted
+}
+
+_renderer_surface_commit :: proc(r: ^Renderer, frame: ^Render_Frame_Transaction) -> bool {
+	if r == nil || frame == nil || frame.state != .Encoded {
+		_renderer_surface_abort(r, frame)
 		return false
 	}
+	cmd := r.backend.finish_command_buffer(frame.encoder)
+	r.backend.release_command_encoder(frame.encoder)
+	frame.encoder = gpu.Gpu_CommandEncoder(nil)
+	frame.encoder_released = true
+	if cmd == nil {
+		_renderer_surface_abort(r, frame)
+		return false
+	}
+	frame.command_buffer = cmd
+	if !r.backend.submit(r.queue, cmd) {
+		r.backend.release_command_buffer(cmd)
+		frame.command_buffer = nil
+		frame.command_released = true
+		_renderer_surface_abort(r, frame)
+		return false
+	}
+	if frame.upload.reserved && !frame.upload_committed {
+		upload_ring_commit(&r.upload_ring, &frame.upload)
+		frame.upload_committed = true
+	}
+	r.backend.release_command_buffer(cmd)
+	frame.command_buffer = nil
+	frame.command_released = true
+	frame.state = .Submitted
+	if !r.backend.present_surface(rawptr(r.surface)) {
+		_renderer_surface_abort(r, frame)
+		return false
+	}
+	frame.state = .Presented
+	r.backend.release_surface_texture(frame.texture, frame.view)
+	frame.texture = gpu.Gpu_Texture(nil)
+	frame.view = gpu.Gpu_TextureView(nil)
+	frame.state = .Released
+	return true
+}
 
-	// Step 5: Encode bg + glyph passes in a single render pass (clear black)
-	encoder := r.backend.create_command_encoder(r.device)
-	pass := r.backend.begin_render_pass(encoder, view, {0, 0, 0, 1}, .Clear)
-
-	r.backend.render_set_pipeline(pass, r.instances.bg_pipeline)
-	r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_bg)
-	r.backend.render_set_vertex_buffer(pass, 0, buffer, 0)
-	r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, bg_count)
-
-	glyph_offset := u64(bg_count) * instance.INSTANCE_STRIDE
-	r.backend.render_set_pipeline(pass, r.instances.glyph_pipeline)
-	r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_glyph)
-	r.backend.render_set_vertex_buffer(pass, 0, buffer, glyph_offset)
-	r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, glyph_count)
-
-	r.backend.end_render_pass(pass)
-	cmd := r.backend.finish_command_buffer(encoder)
-	r.backend.submit(r.queue, cmd)
-
-	// Step 6: Present + release
-	r.backend.present_surface(rawptr(r.surface))
-	r.backend.release_surface_texture(texture, view)
-
+_renderer_upload_instances :: proc(r: ^Renderer, base_count: u32, frame: ^Render_Frame_Transaction) -> bool {
+	if r == nil || frame == nil { return false }
+	count := u64(base_count)
+	cursor_count: u64 = 0
+	if r.cursor_staged { cursor_count = 1 }
+	total := count + cursor_count
+	byte_count := total * instance.INSTANCE_STRIDE
+	upload := upload_ring_begin(&r.upload_ring)
+	if !upload.reserved { return false }
+	frame.upload = upload
+	staging := upload_ring_get_staging(&r.upload_ring, upload)
+	if byte_count > u64(len(staging)) || count > u64(len(r.instances.instance_data)) {
+		upload_ring_abort(&r.upload_ring, &frame.upload)
+		return false
+	}
+	if count > 0 {
+		mem.copy(raw_data(staging[:int(count * instance.INSTANCE_STRIDE)]), raw_data(r.instances.instance_data), int(count * instance.INSTANCE_STRIDE))
+	}
+	frame.cursor_buffer = gpu.Gpu_Buffer(nil)
+	frame.cursor_offset = 0
+	if cursor_count > 0 {
+		slot := r.instances.max_instances - 1
+		if slot >= u32(len(r.instances.instance_data)) {
+			upload_ring_abort(&r.upload_ring, &frame.upload)
+			return false
+		}
+		offset := int(count * instance.INSTANCE_STRIDE)
+		mem.copy(raw_data(staging[offset:]), &r.instances.instance_data[slot], int(instance.INSTANCE_STRIDE))
+		frame.cursor_offset = u64(offset)
+	}
+	if !upload_ring_write(&r.upload_ring, &frame.upload, byte_count) {
+		upload_ring_abort(&r.upload_ring, &frame.upload)
+		return false
+	}
+	buffer := upload_ring_get_buffer(&r.upload_ring, frame.upload.slot)
+	if rawptr(buffer) == nil && total > 0 { return false }
+	frame.cursor_buffer = buffer
 	return true
 }
 
@@ -390,8 +710,8 @@ _prepare_instances :: proc(
 
 		codepoint, fg_packed, bg_packed, flags := render_cell_unpack(cells[idx])
 
-		x := f32(col) * cell_w
-		y := f32(row) * cell_h
+		x := r.pad_x + f32(col) * cell_w
+		y := r.pad_y + f32(row) * cell_h
 
 		// Skip fully empty cells (space with black background)
 		if codepoint == 0x20 && bg_packed == 0x0000 {
@@ -449,8 +769,8 @@ _prepare_instances_v2 :: proc(r: ^Renderer, lut: ^Style_LUT) -> (bg_count: u32, 
 		}
 		row := i32(idx) / cols
 		col := i32(idx) % cols
-		x := f32(col) * cell_w
-		y := f32(row) * cell_h
+		x := r.pad_x + f32(col) * cell_w
+		y := r.pad_y + f32(row) * cell_h
 
 		emit_bg, _ := render_cell_expand_instance(
 			cells[idx], lut, atlas, x, y, cell_w, cell_h,
@@ -469,8 +789,8 @@ _prepare_instances_v2 :: proc(r: ^Renderer, lut: ^Style_LUT) -> (bg_count: u32, 
 		}
 		row := i32(idx) / cols
 		col := i32(idx) % cols
-		x := f32(col) * cell_w
-		y := f32(row) * cell_h
+		x := r.pad_x + f32(col) * cell_w
+		y := r.pad_y + f32(row) * cell_h
 
 		_, emit_glyph := render_cell_expand_instance(
 			cells[idx], lut, atlas, x, y, cell_w, cell_h,
@@ -484,143 +804,210 @@ _prepare_instances_v2 :: proc(r: ^Renderer, lut: ^Style_LUT) -> (bg_count: u32, 
 	return bg_count, glyph_count
 }
 
-// _draw_instance_buffer presents one frame from an explicit instance buffer:
-// surface texture acquisition, bg + glyph passes in a single render pass
-// (clear black), submit, present, release.
-_draw_instance_buffer :: proc(r: ^Renderer, buffer: gpu.Gpu_Buffer, bg_count: u32, glyph_count: u32, glyph_offset: u64) -> bool {
-	// Step 4: Get surface texture
-	if rawptr(r.surface) == nil {
+// _draw_cursor_overlay appends the staged cursor draw to the active instance
+// render pass. It performs no upload, acquisition, submission, or present.
+_draw_cursor_overlay :: proc(r: ^Renderer, frame: ^Render_Frame_Transaction) -> bool {
+	if r == nil || frame == nil || !r.cursor_staged { return true }
+	if r.backend == nil || rawptr(frame.pass) == nil ||
+		rawptr(r.instances.bg_pipeline) == nil || rawptr(r.instances.bind_group_bg) == nil ||
+		rawptr(frame.cursor_buffer) == nil {
 		return false
 	}
-	texture, view, _ := r.backend.get_surface_texture(rawptr(r.surface))
-	if rawptr(view) == nil {
-		if rawptr(texture) != nil {
-			r.backend.release_surface_texture(texture, view)
-		}
-		if r.surface_w != 0 && r.surface_h != 0 {
-			r.backend.configure_surface(rawptr(r.surface), r.device, r.format, r.surface_w, r.surface_h)
-		}
-		return false
-	}
-
-	// Step 5: Encode bg + glyph passes in a single render pass (clear black)
-	encoder := r.backend.create_command_encoder(r.device)
-	pass := r.backend.begin_render_pass(encoder, view, {0, 0, 0, 1}, .Clear)
-
-	r.backend.render_set_pipeline(pass, r.instances.bg_pipeline)
-	r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_bg)
-	r.backend.render_set_vertex_buffer(pass, 0, buffer, 0)
-	r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, bg_count)
-
-	r.backend.render_set_pipeline(pass, r.instances.glyph_pipeline)
-	r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_glyph)
-	r.backend.render_set_vertex_buffer(pass, 0, buffer, glyph_offset)
-	r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, glyph_count)
-
-	r.backend.end_render_pass(pass)
-	cmd := r.backend.finish_command_buffer(encoder)
-	r.backend.submit(r.queue, cmd)
-
-	// Step 6: Present + release
-	r.backend.present_surface(rawptr(r.surface))
-	r.backend.release_surface_texture(texture, view)
-
+	r.backend.render_set_pipeline(frame.pass, r.instances.bg_pipeline)
+	r.backend.render_set_bind_group(frame.pass, 0, r.instances.bind_group_bg)
+	r.backend.render_set_vertex_buffer(frame.pass, 0, frame.cursor_buffer, frame.cursor_offset)
+	r.backend.render_draw(frame.pass, instance.QUAD_VERTEX_COUNT, 1)
 	return true
 }
 
-// renderer_frame_v2 executes one render frame through the V2 pipeline:
-// damage take + static-scene skip, LUT rebuild (when stale), then either the
-// dirty path (stable slots, offset writes, constant counts) or the legacy
-// full path (dense recompile + ring upload, disarms dirty).
-renderer_frame_v2 :: proc(r: ^Renderer, terminal: ^termgrid.Terminal, _: ^Compiled_Frame_V2, lut: ^Style_LUT) -> bool {
-	r.frame_count += 1
+_renderer_frame_published :: proc(r: ^Renderer, view: ^termgrid.Terminal_View = nil) {
+	if r == nil { return }
+	r.first_frame_pending = false
+	r.full_redraw_pending = false
+	r.cursor_staged = false
+	r.last_view = view
+	r.last_view_fingerprint = _renderer_view_fingerprint(view)
+	r.last_view_valid = true
+}
 
-	// Phase 12 frame top: drain worker completions into the atlas, then
-	// upload the atlas when the drain dirtied it — before the
-	// dirty/legacy branch so pop-in glyphs compile fresh this frame.
-	raster_drain_completions(&r.raster, &r.atlas, &r.shape_cache, &r.fallback, &r.fallback_counters)
-	if r.atlas.gpu_dirty {
+// _draw_instance_buffer encodes bg, glyph, and optional cursor draws into the
+// transaction's single render pass. It does not finish, submit, present, or
+// release the acquired surface.
+_draw_instance_buffer :: proc(
+	r: ^Renderer,
+	frame: ^Render_Frame_Transaction,
+	buffer: gpu.Gpu_Buffer,
+	bg_count: u32,
+	glyph_count: u32,
+	glyph_offset: u64,
+) -> bool {
+	if r == nil || frame == nil || frame.state != .Acquired || rawptr(frame.encoder) == nil {
+		return false
+	}
+	pass := r.backend.begin_render_pass(frame.encoder, frame.view, _renderer_theme_clear_color(r.theme), .Clear)
+	if rawptr(pass) == nil { return false }
+	frame.pass = pass
+	ok := true
+	if bg_count > 0 || glyph_count > 0 {
+		ok = rawptr(buffer) != nil && rawptr(r.instances.bg_pipeline) != nil && rawptr(r.instances.glyph_pipeline) != nil &&
+			rawptr(r.instances.bind_group_bg) != nil && rawptr(r.instances.bind_group_glyph) != nil
+	}
+	if ok {
+		r.backend.render_set_pipeline(pass, r.instances.bg_pipeline)
+		r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_bg)
+		r.backend.render_set_vertex_buffer(pass, 0, buffer, 0)
+		r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, bg_count)
+
+		r.backend.render_set_pipeline(pass, r.instances.glyph_pipeline)
+		r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_glyph)
+		r.backend.render_set_vertex_buffer(pass, 0, buffer, glyph_offset)
+		r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, glyph_count)
+	}
+	if ok { ok = _draw_cursor_overlay(r, frame) }
+	r.backend.end_render_pass(pass)
+	frame.pass = gpu.Gpu_RenderPassEncoder(nil)
+	if !ok { return false }
+	frame.state = .Encoded
+	return true
+}
+
+// renderer_prepare_frame owns the single async completion drain and atlas
+// upload for the current frame. The selected strategy consumes the prepared
+// state without draining again.
+renderer_prepare_frame :: proc(r: ^Renderer, terminal: ^termgrid.Terminal) -> bool {
+	if r == nil || terminal == nil { return false }
+	applied := raster_drain_completions(&r.raster, &r.atlas, &r.shape_cache, terminal, &r.fallback, &r.fallback_counters)
+	atlas_changed := r.atlas.gpu_dirty
+	if atlas_changed {
 		atlas_upload_gpu(&r.atlas, r.backend, r.device, r.queue)
+		r.full_redraw_pending = true
 	}
-
-	// Take damage journal
-	journal := termgrid.terminal_take_damage(terminal)
-	defer termgrid.damage_journal_destroy(&journal)
-
-	// Check if there is any damage
-	has_damage := false
-	for i in 0..<len(journal.dirty_rows) {
-		if journal.dirty_rows[i].full || journal.dirty_rows[i].span_count > 0 {
-			has_damage = true
-			break
-		}
+	if applied > 0 {
+		r.full_redraw_pending = true
 	}
-	if len(journal.scroll_ops) > 0 {
-		has_damage = true
+	if applied > 0 && r.dirty.armed {
+		r.dirty.armed = false
 	}
+	r.frame_prepared = true
+	return applied > 0 || atlas_changed
+}
 
-	// Static scene optimization: skip frame if no damage
-	if !has_damage && r.last_dirty {
-		// First clean frame after dirty: render once more to ensure consistency
+_renderer_frame_failed :: proc(
+	r: ^Renderer,
+	terminal: ^termgrid.Terminal,
+	journal: ^termgrid.Damage_Journal,
+	frame: ^Render_Frame_Transaction,
+	strategy: Render_Strategy,
+) -> bool {
+	_renderer_surface_abort(r, frame)
+	if terminal != nil && journal != nil {
+		termgrid.damage_requeue_journal(&terminal.damage, journal)
+	}
+	if strategy != .Instance {
+		r.fallback_pending = true
+	}
+	return false
+}
+
+// _renderer_frame_unavailable preserves the nil/CPU fallback and restores the
+// consumed journal because no visible publication occurred.
+_renderer_frame_unavailable :: proc(r: ^Renderer, terminal: ^termgrid.Terminal, journal: ^termgrid.Damage_Journal, strategy: Render_Strategy) -> bool {
+	if terminal != nil && journal != nil {
+		termgrid.damage_requeue_journal(&terminal.damage, journal)
+	}
+	if strategy != .Instance {
+		r.fallback_pending = true
+	}
+	return false
+}
+
+_renderer_frame_v2_journal :: proc(
+	r: ^Renderer,
+	terminal: ^termgrid.Terminal,
+	journal: ^termgrid.Damage_Journal,
+	lut: ^Style_LUT,
+	view: ^termgrid.Terminal_View = nil,
+	view_changed: bool = false,
+) -> bool {
+	has_damage := _renderer_journal_has_damage(journal)
+	force_full := view_changed || (view != nil && (view.scrollback_offset != 0 || view.selection.active)) || len(journal.scroll_ops) > 0
+	if !has_damage && force_full {
+		r.last_dirty = true
+	} else if !has_damage && r.last_dirty {
 		r.last_dirty = false
 	} else if !has_damage {
-		// Skip frame entirely
 		return false
 	} else {
 		r.last_dirty = true
 	}
-
-	if r.backend == nil || rawptr(r.device) == nil || rawptr(r.queue) == nil {
-		return false
+	if r.backend == nil || rawptr(r.device) == nil || rawptr(r.queue) == nil ||
+		rawptr(r.instances.bg_pipeline) == nil || rawptr(r.instances.glyph_pipeline) == nil || lut == nil {
+		return _renderer_frame_unavailable(r, terminal, journal, .Instance)
 	}
-	if rawptr(r.instances.bg_pipeline) == nil || rawptr(r.instances.glyph_pipeline) == nil {
-		return false
-	}
-
-	// Rebuild the LUT when the style table grew since the last rebuild.
-	if terminal.grid.style_table.count != lut.count {
+	if _style_lut_needs_rebuild(lut, &terminal.grid.style_table) {
 		style_lut_rebuild(lut, &terminal.grid.style_table)
 	}
 
-	// Dirty path: persistent buffer + offset writes, constant counts (N, N).
-	if len(journal.scroll_ops) == 0 && r.dirty.mirror != nil {
+	if !force_full && len(journal.scroll_ops) == 0 && r.dirty.mirror != nil && !r.cursor_staged {
 		if !r.dirty.armed {
 			dirty_upload_rebase(&r.dirty, r, lut)
 		}
 		ranges: [DIRTY_UPLOAD_MAX_RANGES]Dirty_Upload_Range
-		_, _, fell_back := dirty_upload_frame(&r.dirty, r, terminal, &journal, lut, &ranges)
+		_, _, fell_back := dirty_upload_frame(&r.dirty, r, terminal, journal, lut, &ranges)
 		if !fell_back {
 			n := u32(int(r.rows) * int(r.cols))
-			return _draw_instance_buffer(r, r.dirty.buffer, n, n, u64(n) * instance.INSTANCE_STRIDE)
+			frame, ok := _renderer_surface_begin(r)
+			if !ok { return _renderer_frame_failed(r, terminal, journal, &frame, .Instance) }
+			if !_draw_instance_buffer(r, &frame, r.dirty.buffer, n, n, u64(n) * instance.INSTANCE_STRIDE) {
+				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+			}
+			if !_renderer_surface_commit(r, &frame) {
+				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+			}
+			_renderer_frame_published(r)
+			return true
 		}
 	}
 
-	// Legacy full path (dense recompile + ring upload). Disarms dirty; the
-	// next clean frame rebases before returning to the dirty path.
 	r.dirty.armed = false
-
-	// Step 1: Compile full grid → persistent V2 frame.
-	render_compile_full_v2(&r.compiled_v2, terminal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster)
-
-	// Step 2: Prepare instance data (dense).
+	render_compile_full_v2(&r.compiled_v2, terminal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster, view)
 	bg_count, glyph_count := _prepare_instances_v2(r, lut)
-
-	// Step 3: Upload instance data via ring buffer (CapacityClamp on overflow).
-	total := u64(bg_count + glyph_count)
-	byte_count := total * instance.INSTANCE_STRIDE
-	staging := upload_ring_get_staging(&r.upload_ring)
-	copy_size := byte_count
-	if copy_size > u64(len(staging)) {
-		copy_size = u64(len(staging))
+	frame, ok := _renderer_surface_begin(r)
+	if !ok { return _renderer_frame_failed(r, terminal, journal, &frame, .Instance) }
+	if !_renderer_upload_instances(r, bg_count + glyph_count, &frame) {
+		return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
 	}
-	if copy_size > 0 && len(r.instances.instance_data) > 0 {
-		mem.copy(raw_data(staging), raw_data(r.instances.instance_data), int(copy_size))
+	if !_draw_instance_buffer(r, &frame, frame.cursor_buffer, bg_count, glyph_count, u64(bg_count) * instance.INSTANCE_STRIDE) {
+		return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
 	}
-	submitted_slot := upload_ring_current_slot(&r.upload_ring)
-	upload_ring_submit(&r.upload_ring, byte_count)
-	buffer := upload_ring_get_buffer(&r.upload_ring, submitted_slot)
+	if !_renderer_surface_commit(r, &frame) {
+		return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+	}
+	_renderer_frame_published(r, view)
+	return true
+}
 
-	return _draw_instance_buffer(r, buffer, bg_count, glyph_count, u64(bg_count) * instance.INSTANCE_STRIDE)
+// renderer_frame_v2 takes exactly one journal and delegates publication to
+// the journal-owned transaction helper.
+renderer_frame_v2 :: proc(
+	r: ^Renderer,
+	terminal: ^termgrid.Terminal,
+	_: ^Compiled_Frame_V2,
+	lut: ^Style_LUT,
+	view: ^termgrid.Terminal_View = nil,
+) -> bool {
+	view_changed := _renderer_view_changed(r, view)
+	if !_renderer_has_pending_work(r, terminal, view) {
+		if r != nil { r.last_dirty = false }
+		return false
+	}
+	if !r.frame_prepared { renderer_prepare_frame(r, terminal) }
+	_renderer_force_pending_redraw(r, terminal)
+	r.frame_prepared = false
+	r.frame_count += 1
+	journal := termgrid.terminal_take_damage(terminal)
+	defer termgrid.damage_journal_destroy(&journal)
+	return _renderer_frame_v2_journal(r, terminal, &journal, lut, view, view_changed)
 }
 
 // renderer_set_strategy selects the frame path. Switching to Compute_Tiles
@@ -634,222 +1021,198 @@ renderer_set_strategy :: proc(r: ^Renderer, s: Render_Strategy) {
 	}
 }
 
-// renderer_frame_compute executes one frame through the Phase 14 tiled
-// compute path: damage take + static-scene skip, LUT rebuild (when stale),
-// scroll → full compile + mark_all else dirty compile + mark_damage,
-// dirty cell + tile-list (+ LUT when rebuilt) upload, one dispatch, blit.
-// Empty damage skips with no blit. Any unavailable/nil compute state
-// delegates to renderer_frame_v2 verbatim (instance fallback, never latches).
-renderer_frame_compute :: proc(r: ^Renderer, terminal: ^termgrid.Terminal, lut: ^Style_LUT) -> bool {
+// _renderer_frame_compute_journal owns one journal and one shared encoder for
+// dispatch, blit, optional cursor composition, and publication.
+_renderer_frame_compute_journal :: proc(r: ^Renderer, terminal: ^termgrid.Terminal, journal: ^termgrid.Damage_Journal, lut: ^Style_LUT) -> bool {
 	if r.strategy != .Compute_Tiles || !r.compute_tiles.available || r.tile_map.bits == nil {
-		return renderer_frame_v2(r, terminal, nil, lut)
+		return _renderer_frame_v2_journal(r, terminal, journal, lut)
 	}
-	r.frame_count += 1
-
-	// Atlas drain + upload BEFORE dispatch (same order as frame_v2).
-	raster_drain_completions(&r.raster, &r.atlas, &r.shape_cache, &r.fallback, &r.fallback_counters)
-	if r.atlas.gpu_dirty {
-		atlas_upload_gpu(&r.atlas, r.backend, r.device, r.queue)
-	}
-
-	// Take damage journal
-	journal := termgrid.terminal_take_damage(terminal)
-	defer termgrid.damage_journal_destroy(&journal)
-
-	// Check if there is any damage
-	has_damage := false
-	for i in 0..<len(journal.dirty_rows) {
-		if journal.dirty_rows[i].full || journal.dirty_rows[i].span_count > 0 {
-			has_damage = true
-			break
-		}
-	}
-	if len(journal.scroll_ops) > 0 {
-		has_damage = true
-	}
-
-	// Static scene optimization: skip frame if no damage
-	if !has_damage && r.last_dirty {
-		r.last_dirty = false
-	} else if !has_damage {
-		return false
-	} else {
-		r.last_dirty = true
-	}
-
-	if r.backend == nil || rawptr(r.device) == nil || rawptr(r.queue) == nil {
+	if !_renderer_journal_has_damage(journal) {
 		return false
 	}
-
-	// Rebuild the LUT when the style table grew since the last rebuild.
-	lut_rebuilt := terminal.grid.style_table.count != lut.count
-	if lut_rebuilt {
-		style_lut_rebuild(lut, &terminal.grid.style_table)
+	r.last_dirty = true
+	if r.backend == nil || rawptr(r.device) == nil || rawptr(r.queue) == nil || lut == nil {
+		return _renderer_frame_unavailable(r, terminal, journal, .Compute_Tiles)
 	}
-
-	// Scroll ops: full rebase, no span mapping.
+	lut_rebuilt := _style_lut_needs_rebuild(lut, &terminal.grid.style_table)
+	if lut_rebuilt { style_lut_rebuild(lut, &terminal.grid.style_table) }
+	tile.tile_map_clear(&r.tile_map)
 	if len(journal.scroll_ops) > 0 {
 		render_compile_full_v2(&r.compiled_v2, terminal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster)
 		tile.tile_map_mark_all(&r.tile_map)
 	} else {
-		render_compile_v2(&r.compiled_v2, terminal, &journal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster)
-		count, _ := tile.tile_map_mark_damage(&r.tile_map, &journal)
+		render_compile_v2(&r.compiled_v2, terminal, journal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster)
+		count, _ := tile.tile_map_mark_damage(&r.tile_map, journal)
 		if count == 0 {
-			return false
+			return _renderer_frame_failed(r, terminal, journal, nil, .Compute_Tiles)
 		}
 	}
-
-	// Dirty cell ranges + tile list (+ LUT when rebuilt), then one dispatch.
 	lut_words := ([^]u32)(rawptr(&lut.fg_r5g6b5[0]))[:tile.TILE_LUT_WORDS]
-	bytes := tile.compute_tile_upload_cells(&r.compute_tiles, &r.tile_map, r.compiled_v2.cells, lut_words, lut_rebuilt)
-	_ = bytes
-	dispatches, _ := tile.compute_tile_dispatch(&r.compute_tiles, &r.tile_map)
+	_ = tile.compute_tile_upload_cells(&r.compute_tiles, &r.tile_map, r.compiled_v2.cells, lut_words, lut_rebuilt)
+	frame, ok := _renderer_surface_begin(r)
+	if !ok { return _renderer_frame_failed(r, terminal, journal, &frame, .Compute_Tiles) }
+	if r.cursor_staged && !_renderer_upload_instances(r, 0, &frame) {
+		return _renderer_frame_failed(r, terminal, journal, &frame, .Compute_Tiles)
+	}
+	dispatches, _ := tile.compute_tile_dispatch(&r.compute_tiles, &r.tile_map, frame.encoder)
 	if dispatches == 0 {
-		tile.tile_map_clear(&r.tile_map)
-		return false
+		return _renderer_frame_failed(r, terminal, journal, &frame, .Compute_Tiles)
 	}
-
-	// Acquire surface (same discipline as _draw_instance_buffer).
-	if rawptr(r.surface) == nil {
-		tile.tile_map_clear(&r.tile_map)
-		return false
+	cursor_pipeline := gpu.Gpu_RenderPipeline(nil)
+	cursor_bind_group := gpu.Gpu_BindGroup(nil)
+	cursor_buffer := gpu.Gpu_Buffer(nil)
+	cursor_offset: u64 = 0
+	if r.cursor_staged {
+		cursor_pipeline = r.instances.bg_pipeline
+		cursor_bind_group = r.instances.bind_group_bg
+		cursor_buffer = frame.cursor_buffer
+		cursor_offset = frame.cursor_offset
 	}
-	texture, view, _ := r.backend.get_surface_texture(rawptr(r.surface))
-	if rawptr(view) == nil {
-		if rawptr(texture) != nil {
-			r.backend.release_surface_texture(texture, view)
-		}
-		if r.surface_w != 0 && r.surface_h != 0 {
-			r.backend.configure_surface(rawptr(r.surface), r.device, r.format, r.surface_w, r.surface_h)
-		}
-		tile.tile_map_clear(&r.tile_map)
-		return false
+	if !tile.compute_tile_blit(&r.compute_tiles, frame.view, frame.encoder, cursor_pipeline, cursor_bind_group, cursor_buffer, cursor_offset) {
+		return _renderer_frame_failed(r, terminal, journal, &frame, .Compute_Tiles)
 	}
-
-	tile.compute_tile_blit(&r.compute_tiles, view)
+	frame.state = .Encoded
+	if !_renderer_surface_commit(r, &frame) {
+		return _renderer_frame_failed(r, terminal, journal, &frame, .Compute_Tiles)
+	}
+	_renderer_frame_published(r)
 	tile.tile_map_clear(&r.tile_map)
-
-	r.backend.present_surface(rawptr(r.surface))
-	r.backend.release_surface_texture(texture, view)
-
 	return true
 }
 
-// renderer_frame_fullscreen executes one frame through the Phase 15
-// fullscreen fragment path: damage take + static-scene skip, LUT rebuild
-// (when stale), scroll → full compile else dirty compile, full grid + LUT
-// upload, one fullscreen draw. Empty damage skips with no upload and no
-// draw. Any unavailable/nil fullscreen state delegates to
-// renderer_frame_v2 verbatim (instance fallback, never latches).
-renderer_frame_fullscreen :: proc(r: ^Renderer, terminal: ^termgrid.Terminal, lut: ^Style_LUT) -> bool {
-	if r.strategy != .Fullscreen || !r.fullscreen.available {
-		return renderer_frame_v2(r, terminal, nil, lut)
+// renderer_frame_compute takes exactly one journal before entering the
+// compute journal helper.
+renderer_frame_compute :: proc(r: ^Renderer, terminal: ^termgrid.Terminal, lut: ^Style_LUT) -> bool {
+	if !_renderer_has_pending_work(r, terminal) {
+		if r != nil { r.last_dirty = false }
+		return false
 	}
+	if !r.frame_prepared { renderer_prepare_frame(r, terminal) }
+	_renderer_force_pending_redraw(r, terminal)
+	r.frame_prepared = false
 	r.frame_count += 1
-
-	// Atlas drain + upload BEFORE the fullscreen draw (same order as frame_v2).
-	raster_drain_completions(&r.raster, &r.atlas, &r.shape_cache, &r.fallback, &r.fallback_counters)
-	if r.atlas.gpu_dirty {
-		atlas_upload_gpu(&r.atlas, r.backend, r.device, r.queue)
-	}
-
-	// Take damage journal
 	journal := termgrid.terminal_take_damage(terminal)
 	defer termgrid.damage_journal_destroy(&journal)
+	return _renderer_frame_compute_journal(r, terminal, &journal, lut)
+}
 
-	// Check if there is any damage
-	has_damage := false
-	for i in 0..<len(journal.dirty_rows) {
-		if journal.dirty_rows[i].full || journal.dirty_rows[i].span_count > 0 {
-			has_damage = true
-			break
-		}
+// _renderer_frame_fullscreen_journal owns one journal and one shared encoder
+// for the fullscreen shade, optional cursor composition, and publication.
+_renderer_frame_fullscreen_journal :: proc(r: ^Renderer, terminal: ^termgrid.Terminal, journal: ^termgrid.Damage_Journal, lut: ^Style_LUT) -> bool {
+	if r.strategy != .Fullscreen || !r.fullscreen.available {
+		return _renderer_frame_v2_journal(r, terminal, journal, lut)
 	}
-	if len(journal.scroll_ops) > 0 {
-		has_damage = true
-	}
-
-	// Static scene optimization: skipped frames write nothing.
-	if !has_damage {
+	if !_renderer_journal_has_damage(journal) {
 		r.last_dirty = false
 		return false
 	}
 	r.last_dirty = true
-
-	if r.backend == nil || rawptr(r.device) == nil || rawptr(r.queue) == nil {
-		return false
+	if r.backend == nil || rawptr(r.device) == nil || rawptr(r.queue) == nil || lut == nil {
+		return _renderer_frame_unavailable(r, terminal, journal, .Fullscreen)
 	}
-
-	// Rebuild the LUT when the style table grew since the last rebuild.
-	lut_rebuilt := terminal.grid.style_table.count != lut.count
-	if lut_rebuilt {
-		style_lut_rebuild(lut, &terminal.grid.style_table)
-	}
-
-	// Scroll ops: full rebase, no span mapping.
+	lut_rebuilt := _style_lut_needs_rebuild(lut, &terminal.grid.style_table)
+	if lut_rebuilt { style_lut_rebuild(lut, &terminal.grid.style_table) }
 	if len(journal.scroll_ops) > 0 {
 		render_compile_full_v2(&r.compiled_v2, terminal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster)
 	} else {
-		render_compile_v2(&r.compiled_v2, terminal, &journal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster)
+		render_compile_v2(&r.compiled_v2, terminal, journal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster)
 	}
-
-	// Full grid re-upload (+ LUT when rebuilt), no ranges/offsets.
 	cells := transmute([]u64)r.compiled_v2.cells
 	lut_words := ([^]u32)(rawptr(&lut.fg_r5g6b5[0]))[:fullscreen.FULLSCREEN_LUT_WORDS]
-	bytes := fullscreen.fullscreen_upload_grid(&r.fullscreen, cells, lut_words, lut_rebuilt)
-	_ = bytes
-
-	// Acquire surface (same discipline as _draw_instance_buffer).
-	if rawptr(r.surface) == nil {
-		return false
+	_ = fullscreen.fullscreen_upload_grid(&r.fullscreen, cells, lut_words, lut_rebuilt)
+	frame, ok := _renderer_surface_begin(r)
+	if !ok { return _renderer_frame_failed(r, terminal, journal, &frame, .Fullscreen) }
+	if r.cursor_staged && !_renderer_upload_instances(r, 0, &frame) {
+		return _renderer_frame_failed(r, terminal, journal, &frame, .Fullscreen)
 	}
-	texture, view, _ := r.backend.get_surface_texture(rawptr(r.surface))
-	if rawptr(view) == nil {
-		if rawptr(texture) != nil {
-			r.backend.release_surface_texture(texture, view)
-		}
-		if r.surface_w != 0 && r.surface_h != 0 {
-			r.backend.configure_surface(rawptr(r.surface), r.device, r.format, r.surface_w, r.surface_h)
-		}
-		return false
+	cursor_pipeline := gpu.Gpu_RenderPipeline(nil)
+	cursor_bind_group := gpu.Gpu_BindGroup(nil)
+	cursor_buffer := gpu.Gpu_Buffer(nil)
+	cursor_offset: u64 = 0
+	if r.cursor_staged {
+		cursor_pipeline = r.instances.bg_pipeline
+		cursor_bind_group = r.instances.bind_group_bg
+		cursor_buffer = frame.cursor_buffer
+		cursor_offset = frame.cursor_offset
 	}
-
-	if !fullscreen.fullscreen_draw(&r.fullscreen, view) {
-		r.backend.release_surface_texture(texture, view)
-		return false
+	if !fullscreen.fullscreen_draw(&r.fullscreen, frame.view, frame.encoder, cursor_pipeline, cursor_bind_group, cursor_buffer, cursor_offset) {
+		return _renderer_frame_failed(r, terminal, journal, &frame, .Fullscreen)
 	}
-
-	r.backend.present_surface(rawptr(r.surface))
-	r.backend.release_surface_texture(texture, view)
-
+	frame.state = .Encoded
+	if !_renderer_surface_commit(r, &frame) {
+		return _renderer_frame_failed(r, terminal, journal, &frame, .Fullscreen)
+	}
+	_renderer_frame_published(r)
 	return true
 }
 
-// renderer_frame_auto executes one frame through the Phase 16 adaptive
-// path: a read-only pre-scan of the live damage journal skips empty frames
-// with no record and no mutation (frame_count/last_dirty stay owned by the
-// delegated procs, so there is no double-toggle); otherwise the strategy is
-// selected, dispatched through the existing frame procs unchanged, timed
-// with platform_now, and recorded to the executed strategy only when the
-// frame completes (true) with ns > 0. Skips and failed frames record
-// nothing and never poison the averages.
+// renderer_frame_fullscreen takes exactly one journal before entering the
+// fullscreen journal helper.
+renderer_frame_fullscreen :: proc(r: ^Renderer, terminal: ^termgrid.Terminal, lut: ^Style_LUT) -> bool {
+	if !_renderer_has_pending_work(r, terminal) {
+		if r != nil { r.last_dirty = false }
+		return false
+	}
+	if !r.frame_prepared { renderer_prepare_frame(r, terminal) }
+	_renderer_force_pending_redraw(r, terminal)
+	r.frame_prepared = false
+	r.frame_count += 1
+	journal := termgrid.terminal_take_damage(terminal)
+	defer termgrid.damage_journal_destroy(&journal)
+	return _renderer_frame_fullscreen_journal(r, terminal, &journal, lut)
+}
+
+// renderer_frame_auto executes one adaptive frame. Strategy selection reads
+// live damage, then exactly one journal is taken and routed to the selected
+// journal-owned helper. Runtime sibling failure is deferred to the next frame
+// through fallback_pending.
 renderer_frame_auto :: proc(r: ^Renderer, terminal: ^termgrid.Terminal, lut: ^Style_LUT) -> bool {
+	if !_renderer_has_pending_work(r, terminal) {
+		r.last_dirty = false
+		return false
+	}
+	renderer_prepare_frame(r, terminal)
+	_renderer_force_pending_redraw(r, terminal)
 	inp := strategy_estimate_inputs(&terminal.damage, r.rows, r.cols)
 	if inp.dirty_cells <= 0 && !inp.scroll {
+		r.frame_prepared = false
 		return false
 	}
 
 	chosen := strategy_select(inp, &r.strategy_state, r.compute_tiles.available, r.fullscreen.available)
+	if r.fallback_pending {
+		chosen = .Instance
+		r.fallback_pending = false
+	}
 	r.strategy = chosen
+	if !r.strategy_state.pinned {
+		if chosen == .Compute_Tiles && r.strategy_state.last != .Compute_Tiles {
+			tile.tile_map_mark_all(&r.tile_map)
+		} else if chosen == .Instance && r.strategy_state.last != .Instance {
+			r.dirty.armed = false
+		}
+	}
+	journal := termgrid.terminal_take_damage(terminal)
+	defer termgrid.damage_journal_destroy(&journal)
+	r.frame_prepared = false
+	r.frame_count += 1
 	start := platform.platform_now()
 	ok := false
 	switch chosen {
 	case .Instance:
-		ok = renderer_frame_v2(r, terminal, nil, lut)
+		ok = _renderer_frame_v2_journal(r, terminal, &journal, lut)
 	case .Compute_Tiles:
-		ok = renderer_frame_compute(r, terminal, lut)
+		if r.compute_tiles.available && r.tile_map.bits != nil {
+			ok = _renderer_frame_compute_journal(r, terminal, &journal, lut)
+		} else {
+			ok = _renderer_frame_v2_journal(r, terminal, &journal, lut)
+		}
 	case .Fullscreen:
-		ok = renderer_frame_fullscreen(r, terminal, lut)
+		if r.fullscreen.available {
+			ok = _renderer_frame_fullscreen_journal(r, terminal, &journal, lut)
+		} else {
+			ok = _renderer_frame_v2_journal(r, terminal, &journal, lut)
+		}
 	}
 	end := platform.platform_now()
 	if ok {
@@ -880,6 +1243,9 @@ renderer_strategy_unpin :: proc(r: ^Renderer) {
 
 // renderer_resize handles window resize events.
 renderer_resize :: proc(r: ^Renderer, new_width_px: u32, new_height_px: u32) {
+	if !_renderer_wait_for_gpu(r) {
+		return
+	}
 	r.screen_w = f32(new_width_px)
 	r.screen_h = f32(new_height_px)
 	r.surface_w = new_width_px
@@ -902,17 +1268,22 @@ renderer_resize :: proc(r: ^Renderer, new_width_px: u32, new_height_px: u32) {
 		tw = tile.TILE_W_DEFAULT
 		th = tile.TILE_H_DEFAULT
 	}
-	if tile.compute_tile_resize(&r.compute_tiles, r.rows, r.cols, r.cell_width, r.cell_height, r.format) {
-		if tile.tile_map_resize(&r.tile_map, r.rows, r.cols, tw, th) {
-			tile.tile_map_mark_all(&r.tile_map)
+	if r.compute_tiles.available {
+		if tile.compute_tile_resize(&r.compute_tiles, r.rows, r.cols, r.cell_width, r.cell_height, r.pad_x, r.pad_y, r.screen_w, r.screen_h, r.format) {
+			if tile.tile_map_resize(&r.tile_map, r.rows, r.cols, tw, th) {
+				tile.tile_map_mark_all(&r.tile_map)
+			}
+		} else {
+			r.compute_tiles.available = false
 		}
-	} else {
-		r.compute_tiles.available = false
 	}
 	// Phase 15: rewrite fullscreen params / recreate the grid buffer on
 	// geometry change. Resize failure disables fullscreen (fallback); the
 	// flag never latches.
-	if !fullscreen.fullscreen_resize(&r.fullscreen, r.rows, r.cols, r.cell_width, r.cell_height, r.format) {
-		r.fullscreen.available = false
+	if r.fullscreen.available {
+		if !fullscreen.fullscreen_resize(&r.fullscreen, r.rows, r.cols, r.cell_width, r.cell_height, r.pad_x, r.pad_y, r.format) {
+			r.fullscreen.available = false
+		}
 	}
+	r.full_redraw_pending = true
 }

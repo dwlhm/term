@@ -27,6 +27,8 @@ _test_lut :: proc() -> render.Style_LUT {
 	lut.bg_r5g6b5[0] = render.color_to_r5g6b5(0xFF000000)
 	lut.fg_r5g6b5[1] = render.color_to_r5g6b5(0xFFFF0000)
 	lut.bg_r5g6b5[1] = render.color_to_r5g6b5(0xFF0000FF)
+	lut.selection_fg_r5g6b5 = render.color_to_r5g6b5(0xFF00FF00)
+	lut.selection_bg_r5g6b5 = render.color_to_r5g6b5(0xFF663399)
 	lut.count = 2
 	return lut
 }
@@ -191,6 +193,62 @@ test_empty_skip :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_selected_cflag_overrides_lut_colors :: proc(t: ^testing.T) {
+	lut := _test_lut()
+	atlas := _test_atlas()
+	bg, glyph: instance.Instance_Data
+
+	selected := render.render_cell_pack_v2(
+		0x41, 1, render.RENDER_CELL_V2_WIDTH_NARROW,
+		render.RENDER_CELL_V2_CFLAG_SELECTED,
+		render.RENDER_CELL_V2_SLOT_UNRESOLVED,
+	)
+	_, _, _, cflags, _ := render.render_cell_unpack_v2(selected)
+	testing.expect(t, cflags & render.RENDER_CELL_V2_CFLAG_SELECTED != 0, "selected cflag must round-trip")
+	emit_bg, emit_glyph := render.render_cell_expand_instance(selected, &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
+	testing.expect(t, emit_bg && emit_glyph, "selected printable cell must emit both instances")
+	br, bgc, bb := instance.unpack_r5g6b5(lut.selection_bg_r5g6b5)
+	fr, fgc, fb := instance.unpack_r5g6b5(lut.selection_fg_r5g6b5)
+	testing.expect(t, bg.r == br && bg.g == bgc && bg.b == bb, "selection bg must override style bg")
+	testing.expect(t, glyph.r == fr && glyph.g == fgc && glyph.b == fb, "selection fg must override style fg")
+
+	continuation := render.render_cell_pack_v2(
+		0, 1, render.RENDER_CELL_V2_WIDTH_CONTINUATION,
+		render.RENDER_CELL_V2_CFLAG_WIDE_CONT | render.RENDER_CELL_V2_CFLAG_SELECTED,
+		render.RENDER_CELL_V2_SLOT_UNRESOLVED,
+	)
+	emit_bg, emit_glyph = render.render_cell_expand_instance(continuation, &lut, &atlas, 8, 0, 8, 16, &bg, &glyph)
+	testing.expect(t, !emit_bg && !emit_glyph, "selected continuation must preserve wide skip semantics")
+}
+
+@(test)
+test_compiler_view_marks_selection :: proc(t: ^testing.T) {
+	term: termgrid.Terminal
+	termgrid.terminal_init(&term, 1, 2)
+	defer termgrid.terminal_destroy(&term)
+	termgrid.terminal_put_char(&term, 'A')
+
+	view := termgrid.Terminal_View{
+		selection = termgrid.Terminal_Selection{
+			active = true,
+			anchor = termgrid.Terminal_Point{row = 0, col = 0},
+			focus = termgrid.Terminal_Point{row = 0, col = 0},
+		},
+	}
+	frame: render.Compiled_Frame_V2
+	render.render_compiler_init_v2(&frame, 1, 2)
+	defer render.render_compiler_destroy_v2(&frame)
+	testing.expect(t, termgrid.terminal_view_selection_contains(&term, &view, termgrid.Terminal_Point{row = 0, col = 0}), "view selection must contain live cell")
+	testing.expect_value(t, termgrid.terminal_view_document_row(&term, &view, 0), 0)
+	direct := render.render_cell_from_semantic(termgrid.terminal_view_get_cell(&term, &view, 0, 0), true)
+	_, _, _, direct_flags, _ := render.render_cell_unpack_v2(direct)
+	testing.expect(t, direct_flags & render.RENDER_CELL_V2_CFLAG_SELECTED != 0, "direct selected pack must mark the cell")
+	render.render_compile_full_v2(&frame, &term, nil, nil, nil, nil, nil, &view)
+	_, _, _, cflags, _ := render.render_cell_unpack_v2(frame.cells[0])
+	testing.expect(t, cflags & render.RENDER_CELL_V2_CFLAG_SELECTED != 0, "view selection must mark the compiled cell")
+}
+
+@(test)
 test_soa_aos_equivalence :: proc(t: ^testing.T) {
 	lut := _test_lut()
 	atlas := _test_atlas()
@@ -237,4 +295,10 @@ test_lut_rebuild_parity :: proc(t: ^testing.T) {
 		testing.expect_value(t, lut.fg_r5g6b5[i], render.color_to_r5g6b5(style.fg))
 		testing.expect_value(t, lut.bg_r5g6b5[i], render.color_to_r5g6b5(style.bg))
 	}
+
+	table.theme.selection_foreground = 0xFF123456
+	table.theme.selection_background = 0xFF654321
+	render.style_lut_rebuild(&lut, &table)
+	testing.expect_value(t, lut.selection_fg_r5g6b5, render.color_to_r5g6b5(table.theme.selection_foreground))
+	testing.expect_value(t, lut.selection_bg_r5g6b5, render.color_to_r5g6b5(table.theme.selection_background))
 }

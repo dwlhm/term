@@ -10,6 +10,7 @@ package render
 // checks for pinned codepoints.
 
 import "base:runtime"
+import "core:math"
 import "vendor:stb/truetype"
 import "gpu"
 import termgrid "../terminal"
@@ -18,7 +19,7 @@ import termgrid "../terminal"
 ATLAS_SLOT_COUNT :: 512
 
 // ATLAS_GLYPH_SIZE is the pixel dimensions of each glyph cell (width and height).
-ATLAS_GLYPH_SIZE :: 16
+ATLAS_GLYPH_SIZE :: 64
 
 // ATLAS_COLS is the number of glyph columns in the atlas texture.
 ATLAS_COLS :: 16
@@ -49,6 +50,8 @@ Atlas :: struct {
 	tex_width:  int,
 	tex_height: int,
 	glyph_size: int,
+	cell_width: int,
+	cell_height: int,
 	slot_count: int,
 
 	// GPU resources (created by atlas_upload_gpu)
@@ -80,6 +83,8 @@ atlas_init :: proc(a: ^Atlas, rasterizer: ^Font_Rasterizer, allocator: runtime.A
 	a.tex_width  = atlas_cols * glyph_size
 	a.tex_height = atlas_rows * glyph_size
 	a.glyph_size = glyph_size
+	a.cell_width = int(rasterizer.metrics.cell_width)
+	a.cell_height = int(rasterizer.metrics.cell_height)
 	a.slot_count = ATLAS_SLOT_COUNT
 	a.pinned_count = 0
 	a.gpu_dirty = true
@@ -182,8 +187,8 @@ _atlas_rasterize_into_slot :: proc(
 	tex_h := f32(a.tex_height)
 	slot.u0 = f32(x0) / tex_w
 	slot.v0 = f32(y0) / tex_h
-	slot.u1 = f32(x0 + glyph_size) / tex_w
-	slot.v1 = f32(y0 + glyph_size) / tex_h
+	slot.u1 = f32(x0 + int(rasterizer.metrics.cell_width)) / tex_w
+	slot.v1 = f32(y0 + int(rasterizer.metrics.cell_height)) / tex_h
 	slot.advance = rasterizer.metrics.cell_width
 	slot.valid = true
 
@@ -337,7 +342,7 @@ atlas_dynamic_claim_p :: proc(
 
 	base_bmp := font_rasterize_glyph(f, shaped)
 	if base_bmp.pixels != nil {
-		_atlas_blit_bitmap(a, &base_bmp, slot, false)
+		_atlas_blit_bitmap(a, &base_bmp, slot, false, int(math.round(f.metrics.ascent)))
 		delete(base_bmp.pixels)
 	}
 	for m in marks {
@@ -350,7 +355,7 @@ atlas_dynamic_claim_p :: proc(
 		}
 		mark_bmp := font_rasterize_glyph(mf, u32(m))
 		if mark_bmp.pixels != nil {
-			_atlas_blit_bitmap(a, &mark_bmp, slot, true)
+			_atlas_blit_bitmap(a, &mark_bmp, slot, true, int(math.round(mf.metrics.ascent)))
 			delete(mark_bmp.pixels)
 		}
 	}
@@ -678,15 +683,15 @@ _atlas_clear_slot_rect :: proc(a: ^Atlas, slot_index: int) {
 	}
 }
 
-// _atlas_blit_bitmap copies a tight glyph bitmap centered into a slot rect.
+// _atlas_blit_bitmap copies a tight glyph bitmap into a slot rect using baseline anchoring.
 // blend_max overstrikes (marks composite over the base); otherwise assigns.
-_atlas_blit_bitmap :: proc(a: ^Atlas, bmp: ^Glyph_Bitmap, slot_index: int, blend_max: bool) {
+_atlas_blit_bitmap :: proc(a: ^Atlas, bmp: ^Glyph_Bitmap, slot_index: int, blend_max: bool, ascent_px: int) {
 	if bmp.width <= 0 || bmp.height <= 0 || bmp.pixels == nil {
 		return
 	}
 	x0, y0 := _atlas_slot_origin(a, slot_index)
-	ox := x0 + (a.glyph_size - bmp.width) / 2
-	oy := y0 + (a.glyph_size - bmp.height) / 2
+	ox := x0 + int(bmp.bearing_x)
+	oy := y0 + ascent_px + int(bmp.bearing_y)
 	for gy in 0..<bmp.height {
 		for gx in 0..<bmp.width {
 			dx := ox + gx
@@ -723,8 +728,8 @@ _atlas_setup_dynamic_slot :: proc(a: ^Atlas, slot_index: int, advance: f32) {
 	tex_h := f32(a.tex_height)
 	slot.u0 = f32(x0) / tex_w
 	slot.v0 = f32(y0) / tex_h
-	slot.u1 = f32(x0 + glyph_size) / tex_w
-	slot.v1 = f32(y0 + glyph_size) / tex_h
+	slot.u1 = f32(x0 + a.cell_width) / tex_w
+	slot.v1 = f32(y0 + a.cell_height) / tex_h
 	slot.advance = advance
 }
 

@@ -115,6 +115,7 @@ RENDER_CELL_V2_WIDTH_NARROW       :: u8(1)
 RENDER_CELL_V2_WIDTH_WIDE_LEAD    :: u8(2)
 
 RENDER_CELL_V2_CFLAG_WIDE_CONT :: u8(1 << 0)
+RENDER_CELL_V2_CFLAG_SELECTED  :: u8(1 << 1)
 
 // _RENDER_CELL_V2_STYLE_SHIFT is the bit position of the style_id field (== codepoint width).
 _RENDER_CELL_V2_STYLE_SHIFT :: u64(RENDER_CELL_V2_CODEPOINT_BITS)
@@ -150,6 +151,8 @@ Render_Cells_SoA :: struct {
 Style_LUT :: struct {
 	fg_r5g6b5: [1024]u16,
 	bg_r5g6b5: [1024]u16,
+	selection_fg_r5g6b5: u16,
+	selection_bg_r5g6b5: u16,
 	count:     u16,
 }
 
@@ -185,7 +188,7 @@ render_cell_unpack_v2 :: proc(cell: Render_Cell_V2) -> (content: u32, style: u16
 
 // render_cell_from_semantic packs a Semantic_Cell directly into a Render_Cell_V2.
 // Pure: NO style_table_get, NO color conversion; slot is always UNRESOLVED.
-render_cell_from_semantic :: proc(cell: termgrid.Semantic_Cell) -> Render_Cell_V2 {
+render_cell_from_semantic :: proc(cell: termgrid.Semantic_Cell, selected: bool = false) -> Render_Cell_V2 {
 	w := RENDER_CELL_V2_WIDTH_NARROW
 	cf := u8(0)
 	if u8(cell.flags) & u8(termgrid.Cell_Flags.Wide_Continuation) != 0 {
@@ -193,6 +196,9 @@ render_cell_from_semantic :: proc(cell: termgrid.Semantic_Cell) -> Render_Cell_V
 		cf = RENDER_CELL_V2_CFLAG_WIDE_CONT
 	} else if cell.width == 2 {
 		w = RENDER_CELL_V2_WIDTH_WIDE_LEAD
+	}
+	if selected {
+		cf |= RENDER_CELL_V2_CFLAG_SELECTED
 	}
 	return render_cell_pack_v2(cell.content, u16(cell.style), w, cf, RENDER_CELL_V2_SLOT_UNRESOLVED)
 }
@@ -205,18 +211,24 @@ render_cell_empty_v2 :: proc() -> Render_Cell_V2 {
 // style_lut_rebuild pre-resolves every Style_Table entry to R5G6B5 fg/bg.
 // 1024-entry struct rewrite, no allocation.
 style_lut_rebuild :: proc(lut: ^Style_LUT, table: ^termgrid.Style_Table) {
+	if lut == nil || table == nil {
+		return
+	}
 	count := int(table.count)
 	if count > 1024 {
 		count = 1024
 	}
+	default_style := termgrid.style_table_default(table)
 	for i in 0..<1024 {
-		style := termgrid.STYLE_DEFAULT
+		style := default_style
 		if i < count {
 			style = table.entries[i]
 		}
 		lut.fg_r5g6b5[i] = color_to_r5g6b5(style.fg)
 		lut.bg_r5g6b5[i] = color_to_r5g6b5(style.bg)
 	}
+	lut.selection_fg_r5g6b5 = color_to_r5g6b5(table.theme.selection_foreground)
+	lut.selection_bg_r5g6b5 = color_to_r5g6b5(table.theme.selection_background)
 	lut.count = u16(count)
 }
 
@@ -235,7 +247,6 @@ render_cell_expand_instance :: proc(
 	glyph_out: ^instance.Instance_Data,
 ) -> (emit_bg: bool, emit_glyph: bool) {
 	content, style, width, cflags, slot := render_cell_unpack_v2(cell)
-	_ = cflags
 
 	// Continuation cells emit nothing.
 	if width == RENDER_CELL_V2_WIDTH_CONTINUATION {
@@ -249,6 +260,10 @@ render_cell_expand_instance :: proc(
 	}
 	fg := lut.fg_r5g6b5[lut_idx]
 	bg := lut.bg_r5g6b5[lut_idx]
+	if cflags & RENDER_CELL_V2_CFLAG_SELECTED != 0 {
+		fg = lut.selection_fg_r5g6b5
+		bg = lut.selection_bg_r5g6b5
+	}
 
 	// Empty skip (parity with _prepare_instances): space or NUL with black bg emits nothing.
 	if (content == 0x20 || content == 0) && bg == 0x0000 {

@@ -28,6 +28,16 @@ Upload_Ring :: struct {
 	device:     gpu.Gpu_Device,
 	queue:      gpu.Gpu_Queue,
 	backend:    ^gpu.Gpu_Backend_VTable,
+	frame_active: bool,
+}
+
+// Upload_Ring_Frame is a tentative reservation. The ring index advances only
+// after the command using the slot has been accepted by the queue.
+Upload_Ring_Frame :: struct {
+	slot:     int,
+	data_size: u64,
+	reserved: bool,
+	committed: bool,
 }
 
 // upload_ring_init creates the upload ring with the specified capacity per slot.
@@ -37,6 +47,7 @@ upload_ring_init :: proc(r: ^Upload_Ring, backend: ^gpu.Gpu_Backend_VTable, devi
 	r.queue    = queue
 	r.capacity = capacity
 	r.write_slot = 0
+	r.frame_active = false
 
 	for i in 0..<UPLOAD_RING_SLOTS {
 		// Create GPU buffer (nil backend → CPU-only)
@@ -70,25 +81,56 @@ upload_ring_destroy :: proc(r: ^Upload_Ring, allocator: runtime.Allocator = cont
 	}
 }
 
-// upload_ring_get_staging returns the CPU staging buffer for the current write slot.
-// The caller writes data into this buffer, then calls upload_ring_submit.
-upload_ring_get_staging :: proc(r: ^Upload_Ring) -> []u8 {
-	return r.staging[r.write_slot]
+// upload_ring_begin reserves the current slot without advancing ownership.
+upload_ring_begin :: proc(r: ^Upload_Ring) -> Upload_Ring_Frame {
+	if r == nil || r.frame_active {
+		return Upload_Ring_Frame{}
+	}
+	r.frame_active = true
+	return Upload_Ring_Frame{slot = r.write_slot, reserved = true}
 }
 
-// upload_ring_submit flushes the current write slot's data to the GPU buffer.
-// Advances the write slot to the next ring position.
-upload_ring_submit :: proc(r: ^Upload_Ring, data_size: u64) {
-	slot := r.write_slot
-	size := data_size
-	if size > r.capacity {
-		size = r.capacity
+// upload_ring_get_staging returns the staging buffer for a reservation.
+upload_ring_get_staging :: proc(r: ^Upload_Ring, frame: Upload_Ring_Frame) -> []u8 {
+	if r == nil || !frame.reserved || frame.slot < 0 || frame.slot >= UPLOAD_RING_SLOTS {
+		return nil
 	}
-	if r.backend != nil && rawptr(r.queue) != nil && rawptr(r.buffers[slot]) != nil && size > 0 {
-		r.backend.write_buffer(r.queue, r.buffers[slot], 0, raw_data(r.staging[slot]), size)
+	return r.staging[frame.slot]
+}
+
+// upload_ring_write publishes tentative bytes to the reserved GPU buffer.
+// The slot remains owned by the frame until upload_ring_commit.
+upload_ring_write :: proc(r: ^Upload_Ring, frame: ^Upload_Ring_Frame, data_size: u64) -> bool {
+	if r == nil || frame == nil || !frame.reserved || frame.committed || !r.frame_active {
+		return false
 	}
-	// Advance to next slot
-	r.write_slot = (r.write_slot + 1) % UPLOAD_RING_SLOTS
+	if frame.slot < 0 || frame.slot >= UPLOAD_RING_SLOTS || data_size > r.capacity {
+		return false
+	}
+	frame.data_size = data_size
+	if r.backend != nil && rawptr(r.queue) != nil && rawptr(r.buffers[frame.slot]) != nil && data_size > 0 {
+		r.backend.write_buffer(r.queue, r.buffers[frame.slot], 0, raw_data(r.staging[frame.slot]), data_size)
+	}
+	return true
+}
+
+// upload_ring_commit advances ownership after queue submission succeeds.
+upload_ring_commit :: proc(r: ^Upload_Ring, frame: ^Upload_Ring_Frame) {
+	if r == nil || frame == nil || !frame.reserved || frame.committed || !r.frame_active {
+		return
+	}
+	frame.committed = true
+	r.write_slot = (frame.slot + 1) % UPLOAD_RING_SLOTS
+	r.frame_active = false
+}
+
+// upload_ring_abort releases a tentative reservation without advancing it.
+upload_ring_abort :: proc(r: ^Upload_Ring, frame: ^Upload_Ring_Frame) {
+	if r == nil || frame == nil || !frame.reserved || frame.committed {
+		return
+	}
+	frame.reserved = false
+	r.frame_active = false
 }
 
 // upload_ring_get_buffer returns the GPU buffer for a given slot index.
