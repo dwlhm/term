@@ -18,6 +18,7 @@ Parser :: struct {
 	
 	// Small persistent state
 	intermediate: u8,
+	string_esc_pending: bool,
 	
 	// Print run accumulator (for Level 1 fast path)
 	print_run_start: int,
@@ -34,6 +35,7 @@ parser_init :: proc(p: ^Parser) {
 	p.utf8_state = .Ground
 	p.utf8_len = 0
 	p.intermediate = 0
+	p.string_esc_pending = false
 	p.print_run_start = 0
 	p.print_run_len = 0
 	
@@ -59,6 +61,39 @@ parse_chunk :: proc(p: ^Parser, t: ^termgrid.Terminal, input: []u8) {
 	pos := 0
 	
 	for pos < len(input) {
+		// OSC/DCS strings are opaque to the terminal but their terminators
+		// are part of the parser state, including when split across reads.
+		if p.state == .OSC || p.state == .DCS {
+			byte := input[pos]
+			if p.string_esc_pending {
+				p.string_esc_pending = false
+				if byte == '\\' {
+					p.state = .Ground
+					pos += 1
+					continue
+				}
+				if byte == 0x1B {
+					p.string_esc_pending = true
+				}
+				pos += 1
+				continue
+			}
+			if byte == 0x07 || byte == 0x9C {
+				p.state = .Ground
+				pos += 1
+				continue
+			}
+			if byte == 0x18 || byte == 0x1A {
+				parser_reset(p)
+				pos += 1
+				continue
+			}
+			if byte == 0x1B {
+				p.string_esc_pending = true
+			}
+			pos += 1
+			continue
+		}
 		// Level 1: Block Scanner (ASCII fast path)
 		if p.state == .Ground {
 			run := scan_ascii_run(input[pos:])
@@ -92,12 +127,14 @@ parse_chunk :: proc(p: ^Parser, t: ^termgrid.Terminal, input: []u8) {
 			esc_dispatch(p, t, byte)
 		case .OscStart:
 			p.state = .OSC
+			p.string_esc_pending = false
 		case .OscPut:
 			// Discard OSC payload
 		case .OscEnd:
 			p.state = .Ground
 		case .DcsHook:
 			p.state = .DCS
+			p.string_esc_pending = false
 		case .DcsPut:
 			// Discard DCS payload
 		case .DcsUnhook:
@@ -144,6 +181,7 @@ parser_reset :: proc(p: ^Parser) {
 	csi_reset(p)
 	utf8_reset(p)
 	p.intermediate = 0
+	p.string_esc_pending = false
 	p.print_run_start = 0
 	p.print_run_len = 0
 }
@@ -180,7 +218,7 @@ execute_c0 :: proc(t: ^termgrid.Terminal, b: u8) {
 		tab_stop := 8 - (t.cursor.col % 8)
 		termgrid.terminal_cursor_right(t, tab_stop)
 	case 0x0A: // LF (Line Feed)
-		termgrid.terminal_newline(t)
+		termgrid.terminal_linefeed(t)
 	case 0x0D: // CR (Carriage Return)
 		t.cursor.col = 0
 	}
@@ -188,9 +226,19 @@ execute_c0 :: proc(t: ^termgrid.Terminal, b: u8) {
 
 // esc_dispatch dispatches an escape sequence.
 esc_dispatch :: proc(p: ^Parser, t: ^termgrid.Terminal, final_byte: u8) {
-	// For now, ignore most escape sequences
-	// Future: implement common escape sequences (RIS, DEC reset, etc.)
 	_ = p
-	_ = t
-	_ = final_byte
+	switch final_byte {
+	case '7':
+		termgrid.terminal_save_cursor(t)
+	case '8':
+		termgrid.terminal_restore_cursor(t)
+	case 'c':
+		termgrid.terminal_reset(t)
+	case 'M':
+		termgrid.terminal_reverse_index(t)
+	case 'D':
+		termgrid.terminal_index(t)
+	case 'E':
+		termgrid.terminal_next_line(t)
+	}
 }

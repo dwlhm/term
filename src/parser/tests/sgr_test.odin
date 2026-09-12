@@ -50,8 +50,8 @@ test_sgr_fg_red :: proc(t: ^testing.T) {
 	testing.expect(t, cell.content == 'R', "cell must hold R")
 	testing.expect(t, cell.style != 0, "red cell must carry non-default style")
 	st := tg.style_table_get(&term.grid.style_table, cell.style)
-	testing.expect(t, st.fg == 0xFFCD0000, "fg must be xterm red")
-	testing.expect(t, st.bg == 0xFF000000, "bg must stay default black")
+	testing.expect(t, st.fg == tg.CATPPUCCIN_MOCHA_RED, "fg must use themed red")
+	testing.expect(t, st.bg == tg.CATPPUCCIN_MOCHA_BASE, "bg must stay default base")
 }
 
 @(test)
@@ -66,7 +66,7 @@ test_sgr_bold_red_combined :: proc(t: ^testing.T) {
 	_sgr_feed(&parser, &term, "\x1b[1;31mB")
 	cell := tg.terminal_get_cell(&term, 0, 0)
 	st := tg.style_table_get(&term.grid.style_table, cell.style)
-	testing.expect(t, st.fg == 0xFFCD0000, "fg must be xterm red")
+	testing.expect(t, st.fg == tg.CATPPUCCIN_MOCHA_RED, "fg must use themed red")
 	testing.expect(t, st.flags & tg.STYLE_FLAG_BOLD != 0, "bold flag must be set")
 	// ONE style id carries both: single insert per sequence.
 	testing.expect(t, int(term.grid.style_table.count) == 2, "combined SGR must insert exactly one style")
@@ -83,8 +83,8 @@ test_sgr_fg_bg :: proc(t: ^testing.T) {
 
 	_sgr_feed(&parser, &term, "\x1b[31;42mX")
 	st := _sgr_style_of(&term, 0, 0)
-	testing.expect(t, st.fg == 0xFFCD0000, "fg must be xterm red")
-	testing.expect(t, st.bg == 0xFF00CD00, "bg must be xterm green")
+	testing.expect(t, st.fg == tg.CATPPUCCIN_MOCHA_RED, "fg must use themed red")
+	testing.expect(t, st.bg == tg.CATPPUCCIN_MOCHA_GREEN, "bg must use themed green")
 }
 
 @(test)
@@ -99,8 +99,8 @@ test_sgr_cumulative :: proc(t: ^testing.T) {
 	_sgr_feed(&parser, &term, "\x1b[31m")
 	_sgr_feed(&parser, &term, "\x1b[42mY")
 	st := _sgr_style_of(&term, 0, 0)
-	testing.expect(t, st.fg == 0xFFCD0000, "fg red must survive later bg-only SGR")
-	testing.expect(t, st.bg == 0xFF00CD00, "bg must be xterm green")
+	testing.expect(t, st.fg == tg.CATPPUCCIN_MOCHA_RED, "fg red must survive later bg-only SGR")
+	testing.expect(t, st.bg == tg.CATPPUCCIN_MOCHA_GREEN, "bg must use themed green")
 }
 
 @(test)
@@ -116,8 +116,8 @@ test_sgr_fg_bg_default_only :: proc(t: ^testing.T) {
 	_sgr_feed(&parser, &term, "\x1b[31;42m")
 	_sgr_feed(&parser, &term, "\x1b[39mZ")
 	st := _sgr_style_of(&term, 0, 0)
-	testing.expect(t, st.fg == 0xFFFFFFFF, "39 must reset fg to default white")
-	testing.expect(t, st.bg == 0xFF00CD00, "39 must preserve bg")
+	testing.expect(t, st.fg == tg.CATPPUCCIN_MOCHA_TEXT, "39 must reset fg to default text")
+	testing.expect(t, st.bg == tg.CATPPUCCIN_MOCHA_GREEN, "39 must preserve bg")
 
 	// 49 resets only bg.
 	_sgr_feed(&parser, &term, "\x1b[0m")
@@ -125,8 +125,8 @@ test_sgr_fg_bg_default_only :: proc(t: ^testing.T) {
 	_sgr_feed(&parser, &term, "\x1b[49mW")
 	// Cursor advanced past Z, so W lands at col 1.
 	st = _sgr_style_of(&term, 0, 1)
-	testing.expect(t, st.fg == 0xFFCD0000, "49 must preserve fg")
-	testing.expect(t, st.bg == 0xFF000000, "49 must reset bg to default black")
+	testing.expect(t, st.fg == tg.CATPPUCCIN_MOCHA_RED, "49 must preserve fg")
+	testing.expect(t, st.bg == tg.CATPPUCCIN_MOCHA_BASE, "49 must reset bg to default base")
 }
 
 @(test)
@@ -140,13 +140,13 @@ test_sgr_bright :: proc(t: ^testing.T) {
 
 	_sgr_feed(&parser, &term, "\x1b[90mA")
 	st := _sgr_style_of(&term, 0, 0)
-	testing.expect(t, st.fg == 0xFF7F7F7F, "90 must be bright black")
+	testing.expect(t, st.fg == tg.CATPPUCCIN_MOCHA_SURFACE2, "90 must be themed bright black")
 
 	_sgr_feed(&parser, &term, "\x1b[0m")
 	_sgr_feed(&parser, &term, "\x1b[102mB")
 	// Cursor advanced to col 1; read the second cell.
 	st = _sgr_style_of(&term, 0, 1)
-	testing.expect(t, st.bg == 0xFF00FF00, "102 must be bright green bg")
+	testing.expect(t, st.bg == tg.CATPPUCCIN_MOCHA_GREEN, "102 must be themed bright green bg")
 }
 
 @(test)
@@ -161,13 +161,13 @@ test_sgr_256_color :: proc(t: ^testing.T) {
 	_sgr_feed(&parser, &term, "\x1b[38;5;196mA")
 	st := _sgr_style_of(&term, 0, 0)
 	testing.expect(t, st.fg == 0xFFFF0000, "38;5;196 must be 256-color red fg")
-	testing.expect(t, st.bg == 0xFF000000, "bg must stay default")
+	testing.expect(t, st.bg == tg.CATPPUCCIN_MOCHA_BASE, "bg must stay default base")
 
 	_sgr_feed(&parser, &term, "\x1b[0m")
 	_sgr_feed(&parser, &term, "\x1b[48;5;27mB")
 	st = _sgr_style_of(&term, 0, 1)
 	testing.expect(t, st.bg == 0xFF005FFF, "48;5;27 must be 256-color bg")
-	testing.expect(t, st.fg == 0xFFFFFFFF, "fg must stay default white")
+	testing.expect(t, st.fg == tg.CATPPUCCIN_MOCHA_TEXT, "fg must stay default text")
 }
 
 @(test)
@@ -207,7 +207,7 @@ test_sgr_truncated_tail :: proc(t: ^testing.T) {
 	_sgr_feed(&parser, &term, "\x1b[0m")
 	_sgr_feed(&parser, &term, "\x1b[32;38;5mA")
 	st := _sgr_style_of(&term, 0, 0)
-	testing.expect(t, st.fg == 0xFF00CD00, "prior param 32 must apply despite truncated tail")
+	testing.expect(t, st.fg == tg.CATPPUCCIN_MOCHA_GREEN, "prior param 32 must apply despite truncated tail")
 }
 
 @(test)

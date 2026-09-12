@@ -12,6 +12,12 @@ CSI_Params :: struct {
 // (CSI ? 25 h = show, CSI ? 25 l = hide).
 DECTCEM_CURSOR_PARAM :: 25
 
+// ALT_SCREEN_PARAM is the DEC private mode number for alternate screen buffer (CSI ? 1049 h/l).
+ALT_SCREEN_PARAM :: 1049
+
+// ALT_SCREEN_PARAM_LEGACY is the legacy DEC private mode number for alternate screen buffer (CSI ? 47 h/l).
+ALT_SCREEN_PARAM_LEGACY :: 47
+
 // csi_collect_param collects a CSI parameter byte.
 // Handles digits (0-9), semicolon (;), and colon (:).
 csi_collect_param :: proc(p: ^Parser, b: u8) {
@@ -51,18 +57,28 @@ csi_dispatch :: proc(p: ^Parser, t: ^termgrid.Terminal, final_byte: u8) {
 	switch final_byte {
 	case 'A': // CUU - Cursor Up
 		_csi_execute_cuu(t, params)
-	case 'B': // CUD - Cursor Down
+	case 'B', 'e': // CUD / VPR - Cursor Down / Line Position Relative
 		_csi_execute_cud(t, params)
-	case 'C': // CUF - Cursor Forward
+	case 'C', 'a': // CUF / HPR - Cursor Forward / Character Position Relative
 		_csi_execute_cuf(t, params)
 	case 'D': // CUB - Cursor Back
 		_csi_execute_cub(t, params)
-	case 'H': // CUP - Cursor Position
+	case 'H', 'f': // CUP / HVP - Cursor Position / Character and Line Position
 		_csi_execute_cup(t, params)
+	case 'G': // CHA - Cursor Character Absolute
+		_csi_execute_cha(t, params)
+	case 'd': // VPA - Line Position Absolute
+		_csi_execute_vpa(t, params)
 	case 'J': // ED - Erase in Display
 		_csi_execute_ed(t, params)
 	case 'K': // EL - Erase in Line
 		_csi_execute_el(t, params)
+	case 'X': // ECH - Erase Character
+		_csi_execute_ech(t, params)
+	case 'L': // IL - Insert Line
+		_csi_execute_il(t, params)
+	case 'M': // DL - Delete Line
+		_csi_execute_dl(t, params)
 	case 'S': // SU - Scroll Up
 		_csi_execute_su(t, params)
 	case 'T': // SD - Scroll Down
@@ -75,13 +91,15 @@ csi_dispatch :: proc(p: ^Parser, t: ^termgrid.Terminal, final_byte: u8) {
 		_csi_execute_ich(t, params)
 	case 'P': // DCH - Delete Characters
 		_csi_execute_dch(t, params)
-	case 'h': // SM - Set Mode (private: DECTCEM show)
+	case 'h': // SM - Set Mode (private: DECTCEM show, alt screen enter)
 		if private {
 			_csi_execute_dectcem(t, params, true)
+			_csi_execute_alt_screen(t, params, true)
 		}
-	case 'l': // RM - Reset Mode (private: DECTCEM hide)
+	case 'l': // RM - Reset Mode (private: DECTCEM hide, alt screen leave)
 		if private {
 			_csi_execute_dectcem(t, params, false)
+			_csi_execute_alt_screen(t, params, false)
 		}
 	}
 	
@@ -171,6 +189,8 @@ _csi_execute_ed :: proc(t: ^termgrid.Terminal, params: CSI_Params) {
 		termgrid.terminal_erase_display(t, .To_Beginning)
 	case 2:
 		termgrid.terminal_erase_display(t, .Entire)
+	case 3:
+		termgrid.terminal_clear_scrollback(t)
 	}
 }
 
@@ -203,6 +223,7 @@ _csi_execute_decstbm :: proc(t: ^termgrid.Terminal, params: CSI_Params) {
 	// Bare r (no params, value 0) resets to full grid.
 	if int(params.count) <= 1 && int(params.values[0]) == 0 {
 		termgrid.terminal_reset_scroll_region(t)
+		termgrid.terminal_move_cursor(t, 0, 0)
 		return
 	}
 
@@ -245,6 +266,72 @@ _csi_execute_decstbm :: proc(t: ^termgrid.Terminal, params: CSI_Params) {
 	if !termgrid.terminal_set_scroll_region(t, top_0, bottom_0) {
 		// Invalid region (top>=bottom or OOR): leave margins unchanged.
 		return
+	}
+	termgrid.terminal_move_cursor(t, 0, 0)
+}
+
+// _csi_execute_cha executes Cursor Character Absolute (CHA).
+// Moves cursor to the specified column on the current row (1-indexed, default 1).
+_csi_execute_cha :: proc(t: ^termgrid.Terminal, params: CSI_Params) {
+	col := int(params.values[0])
+	if col == 0 {
+		col = 1
+	}
+	termgrid.terminal_move_cursor(t, t.cursor.row, col - 1)
+}
+
+// _csi_execute_vpa executes Line Position Absolute (VPA).
+// Moves cursor to the specified row on the current column (1-indexed, default 1).
+_csi_execute_vpa :: proc(t: ^termgrid.Terminal, params: CSI_Params) {
+	row := int(params.values[0])
+	if row == 0 {
+		row = 1
+	}
+	termgrid.terminal_move_cursor(t, row - 1, t.cursor.col)
+}
+
+// _csi_execute_ech executes Erase Character (ECH).
+// Erases n characters at cursor position without moving cursor.
+_csi_execute_ech :: proc(t: ^termgrid.Terminal, params: CSI_Params) {
+	n := int(params.values[0])
+	if n == 0 {
+		n = 1
+	}
+	termgrid.terminal_erase_chars(t, n)
+}
+
+// _csi_execute_il executes Insert Line (IL).
+// Inserts n blank lines at current cursor row.
+_csi_execute_il :: proc(t: ^termgrid.Terminal, params: CSI_Params) {
+	n := int(params.values[0])
+	if n == 0 {
+		n = 1
+	}
+	termgrid.terminal_insert_lines(t, n)
+}
+
+// _csi_execute_dl executes Delete Line (DL).
+// Deletes n lines at current cursor row.
+_csi_execute_dl :: proc(t: ^termgrid.Terminal, params: CSI_Params) {
+	n := int(params.values[0])
+	if n == 0 {
+		n = 1
+	}
+	termgrid.terminal_delete_lines(t, n)
+}
+
+// _csi_execute_alt_screen executes alternate screen switching (DEC private mode 1049 / 47).
+_csi_execute_alt_screen :: proc(t: ^termgrid.Terminal, params: CSI_Params, enter: bool) {
+	for i in 0..<int(params.count) {
+		val := int(params.values[i])
+		if val == ALT_SCREEN_PARAM || val == ALT_SCREEN_PARAM_LEGACY {
+			if enter {
+				termgrid.terminal_enter_alt_screen(t)
+			} else {
+				termgrid.terminal_leave_alt_screen(t)
+			}
+			return
+		}
 	}
 }
 
@@ -354,63 +441,6 @@ _csi_execute_dch :: proc(t: ^termgrid.Terminal, params: CSI_Params) {
 		termgrid.damage_mark_row(&t.damage, t.cursor.row, t.grid.rows[phys].generation)
 	}
 }
-// SGR palette (xterm): stored as 0xFFRRGGBB.
-_SGR_STANDARD := [8]u32{
-	0xFF000000, // black
-	0xFFCD0000, // red
-	0xFF00CD00, // green
-	0xFFCDCD00, // yellow
-	0xFF0000EE, // blue
-	0xFFCD00CD, // magenta
-	0xFF00CDCD, // cyan
-	0xFFE5E5E5, // white
-}
-
-// SGR bright palette (xterm): stored as 0xFFRRGGBB.
-_SGR_BRIGHT := [8]u32{
-	0xFF7F7F7F, // bright black
-	0xFFFF0000, // bright red
-	0xFF00FF00, // bright green
-	0xFFFFFF00, // bright yellow
-	0xFF5C5CFF, // bright blue
-	0xFFFF00FF, // bright magenta
-	0xFF00FFFF, // bright cyan
-	0xFFFFFFFF, // bright white
-}
-
-// _sgr_cube_level maps a 6x6x6 cube component (0..5) to its intensity.
-_sgr_cube_level :: proc(v: int) -> u32 {
-	levels := [6]u32{0, 95, 135, 175, 215, 255}
-	if v < 0 || v > 5 {
-		return 0
-	}
-	return levels[v]
-}
-
-// _sgr_palette_256 resolves a 256-color index to 0xFFRRGGBB:
-// 0-7 standard, 8-15 bright, 16-231 6x6x6 cube, 232-255 grayscale.
-// Out-of-range indices return default white (callers guard bounds).
-_sgr_palette_256 :: proc(idx: int) -> u32 {
-	if idx < 0 || idx > 255 {
-		return termgrid.STYLE_DEFAULT.fg
-	}
-	if idx < 8 {
-		return _SGR_STANDARD[idx]
-	}
-	if idx < 16 {
-		return _SGR_BRIGHT[idx - 8]
-	}
-	if idx < 232 {
-		i := idx - 16
-		r := _sgr_cube_level(i / 36)
-		g := _sgr_cube_level((i % 36) / 6)
-		b := _sgr_cube_level(i % 6)
-		return 0xFF000000 | (r << 16) | (g << 8) | b
-	}
-	g := u32(8 + 10 * (idx - 232))
-	return 0xFF000000 | (g << 16) | (g << 8) | g
-}
-
 // _sgr_clamp_rgb clamps an SGR truecolor component to 0..255.
 _sgr_clamp_rgb :: proc(v: u32) -> u32 {
 	if v > 255 {
@@ -426,11 +456,12 @@ _sgr_clamp_rgb :: proc(v: u32) -> u32 {
 // the tail while prior params still apply.
 _csi_execute_sgr :: proc(t: ^termgrid.Terminal, params: CSI_Params) {
 	cur := termgrid.style_table_get(&t.grid.style_table, t.current_style)
+	theme := t.grid.style_table.theme
 
 	count := int(params.count)
 	if count == 0 {
 		// Bare ESC[m with no params: treat as [0] reset.
-		cur = termgrid.STYLE_DEFAULT
+		cur = termgrid.style_table_default(&t.grid.style_table)
 		termgrid.terminal_set_style(t, termgrid.style_table_insert(&t.grid.style_table, cur))
 		return
 	}
@@ -441,7 +472,7 @@ _csi_execute_sgr :: proc(t: ^termgrid.Terminal, params: CSI_Params) {
 
 		switch code {
 		case 0: // Reset
-			cur = termgrid.STYLE_DEFAULT
+			cur = termgrid.style_table_default(&t.grid.style_table)
 		case 1: // Bold
 			cur.flags |= termgrid.STYLE_FLAG_BOLD
 		case 3: // Italic
@@ -463,13 +494,13 @@ _csi_execute_sgr :: proc(t: ^termgrid.Terminal, params: CSI_Params) {
 		case 29: // Strike off
 			cur.flags = cur.flags & (~termgrid.STYLE_FLAG_STRIKE)
 		case 30..=37: // Standard foreground
-			cur.fg = _sgr_palette_256(code - 30)
+			cur.fg = termgrid.theme_palette_256(theme, code - 30)
 		case 40..=47: // Standard background
-			cur.bg = _sgr_palette_256(code - 40)
+			cur.bg = termgrid.theme_palette_256(theme, code - 40)
 		case 90..=97: // Bright foreground
-			cur.fg = _sgr_palette_256(code - 90 + 8)
+			cur.fg = termgrid.theme_palette_256(theme, code - 90 + 8)
 		case 100..=107: // Bright background
-			cur.bg = _sgr_palette_256(code - 100 + 8)
+			cur.bg = termgrid.theme_palette_256(theme, code - 100 + 8)
 		case 38, 48: // Extended color: 38 fg, 48 bg
 			is_fg := code == 38
 			if i + 1 >= count {
@@ -485,8 +516,8 @@ _csi_execute_sgr :: proc(t: ^termgrid.Terminal, params: CSI_Params) {
 					break
 				}
 				idx := int(params.values[i + 2])
-				if idx >= 0 && idx <= 255 {
-					c := _sgr_palette_256(idx)
+				if idx >= 0 && idx < termgrid.THEME_256_COUNT {
+					c := termgrid.theme_palette_256(theme, idx)
 					if is_fg {
 						cur.fg = c
 					} else {
@@ -514,10 +545,10 @@ _csi_execute_sgr :: proc(t: ^termgrid.Terminal, params: CSI_Params) {
 				// Unknown extended mode: swallow the mode byte.
 				i += 1
 			}
-		case 39: // Default foreground (white)
-			cur.fg = termgrid.STYLE_DEFAULT.fg
-		case 49: // Default background (black)
-			cur.bg = termgrid.STYLE_DEFAULT.bg
+		case 39: // Default foreground
+			cur.fg = termgrid.style_table_default(&t.grid.style_table).fg
+		case 49: // Default background
+			cur.bg = termgrid.style_table_default(&t.grid.style_table).bg
 		}
 		i += 1
 	}
