@@ -33,6 +33,9 @@ window_init :: proc(w: ^Window, title: string, width, height: i32) -> bool {
 		return false
 	}
 
+	// Disable macOS Press and Hold so key repeat is enabled for terminal use
+	platform_disable_press_and_hold()
+
 	// Convert title to C string (null-terminated)
 	title_len := len(title)
 	if title_len > 255 {
@@ -91,6 +94,25 @@ window_capture_mouse :: proc(w: ^Window, enabled: bool) -> bool {
 		return false
 	}
 	return sdl3.CaptureMouse(enabled)
+}
+
+// window_set_title updates the SDL window title (e.g. from OSC 0/1/2).
+// The title is truncated at 255 bytes into the window's title buffer.
+// Invalid windows return false without touching SDL.
+window_set_title :: proc(w: ^Window, title: string) -> bool {
+	if w == nil || w.handle == nil {
+		return false
+	}
+	title_len := len(title)
+	if title_len > 255 {
+		title_len = 255
+	}
+	for i in 0..<title_len {
+		w._title_buf[i] = title[i]
+	}
+	w._title_buf[title_len] = 0
+	w.title = string(w._title_buf[:title_len])
+	return sdl3.SetWindowTitle(w.handle, cstring(&w._title_buf[0]))
 }
 
 // window_set_clipboard_text copies text to SDL's system clipboard.

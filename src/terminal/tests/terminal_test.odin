@@ -529,18 +529,27 @@ test_cursor_advance :: proc(t: ^testing.T) {
 	testing.expect(t, c.col == 1, "Col should advance to 1")
 	testing.expect(t, !scroll_needed, "No scroll needed")
 
-	// Advance to right edge
+	// Advance to right edge: xenl defers wrap, stays at last col with pending_wrap
 	tg.cursor_move(&c, 0, 79, 24, 80)
 	tg.cursor_advance(&c, 1, 24, 80, &scroll_needed)
-	testing.expect(t, c.col == 0, "Col should wrap to 0")
-	testing.expect(t, c.row == 1, "Row should advance to 1")
+	testing.expect(t, c.col == 79, "xenl: col stays at last column")
+	testing.expect(t, c.pending_wrap, "xenl: pending_wrap should be set")
+	testing.expect(t, !scroll_needed, "No scroll needed yet")
+
+	// Apply pending wrap: now cursor moves to next line
+	scroll_needed = tg.cursor_apply_pending_wrap(&c, 24)
+	testing.expect(t, c.col == 0, "After apply: col wraps to 0")
+	testing.expect(t, c.row == 1, "After apply: row advances to 1")
+	testing.expect(t, !c.pending_wrap, "After apply: pending_wrap cleared")
 	testing.expect(t, !scroll_needed, "No scroll needed")
 
-	// Advance at bottom-right corner
+	// Advance at bottom-right corner with pending wrap
 	tg.cursor_move(&c, 23, 79, 24, 80)
 	tg.cursor_advance(&c, 1, 24, 80, &scroll_needed)
-	testing.expect(t, c.row == 23, "Row should stay at 23")
-	testing.expect(t, scroll_needed, "Scroll should be needed")
+	testing.expect(t, c.pending_wrap, "pending_wrap set at bottom-right")
+	scroll_needed = tg.cursor_apply_pending_wrap(&c, 24)
+	testing.expect(t, c.row == 23, "Row stays at 23 (clamped)")
+	testing.expect(t, scroll_needed, "Scroll needed at bottom")
 }
 
 // --- Terminal Tests ---

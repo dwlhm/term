@@ -142,7 +142,7 @@ _ra_popin_drain_ns :: proc() -> (drain_ns: f64, applied: int) {
 	defer render.raster_queue_destroy(&q)
 	render.raster_worker_start(&q, &_ra_chain)
 	for i in 0..<len(_ra_drain_keys) {
-		k := render.Cluster_Key{base = _ra_drain_keys[i], join_form = .Isolated}
+		k := render.cluster_key_make(_ra_drain_keys[i], .Isolated)
 		for render.raster_request_async(&q, k, _ra_drain_fi[i], u32(_ra_drain_keys[i]), nil, true, termgrid.Damage_Target{}) != .Enqueued {
 			thread.yield()
 		}

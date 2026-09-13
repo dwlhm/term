@@ -222,9 +222,8 @@ _terminal_view_write_cell :: proc(b: ^strings.Builder, cell: Semantic_Cell, stor
 		return
 	}
 	cluster := store.entries[idx]
-	strings.write_rune(b, cluster.base)
-	mark_count := min(int(cluster.mark_count), GRAPHEME_MAX_MARKS)
-	for i in 0..<mark_count {
-		strings.write_rune(b, cluster.marks[i])
+	count := min(int(cluster.rune_count), GRAPHEME_INLINE_CAP)
+	for i in 0..<count {
+		strings.write_rune(b, cluster.runes[i])
 	}
 }

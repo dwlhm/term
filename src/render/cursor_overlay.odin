@@ -1,5 +1,6 @@
 package render
 
+import "core:math"
 import instance "instance"
 
 // Cursor blink overlay state (TODO Langkah 11).
@@ -18,7 +19,7 @@ import instance "instance"
 //     the cursor appears immediately instead of after one blink period.
 //   - Focus regained restarts visible-on with a fresh timer
 //     (next_toggle = now + CURSOR_BLINK_NS), same as the initial tick.
-//   - cursor_overlay_sync updates position only: blink phase and timer
+//   - cursor_overlay_sync updates position and style: blink phase and timer
 //     are untouched, no toggle reset on cursor movement.
 //   - Clock jumping backwards (now more than one full period behind the
 //     scheduled toggle) clamps the timer to now + CURSOR_BLINK_NS and
@@ -31,6 +32,7 @@ Cursor_Overlay :: struct {
 	row:         int,  // mirrored terminal cursor row (via cursor_overlay_sync)
 	col:         int,  // mirrored terminal cursor col (via cursor_overlay_sync)
 	next_toggle: i64,  // ns timestamp of the next blink flip; 0 = parked
+	style:       u8,   // DECSCUSR: 0=default, 1=blink block, 2=steady block, 3=blink underline, 4=steady underline, 5=blink bar, 6=steady bar
 }
 
 // CURSOR_BLINK_NS is the blink half-period: the cursor toggles every 530ms
@@ -38,10 +40,11 @@ Cursor_Overlay :: struct {
 CURSOR_BLINK_NS :: 530_000_000
 
 // cursor_overlay_sync mirrors a terminal cursor move into the overlay.
-// Position only: blink state and timer are untouched, no toggle reset.
-cursor_overlay_sync :: proc(o: ^Cursor_Overlay, row, col: int) {
+// Blink state and timer are untouched, no toggle reset.
+cursor_overlay_sync :: proc(o: ^Cursor_Overlay, row, col: int, style: u8 = 0) {
 	o.row = row
 	o.col = col
+	o.style = style
 }
 
 // cursor_overlay_tick advances the blink state for timestamp now (ns).
@@ -54,6 +57,15 @@ cursor_overlay_tick :: proc(o: ^Cursor_Overlay, now: i64, focused: bool, term_vi
 		// Hidden or unfocused: steady off, timer parked.
 		if o.blink_on || o.next_toggle != 0 {
 			o.blink_on = false
+			o.next_toggle = 0
+			return true
+		}
+		return false
+	}
+	// Steady styles (2, 4, 6) don't blink
+	if o.style == 2 || o.style == 4 || o.style == 6 {
+		if !o.blink_on || o.next_toggle != 0 {
+			o.blink_on = true
 			o.next_toggle = 0
 			return true
 		}
@@ -144,8 +156,22 @@ cursor_overlay_draw :: proc(r: ^Renderer, o: ^Cursor_Overlay, scrollback_offset:
 	}
 	x := r.pad_x + f32(o.col) * r.cell_width
 	y := r.pad_y + f32(viewport_row) * r.cell_height
+	w := r.cell_width
+	h := r.cell_height
+
+	switch o.style {
+	case 3, 4: // Underline
+		underline_h := max(f32(2.0), math.floor(r.cell_height * 0.15))
+		y = y + r.cell_height - underline_h
+		h = underline_h
+	case 5, 6: // Bar / Beam
+		bar_w := max(f32(2.0), math.floor(r.cell_width * 0.15))
+		w = bar_w
+	case: // 0, 1, 2: Block
+	}
+
 	instance.instance_renderer_fill_bg(
-		inst, slot, x, y, r.cell_width, r.cell_height,
+		inst, slot, x, y, w, h,
 		CURSOR_OVERLAY_R, CURSOR_OVERLAY_G, CURSOR_OVERLAY_B,
 	)
 	r.cursor_staged = true

@@ -156,7 +156,7 @@ bench_expand_aos :: proc(ctx: ^Benchmark_Context) {
 	for i in 0..<RENDER_CELL_BENCH_FULL {
 		v := render.render_cell_from_semantic(grid.cells[i])
 		bg, glyph: instance.Instance_Data
-		emit_bg, emit_glyph := render.render_cell_expand_instance(v, &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
+		emit_bg, emit_glyph, _ := render.render_cell_expand_instance(v, &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
 		if emit_bg {
 			instances += 1
 		}
@@ -194,7 +194,7 @@ bench_expand_soa :: proc(ctx: ^Benchmark_Context) {
 			u16((sf >> 19) & 0x1FF),
 		)
 		bg, glyph: instance.Instance_Data
-		emit_bg, emit_glyph := render.render_cell_expand_instance(v, &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
+		emit_bg, emit_glyph, _ := render.render_cell_expand_instance(v, &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
 		if emit_bg {
 			instances += 1
 		}
@@ -216,7 +216,7 @@ _bench_upload_prefix :: proc(ctx: ^Benchmark_Context, n: int) {
 	for i in 0..<n {
 		v := render.render_cell_from_semantic(grid.cells[i])
 		bg, glyph: instance.Instance_Data
-		emit_bg, emit_glyph := render.render_cell_expand_instance(v, &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
+		emit_bg, emit_glyph, _ := render.render_cell_expand_instance(v, &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
 		if emit_bg {
 			instances += 1
 		}

@@ -1,5 +1,6 @@
 package render
 
+import "core:math"
 import instance "instance"
 import termgrid "../terminal"
 
@@ -116,6 +117,7 @@ RENDER_CELL_V2_WIDTH_WIDE_LEAD    :: u8(2)
 
 RENDER_CELL_V2_CFLAG_WIDE_CONT :: u8(1 << 0)
 RENDER_CELL_V2_CFLAG_SELECTED  :: u8(1 << 1)
+RENDER_CELL_V2_CFLAG_EMOJI     :: u8(1 << 2) // cell contains color emoji (route to emoji atlas)
 
 // _RENDER_CELL_V2_STYLE_SHIFT is the bit position of the style_id field (== codepoint width).
 _RENDER_CELL_V2_STYLE_SHIFT :: u64(RENDER_CELL_V2_CODEPOINT_BITS)
@@ -197,6 +199,9 @@ render_cell_from_semantic :: proc(cell: termgrid.Semantic_Cell, selected: bool =
 	} else if cell.width == 2 {
 		w = RENDER_CELL_V2_WIDTH_WIDE_LEAD
 	}
+	if termgrid.is_emoji_codepoint(rune(cell.content)) {
+		cf |= RENDER_CELL_V2_CFLAG_EMOJI
+	}
 	if selected {
 		cf |= RENDER_CELL_V2_CFLAG_SELECTED
 	}
@@ -208,8 +213,18 @@ render_cell_empty_v2 :: proc() -> Render_Cell_V2 {
 	return render_cell_pack_v2(0x20, 0, RENDER_CELL_V2_WIDTH_NARROW, 0, RENDER_CELL_V2_SLOT_UNRESOLVED)
 }
 
+// _style_lut_dim_argb scales an ARGB color's RGB channels for DIM (SGR 2).
+// Matches the standard half-intensity dim used for fish autosuggestions.
+_style_lut_dim_argb :: proc(argb: u32) -> u32 {
+	r := (argb >> 16) & 0xFF
+	g := (argb >> 8) & 0xFF
+	b := argb & 0xFF
+	return (argb & 0xFF000000) | ((r / 2) << 16) | ((g / 2) << 8) | (b / 2)
+}
+
 // style_lut_rebuild pre-resolves every Style_Table entry to R5G6B5 fg/bg.
-// 1024-entry struct rewrite, no allocation.
+// DIM-flagged styles resolve to half-intensity foreground (SGR 2, used by
+// fish autosuggestions). 1024-entry struct rewrite, no allocation.
 style_lut_rebuild :: proc(lut: ^Style_LUT, table: ^termgrid.Style_Table) {
 	if lut == nil || table == nil {
 		return
@@ -224,7 +239,11 @@ style_lut_rebuild :: proc(lut: ^Style_LUT, table: ^termgrid.Style_Table) {
 		if i < count {
 			style = table.entries[i]
 		}
-		lut.fg_r5g6b5[i] = color_to_r5g6b5(style.fg)
+		fg := style.fg
+		if style.flags & termgrid.STYLE_FLAG_DIM != 0 {
+			fg = _style_lut_dim_argb(fg)
+		}
+		lut.fg_r5g6b5[i] = color_to_r5g6b5(fg)
 		lut.bg_r5g6b5[i] = color_to_r5g6b5(style.bg)
 	}
 	lut.selection_fg_r5g6b5 = color_to_r5g6b5(table.theme.selection_foreground)
@@ -245,12 +264,15 @@ render_cell_expand_instance :: proc(
 	x, y, cell_w, cell_h: f32,
 	bg_out: ^instance.Instance_Data,
 	glyph_out: ^instance.Instance_Data,
-) -> (emit_bg: bool, emit_glyph: bool) {
+	emoji_out: ^instance.Instance_Data = nil,
+	emoji_atlas_ptr: ^Emoji_Atlas = nil,
+	store: ^termgrid.Grapheme_Store = nil,
+) -> (emit_bg: bool, emit_glyph: bool, emit_emoji: bool) {
 	content, style, width, cflags, slot := render_cell_unpack_v2(cell)
 
 	// Continuation cells emit nothing.
 	if width == RENDER_CELL_V2_WIDTH_CONTINUATION {
-		return false, false
+		return false, false, false
 	}
 
 	// LUT lookup with bounds fallback to entry 0.
@@ -265,17 +287,21 @@ render_cell_expand_instance :: proc(
 		bg = lut.selection_bg_r5g6b5
 	}
 
-	// Empty skip (parity with _prepare_instances): space or NUL with black bg emits nothing.
-	if (content == 0x20 || content == 0) && bg == 0x0000 {
-		return false, false
+	// Empty skip: space or NUL with default/black bg emits nothing.
+	if (content == 0x20 || content == 0) && (bg == 0x0000 || bg == lut.bg_r5g6b5[0]) {
+		return false, false, false
 	}
 
-	// Background instance.
+	// Background instance. Wide leads span double width.
 	if bg_out != nil {
 		bg_r, bg_g, bg_b := instance.unpack_r5g6b5(bg)
+		bg_cw := cell_w
+		if width == RENDER_CELL_V2_WIDTH_WIDE_LEAD {
+			bg_cw = cell_w * 2.0
+		}
 		bg_out^ = instance.Instance_Data{
 			x = x, y = y,
-			cw = cell_w, ch = cell_h,
+			cw = bg_cw, ch = cell_h,
 			u0 = 0, v0 = 0, u1 = 0, v1 = 0,
 			r = bg_r, g = bg_g, b = bg_b, a = 1.0,
 		}
@@ -284,7 +310,52 @@ render_cell_expand_instance :: proc(
 
 	// Spaces and NUL emit no glyph.
 	if content == 0x20 || content == 0 {
-		return true, false
+		return true, false, false
+	}
+
+	is_emoji := cflags & RENDER_CELL_V2_CFLAG_EMOJI != 0
+	if is_emoji && emoji_out != nil && emoji_atlas_ptr != nil {
+		when ODIN_OS == .Darwin {
+			key := u64(content)
+			emoji_info, found := emoji_atlas_ptr.glyphs[key]
+			if !found {
+				ok: bool
+				if termgrid.content_is_grapheme(termgrid.Content_Handle(content)) {
+					buf: [64]u8
+					str := termgrid.grapheme_to_utf8(termgrid.Content_Handle(content), store, buf[:])
+					emoji_info, ok = emoji_atlas_get_cluster(emoji_atlas_ptr, str)
+				} else {
+					emoji_info, ok = emoji_atlas_get_glyph(emoji_atlas_ptr, rune(content))
+				}
+				if ok {
+					emoji_atlas_ptr.glyphs[key] = emoji_info
+					found = true
+				}
+			}
+			if found {
+				gw := emoji_info.size[0]
+				gh := emoji_info.size[1]
+				total_w := width == RENDER_CELL_V2_WIDTH_WIDE_LEAD ? cell_w * 2.0 : cell_w
+				scale := min(total_w / gw, cell_h / gh, 1.0)
+				draw_w := gw * scale
+				draw_h := gh * scale
+				offset_x := math.floor((total_w - draw_w) * 0.5 + 0.5)
+				offset_y := math.floor((cell_h - draw_h) * 0.5 + 0.5)
+				emoji_out^ = instance.Instance_Data{
+					x = x + offset_x,
+					y = y + offset_y,
+					cw = draw_w,
+					ch = draw_h,
+					u0 = emoji_info.uv[0],
+					v0 = emoji_info.uv[1],
+					u1 = emoji_info.uv[2],
+					v1 = emoji_info.uv[3],
+					r = 1.0, g = 1.0, b = 1.0, a = 1.0,
+				}
+				return true, false, true
+			}
+		}
+		return true, false, false
 	}
 
 	// Resolve the glyph slot: pinned slot when unresolved, stored slot otherwise.
@@ -317,7 +388,7 @@ render_cell_expand_instance :: proc(
 	}
 	if slot_entry == nil || !slot_entry.valid {
 		// GlyphSlotInvalid → skip glyph, keep bg.
-		return true, false
+		return true, false, false
 	}
 
 	// Glyph instance (wide leads span double width).
@@ -335,5 +406,5 @@ render_cell_expand_instance :: proc(
 			r = fg_r, g = fg_g, b = fg_b, a = 1.0,
 		}
 	}
-	return true, true
+	return true, true, false
 }

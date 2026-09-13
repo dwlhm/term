@@ -90,7 +90,8 @@ window_poll_input :: proc(w: ^win.Window, out: []Input_Event, max: int) -> int {
 //     Tab/Escape (no Ctrl) fold to Alt_Mod carrying '\r'/'\x7f'/'\t'/
 //     '\x1b', preserving the Alt prefix input_encode emits (ESC CR,
 //     ESC DEL, ESC TAB, ESC ESC); Ctrl wins when both are held.
-//   KEYDOWN Ctrl/GUI+C -> Local Copy (copy never reaches the PTY).
+//   KEYDOWN Cmd+C / Ctrl+Shift+C -> Local Copy (bare Ctrl+C produces Ctrl event for PTY).
+//   KEYDOWN Cmd+V / Ctrl+Shift+V -> Local Paste.
 //   KEYDOWN Ctrl/GUI+plus/minus -> Local Zoom_In/Zoom_Out.
 //   KEYDOWN printable + Ctrl -> Ctrl event (TEXTINPUT never fires for
 //     Ctrl combos, so KEYDOWN is the only source). Encodability is decided
@@ -131,6 +132,7 @@ input_translate_sdl :: proc(ev: sdl3.Event, out: []Input_Event) -> (n: int, quit
 		if len(out) == 0 {
 			return 0, false, false
 		}
+		shift := (sdl3.GetModState() & sdl3.KMOD_SHIFT) != sdl3.KMOD_NONE
 		out[0] = Input_Event{
 			event_type = .Pointer,
 			pointer = Input_Pointer_Event{
@@ -140,6 +142,7 @@ input_translate_sdl :: proc(ev: sdl3.Event, out: []Input_Event) -> (n: int, quit
 				dx = ev.motion.xrel,
 				dy = ev.motion.yrel,
 				primary_down = _mouse_primary_down(ev.motion.state),
+				shift = shift,
 			},
 		}
 		return 1, false, false
@@ -147,6 +150,7 @@ input_translate_sdl :: proc(ev: sdl3.Event, out: []Input_Event) -> (n: int, quit
 		if len(out) == 0 {
 			return 0, false, false
 		}
+		shift := (sdl3.GetModState() & sdl3.KMOD_SHIFT) != sdl3.KMOD_NONE
 		out[0] = Input_Event{
 			event_type = .Pointer,
 			pointer = Input_Pointer_Event{
@@ -156,6 +160,7 @@ input_translate_sdl :: proc(ev: sdl3.Event, out: []Input_Event) -> (n: int, quit
 				button = ev.button.button,
 				pressed = ev.button.down,
 				primary_down = ev.button.button == sdl3.BUTTON_LEFT && ev.button.down,
+				shift = shift,
 			},
 		}
 		return 1, false, false
@@ -163,6 +168,7 @@ input_translate_sdl :: proc(ev: sdl3.Event, out: []Input_Event) -> (n: int, quit
 		if len(out) == 0 {
 			return 0, false, false
 		}
+		shift := (sdl3.GetModState() & sdl3.KMOD_SHIFT) != sdl3.KMOD_NONE
 		out[0] = Input_Event{
 			event_type = .Pointer,
 			pointer = Input_Pointer_Event{
@@ -174,6 +180,7 @@ input_translate_sdl :: proc(ev: sdl3.Event, out: []Input_Event) -> (n: int, quit
 				wheel_integer_x = ev.wheel.integer_x,
 				wheel_integer_y = ev.wheel.integer_y,
 				wheel_flipped = ev.wheel.direction == .FLIPPED,
+				shift = shift,
 			},
 		}
 		return 1, false, false
@@ -227,8 +234,14 @@ _translate_key :: proc(key: sdl3.Keycode, mod: sdl3.Keymod, out: []Input_Event) 
 	alt := (mod & sdl3.KMOD_ALT) != sdl3.KMOD_NONE
 	ctrl := (mod & sdl3.KMOD_CTRL) != sdl3.KMOD_NONE
 	gui := (mod & sdl3.KMOD_GUI) != sdl3.KMOD_NONE
-	if (ctrl || gui) && key == sdl3.K_C {
+	is_copy := (gui && !ctrl && key == sdl3.K_C) || (ctrl && shift && !gui && key == sdl3.K_C) || key == sdl3.K_COPY
+	if is_copy {
 		out[0] = Input_Event{event_type = .Local, action = .Copy, ctrl = ctrl, gui = gui, shift = shift}
+		return true
+	}
+	is_paste := (gui && !ctrl && key == sdl3.K_V) || (ctrl && shift && !gui && key == sdl3.K_V) || key == sdl3.K_PASTE
+	if is_paste {
+		out[0] = Input_Event{event_type = .Local, action = .Paste, ctrl = ctrl, gui = gui, shift = shift}
 		return true
 	}
 	if (ctrl || gui) && shift && key == sdl3.K_EQUALS {
@@ -245,6 +258,9 @@ _translate_key :: proc(key: sdl3.Keycode, mod: sdl3.Keymod, out: []Input_Event) 
 			return true
 		case sdl3.K_COPY:
 			out[0] = Input_Event{event_type = .Local, action = .Copy, ctrl = ctrl, gui = gui, shift = shift}
+			return true
+		case sdl3.K_PASTE:
+			out[0] = Input_Event{event_type = .Local, action = .Paste, ctrl = ctrl, gui = gui, shift = shift}
 			return true
 		}
 	}
@@ -358,14 +374,17 @@ input_grid_for_pixels :: proc(
 // Write policy is count-and-continue with no global counters: every event
 // is attempted, and ok = false when any encodable event was lost (nil pty
 // or pty_write failure).
-input_pump_events :: proc(p: ^pty.Pty, evs: []Input_Event) -> (ok: bool) {
+// kitty_flags carries the terminal's active kitty keyboard enhancement flags
+// (default 0 = legacy); callers pass the active screen's flags so ambiguous
+// keys encode as CSI u when the application enabled disambiguation.
+input_pump_events :: proc(p: ^pty.Pty, evs: []Input_Event, kitty_flags: u8 = 0, app_cursor: bool = false) -> (ok: bool) {
 	ok = true
 	for ev in evs {
 		if ev.event_type != .Key {
 			continue
 		}
 		buf: [INPUT_ENCODE_MAX]u8
-		m := input_encode(ev, buf[:])
+		m := input_encode(ev, buf[:], kitty_flags, app_cursor)
 		if m == 0 {
 			continue
 		}
@@ -424,7 +443,11 @@ input_pump :: proc(
 	prev_ph := w.pixel_h
 	evs: [INPUT_PUMP_MAX_EVENTS]Input_Event
 	n := window_poll_input(w, evs[:], INPUT_PUMP_MAX_EVENTS)
-	ok = input_pump_events(p, evs[:n])
+	kitty_flags: u8 = 0
+	if t != nil {
+		kitty_flags = termgrid.terminal_kitty_active(t).flags
+	}
+	ok = input_pump_events(p, evs[:n], kitty_flags)
 	quit = !w.is_open
 	if (w.pixel_w != prev_pw || w.pixel_h != prev_ph) && t != nil {
 		r, wins_ok := input_pump_resize(p, t, int(w.pixel_w), int(w.pixel_h), cell_w, cell_h)

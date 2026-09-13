@@ -197,11 +197,17 @@ test_pump_translate_ctrl_alt_printable :: proc(t: ^testing.T) {
 	n, _, _ := input.input_translate_sdl(_pump_key(sdl3.K_A, sdl3.KMOD_NONE), out[:])
 	testing.expect(t, n == 0, "bare printable KEYDOWN must be ignored (TEXTINPUT owns it)")
 
-	// Ctrl combos ride KEYDOWN (TEXTINPUT never fires for them), except
-	// Ctrl+C, which is reserved for local copy handling.
+	// Ctrl combos ride KEYDOWN (TEXTINPUT never fires for them).
+	// Bare Ctrl+C produces Ctrl event for PTY (0x03 / SIGINT).
 	n, _, _ = input.input_translate_sdl(_pump_key(sdl3.K_C, sdl3.KMOD_CTRL), out[:])
-	testing.expect(t, n == 1, "Ctrl+C must yield one local event")
-	testing.expect(t, out[0].event_type == .Local && out[0].action == .Copy, "Ctrl+C must be Local Copy")
+	testing.expect(t, n == 1, "Ctrl+C must yield one event")
+	testing.expect(t, out[0].kind == .Ctrl && out[0].rune == 'c', "Ctrl+C must be Ctrl{c}")
+	// Cmd+C produces Local Copy
+	n, _, _ = input.input_translate_sdl(_pump_key(sdl3.K_C, sdl3.KMOD_GUI), out[:])
+	testing.expect(t, n == 1 && out[0].event_type == .Local && out[0].action == .Copy, "Cmd+C must be Local Copy")
+	// Ctrl+Shift+C produces Local Copy
+	n, _, _ = input.input_translate_sdl(_pump_key(sdl3.K_C, sdl3.KMOD_CTRL|sdl3.KMOD_SHIFT), out[:])
+	testing.expect(t, n == 1 && out[0].event_type == .Local && out[0].action == .Copy, "Ctrl+Shift+C must be Local Copy")
 
 	n, _, _ = input.input_translate_sdl(_pump_key(sdl3.K_SPACE, sdl3.KMOD_CTRL), out[:])
 	testing.expect(t, n == 1 && out[0].kind == .Ctrl && out[0].rune == ' ', "Ctrl+Space must be Ctrl{space}")
@@ -282,8 +288,32 @@ test_pump_translate_delete_and_local_actions :: proc(t: ^testing.T) {
 		testing.expect(t, out[0].shift && out[0].ctrl && out[0].gui, "Delete must preserve Shift/Ctrl/GUI")
 	}
 
+	// Cmd+C produces local Copy
+	n, _, _ = input.input_translate_sdl(_pump_key(sdl3.K_C, sdl3.KMOD_GUI), out[:])
+	testing.expect(t, n == 1 && out[0].event_type == .Local && out[0].action == .Copy, "Cmd+C must be local Copy")
+
+	// Ctrl+Shift+C produces local Copy
+	n, _, _ = input.input_translate_sdl(_pump_key(sdl3.K_C, sdl3.KMOD_CTRL|sdl3.KMOD_SHIFT), out[:])
+	testing.expect(t, n == 1 && out[0].event_type == .Local && out[0].action == .Copy, "Ctrl+Shift+C must be local Copy")
+
+	// Bare Ctrl+C produces Ctrl event
 	n, _, _ = input.input_translate_sdl(_pump_key(sdl3.K_C, sdl3.KMOD_CTRL), out[:])
-	testing.expect(t, n == 1 && out[0].event_type == .Local && out[0].action == .Copy, "Ctrl+C must be local Copy")
+	testing.expect(t, n == 1 && out[0].kind == .Ctrl && out[0].rune == 'c', "bare Ctrl+C must be Ctrl{c}")
+
+	// Cmd+V produces local Paste
+	n, _, _ = input.input_translate_sdl(_pump_key(sdl3.K_V, sdl3.KMOD_GUI), out[:])
+	testing.expect(t, n == 1 && out[0].event_type == .Local && out[0].action == .Paste, "Cmd+V must be local Paste")
+
+	// Ctrl+Shift+V produces local Paste
+	n, _, _ = input.input_translate_sdl(_pump_key(sdl3.K_V, sdl3.KMOD_CTRL|sdl3.KMOD_SHIFT), out[:])
+	testing.expect(t, n == 1 && out[0].event_type == .Local && out[0].action == .Paste, "Ctrl+Shift+V must be local Paste")
+
+	// Bare Ctrl+V produces Ctrl event
+	n, _, _ = input.input_translate_sdl(_pump_key(sdl3.K_V, sdl3.KMOD_CTRL), out[:])
+	testing.expect(t, n == 1 && out[0].kind == .Ctrl && out[0].rune == 'v', "bare Ctrl+V must be Ctrl{v}")
+
+	n, _, _ = input.input_translate_sdl(_pump_key(sdl3.K_PASTE, sdl3.KMOD_NONE), out[:])
+	testing.expect(t, n == 1 && out[0].event_type == .Local && out[0].action == .Paste, "K_PASTE must be local Paste")
 
 	n, _, _ = input.input_translate_sdl(_pump_key(sdl3.K_PLUS, sdl3.KMOD_GUI), out[:])
 	testing.expect(t, n == 1 && out[0].event_type == .Local && out[0].action == .Zoom_In, "GUI+plus must be local zoom in")

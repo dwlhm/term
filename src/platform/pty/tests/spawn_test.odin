@@ -1,6 +1,9 @@
 package pty_test
 
 import "core:c"
+import "core:fmt"
+import "core:os"
+import "core:strings"
 import "core:testing"
 import "core:time"
 import posix "core:sys/posix"
@@ -29,15 +32,15 @@ _get_winsize :: proc(master: int) -> (rows, cols: int, ok: bool) {
 // _teardown kills the spawned child, reaps it, and closes the master fd.
 // Only call after a successful spawn.
 _teardown :: proc(p: ^pty.Pty) {
+	if p.master >= 0 {
+		posix.close(posix.FD(p.master))
+		p.master = -1
+	}
 	if p.pid > 0 {
 		posix.kill(posix.pid_t(p.pid), .SIGKILL)
 		status: c.int
 		posix.waitpid(posix.pid_t(p.pid), &status, posix.Wait_Flags{})
 		p.pid = -1
-	}
-	if p.master >= 0 {
-		posix.close(posix.FD(p.master))
-		p.master = -1
 	}
 }
 
@@ -161,3 +164,49 @@ test_spawn_clears_prompt_eol_marker :: proc(t: ^testing.T) {
 	}
 	testing.expect(t, !saw_percent, "absolute shell environment must clear PROMPT_EOL_MARK")
 }
+
+@(test)
+test_spawn_env_term_program_and_path :: proc(t: ^testing.T) {
+	p: pty.Pty
+	ok := pty.pty_spawn(&p, 24, 80, "/bin/sh", {"-c", "printf '%s|%s' \"$TERM_PROGRAM\" \"$PATH\""})
+	testing.expect(t, ok, "spawn must succeed")
+	if !ok { return }
+	defer _teardown(&p)
+	buf: [4096]u8
+	total := 0
+	for _ in 0..<200 {
+		n, eof := pty.pty_drain(&p, buf[total:], len(buf) - total)
+		total += n
+		if eof || total >= len(buf) { break }
+		time.sleep(1 * time.Millisecond)
+	}
+	output := string(buf[:total])
+	testing.expect(t, strings.has_prefix(output, "Term|"), "TERM_PROGRAM must be Term")
+	testing.expect(t, strings.contains(output, "/opt/homebrew/bin"), "PATH must contain /opt/homebrew/bin")
+}
+
+@(test)
+test_spawn_env_inheritance :: proc(t: ^testing.T) {
+	test_env_key :: "TERM_TEST_CUSTOM_INHERIT"
+	test_env_val :: "custom_inherit_value_9876"
+	os.set_env(test_env_key, test_env_val)
+	defer os.unset_env(test_env_key)
+
+	p: pty.Pty
+	ok := pty.pty_spawn(&p, 24, 80, "/bin/sh", {"-c", "printf '%s' \"$TERM_TEST_CUSTOM_INHERIT\""})
+	testing.expect(t, ok, "spawn must succeed")
+	if !ok { return }
+	defer _teardown(&p)
+
+	buf: [256]u8
+	total := 0
+	for _ in 0..<200 {
+		n, eof := pty.pty_drain(&p, buf[total:], len(buf) - total)
+		total += n
+		if eof || total >= len(buf) { break }
+		time.sleep(1 * time.Millisecond)
+	}
+	output := string(buf[:total])
+	testing.expect_value(t, output, test_env_val)
+}
+

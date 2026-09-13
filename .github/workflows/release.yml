@@ -1,0 +1,40 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-release:
+    runs-on: macos-14
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Odin
+        uses: laytan/setup-odin@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build release binary
+        run: make release
+
+      - name: Build macOS app bundle
+        run: make bundle
+
+      - name: Package release archives
+        run: |
+          tar -czf term-macos-arm64.tar.gz -C bin Term.app
+          cd bin && zip -ry ../term-macos-arm64.zip Term.app && cd ..
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            term-macos-arm64.tar.gz
+            term-macos-arm64.zip
+          draft: false
+          prerelease: false

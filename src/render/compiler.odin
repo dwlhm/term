@@ -198,6 +198,43 @@ render_compile_full_v2 :: proc(
 	f.cell_count = i32(rows * cols)
 }
 
+// _is_emoji_cell checks whether a cell or grapheme cluster is an emoji
+_is_emoji_cell :: proc(cell: termgrid.Semantic_Cell, store: ^termgrid.Grapheme_Store) -> bool {
+	handle := termgrid.Content_Handle(cell.content)
+	base := termgrid.grapheme_resolve_base(handle, store)
+	if base == 0 || base == 0x20 {
+		return false
+	}
+	if termgrid.is_emoji_codepoint(base) {
+		return true
+	}
+	if termgrid.content_is_grapheme(handle) && store != nil {
+		idx := int(handle - termgrid.CONTENT_GRAPHEME_BASE)
+		if idx >= 0 && idx < termgrid.GRAPHEME_STORE_CAP {
+			e := &store.entries[idx]
+			for i in 0..<int(e.rune_count) {
+				r := e.runes[i]
+				if termgrid.is_emoji_codepoint(r) {
+					return true
+				}
+				if r >= 0x1F3FB && r <= 0x1F3FF {
+					return true
+				}
+				if r == 0x20E3 {
+					return true
+				}
+				if r == 0xFE0F {
+					b := e.runes[0]
+					if termgrid.is_emoji_codepoint(b) || (b >= '0' && b <= '9') || b == '#' || b == '*' {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
 // _compile_row_range_v2 compiles a range of cells in a single row.
 // ASCII cells (content < 0x80) take the unchanged pure-pack branch with zero
 // new calls. Non-ASCII grapheme clusters and non-pinned literals resolve
@@ -257,7 +294,17 @@ _compile_row_range_v2 :: proc(
 			shape_rq = nil
 		}
 		rc: Render_Cell_V2
-		if shaping && cell.content >= 0x80 {
+		if _is_emoji_cell(cell, store) {
+			w := RENDER_CELL_V2_WIDTH_NARROW
+			cf := u8(RENDER_CELL_V2_CFLAG_EMOJI)
+			if selected {
+				cf |= RENDER_CELL_V2_CFLAG_SELECTED
+			}
+			if cell.width == 2 {
+				w = RENDER_CELL_V2_WIDTH_WIDE_LEAD
+			}
+			rc = render_cell_pack_v2(cell.content, u16(cell.style), w, cf, RENDER_CELL_V2_SLOT_UNRESOLVED)
+		} else if shaping && cell.content >= 0x80 {
 			handle := termgrid.Content_Handle(cell.content)
 			needs_shape := termgrid.content_is_grapheme(handle)
 			if !needs_shape {
@@ -333,17 +380,22 @@ shaped_cell_from_cluster :: proc(
 	}
 	style := u16(cell.style)
 
+	if _is_emoji_cell(cell, store) {
+		ec := cf | RENDER_CELL_V2_CFLAG_EMOJI
+		return render_cell_pack_v2(cell.content, style, w, ec, RENDER_CELL_V2_SLOT_UNRESOLVED)
+	}
+
 	// Collect cluster marks; an in-cluster ZWJ forces a right boundary
 	// (never merges, no ligature) but stays in the key identity.
-	mark_buf: [termgrid.GRAPHEME_MAX_MARKS]rune
+	mark_buf: [termgrid.GRAPHEME_INLINE_CAP]rune
 	mark_n := 0
 	own_zwj := false
 	if termgrid.content_is_grapheme(handle) && store != nil {
 		idx := int(handle - termgrid.CONTENT_GRAPHEME_BASE)
 		if idx >= 0 && idx < termgrid.GRAPHEME_STORE_CAP {
 			e := &store.entries[idx]
-			for i in 0..<int(e.mark_count) {
-				m := e.marks[i]
+			for i in 1..<int(e.rune_count) {
+				m := e.runes[i]
 				if m == 0x200D {
 					own_zwj = true
 				}
@@ -418,6 +470,20 @@ shaped_cell_from_cluster :: proc(
 	// glyph is covered, else bg-only skip counted as tofu_missing.
 	marks: []rune
 	if !covered {
+		is_emoji_range := (base >= 0x1F000 && base <= 0x1FAFF) ||
+			(base >= 0x2600 && base <= 0x27BF) ||
+			(base >= 0x2300 && base <= 0x23FF) ||
+			(base >= 0x2B05 && base <= 0x2B07) ||
+			(base >= 0x2B1B && base <= 0x2B1C) ||
+			base == 0x2B50 || base == 0x2B55 ||
+			base == 0x203C || base == 0x2049 || base == 0x2122 || base == 0x2139 ||
+			(base >= 0x2194 && base <= 0x2199) || (base >= 0x21A9 && base <= 0x21AA) ||
+			base == 0x3030 || base == 0x303D || base == 0x3297 || base == 0x3299
+		if is_emoji_range {
+			ec := cf | RENDER_CELL_V2_CFLAG_EMOJI
+			return render_cell_pack_v2(cell.content, style, w, ec, RENDER_CELL_V2_SLOT_UNRESOLVED)
+		}
+
 		if fi, cov := fallback_resolve(chain, FALLBACK_TOFU_PRIMARY, counters); cov {
 			shaped, font_index = FALLBACK_TOFU_PRIMARY, fi
 		} else if sfi, scov := fallback_resolve(chain, FALLBACK_TOFU_SECONDARY, counters); scov {
@@ -432,7 +498,7 @@ shaped_cell_from_cluster :: proc(
 		// Keep only covered marks (independent probes, nil counters: a
 		// mark miss is mark_drop, never fallback_miss). Cross-font pairs
 		// composite into ONE slot downstream.
-		kept: [termgrid.GRAPHEME_MAX_MARKS]rune
+		kept: [termgrid.GRAPHEME_INLINE_CAP]rune
 		kn := 0
 		for i in 0..<mark_n {
 			if _, mok := fallback_resolve(chain, u32(mark_buf[i]), nil); mok {
@@ -449,7 +515,7 @@ shaped_cell_from_cluster :: proc(
 	// this frame packs the blank UNRESOLVED placeholder (pop-in next
 	// frame). Chain exhaustion above stays fully sync (no enqueue).
 	if rq != nil {
-		wide := termgrid.wcwidth(rune(key.base)) == 2
+		wide := termgrid.wcwidth(rune(key.runes[0])) == 2
 		request_result := raster_request_async(rq, key, font_index, shaped, marks, wide, target)
 		if result != nil { result^ = request_result }
 		return render_cell_pack_v2(0, style, RENDER_CELL_V2_WIDTH_NARROW, cf, RENDER_CELL_V2_SLOT_UNRESOLVED)

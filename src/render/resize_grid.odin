@@ -90,7 +90,26 @@ renderer_resize_grid :: proc(r: ^Renderer, t: ^termgrid.Terminal, rows: i32, col
 
 	// 5. Dirty mirror: rebuild against the committed dims (rebase + arm
 	// inside init; nil backend skips GPU creation for CPU-only use).
-	// Oversize grids (2N > max_instances) refuse init and stay disarmed.
+	// Instance capacity scales dynamically for large viewports/fullscreen.
+	needed_instances := max(u32(RENDER_MAX_INSTANCES), u32(2 * rows * cols + 128))
+	if needed_instances > r.instances.max_instances {
+		r.instances.max_instances = needed_instances
+		when ODIN_OS == .Darwin {
+			if r.instances.emoji_data != nil {
+				delete(r.instances.emoji_data, allocator)
+				r.instances.emoji_data = make([]instance.Instance_Data, r.instances.max_instances, allocator)
+			}
+			if rawptr(r.instances.emoji_buffer) != nil && r.backend != nil {
+				r.backend.destroy_buffer(r.instances.emoji_buffer)
+				r.instances.emoji_buffer = r.backend.create_buffer(
+					r.device,
+					u64(r.instances.max_instances) * instance.INSTANCE_STRIDE,
+					gpu.Gpu_Buffer_Usage.Vertex | gpu.Gpu_Buffer_Usage.Copy_Dst,
+					false,
+				)
+			}
+		}
+	}
 	if rawptr(r.dirty.buffer) != nil && r.backend != nil {
 		r.backend.destroy_buffer(r.dirty.buffer)
 		r.dirty.buffer = gpu.Gpu_Buffer(nil)
@@ -98,9 +117,10 @@ renderer_resize_grid :: proc(r: ^Renderer, t: ^termgrid.Terminal, rows: i32, col
 	dirty_upload_destroy(&r.dirty, allocator)
 	dirty_upload_init(&r.dirty, r, allocator)
 
-	// 6. Upload ring: same per-slot capacity, fresh staging + buffers.
+	// 6. Upload ring: dynamic capacity matching max_instances, fresh staging + buffers.
+	upload_capacity := max(u64(RENDER_UPLOAD_CAPACITY), u64(r.instances.max_instances) * instance.INSTANCE_STRIDE)
 	upload_ring_destroy(&r.upload_ring, allocator)
-	upload_ring_init(&r.upload_ring, r.backend, r.device, r.queue, RENDER_UPLOAD_CAPACITY, allocator)
+	upload_ring_init(&r.upload_ring, r.backend, r.device, r.queue, upload_capacity, allocator)
 
 	// 7. Instance staging: draw capacity, not grid capacity, so the length
 	// (max_instances) is kept; the backing is renewed to drop stale pixels.

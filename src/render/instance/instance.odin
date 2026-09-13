@@ -44,6 +44,13 @@ Instance_Renderer :: struct {
 	atlas_view:       gpu.Gpu_TextureView,
 	sampler:          gpu.Gpu_Sampler,
 
+	// Emoji pass resources (nil when emoji not available)
+	emoji_pipeline:          gpu.Gpu_RenderPipeline,
+	bind_group_layout_emoji: gpu.Gpu_BindGroupLayout,
+	bind_group_emoji:        gpu.Gpu_BindGroup,
+	emoji_buffer:            gpu.Gpu_Buffer,
+	emoji_data:              []Instance_Data,
+
 	// State
 	max_instances: u32,
 	instance_data: []Instance_Data, // CPU staging buffer
@@ -198,10 +205,30 @@ instance_renderer_destroy :: proc(r: ^Instance_Renderer, allocator: runtime.Allo
 			r.backend.destroy_buffer(r.instance_buffer)
 			r.instance_buffer = gpu.Gpu_Buffer(nil)
 		}
+		if rawptr(r.emoji_pipeline) != nil {
+			r.backend.destroy_render_pipeline(r.emoji_pipeline)
+			r.emoji_pipeline = gpu.Gpu_RenderPipeline(nil)
+		}
+		if rawptr(r.bind_group_emoji) != nil {
+			r.backend.destroy_bind_group(r.bind_group_emoji)
+			r.bind_group_emoji = gpu.Gpu_BindGroup(nil)
+		}
+		if rawptr(r.bind_group_layout_emoji) != nil {
+			r.backend.destroy_bind_group_layout(r.bind_group_layout_emoji)
+			r.bind_group_layout_emoji = gpu.Gpu_BindGroupLayout(nil)
+		}
+		if rawptr(r.emoji_buffer) != nil {
+			r.backend.destroy_buffer(r.emoji_buffer)
+			r.emoji_buffer = gpu.Gpu_Buffer(nil)
+		}
 	}
 	if r.instance_data != nil {
 		delete(r.instance_data)
 		r.instance_data = nil
+	}
+	if r.emoji_data != nil {
+		delete(r.emoji_data, allocator)
+		r.emoji_data = nil
 	}
 }
 
@@ -250,6 +277,81 @@ instance_renderer_fill_glyph :: proc(
 		u1 = u1, v1 = v1,
 		r = r_color, g = g_color, b = b_color, a = 1.0,
 	}
+}
+
+// instance_renderer_fill_emoji fills an emoji instance into the emoji staging buffer.
+instance_renderer_fill_emoji :: proc(
+	r: ^Instance_Renderer,
+	index: u32,
+	x, y, w, h: f32,
+	u0, v0, u1, v1: f32,
+) {
+	if r == nil || r.emoji_data == nil || int(index) >= len(r.emoji_data) { return }
+	r.emoji_data[index] = Instance_Data{
+		x = x, y = y,
+		cw = w, ch = h,
+		u0 = u0, v0 = v0,
+		u1 = u1, v1 = v1,
+		r = 1.0, g = 1.0, b = 1.0, a = 1.0,
+	}
+}
+
+// instance_renderer_init_emoji wires the emoji RGBA8 pipeline.
+// Safe to call when emoji_texture is nil (no-op, returns false).
+instance_renderer_init_emoji :: proc(
+	r: ^Instance_Renderer,
+	emoji_texture: gpu.Gpu_Texture,
+	emoji_view: gpu.Gpu_TextureView,
+	emoji_wgsl: string,
+	format: gpu.Gpu_Format,
+	allocator: runtime.Allocator = context.allocator,
+) -> bool {
+	if r == nil || r.backend == nil || rawptr(r.device) == nil || rawptr(emoji_texture) == nil || rawptr(emoji_view) == nil {
+		return false
+	}
+
+	// Allocate CPU staging
+	r.emoji_data = make([]Instance_Data, r.max_instances, allocator)
+
+	// Create emoji buffer (same size as instance_buffer)
+	r.emoji_buffer = r.backend.create_buffer(
+		r.device,
+		u64(r.max_instances) * INSTANCE_STRIDE,
+		gpu.Gpu_Buffer_Usage.Vertex | gpu.Gpu_Buffer_Usage.Copy_Dst,
+		false,
+	)
+
+	// Shared vertex layout: stride 48, step Instance (identical to glyph pipeline)
+	attrs := []gpu.Gpu_Vertex_Attribute{
+		{format = .Float32x2, offset = 0, shader_location = 0},
+		{format = .Float32x2, offset = 8, shader_location = 1},
+		{format = .Float32x4, offset = 16, shader_location = 2},
+		{format = .Float32x4, offset = 32, shader_location = 3},
+	}
+	layouts := []gpu.Gpu_Vertex_Layout{
+		{array_stride = INSTANCE_STRIDE, step_mode = .Instance, attributes = attrs},
+	}
+
+	emoji_module := r.backend.create_shader_module(r.device, emoji_wgsl)
+	r.emoji_pipeline = r.backend.create_render_pipeline(
+		r.device, emoji_module, "vs_main", emoji_module, "fs_main",
+		layouts, format, .Alpha_Blend, .Triangle_List,
+	)
+	r.backend.destroy_shader_module(emoji_module)
+
+	if rawptr(r.emoji_pipeline) == nil {
+		return false
+	}
+
+	r.bind_group_layout_emoji = r.backend.pipeline_get_bind_group_layout(r.emoji_pipeline, 0)
+
+	emoji_entries := []gpu.Gpu_Bind_Entry{
+		{binding = 0, buffer = r.uniform_buffer, offset = 0, size = size_of(Uniform_Data), entry_type = .Buffer},
+		{binding = 1, view = emoji_view, entry_type = .Texture_View},
+		{binding = 2, sampler = r.sampler, entry_type = .Sampler},
+	}
+	r.bind_group_emoji = r.backend.create_bind_group(r.device, r.bind_group_layout_emoji, emoji_entries)
+	return true
 }
 
 // unpack_r5g6b5 unpacks a 16-bit R5G6B5 color to f32 RGB components [0, 1].

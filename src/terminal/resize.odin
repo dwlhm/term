@@ -10,6 +10,8 @@ _Logical_Line :: struct {
 	is_prompt:     bool,
 }
 
+PROMPT_ELASTIC_GAP_MIN_LEN :: 4
+
 _reflow_make_row :: proc(cols: int, allocator: runtime.Allocator) -> Row {
 	r: Row
 	row_init(&r, cols, allocator)
@@ -162,7 +164,7 @@ terminal_resize :: proc(t: ^Terminal, new_rows: int, new_cols: int, allocator :=
 			first_text := -1
 			for i in 0..<len(ll.cells) {
 				cell := ll.cells[i]
-				if (cell.content != 0 && cell.content != ' ') || cell.style != 0 {
+				if cell.content != 0 && cell.content != ' ' {
 					first_text = i
 					break
 				}
@@ -175,7 +177,7 @@ terminal_resize :: proc(t: ^Terminal, new_rows: int, new_cols: int, allocator :=
 			last_text := -1
 			for i := len(ll.cells) - 1; i >= 0; i -= 1 {
 				cell := ll.cells[i]
-				if (cell.content != 0 && cell.content != ' ') || cell.style != 0 {
+				if cell.content != 0 && cell.content != ' ' {
 					last_text = i
 					break
 				}
@@ -183,11 +185,8 @@ terminal_resize :: proc(t: ^Terminal, new_rows: int, new_cols: int, allocator :=
 			if last_text <= first_text {
 				continue
 			}
-			if !t.has_osc_133 && last_text < old_cols - 25 {
-				continue
-			}
 
-			// Find the longest run of unstyled spaces between first_text and last_text
+			// Find the longest run of spaces between first_text and last_text
 			best_gap_start := -1
 			best_gap_len := 0
 			cur_gap_start := -1
@@ -197,7 +196,7 @@ terminal_resize :: proc(t: ^Terminal, new_rows: int, new_cols: int, allocator :=
 				is_space := false
 				if i < last_text {
 					cell := ll.cells[i]
-					if (cell.content == 0 || cell.content == ' ') && cell.style == 0 {
+					if cell.content == 0 || cell.content == ' ' {
 						is_space = true
 					}
 				}
@@ -218,19 +217,12 @@ terminal_resize :: proc(t: ^Terminal, new_rows: int, new_cols: int, allocator :=
 				}
 			}
 
-			should_compress := false
-			if t.has_osc_133 {
-				should_compress = ll.is_prompt && best_gap_len >= 6
-			} else {
-				should_compress = best_gap_len >= 6
-			}
+			should_compress := best_gap_len >= PROMPT_ELASTIC_GAP_MIN_LEN
 
 			cursor_ok := !ll.has_cursor || ll.cursor_offset <= best_gap_start + 1
 			if should_compress && cursor_ok {
-				if !t.has_osc_133 {
-					ll.is_prompt = true
-				}
-				diff := old_cols - new_cols
+				ll.is_prompt = true
+				diff := len(ll.cells) - new_cols
 				compress := min(diff, best_gap_len)
 				if compress > 0 {
 					remove_start := best_gap_start + best_gap_len - compress
@@ -429,9 +421,12 @@ terminal_resize :: proc(t: ^Terminal, new_rows: int, new_cols: int, allocator :=
 	t.grid.mask = new_cap - 1
 	t.grid.origin = 0
 
-	// g. Clamp t.cursor.row to [0, new_rows-1] and t.cursor.col to [0, new_cols-1]
+	// g. Clamp t.cursor.row to [0, new_rows-1] and t.cursor.col to [0, new_cols-1].
+	// pending_wrap is layout-dependent (last-column state of the old width),
+	// so it is cleared: the reflowed cursor position is authoritative.
 	t.cursor.row = clamp(new_cursor_row, 0, new_rows - 1)
 	t.cursor.col = clamp(new_cursor_col, 0, new_cols - 1)
+	t.cursor.pending_wrap = false
 
 	// h. Destroy old rows slice and re-init damage with damage_mark_all
 	damage_destroy(&t.damage, allocator)

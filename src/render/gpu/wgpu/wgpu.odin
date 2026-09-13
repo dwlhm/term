@@ -332,9 +332,14 @@ _wgpu_write_texture :: proc(queue: gpu.Gpu_Queue, texture: gpu.Gpu_Texture, data
 	q := wgpu.Queue(queue)
 	tex := wgpu.Texture(texture)
 
+	bytes_per_row := width
+	if height > 0 && len(data) > 0 {
+		bytes_per_row = u32(len(data)) / height
+	}
+
 	data_layout := wgpu.TexelCopyBufferLayout{
 		offset       = 0,
-		bytesPerRow  = width,
+		bytesPerRow  = bytes_per_row,
 		rowsPerImage = height,
 	}
 	dest := wgpu.TexelCopyTextureInfo{

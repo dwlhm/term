@@ -197,7 +197,10 @@ test_p10_backspace_wide :: proc(t: ^testing.T) {
 	tg.terminal_put_char(&term, 0x4E2D) // cursor col 2
 	tg.terminal_backspace(&term)
 	cursor := tg.terminal_get_cursor(&term)
-	testing.expect(t, cursor.col == 0, "BS over wide -2 lands lead")
+	testing.expect(t, cursor.col == 1, "BS over wide -1 moves to continuation cell")
+	tg.terminal_backspace(&term)
+	cursor = tg.terminal_get_cursor(&term)
+	testing.expect(t, cursor.col == 0, "second BS moves to lead cell")
 	cell := tg.terminal_get_cell(&term, 0, 0)
 	testing.expect(t, cell.content == 0x4E2D, "grid untouched by BS")
 }

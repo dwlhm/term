@@ -1,11 +1,14 @@
 package termgrid
 
+import "core:unicode/utf8"
+
 // Bounded combining-mark grapheme pool. Zero allocation: fixed arrays only.
 // A Content_Handle >= CONTENT_GRAPHEME_BASE is a pool index;
 // <= 0x10FFFF is a literal codepoint; 0 is empty.
 
-// GRAPHEME_MAX_MARKS caps marks per cluster.
-GRAPHEME_MAX_MARKS :: 4
+// GRAPHEME_INLINE_CAP caps marks per cluster.
+GRAPHEME_INLINE_CAP :: 16
+GRAPHEME_MAX_MARKS :: GRAPHEME_INLINE_CAP
 
 // GRAPHEME_STORE_CAP caps live clusters in the pool.
 GRAPHEME_STORE_CAP :: 256
@@ -13,11 +16,30 @@ GRAPHEME_STORE_CAP :: 256
 // CONTENT_GRAPHEME_BASE partitions Content_Handle: >= base is a pool index.
 CONTENT_GRAPHEME_BASE :: u32(0x110000)
 
-// Grapheme_Cluster is one base rune plus up to 4 combining marks.
+// Grapheme_Cluster is a sequence of up to GRAPHEME_INLINE_CAP runes.
 Grapheme_Cluster :: struct {
-	base:       rune,
-	marks:      [GRAPHEME_MAX_MARKS]rune,
-	mark_count: u8,
+	runes:      [GRAPHEME_INLINE_CAP]rune,
+	rune_count: u8,
+	width:      u8,
+}
+
+// grapheme_cluster_make initializes a new cluster with 1 initial rune.
+grapheme_cluster_make :: proc(initial_rune: rune, width: u8 = 1) -> Grapheme_Cluster {
+	c: Grapheme_Cluster
+	c.runes[0] = initial_rune
+	c.rune_count = 1
+	c.width = width
+	return c
+}
+
+// grapheme_cluster_append adds a rune to a cluster (clamps safely at GRAPHEME_INLINE_CAP).
+grapheme_cluster_append :: proc(cluster: ^Grapheme_Cluster, r: rune) -> bool {
+	if cluster == nil || cluster.rune_count >= GRAPHEME_INLINE_CAP {
+		return false
+	}
+	cluster.runes[cluster.rune_count] = r
+	cluster.rune_count += 1
+	return true
 }
 
 // Grapheme_Store is a bump allocator with a free stack for released indices.
@@ -52,29 +74,34 @@ grapheme_store_append :: proc(s: ^Grapheme_Store, base: rune, mark: rune) -> Con
 	} else {
 		return Content_Handle(base)
 	}
-	s.entries[idx] = Grapheme_Cluster{base = base, mark_count = 1}
-	s.entries[idx].marks[0] = mark
+	s.entries[idx] = {}
+	s.entries[idx].runes[0] = base
+	s.entries[idx].runes[1] = mark
+	s.entries[idx].rune_count = 2
+	s.entries[idx].width = 1
 	s.live_count += 1
 	return CONTENT_GRAPHEME_BASE + Content_Handle(idx)
 }
 
-// grapheme_store_add_mark appends a mark to a cluster.
+// grapheme_store_add_rune appends a rune to a cluster.
 // Literal handle: allocates a new cluster. Pool handle: appends in place
-// when mark_count < GRAPHEME_MAX_MARKS, else drops the mark (handle unchanged).
-grapheme_store_add_mark :: proc(s: ^Grapheme_Store, h: Content_Handle, mark: rune) -> Content_Handle {
+// when rune_count < GRAPHEME_INLINE_CAP, else drops the rune (handle unchanged).
+grapheme_store_add_rune :: proc(s: ^Grapheme_Store, h: Content_Handle, r: rune) -> Content_Handle {
 	if !content_is_grapheme(h) {
-		return grapheme_store_append(s, rune(h), mark)
+		return grapheme_store_append(s, rune(h), r)
 	}
 	idx := int(h - CONTENT_GRAPHEME_BASE)
 	if idx < 0 || idx >= GRAPHEME_STORE_CAP {
-		return grapheme_store_append(s, grapheme_resolve_base(h, s), mark)
+		return grapheme_store_append(s, grapheme_resolve_base(h, s), r)
 	}
 	e := &s.entries[idx]
-	if int(e.mark_count) < GRAPHEME_MAX_MARKS {
-		e.marks[e.mark_count] = mark
-		e.mark_count += 1
-	}
+	grapheme_cluster_append(e, r)
 	return h
+}
+
+// grapheme_store_add_mark forwards to grapheme_store_add_rune for backward compatibility.
+grapheme_store_add_mark :: proc(s: ^Grapheme_Store, h: Content_Handle, mark: rune) -> Content_Handle {
+	return grapheme_store_add_rune(s, h, mark)
 }
 
 // grapheme_store_release frees a pool handle back to the free stack.
@@ -114,5 +141,44 @@ grapheme_resolve_base :: proc(h: Content_Handle, s: ^Grapheme_Store) -> rune {
 	if idx < 0 || idx >= GRAPHEME_STORE_CAP {
 		return 0xFFFD
 	}
-	return s.entries[idx].base
+	e := &s.entries[idx]
+	if e.rune_count == 0 {
+		return 0xFFFD
+	}
+	return e.runes[0]
 }
+
+// grapheme_to_utf8 writes the full UTF-8 representation (runes 0..<rune_count)
+// into out_buf and returns the resulting string slice.
+grapheme_to_utf8 :: proc(h: Content_Handle, s: ^Grapheme_Store, out_buf: []u8) -> string {
+	if !content_is_grapheme(h) {
+		b, n := utf8.encode_rune(rune(h))
+		if n <= 0 || n > len(out_buf) do return ""
+		copy(out_buf[:n], b[:n])
+		return string(out_buf[:n])
+	}
+	if s == nil {
+		b, n := utf8.encode_rune(0xFFFD)
+		if n <= 0 || n > len(out_buf) do return ""
+		copy(out_buf[:n], b[:n])
+		return string(out_buf[:n])
+	}
+	idx := int(h - CONTENT_GRAPHEME_BASE)
+	if idx < 0 || idx >= GRAPHEME_STORE_CAP {
+		b, n := utf8.encode_rune(0xFFFD)
+		if n <= 0 || n > len(out_buf) do return ""
+		copy(out_buf[:n], b[:n])
+		return string(out_buf[:n])
+	}
+	e := &s.entries[idx]
+	offset := 0
+	count := min(int(e.rune_count), GRAPHEME_INLINE_CAP)
+	for i in 0..<count {
+		b, n := utf8.encode_rune(e.runes[i])
+		if offset + n > len(out_buf) do break
+		copy(out_buf[offset:offset+n], b[:n])
+		offset += n
+	}
+	return string(out_buf[:offset])
+}
+

@@ -648,3 +648,52 @@ test_resize_dual_engine_scrollback_preservation :: proc(t: ^testing.T) {
 	testing.expect(t, term.scrollback.rows[0].cells[0].content == tg.Content_Handle('A'), "oldest row content intact")
 }
 
+@(test)
+test_resize_prompt_rprompt_elastic_gap_styled :: proc(t: ^testing.T) {
+	term: tg.Terminal
+	tg.terminal_init(&term, 24, 80)
+	defer tg.terminal_destroy(&term)
+
+	// Left prompt: 10 chars with style 1
+	for i in 0..<10 {
+		tg.grid_set_cell(&term.grid, 0, i, tg.Semantic_Cell{content = tg.Content_Handle('0' + i), style = 1, width = 1})
+	}
+	// Space gap: 60 spaces with style 2 (simulating styled background/foreground in p10k)
+	for i in 10..<70 {
+		tg.grid_set_cell(&term.grid, 0, i, tg.Semantic_Cell{content = ' ', style = 2, width = 1})
+	}
+	// RPROMPT: 10 chars with style 3
+	for i in 0..<10 {
+		tg.grid_set_cell(&term.grid, 0, 70 + i, tg.Semantic_Cell{content = tg.Content_Handle('a' + i), style = 3, width = 1})
+	}
+
+	// Move cursor back to end of left prompt
+	tg.terminal_move_cursor(&term, 0, 10)
+	testing.expect(t, term.cursor.row == 0 && term.cursor.col == 10, "cursor at end of left prompt")
+
+	// Resize to 70 cols: gap compresses by 80 - 70 = 10 spaces, line stays on 1 row!
+	tg.terminal_resize(&term, 24, 70)
+
+	testing.expect(t, term.grid.col_count == 70, "col_count is 70")
+	testing.expect(t, !term.grid.rows[0].wrapped, "row 0 stays on 1 row and is not wrapped")
+	testing.expect(t, term.cursor.row == 0, "cursor row stays on row 0")
+	testing.expect(t, term.cursor.col == 10, "cursor col preserved at 10")
+
+	// Verify left prompt intact
+	for i in 0..<10 {
+		cell := tg.grid_get_cell(&term.grid, 0, i)
+		testing.expect(t, cell.content == tg.Content_Handle('0' + i), "left prompt intact")
+	}
+	// Verify RPROMPT intact at right edge (cols 60..69)
+	for i in 0..<10 {
+		cell := tg.grid_get_cell(&term.grid, 0, 60 + i)
+		testing.expect(t, cell.content == tg.Content_Handle('a' + i), "rprompt intact at right edge")
+	}
+	// Verify row 1 is empty default
+	for i in 0..<70 {
+		cell := tg.grid_get_cell(&term.grid, 1, i)
+		testing.expect(t, cell == tg.CELL_DEFAULT, "row 1 is empty default")
+	}
+}
+
+

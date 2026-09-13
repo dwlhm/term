@@ -25,6 +25,7 @@ import termgrid "../terminal"
 
 BG_WGSL :: #load("shaders/bg.wgsl")
 GLYPH_WGSL :: #load("shaders/glyph.wgsl")
+EMOJI_WGSL :: #load("shaders/emoji.wgsl")
 
 // Render_Strategy selects the frame path. Instance is the zero value and the
 // default; Compute_Tiles routes renderer_frame_compute through the tiled
@@ -72,8 +73,9 @@ Render_Frame_Transaction :: struct {
 // Renderer is the top-level render state.
 Renderer :: struct {
 	// Sub-systems
-	atlas:      Atlas,
-	compiled:   Compiled_Frame,
+	atlas:       Atlas,
+	emoji_atlas: Emoji_Atlas,
+	compiled:    Compiled_Frame,
 	compiled_v2: Compiled_Frame_V2,
 	dirty:      Dirty_Upload,
 	style_lut:  Style_LUT,
@@ -210,6 +212,11 @@ renderer_init :: proc(
 	// Upload atlas to GPU
 	atlas_upload_gpu(&r.atlas, backend, device, queue)
 
+	when ODIN_OS == .Darwin {
+		emoji_size := r.cell_height * 0.85
+		_ = emoji_atlas_init(&r.emoji_atlas, emoji_size, 1.0)
+	}
+
 	// Initialize compiled frame buffer
 	render_compiler_init(&r.compiled, rows, cols, allocator)
 
@@ -236,6 +243,20 @@ renderer_init :: proc(
 	if !ok {
 		renderer_destroy(r, allocator)
 		return false
+	}
+
+	when ODIN_OS == .Darwin {
+		if rawptr(r.emoji_atlas.ct_font) != nil {
+			emoji_atlas_upload_gpu(&r.emoji_atlas, backend, device, queue)
+			instance.instance_renderer_init_emoji(
+				&r.instances,
+				r.emoji_atlas.gpu_texture,
+				r.emoji_atlas.gpu_view,
+				string(EMOJI_WGSL),
+				format,
+				allocator,
+			)
+		}
 	}
 
 	// Phase 8: persistent dirty-upload buffer; the upload ring is retained
@@ -274,6 +295,9 @@ renderer_destroy :: proc(r: ^Renderer, allocator: runtime.Allocator = context.al
 	dirty_upload_destroy(&r.dirty, allocator)
 	upload_ring_destroy(&r.upload_ring, allocator)
 	instance.instance_renderer_destroy(&r.instances, allocator)
+	when ODIN_OS == .Darwin {
+		emoji_atlas_destroy(&r.emoji_atlas)
+	}
 
 	// Optional sibling renderers are not initialized by the production path;
 	// their destroy routines remain nil-safe for benchmark/test instances.
@@ -357,6 +381,9 @@ renderer_rebuild_font :: proc(
 	defer delete(old_storage)
 	old := &old_storage[0]
 	old.atlas = r.atlas
+	when ODIN_OS == .Darwin {
+		old.emoji_atlas = r.emoji_atlas
+	}
 	old.compiled = r.compiled
 	old.compiled_v2 = r.compiled_v2
 	old.dirty = r.dirty
@@ -375,6 +402,10 @@ renderer_rebuild_font :: proc(
 	new_cell_width := candidate.cell_width
 	new_cell_height := candidate.cell_height
 	r.atlas = candidate.atlas
+	when ODIN_OS == .Darwin {
+		r.emoji_atlas = candidate.emoji_atlas
+		candidate.emoji_atlas = Emoji_Atlas{}
+	}
 	r.compiled = candidate.compiled
 	r.compiled_v2 = candidate.compiled_v2
 	r.dirty = candidate.dirty
@@ -751,7 +782,7 @@ _prepare_instances :: proc(
 // pre-resolved Style_LUT. No per-cell style_table_get, color conversion, or atlas rasterize.
 // Two passes partition the staging buffer as [bg 0..bg_count), [glyph bg_count..bg_count+glyph_count),
 // matching the draw offsets below. Writes are capped at max_instances.
-_prepare_instances_v2 :: proc(r: ^Renderer, lut: ^Style_LUT) -> (bg_count: u32, glyph_count: u32) {
+_prepare_instances_v2 :: proc(r: ^Renderer, lut: ^Style_LUT, store: ^termgrid.Grapheme_Store = nil) -> (bg_count: u32, glyph_count: u32, emoji_count: u32) {
 	cells := r.compiled_v2.cells
 	cols := r.cols
 	cell_w := r.cell_width
@@ -761,6 +792,7 @@ _prepare_instances_v2 :: proc(r: ^Renderer, lut: ^Style_LUT) -> (bg_count: u32, 
 
 	bg_count = 0
 	glyph_count = 0
+	emoji_count = 0
 
 	// Pass 1: backgrounds, densely packed from index 0.
 	for idx in 0..<len(cells) {
@@ -772,7 +804,7 @@ _prepare_instances_v2 :: proc(r: ^Renderer, lut: ^Style_LUT) -> (bg_count: u32, 
 		x := r.pad_x + f32(col) * cell_w
 		y := r.pad_y + f32(row) * cell_h
 
-		emit_bg, _ := render_cell_expand_instance(
+		emit_bg, _, _ := render_cell_expand_instance(
 			cells[idx], lut, atlas, x, y, cell_w, cell_h,
 			&inst.instance_data[bg_count], nil,
 		)
@@ -781,7 +813,7 @@ _prepare_instances_v2 :: proc(r: ^Renderer, lut: ^Style_LUT) -> (bg_count: u32, 
 		}
 	}
 
-	// Pass 2: glyphs, packed from index bg_count.
+	// Pass 2: glyphs and emojis
 	for idx in 0..<len(cells) {
 		glyph_idx := bg_count + glyph_count
 		if glyph_idx >= inst.max_instances {
@@ -792,16 +824,30 @@ _prepare_instances_v2 :: proc(r: ^Renderer, lut: ^Style_LUT) -> (bg_count: u32, 
 		x := r.pad_x + f32(col) * cell_w
 		y := r.pad_y + f32(row) * cell_h
 
-		_, emit_glyph := render_cell_expand_instance(
+		emoji_inst_ptr: ^instance.Instance_Data = nil
+		emoji_atlas_ptr: ^Emoji_Atlas = nil
+		when ODIN_OS == .Darwin {
+			if emoji_count < inst.max_instances && inst.emoji_data != nil {
+				emoji_inst_ptr = &inst.emoji_data[emoji_count]
+			}
+			emoji_atlas_ptr = &r.emoji_atlas
+		}
+
+		_, emit_glyph, emit_emoji := render_cell_expand_instance(
 			cells[idx], lut, atlas, x, y, cell_w, cell_h,
 			nil, &inst.instance_data[glyph_idx],
+			emoji_inst_ptr,
+			emoji_atlas_ptr,
+			store,
 		)
-		if emit_glyph {
+		if emit_emoji {
+			emoji_count += 1
+		} else if emit_glyph {
 			glyph_count += 1
 		}
 	}
 
-	return bg_count, glyph_count
+	return bg_count, glyph_count, emoji_count
 }
 
 // _draw_cursor_overlay appends the staged cursor draw to the active instance
@@ -840,6 +886,7 @@ _draw_instance_buffer :: proc(
 	bg_count: u32,
 	glyph_count: u32,
 	glyph_offset: u64,
+	emoji_count: u32 = 0,
 ) -> bool {
 	if r == nil || frame == nil || frame.state != .Acquired || rawptr(frame.encoder) == nil {
 		return false
@@ -862,6 +909,15 @@ _draw_instance_buffer :: proc(
 		r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_glyph)
 		r.backend.render_set_vertex_buffer(pass, 0, buffer, glyph_offset)
 		r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, glyph_count)
+
+		when ODIN_OS == .Darwin {
+			if emoji_count > 0 && rawptr(r.instances.emoji_pipeline) != nil && rawptr(r.instances.emoji_buffer) != nil {
+				r.backend.render_set_pipeline(pass, r.instances.emoji_pipeline)
+				r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_emoji)
+				r.backend.render_set_vertex_buffer(pass, 0, r.instances.emoji_buffer, 0)
+				r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, emoji_count)
+			}
+		}
 	}
 	if ok { ok = _draw_cursor_overlay(r, frame) }
 	r.backend.end_render_pass(pass)
@@ -881,6 +937,11 @@ renderer_prepare_frame :: proc(r: ^Renderer, terminal: ^termgrid.Terminal) -> bo
 	if atlas_changed {
 		atlas_upload_gpu(&r.atlas, r.backend, r.device, r.queue)
 		r.full_redraw_pending = true
+	}
+	when ODIN_OS == .Darwin {
+		if r.emoji_atlas.gpu_dirty {
+			emoji_atlas_upload_gpu(&r.emoji_atlas, r.backend, r.device, r.queue)
+		}
 	}
 	if applied > 0 {
 		r.full_redraw_pending = true
@@ -948,7 +1009,11 @@ _renderer_frame_v2_journal :: proc(
 		style_lut_rebuild(lut, &terminal.grid.style_table)
 	}
 
-	if !force_full && len(journal.scroll_ops) == 0 && r.dirty.mirror != nil && !r.cursor_staged {
+	has_emojis := false
+	when ODIN_OS == .Darwin {
+		has_emojis = len(r.emoji_atlas.glyphs) > 0
+	}
+	if !force_full && !has_emojis && len(journal.scroll_ops) == 0 && r.dirty.mirror != nil && !r.cursor_staged {
 		if !r.dirty.armed {
 			dirty_upload_rebase(&r.dirty, r, lut)
 		}
@@ -971,13 +1036,21 @@ _renderer_frame_v2_journal :: proc(
 
 	r.dirty.armed = false
 	render_compile_full_v2(&r.compiled_v2, terminal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster, view)
-	bg_count, glyph_count := _prepare_instances_v2(r, lut)
+	bg_count, glyph_count, emoji_count := _prepare_instances_v2(r, lut, &terminal.grapheme_store)
+	when ODIN_OS == .Darwin {
+		if r.emoji_atlas.gpu_dirty {
+			emoji_atlas_upload_gpu(&r.emoji_atlas, r.backend, r.device, r.queue)
+		}
+		if emoji_count > 0 && rawptr(r.instances.emoji_buffer) != nil && r.instances.emoji_data != nil {
+			r.backend.write_buffer(r.queue, r.instances.emoji_buffer, 0, raw_data(r.instances.emoji_data), u64(emoji_count) * instance.INSTANCE_STRIDE)
+		}
+	}
 	frame, ok := _renderer_surface_begin(r)
 	if !ok { return _renderer_frame_failed(r, terminal, journal, &frame, .Instance) }
 	if !_renderer_upload_instances(r, bg_count + glyph_count, &frame) {
 		return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
 	}
-	if !_draw_instance_buffer(r, &frame, frame.cursor_buffer, bg_count, glyph_count, u64(bg_count) * instance.INSTANCE_STRIDE) {
+	if !_draw_instance_buffer(r, &frame, frame.cursor_buffer, bg_count, glyph_count, u64(bg_count) * instance.INSTANCE_STRIDE, emoji_count) {
 		return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
 	}
 	if !_renderer_surface_commit(r, &frame) {

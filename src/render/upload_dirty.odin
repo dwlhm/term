@@ -115,7 +115,7 @@ dirty_upload_rebase :: proc(d: ^Dirty_Upload, r: ^Renderer, lut: ^Style_LUT) {
 		col := idx % cols
 		x := r.pad_x + f32(col) * cw
 		y := r.pad_y + f32(row) * ch
-		emit_bg, emit_glyph := render_cell_expand_instance(
+		emit_bg, emit_glyph, _ := render_cell_expand_instance(
 			r.compiled_v2.cells[idx], lut, &r.atlas, x, y, cw, ch,
 			&d.mirror[idx], &d.mirror[n+idx],
 		)
@@ -282,7 +282,7 @@ _dirty_expand_row :: proc(
 		idx := row * cols + col
 		x := r.pad_x + f32(col) * cw
 		y := r.pad_y + f32(row) * ch
-		emit_bg, emit_glyph := render_cell_expand_instance(
+		emit_bg, emit_glyph, _ := render_cell_expand_instance(
 			r.compiled_v2.cells[idx], lut, &r.atlas, x, y, cw, ch,
 			&d.mirror[idx], &d.mirror[n+idx],
 		)

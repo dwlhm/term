@@ -6,6 +6,7 @@ import "core:testing"
 import "core:os"
 import "core:fmt"
 import "base:runtime"
+import "vendor:stb/truetype"
 import "../"
 
 // Test font paths (macOS system fonts)
@@ -349,4 +350,49 @@ test_atlas_lookup_pinned_o1 :: proc(t: ^testing.T) {
 	_, slot2 := render.atlas_lookup(&atlas, u32(0x2500))
 	testing.expect(t, slot2 != nil, "Should find box drawing glyph")
 	testing.expect(t, slot2.valid, "Box drawing slot should be valid")
+}
+
+@(test)
+test_fitted_glyph_invariant :: proc(t: ^testing.T) {
+	testing.expect(t, render.is_symbol_or_pua(0xE000), "0xE000 should be symbol or PUA")
+	testing.expect(t, render.is_symbol_or_pua(0xE0B0), "0xE0B0 should be symbol or PUA")
+	testing.expect(t, render.is_symbol_or_pua(0xE0B6), "0xE0B6 should be symbol or PUA")
+	testing.expect(t, render.is_symbol_or_pua(0xF179), "0xF179 should be symbol or PUA")
+	testing.expect(t, render.is_symbol_or_pua(0x2500), "0x2500 should be symbol or PUA")
+	testing.expect(t, !render.is_symbol_or_pua('A'), "'A' should not be symbol or PUA")
+
+	font_path := "assets/fonts/SymbolsNerdFontMono-Regular.ttf"
+	if !os.exists(font_path) {
+		font_path = "../assets/fonts/SymbolsNerdFontMono-Regular.ttf"
+	}
+	testing.expect(t, os.exists(font_path), "Font file must exist")
+	if !os.exists(font_path) {
+		return
+	}
+
+	r: render.Font_Rasterizer
+	success := render.font_rasterizer_init(&r, font_path, 16.0)
+	testing.expect(t, success, "font_rasterizer_init should succeed")
+	if !success {
+		return
+	}
+	defer render.font_rasterizer_destroy(&r)
+
+	max_w := 9
+	max_h := 18
+	codepoints := []u32{0x2500, 0xE0B0, 0xE0B6, 0xF179, 0xF07B, 0xF017, 0xE0A0}
+
+	for cp in codepoints {
+		if truetype.FindGlyphIndex(&r.info, rune(cp)) == 0 {
+			continue
+		}
+		bmp := render.font_rasterize_glyph_fitted(&r, cp, max_w, max_h)
+		testing.expect(t, bmp.pixels != nil, fmt.tprintf("glyph bitmap should not be nil for U+%04X", cp))
+		if bmp.pixels != nil {
+			bx := int(bmp.bearing_x)
+			testing.expect(t, bx >= 0, fmt.tprintf("bearing_x >= 0 for codepoint U+%04X (got %d)", cp, bx))
+			testing.expect(t, bx + bmp.width <= max_w, fmt.tprintf("bearing_x + width <= max_w for codepoint U+%04X (got %d + %d = %d > %d)", cp, bx, bmp.width, bx + bmp.width, max_w))
+			delete(bmp.pixels)
+		}
+	}
 }

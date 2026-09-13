@@ -199,8 +199,8 @@ test_encode_delete_modifier_table :: proc(t: ^testing.T) {
 	}{
 		{{kind = .Delete}, {0x1B, '[', '3', '~'}},
 		{{kind = .Delete, shift = true}, {0x1B, '[', '3', ';', '2', '~'}},
-		{{kind = .Delete, ctrl = true}, {0x1B, '[', '3', ';', '5', '~'}},
-		{{kind = .Delete, shift = true, ctrl = true}, {0x1B, '[', '3', ';', '6', '~'}},
+		{{kind = .Delete, alt = true}, {0x1B, '[', '3', ';', '3', '~'}},
+		{{kind = .Delete, shift = true, alt = true}, {0x1B, '[', '3', ';', '4', '~'}},
 	}
 	for c in cases {
 		buf, n := _enc(c.ev)
@@ -211,10 +211,29 @@ test_encode_delete_modifier_table :: proc(t: ^testing.T) {
 @(test)
 test_encode_delete_buffer_boundary :: proc(t: ^testing.T) {
 	tiny: [5]u8
-	n := _enc_cap({kind = .Delete, shift = true, ctrl = true}, tiny[:])
+	n := _enc_cap({kind = .Delete, shift = true, alt = true}, tiny[:])
 	testing.expect(t, n == 0, "short Delete output must fail atomically")
 
 	exact: [6]u8
-	n = _enc_cap({kind = .Delete, shift = true, ctrl = true}, exact[:])
+	n = _enc_cap({kind = .Delete, shift = true, alt = true}, exact[:])
 	testing.expect(t, n == 6, "exact Delete output buffer must succeed")
+}
+
+@(test)
+test_encode_backspace_delete_modifiers :: proc(t: ^testing.T) {
+	// Cmd+Backspace -> 0x15 (^U)
+	buf, n := _enc({kind = .Backspace, gui = true})
+	_expect_bytes(t, buf, n, {0x15}, "Cmd+Backspace must emit 0x15 (^U)")
+
+	// Ctrl+Backspace -> 0x17 (^W)
+	buf, n = _enc({kind = .Backspace, ctrl = true})
+	_expect_bytes(t, buf, n, {0x17}, "Ctrl+Backspace must emit 0x17 (^W)")
+
+	// Cmd+Delete -> 0x0B (^K)
+	buf, n = _enc({kind = .Delete, gui = true})
+	_expect_bytes(t, buf, n, {0x0B}, "Cmd+Delete must emit 0x0B (^K)")
+
+	// Ctrl+Delete -> \x1bd (ESC d)
+	buf, n = _enc({kind = .Delete, ctrl = true})
+	_expect_bytes(t, buf, n, {0x1B, 'd'}, "Ctrl+Delete must emit ESC d")
 }

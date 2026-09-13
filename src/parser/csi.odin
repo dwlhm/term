@@ -3,9 +3,22 @@ package parser
 import termgrid "../terminal"
 
 // CSI_Params holds CSI parameters.
+// subparam_mask bit i is 1 when values[i] was introduced by a colon (ECMA-48
+// sub-parameter) rather than a semicolon. SGR uses this to distinguish
+// colon-joined forms (4:2 underline style, 38:2::R:G:B truecolor) from
+// semicolon-separated codes (4;2 = underline + dim).
 CSI_Params :: struct {
-	values: [16]u32, // max 16 parameters (DEC limit)
-	count:  u8,      // number of parameters collected
+	values:        [16]u32, // max 16 parameters (DEC limit)
+	subparam_mask: u16,     // bit i = 1 if parameter i was introduced by ':'
+	count:         u8,      // number of parameters collected
+}
+
+// csi_is_subparam reports whether parameter idx was introduced by a colon.
+csi_is_subparam :: proc(params: CSI_Params, idx: int) -> bool {
+	if idx < 0 || idx >= 16 {
+		return false
+	}
+	return (params.subparam_mask & (u16(1) << u16(idx))) != 0
 }
 
 // DECTCEM_CURSOR_PARAM is the DEC private mode number for cursor visibility
@@ -19,7 +32,10 @@ ALT_SCREEN_PARAM :: 1049
 ALT_SCREEN_PARAM_LEGACY :: 47
 
 // csi_collect_param collects a CSI parameter byte.
-// Handles digits (0-9), semicolon (;), and colon (:).
+// Handles digits (0-9), semicolon (;) as parameter separator, and colon (:)
+// as ECMA-48 sub-parameter separator. Colon-joined params are flagged in
+// csi_subparam_mask so SGR can distinguish 4:2 (underline style) from 4;2
+// (underline + dim), and 38:2::R:G:B from 38;2;R;G;B.
 csi_collect_param :: proc(p: ^Parser, b: u8) {
 	if b >= 0x30 && b <= 0x39 {
 		// Digit: accumulate into current parameter
@@ -27,14 +43,20 @@ csi_collect_param :: proc(p: ^Parser, b: u8) {
 			p.csi_values[p.csi_count] = p.csi_values[p.csi_count] * 10 + u32(b - 0x30)
 		}
 	} else if b == 0x3B {
-		// Semicolon: next parameter
+		// Semicolon: next parameter (not a sub-parameter)
 		if p.csi_count < 16 {
 			p.csi_count += 1
+			if p.csi_count < 16 {
+				p.csi_subparam_mask &= ~(u16(1) << u16(p.csi_count))
+			}
 		}
 	} else if b == 0x3A {
-		// Colon: sub-parameter (treat as semicolon for now)
+		// Colon: next sub-parameter
 		if p.csi_count < 16 {
 			p.csi_count += 1
+			if p.csi_count < 16 {
+				p.csi_subparam_mask |= (u16(1) << u16(p.csi_count))
+			}
 		}
 	}
 }
@@ -48,8 +70,9 @@ csi_collect_param :: proc(p: ^Parser, b: u8) {
 csi_dispatch :: proc(p: ^Parser, t: ^termgrid.Terminal, final_byte: u8) {
 	// Build CSI_Params from parser state
 	params := CSI_Params{
-		values = p.csi_values,
-		count  = p.csi_count + 1, // count is 0-indexed, so add 1
+		values        = p.csi_values,
+		subparam_mask = p.csi_subparam_mask,
+		count         = p.csi_count + 1, // count is 0-indexed, so add 1
 	}
 	private := p.intermediate == '?'
 	
@@ -91,15 +114,33 @@ csi_dispatch :: proc(p: ^Parser, t: ^termgrid.Terminal, final_byte: u8) {
 		_csi_execute_ich(t, params)
 	case 'P': // DCH - Delete Characters
 		_csi_execute_dch(t, params)
-	case 'h': // SM - Set Mode (private: DECTCEM show, alt screen enter)
+	case 'c': // DA - Device Attributes
+		_csi_execute_da(t, params, p)
+	case 'n': // DSR - Device Status Report (non-private only)
+		if !private {
+			_csi_execute_dsr(t, params, p)
+		}
+	case 'q': // DECSCUSR (intermediate space) / XTVERSION (intermediate '>')
+		if p.intermediate == ' ' {
+			_csi_execute_decscusr(t, params)
+		} else if p.intermediate == '>' {
+			_csi_execute_xtversion(t, params, p)
+		}
+		// Plain CSI q (DECSCA, character protection) is unimplemented
+		// and safely ignored.
+	case 'u': // Kitty keyboard protocol (= set, ? query/set, > push, < pop)
+		_csi_execute_kitty_keyboard(t, params, p)
+	case 'h': // SM - Set Mode (private: DECTCEM show, alt screen enter, bracketed paste, focus reporting)
 		if private {
 			_csi_execute_dectcem(t, params, true)
 			_csi_execute_alt_screen(t, params, true)
+			_csi_execute_private_mode(t, params, true)
 		}
-	case 'l': // RM - Reset Mode (private: DECTCEM hide, alt screen leave)
+	case 'l': // RM - Reset Mode (private: DECTCEM hide, alt screen leave, bracketed paste, focus reporting)
 		if private {
 			_csi_execute_dectcem(t, params, false)
 			_csi_execute_alt_screen(t, params, false)
+			_csi_execute_private_mode(t, params, false)
 		}
 	}
 	
@@ -113,6 +154,7 @@ csi_reset :: proc(p: ^Parser) {
 	for i in 0..<16 {
 		p.csi_values[i] = 0
 	}
+	p.csi_subparam_mask = 0
 	p.csi_count = 0
 }
 
@@ -347,6 +389,53 @@ _csi_execute_dectcem :: proc(t: ^termgrid.Terminal, params: CSI_Params, visible:
 	}
 }
 
+// _csi_execute_private_mode handles additional private modes:
+// - Mode 1: Application Cursor Keys (DECCKM)
+// - Mode 1000: Mouse Tracking Normal (press/release)
+// - Mode 1002: Mouse Tracking Button-Event (press/release/drag)
+// - Mode 1003: Mouse Tracking Any-Event (all motion)
+// - Mode 1006: Mouse SGR Extended Format (\e[<...M/m)
+// - Mode 1004: Focus Reporting (send \e[I on focus gain, \e[O on focus loss)
+// - Mode 2004: Bracketed Paste (wrap pastes with \e[200~ and \e[201~)
+// - Mode 2026: Synchronized Output
+_csi_execute_private_mode :: proc(t: ^termgrid.Terminal, params: CSI_Params, enable: bool) {
+	for i in 0..<int(params.count) {
+		switch int(params.values[i]) {
+		case 1:
+			t.app_cursor_keys = enable
+		case 1000:
+			t.mouse_tracking = enable ? .Normal : .None
+		case 1002:
+			t.mouse_tracking = enable ? .Button_Event : .None
+		case 1003:
+			t.mouse_tracking = enable ? .Any_Event : .None
+		case 1006:
+			t.mouse_format = enable ? .SGR : .X10
+		case 1004:
+			t.focus_reporting = enable
+		case 2004:
+			t.bracketed_paste = enable
+		case 2026:
+			termgrid.terminal_set_sync_output(t, enable)
+		}
+	}
+}
+
+// _csi_execute_decscusr handles DECSCUSR (Set Cursor Style): CSI Ps SP q
+// Ps = 0 or 1: blinking block (default)
+// Ps = 2: steady block
+// Ps = 3: blinking underline
+// Ps = 4: steady underline
+// Ps = 5: blinking bar
+// Ps = 6: steady bar
+_csi_execute_decscusr :: proc(t: ^termgrid.Terminal, params: CSI_Params) {
+	n := int(params.values[0])
+	if n < 0 || n > 6 {
+		n = 0
+	}
+	t.cursor.style = u8(n)
+}
+
 // _csi_ich_n clamps the ICH/DCH count: params default 1, bounded by row rest.
 _csi_ich_n :: proc(params: CSI_Params, col, cols: int) -> int {
 	n := int(params.values[0])
@@ -441,6 +530,134 @@ _csi_execute_dch :: proc(t: ^termgrid.Terminal, params: CSI_Params) {
 		termgrid.damage_mark_row(&t.damage, t.cursor.row, t.grid.rows[phys].generation)
 	}
 }
+// _csi_execute_xtversion answers XTVERSION (CSI > q) with a DCS response
+// identifying this terminal. fish uses it only for temporary workarounds
+// for incompatible terminals, so any well-formed response suffices.
+_csi_execute_xtversion :: proc(t: ^termgrid.Terminal, params: CSI_Params, p: ^Parser) {
+	_ = t
+	_ = params
+	if p.response_cb == nil {
+		return
+	}
+	// DCS > | Term ST
+	response := [10]u8{0x1B, 'P', '>', '|', 'T', 'e', 'r', 'm', 0x1B, '\\'}
+	p.response_cb(response[:])
+}
+
+// _csi_execute_kitty_keyboard handles the kitty keyboard protocol's CSI u
+// sequences. The intermediate byte selects the operation:
+// - '=': CSI = flags ; mode u sets enhancements (mode 1 replace (default),
+//   mode 2 set bits, mode 3 clear bits).
+// - '?': CSI ? u queries (responds CSI ? flags u); CSI ? flags u with
+//   parameters applies them (the enable form fish documents).
+// - '>': CSI > flags u pushes the current flags and sets the new subset.
+// - '<': CSI < n u pops n stack entries (default 1).
+// Only the disambiguate flag (0b1) is supported; other bits are masked off
+// and report as unset, which applications detect via the query response.
+_csi_execute_kitty_keyboard :: proc(t: ^termgrid.Terminal, params: CSI_Params, p: ^Parser) {
+	count := int(params.count)
+	flags := u8(0)
+	if count > 0 {
+		flags = u8(params.values[0])
+	}
+	mode := u8(1)
+	if count > 1 {
+		mode = u8(params.values[1])
+	}
+
+	switch p.intermediate {
+	case '=':
+		termgrid.terminal_kitty_set(t, flags, mode)
+	case '?':
+		if count <= 1 && flags == 0 {
+			// Query: respond CSI ? flags u with the active screen's flags.
+			if p.response_cb == nil {
+				return
+			}
+			active := termgrid.terminal_kitty_active(t)
+			resp: [8]u8
+			n := 0
+			resp[n] = 0x1B; n += 1
+			resp[n] = '['; n += 1
+			resp[n] = '?'; n += 1
+			if active.flags >= 10 {
+				resp[n] = '0' + active.flags / 10
+				n += 1
+			}
+			resp[n] = '0' + active.flags % 10
+			n += 1
+			resp[n] = 'u'; n += 1
+			p.response_cb(resp[:n])
+		} else {
+			// Enable form with parameters: apply like '='.
+			termgrid.terminal_kitty_set(t, flags, mode)
+		}
+	case '>':
+		termgrid.terminal_kitty_push(t, flags)
+	case '<':
+		termgrid.terminal_kitty_pop(t, flags)
+	}
+}
+
+// _csi_execute_da handles Device Attributes (CSI c / CSI ? c / CSI > c).
+// Primary DA (intermediate 0 or '?'): responds with \x1b[?62c (VT220).
+// Secondary DA (intermediate '>'): responds with \x1b[>0;10;0c.
+// The response is sent via the parser's response_cb to write back to PTY.
+_csi_execute_da :: proc(t: ^termgrid.Terminal, params: CSI_Params, p: ^Parser) {
+	_ = t
+	_ = params
+	if p.response_cb == nil {
+		return
+	}
+	if p.intermediate == '>' {
+		response := [10]u8{0x1B, '[', '>', '0', ';', '1', '0', ';', '0', 'c'}
+		p.response_cb(response[:])
+	} else {
+		// VT220 Primary DA response: ESC [ ? 6 2 c (no trailing separator).
+		// 62 = VT220, which is the standard xterm-compatible response.
+		response := [6]u8{0x1B, '[', '?', '6', '2', 'c'}
+		p.response_cb(response[:])
+	}
+}
+
+// _csi_execute_dsr handles Device Status Report (CSI 5 n / CSI 6 n).
+// Parameter 5: Status Report -> responds \x1b[0n (terminal OK).
+// Parameter 6: Cursor Position Report (CPR) -> responds \x1b[<row>;<col>R (1-indexed).
+// Used by fish shell and modern CLIs for terminal queries and layout negotiation.
+_csi_execute_dsr :: proc(t: ^termgrid.Terminal, params: CSI_Params, p: ^Parser) {
+	if p.response_cb == nil || params.count == 0 {
+		return
+	}
+	if params.values[0] == 5 {
+		response := [4]u8{0x1B, '[', '0', 'n'}
+		p.response_cb(response[:])
+	} else if params.values[0] == 6 {
+		// Format row and col as decimal strings (1-indexed)
+		row_1 := t.cursor.row + 1
+		col_1 := t.cursor.col + 1
+		// Build response: ESC [ row ; col R
+		// Max digits: row up to 9999 (4 digits), col up to 9999 (4 digits)
+		// Total: 3 (ESC [) + 4 + 1 (;) + 4 + 1 (R) = 13 bytes max
+		buf: [16]u8
+		n := 0
+		buf[n] = 0x1B; n += 1
+		buf[n] = '['; n += 1
+		// Write row
+		if row_1 >= 1000 { buf[n] = '0' + u8(row_1 / 1000); n += 1 }
+		if row_1 >= 100 { buf[n] = '0' + u8((row_1 / 100) % 10); n += 1 }
+		if row_1 >= 10 { buf[n] = '0' + u8((row_1 / 10) % 10); n += 1 }
+		buf[n] = '0' + u8(row_1 % 10); n += 1
+		buf[n] = ';'; n += 1
+		// Write col
+		if col_1 >= 1000 { buf[n] = '0' + u8(col_1 / 1000); n += 1 }
+		if col_1 >= 100 { buf[n] = '0' + u8((col_1 / 100) % 10); n += 1 }
+		if col_1 >= 10 { buf[n] = '0' + u8((col_1 / 10) % 10); n += 1 }
+		buf[n] = '0' + u8(col_1 % 10); n += 1
+		buf[n] = 'R'; n += 1
+		p.response_cb(buf[:n])
+	}
+}
+
 // _sgr_clamp_rgb clamps an SGR truecolor component to 0..255.
 _sgr_clamp_rgb :: proc(v: u32) -> u32 {
 	if v > 255 {
@@ -475,16 +692,28 @@ _csi_execute_sgr :: proc(t: ^termgrid.Terminal, params: CSI_Params) {
 			cur = termgrid.style_table_default(&t.grid.style_table)
 		case 1: // Bold
 			cur.flags |= termgrid.STYLE_FLAG_BOLD
+		case 2: // Dim (fish autosuggestion uses this)
+			cur.flags |= termgrid.STYLE_FLAG_DIM
 		case 3: // Italic
 			cur.flags |= termgrid.STYLE_FLAG_ITALIC
-		case 4: // Underline
-			cur.flags |= termgrid.STYLE_FLAG_UNDERLINE
+		case 4: // Underline, or underline style variant when colon-joined (4:0..4:5)
+			if i + 1 < count && csi_is_subparam(params, i + 1) {
+				sub := int(params.values[i + 1])
+				if sub == 0 {
+					cur.flags = cur.flags & (~termgrid.STYLE_FLAG_UNDERLINE)
+				} else if sub >= 1 && sub <= 5 {
+					cur.flags |= termgrid.STYLE_FLAG_UNDERLINE
+				}
+				i += 1 // consume the colon-joined style sub-parameter
+			} else {
+				cur.flags |= termgrid.STYLE_FLAG_UNDERLINE
+			}
 		case 7: // Inverse
 			cur.flags |= termgrid.STYLE_FLAG_INVERSE
 		case 9: // Strike
 			cur.flags |= termgrid.STYLE_FLAG_STRIKE
-		case 22: // Bold off
-			cur.flags = cur.flags & (~termgrid.STYLE_FLAG_BOLD)
+		case 22: // Normal intensity: clears both bold and dim (xterm)
+			cur.flags = cur.flags & (~(termgrid.STYLE_FLAG_BOLD | termgrid.STYLE_FLAG_DIM))
 		case 23: // Italic off
 			cur.flags = cur.flags & (~termgrid.STYLE_FLAG_ITALIC)
 		case 24: // Underline off
@@ -501,16 +730,17 @@ _csi_execute_sgr :: proc(t: ^termgrid.Terminal, params: CSI_Params) {
 			cur.fg = termgrid.theme_palette_256(theme, code - 90 + 8)
 		case 100..=107: // Bright background
 			cur.bg = termgrid.theme_palette_256(theme, code - 100 + 8)
-		case 38, 48: // Extended color: 38 fg, 48 bg
+		case 38, 48, 58: // Extended color: 38 fg, 48 bg, 58 underline
 			is_fg := code == 38
+			is_ul := code == 58
 			if i + 1 >= count {
-				// Truncated: lone 38/48, ignore tail.
+				// Truncated: lone 38/48/58, ignore tail.
 				i = count
 				break
 			}
 			mode := int(params.values[i + 1])
 			if mode == 5 {
-				// 256-color: need 2 more values (38;5;idx).
+				// 256-color: need 2 more values (38;5;idx or 38:5:idx).
 				if i + 2 >= count {
 					i = count
 					break
@@ -520,27 +750,37 @@ _csi_execute_sgr :: proc(t: ^termgrid.Terminal, params: CSI_Params) {
 					c := termgrid.theme_palette_256(theme, idx)
 					if is_fg {
 						cur.fg = c
+					} else if is_ul {
+						cur.underline = c
 					} else {
 						cur.bg = c
 					}
 				}
 				i += 2
 			} else if mode == 2 {
-				// Truecolor: need 4 more values (38;2;r;g;b).
-				if i + 4 >= count {
+				// Truecolor: semicolon form needs 4 more values (38;2;r;g;b);
+				// colon form has an empty field (38:2::r:g:b) which the
+				// parser records as a zero sub-parameter — skip it.
+				offset := i + 2
+				if offset < count && int(params.values[offset]) == 0 && csi_is_subparam(params, offset) {
+					offset += 1
+				}
+				if offset + 2 >= count {
 					i = count
 					break
 				}
-				r := _sgr_clamp_rgb(params.values[i + 2])
-				g := _sgr_clamp_rgb(params.values[i + 3])
-				b := _sgr_clamp_rgb(params.values[i + 4])
+				r := _sgr_clamp_rgb(params.values[offset])
+				g := _sgr_clamp_rgb(params.values[offset + 1])
+				b := _sgr_clamp_rgb(params.values[offset + 2])
 				c := 0xFF000000 | (r << 16) | (g << 8) | b
 				if is_fg {
 					cur.fg = c
+				} else if is_ul {
+					cur.underline = c
 				} else {
 					cur.bg = c
 				}
-				i += 4
+				i = offset + 2
 			} else {
 				// Unknown extended mode: swallow the mode byte.
 				i += 1
@@ -549,6 +789,8 @@ _csi_execute_sgr :: proc(t: ^termgrid.Terminal, params: CSI_Params) {
 			cur.fg = termgrid.style_table_default(&t.grid.style_table).fg
 		case 49: // Default background
 			cur.bg = termgrid.style_table_default(&t.grid.style_table).bg
+		case 59: // Default underline color (follow foreground)
+			cur.underline = termgrid.style_table_default(&t.grid.style_table).underline
 		}
 		i += 1
 	}

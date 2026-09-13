@@ -4,6 +4,7 @@ package render_tests
 // empty skip, SoA/AoS equivalence, and LUT rebuild parity.
 
 import "core:testing"
+import "vendor:stb/truetype"
 import render "../"
 import instance "../instance"
 import termgrid "../../terminal"
@@ -97,7 +98,7 @@ test_style_overflow_fallback :: proc(t: ^testing.T) {
 	lut := _test_lut()
 	atlas := _test_atlas()
 	bg, glyph: instance.Instance_Data
-	emit_bg, emit_glyph := render.render_cell_expand_instance(v, &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
+	emit_bg, emit_glyph, _ := render.render_cell_expand_instance(v, &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
 	testing.expect(t, emit_bg, "stale style must keep bg")
 	testing.expect(t, emit_glyph, "valid 'A' slot must emit glyph")
 	er, eg, eb := instance.unpack_r5g6b5(lut.bg_r5g6b5[0])
@@ -120,14 +121,14 @@ test_slot_overflow_unresolved :: proc(t: ^testing.T) {
 	lut := _test_lut()
 	atlas := _test_atlas()
 	bg, glyph: instance.Instance_Data
-	emit_bg, emit_glyph := render.render_cell_expand_instance(v, &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
+	emit_bg, emit_glyph, _ := render.render_cell_expand_instance(v, &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
 	testing.expect(t, emit_bg && emit_glyph, "atlas fallback must emit bg+glyph")
 
 	// Invalid slot (valid bit clear) → skip glyph, keep bg.
 	if a_idx, a_ok := render.atlas_pinned_slot_index(0x41); a_ok {
 		atlas.slots[a_idx] = render.Atlas_Slot{valid = false}
 	}
-	emit_bg2, emit_glyph2 := render.render_cell_expand_instance(v, &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
+	emit_bg2, emit_glyph2, _ := render.render_cell_expand_instance(v, &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
 	testing.expect(t, emit_bg2 && !emit_glyph2, "invalid slot must skip glyph and keep bg")
 }
 
@@ -146,12 +147,12 @@ test_wide_continuation_pair :: proc(t: ^testing.T) {
 	bg, glyph: instance.Instance_Data
 
 	// Lead emits a double-width glyph.
-	emit_bg, emit_glyph := render.render_cell_expand_instance(lead, &lut, &atlas, 8, 0, 8, 16, &bg, &glyph)
+	emit_bg, emit_glyph, _ := render.render_cell_expand_instance(lead, &lut, &atlas, 8, 0, 8, 16, &bg, &glyph)
 	testing.expect(t, emit_bg && emit_glyph, "wide lead must emit bg+glyph")
 	testing.expect(t, glyph.cw == 16.0, "wide lead glyph must span double width")
 
 	// Continuation emits nothing.
-	emit_bg2, emit_glyph2 := render.render_cell_expand_instance(cont, &lut, &atlas, 16, 0, 8, 16, &bg, &glyph)
+	emit_bg2, emit_glyph2, _ := render.render_cell_expand_instance(cont, &lut, &atlas, 16, 0, 8, 16, &bg, &glyph)
 	testing.expect(t, !emit_bg2 && !emit_glyph2, "continuation must emit nothing")
 }
 
@@ -166,7 +167,7 @@ test_continuation_orphan :: proc(t: ^testing.T) {
 	lut := _test_lut()
 	atlas := _test_atlas()
 	bg, glyph: instance.Instance_Data
-	emit_bg, emit_glyph := render.render_cell_expand_instance(v, &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
+	emit_bg, emit_glyph, _ := render.render_cell_expand_instance(v, &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
 	testing.expect(t, !emit_bg && !emit_glyph, "orphan continuation must emit nothing")
 }
 
@@ -178,17 +179,17 @@ test_empty_skip :: proc(t: ^testing.T) {
 
 	// Space + black bg → 0 instances.
 	space := render.render_cell_pack_v2(0x20, 0, 1, 0, render.RENDER_CELL_V2_SLOT_UNRESOLVED)
-	eb, eg := render.render_cell_expand_instance(space, &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
+	eb, eg, _ := render.render_cell_expand_instance(space, &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
 	testing.expect(t, !eb && !eg, "space+black must be skipped")
 
 	// NUL + black bg → 0 instances.
 	nul := render.render_cell_pack_v2(0, 0, 1, 0, render.RENDER_CELL_V2_SLOT_UNRESOLVED)
-	eb2, eg2 := render.render_cell_expand_instance(nul, &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
+	eb2, eg2, _ := render.render_cell_expand_instance(nul, &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
 	testing.expect(t, !eb2 && !eg2, "NUL+black must be skipped")
 
 	// Printable with style 1 (blue bg) → bg+glyph.
 	cell := render.render_cell_pack_v2(0x41, 1, 1, 0, render.RENDER_CELL_V2_SLOT_UNRESOLVED)
-	eb3, eg3 := render.render_cell_expand_instance(cell, &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
+	eb3, eg3, _ := render.render_cell_expand_instance(cell, &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
 	testing.expect(t, eb3 && eg3, "printable must emit bg+glyph")
 }
 
@@ -205,7 +206,7 @@ test_selected_cflag_overrides_lut_colors :: proc(t: ^testing.T) {
 	)
 	_, _, _, cflags, _ := render.render_cell_unpack_v2(selected)
 	testing.expect(t, cflags & render.RENDER_CELL_V2_CFLAG_SELECTED != 0, "selected cflag must round-trip")
-	emit_bg, emit_glyph := render.render_cell_expand_instance(selected, &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
+	emit_bg, emit_glyph, _ := render.render_cell_expand_instance(selected, &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
 	testing.expect(t, emit_bg && emit_glyph, "selected printable cell must emit both instances")
 	br, bgc, bb := instance.unpack_r5g6b5(lut.selection_bg_r5g6b5)
 	fr, fgc, fb := instance.unpack_r5g6b5(lut.selection_fg_r5g6b5)
@@ -217,7 +218,7 @@ test_selected_cflag_overrides_lut_colors :: proc(t: ^testing.T) {
 		render.RENDER_CELL_V2_CFLAG_WIDE_CONT | render.RENDER_CELL_V2_CFLAG_SELECTED,
 		render.RENDER_CELL_V2_SLOT_UNRESOLVED,
 	)
-	emit_bg, emit_glyph = render.render_cell_expand_instance(continuation, &lut, &atlas, 8, 0, 8, 16, &bg, &glyph)
+	emit_bg, emit_glyph, _ = render.render_cell_expand_instance(continuation, &lut, &atlas, 8, 0, 8, 16, &bg, &glyph)
 	testing.expect(t, !emit_bg && !emit_glyph, "selected continuation must preserve wide skip semantics")
 }
 
@@ -272,8 +273,8 @@ test_soa_aos_equivalence :: proc(t: ^testing.T) {
 	// Expansion must be byte-identical.
 	bg_a, glyph_a: instance.Instance_Data
 	bg_b, glyph_b: instance.Instance_Data
-	eba, ega := render.render_cell_expand_instance(aos, &lut, &atlas, 0, 0, 8, 16, &bg_a, &glyph_a)
-	ebb, egb := render.render_cell_expand_instance(rebuilt, &lut, &atlas, 0, 0, 8, 16, &bg_b, &glyph_b)
+	eba, ega, _ := render.render_cell_expand_instance(aos, &lut, &atlas, 0, 0, 8, 16, &bg_a, &glyph_a)
+	ebb, egb, _ := render.render_cell_expand_instance(rebuilt, &lut, &atlas, 0, 0, 8, 16, &bg_b, &glyph_b)
 	testing.expect(t, eba == ebb && ega == egb, "emit flags must match")
 	testing.expect(t, bg_a == bg_b, "bg instances must be byte-identical")
 	testing.expect(t, glyph_a == glyph_b, "glyph instances must be byte-identical")
@@ -302,3 +303,36 @@ test_lut_rebuild_parity :: proc(t: ^testing.T) {
 	testing.expect_value(t, lut.selection_fg_r5g6b5, render.color_to_r5g6b5(table.theme.selection_foreground))
 	testing.expect_value(t, lut.selection_bg_r5g6b5, render.color_to_r5g6b5(table.theme.selection_background))
 }
+
+@(test)
+test_emoji_cell_semantic_pack :: proc(t: ^testing.T) {
+	sem := termgrid.Semantic_Cell{content = 0x1F680, width = 2, flags = .None}
+	v := render.render_cell_from_semantic(sem)
+	content, _, width, cflags, _ := render.render_cell_unpack_v2(v)
+	testing.expect_value(t, content, u32(0x1F680))
+	testing.expect_value(t, width, u8(2))
+	testing.expect(t, cflags & render.RENDER_CELL_V2_CFLAG_EMOJI != 0, "emoji flag must be set for 0x1F680")
+}
+
+@(test)
+test_nerd_font_symbols_resolve :: proc(t: ^testing.T) {
+	font_path := "assets/fonts/SymbolsNerdFontMono-Regular.ttf"
+	rasterizer: render.Font_Rasterizer
+	if !render.font_rasterizer_init(&rasterizer, font_path, 16.0) {
+		// If running from a directory where assets/ is not local, skip gracefully
+		return
+	}
+	defer render.font_rasterizer_destroy(&rasterizer)
+
+	// Powerlevel10k commonly used Nerd Font glyphs:
+	// 0xF179: Apple logo
+	// 0xF07B: Folder
+	// 0xF126: Git branch
+	// 0xE0A0: Powerline branch symbol
+	glyphs := [?]rune{0xF179, 0xF07B, 0xF126, 0xE0A0}
+	for g in glyphs {
+		glyph_idx := truetype.FindGlyphIndex(&rasterizer.info, g)
+		testing.expect(t, glyph_idx > 0, "Nerd Font symbol must exist in SymbolsNerdFontMono")
+	}
+}
+

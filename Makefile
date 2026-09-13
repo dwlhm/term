@@ -3,10 +3,11 @@ OUT_DIR ?= bin
 MAIN_SRC ?= src/app
 TARGET ?= $(OUT_DIR)/term
 COMMON_FLAGS ?= -strict-style
+TEST_FLAGS ?= -define:ODIN_TEST_THREADS=1
 DEBUG_FLAGS ?= -debug
 RELEASE_FLAGS ?= -o:speed -no-bounds-check
 
-.PHONY: all build release run check test test-terminal test-parser test-pty test-input test-render test-app test-bench bench clean help
+.PHONY: all build release bundle run check test test-terminal test-parser test-pty test-input test-render test-app test-bench bench clean help
 
 all: build
 
@@ -17,6 +18,14 @@ build:
 release:
 	@mkdir -p $(OUT_DIR)
 	$(ODIN) build $(MAIN_SRC) -out:$(TARGET) $(RELEASE_FLAGS) $(COMMON_FLAGS)
+
+bundle: release
+	@mkdir -p $(OUT_DIR)/Term.app/Contents/MacOS
+	@mkdir -p $(OUT_DIR)/Term.app/Contents/Resources
+	cp $(TARGET) $(OUT_DIR)/Term.app/Contents/MacOS/
+	cp assets/Info.plist $(OUT_DIR)/Term.app/Contents/Info.plist
+	cp assets/term.icns $(OUT_DIR)/Term.app/Contents/Resources/
+	cp -R assets/fonts $(OUT_DIR)/Term.app/Contents/Resources/
 
 run: build
 	./$(TARGET)
@@ -31,25 +40,25 @@ check:
 test: test-terminal test-parser test-pty test-input test-render test-app test-bench
 
 test-terminal:
-	$(ODIN) test src/terminal/tests $(COMMON_FLAGS)
+	$(ODIN) test src/terminal/tests $(COMMON_FLAGS) $(TEST_FLAGS)
 
 test-parser:
-	$(ODIN) test src/parser/tests $(COMMON_FLAGS)
+	$(ODIN) test src/parser/tests $(COMMON_FLAGS) $(TEST_FLAGS)
 
 test-pty:
-	$(ODIN) test src/platform/pty/tests $(COMMON_FLAGS)
+	$(ODIN) test src/platform/pty/tests $(COMMON_FLAGS) $(TEST_FLAGS)
 
 test-input:
-	$(ODIN) test src/platform/input/tests $(COMMON_FLAGS)
+	$(ODIN) test src/platform/input/tests $(COMMON_FLAGS) $(TEST_FLAGS)
 
 test-render:
-	$(ODIN) test src/render/tests $(COMMON_FLAGS)
+	$(ODIN) test src/render/tests $(COMMON_FLAGS) $(TEST_FLAGS)
 
 test-app:
-	$(ODIN) test src/app/tests $(COMMON_FLAGS)
+	$(ODIN) test src/app/tests $(COMMON_FLAGS) $(TEST_FLAGS)
 
 test-bench:
-	$(ODIN) test src/bench/tests $(COMMON_FLAGS)
+	$(ODIN) test src/bench/tests $(COMMON_FLAGS) $(TEST_FLAGS)
 
 bench:
 	@mkdir -p $(OUT_DIR)
@@ -59,7 +68,7 @@ bench:
 	$(ODIN) build src/bench/cmd_input_photon -out:$(OUT_DIR)/bench_input_photon -o:speed
 
 clean:
-	rm -rf $(OUT_DIR) build term-app app.bin
+	rm -rf $(OUT_DIR) $(OUT_DIR)/Term.app build term-app app.bin
 
 help:
 	@echo "Usage: make [target]"
@@ -68,6 +77,7 @@ help:
 	@echo "  all             Alias for build"
 	@echo "  build           Build debug executable to $(TARGET)"
 	@echo "  release         Build release executable to $(TARGET)"
+	@echo "  bundle          Create macOS application bundle (Term.app)"
 	@echo "  run             Build and run executable"
 	@echo "  check           Type check all source modules"
 	@echo "  test            Run all test suites sequentially"

@@ -1,0 +1,33 @@
+name: Feature Request
+description: Suggest an idea or feature for Term
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for proposing an enhancement! Please describe your use case and desired functionality.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Is your feature request related to a problem?
+      description: A clear and concise description of the problem or limitation you are experiencing.
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Describe the Proposed Solution
+      description: A clear and concise description of the feature or behavior you would like to see.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Any alternative solutions, workarounds, or features you have evaluated.
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional Context
+      description: References to terminal specifications, protocol standards (e.g., Kitty, OSC), or screenshots.

@@ -106,7 +106,7 @@ test_fallback_probe_order :: proc(t: ^testing.T) {
 	testing.expect_value(t, ecounters.fallback_miss, u64(3))
 	lut := _fb_lut(&term)
 	bg, glyph: instance.Instance_Data
-	_, emit_glyph := render.render_cell_expand_instance(frame.cells[0], &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
+	_, emit_glyph, _ := render.render_cell_expand_instance(frame.cells[0], &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
 	testing.expect(t, !emit_glyph, "tofu-missing must emit no glyph")
 }
 
@@ -206,7 +206,7 @@ test_presentation_fallback :: proc(t: ^testing.T) {
 	testing.expect(t, atlas.slots[g.atlas_slot].valid, "tofu slot must be valid")
 	lut := _fb_lut(&term)
 	bg, glyph: instance.Instance_Data
-	emit_bg, emit_glyph := render.render_cell_expand_instance(frame.cells[0], &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
+	emit_bg, emit_glyph, _ := render.render_cell_expand_instance(frame.cells[0], &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
 	testing.expect(t, emit_bg && emit_glyph, "tofu must emit bg+glyph")
 }
 
@@ -279,10 +279,10 @@ test_vs16_mark_wide :: proc(t: ^testing.T) {
 	cache: render.Shape_Cache
 	render.render_compile_full_v2(&frame, &term, &chain, &cache, &atlas, &counters)
 
-	// Key carries VS16 as mark0; the probe uses the base only.
+	// Key carries VS16 as runes[1]; the probe uses the base only.
 	cell := termgrid.grid_get_cell(&term.grid, 0, 0)
 	key := render.cluster_key_from_handle(cell.content, &term.grapheme_store, .Isolated)
-	testing.expect_value(t, key.mark0, rune(0xFE0F))
+	testing.expect_value(t, key.runes[1], rune(0xFE0F))
 	g, hit := render.shape_cache_lookup(&cache, key)
 	testing.expect(t, hit, "CJK+VS16 must cache")
 	testing.expect_value(t, g.shaped_codepoint, u32(0x4E2D))
@@ -297,10 +297,10 @@ test_vs16_mark_wide :: proc(t: ^testing.T) {
 	testing.expect(t, slot0 != render.RENDER_CELL_V2_SLOT_UNRESOLVED)
 	lut := _fb_lut(&term)
 	bg, glyph: instance.Instance_Data
-	emit_bg, emit_glyph := render.render_cell_expand_instance(frame.cells[0], &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
+	emit_bg, emit_glyph, _ := render.render_cell_expand_instance(frame.cells[0], &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
 	testing.expect(t, emit_bg && emit_glyph, "wide lead must emit")
 	testing.expect(t, glyph.cw == 16.0, "wide lead spans double width")
-	emit_bg1, emit_glyph1 := render.render_cell_expand_instance(frame.cells[1], &lut, &atlas, 8, 0, 8, 16, &bg, &glyph)
+	emit_bg1, emit_glyph1, _ := render.render_cell_expand_instance(frame.cells[1], &lut, &atlas, 8, 0, 8, 16, &bg, &glyph)
 	testing.expect(t, !emit_bg1 && !emit_glyph1, "continuation emits nothing")
 }
 
@@ -455,7 +455,7 @@ test_cache_identity_not_handle :: proc(t: ^testing.T) {
 test_cache_evict_bounded :: proc(t: ^testing.T) {
 	cache: render.Shape_Cache
 	for i in 0..<(render.SHAPE_CACHE_CAP + 1) {
-		k := render.Cluster_Key{base = rune(0x200 + i), join_form = .Isolated}
+		k := render.cluster_key_make(rune(0x200 + i), .Isolated)
 		g := render.Shaped_Glyph{font_index = 0, shaped_codepoint = u32(0x200 + i), atlas_slot = u16(271 + (i % 241))}
 		render.shape_cache_insert(&cache, k, g)
 	}
@@ -500,7 +500,7 @@ test_fifo_evict_heals :: proc(t: ^testing.T) {
 	testing.expect_value(t, atlas.fallback_tag[int(g1.atlas_slot) - render.FALLBACK_SLOT_BASE], u64(0xE9))
 	lut := _fb_lut(&term)
 	bg, glyph: instance.Instance_Data
-	emit_bg, emit_glyph := render.render_cell_expand_instance(frame.cells[0], &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
+	emit_bg, emit_glyph, _ := render.render_cell_expand_instance(frame.cells[0], &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
 	testing.expect(t, emit_bg && emit_glyph, "healed cell must emit")
 }
 

@@ -152,7 +152,7 @@ test_compute_tile_fallback_nil_pipeline :: proc(t: ^testing.T) {
 	atlas := _dirty_test_atlas()
 	cell := render.render_cell_from_semantic(termgrid.Semantic_Cell{content = u32('Q'), style = 0, width = 1, flags = .None})
 	bg_inst, glyph_inst: instance.Instance_Data
-	emit_bg, emit_glyph := render.render_cell_expand_instance(cell, &lut, &atlas, 40 * 8, 12 * 16, 8, 16, &bg_inst, &glyph_inst)
+	emit_bg, emit_glyph, _ := render.render_cell_expand_instance(cell, &lut, &atlas, 40 * 8, 12 * 16, 8, 16, &bg_inst, &glyph_inst)
 	testing.expect(t, emit_bg && emit_glyph, "reference expand must emit bg + glyph")
 	testing.expect(t, bg_inst != instance.Instance_Data{}, "reference bg instance must be written")
 	testing.expect(t, glyph_inst != instance.Instance_Data{}, "reference glyph instance must be written")

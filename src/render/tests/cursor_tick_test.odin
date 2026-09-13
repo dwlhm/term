@@ -112,3 +112,33 @@ test_cursor_overlay_clock_backwards_clamps :: proc(t: ^testing.T) {
 	testing.expect(t, !steady, "clamped timer must stay pending at the same now")
 	testing.expect(t, o.blink_on, "clamped timer must keep blink on")
 }
+
+@(test)
+test_cursor_overlay_steady_styles_no_blink :: proc(t: ^testing.T) {
+	for style in ([?]u8{2, 4, 6}) {
+		o: render.Cursor_Overlay
+		render.cursor_overlay_sync(&o, 0, 0, style)
+
+		changed := render.cursor_overlay_tick(&o, 1000, true, true)
+		testing.expect(t, changed, "steady style initial tick must report changed")
+		testing.expect(t, o.blink_on, "steady style must have blink_on = true")
+		testing.expect_value(t, o.next_toggle, 0) // parked timer
+
+		// Even far in the future, it should never toggle off
+		changed = render.cursor_overlay_tick(&o, 1000 + 10 * render.CURSOR_BLINK_NS, true, true)
+		testing.expect(t, !changed, "steady style must not toggle blink")
+		testing.expect(t, o.blink_on, "steady style must remain on")
+		testing.expect_value(t, o.next_toggle, 0)
+
+		// When hidden or unfocused, it turns off
+		changed = render.cursor_overlay_tick(&o, 2000, false, true)
+		testing.expect(t, changed, "unfocused steady style must report changed")
+		testing.expect(t, !o.blink_on, "unfocused steady style must be off")
+
+		// Regained focus turns back on without timer
+		changed = render.cursor_overlay_tick(&o, 3000, true, true)
+		testing.expect(t, changed, "regained focus steady style must report changed")
+		testing.expect(t, o.blink_on, "regained focus steady style must turn on")
+		testing.expect_value(t, o.next_toggle, 0)
+	}
+}

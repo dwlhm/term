@@ -201,3 +201,18 @@ test_s15_resize_chain :: proc(t: ^testing.T) {
 	testing.expect(t, a.last_px_w == px_w && a.last_px_h == px_h, "last_px must store the applied size")
 	testing.expect(t, _row_matches(&a.terminal, 0, "hi"), "terminal content must survive the resize")
 }
+
+@(test)
+test_app_dispatch_paste_local_action :: proc(t: ^testing.T) {
+	a: app.App
+	_bare_app(&a)
+	defer _bare_destroy(&a)
+	a.window.is_open = true
+
+	evs := [1]input.Input_Event{
+		{event_type = .Local, action = .Paste},
+	}
+	quit, ok := app.app_dispatch_input_events(&a, evs[:])
+	testing.expect(t, !quit, "Paste must not trigger quit")
+	testing.expect(t, ok, "Paste dispatch on bare app must succeed")
+}

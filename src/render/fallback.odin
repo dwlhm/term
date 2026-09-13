@@ -65,6 +65,15 @@ fallback_chain_init :: proc(
 				break
 			}
 			if font_rasterizer_init(&chain.fonts[chain.count], path, pixel_size, nil, allocator) {
+				fb := &chain.fonts[chain.count]
+				if primary != nil {
+					if fb.metrics.cell_width <= 0 {
+						fb.metrics.cell_width = primary.metrics.cell_width
+					}
+					if fb.metrics.cell_height <= 0 {
+						fb.metrics.cell_height = primary.metrics.cell_height
+					}
+				}
 				chain.count += 1
 			}
 		}

@@ -7,6 +7,7 @@ package render_tests
 // nil-safety. The backend stays nil in every test; a non-crash plus exact
 // staging contents is the headless limit, documented honestly here.
 
+import "core:math"
 import "core:testing"
 import render "../"
 import instance "../instance"
@@ -282,5 +283,45 @@ test_cursor_draw_clipped_when_scrolled_offscreen :: proc(t: ^testing.T) {
 	testing.expect(t, !drew, "cursor scrolled beyond bottom of viewport must be clipped")
 	testing.expect(t, !r.cursor_staged, "clipped cursor must not be staged")
 	testing.expect_value(t, _cursor_draw_nonzero(&r), 0)
+}
+
+@(test)
+test_cursor_draw_styles_bar_and_underline :: proc(t: ^testing.T) {
+	r := _cursor_draw_renderer(CURSOR_DRAW_ROWS, CURSOR_DRAW_COLS, CURSOR_DRAW_MAX)
+	defer delete(r.instances.instance_data)
+
+	o: render.Cursor_Overlay
+	slot := r.instances.max_instances - 1
+
+	// Bar cursor (style = 5 or 6)
+	render.cursor_overlay_sync(&o, 2, 3, 5)
+	render.cursor_overlay_tick(&o, 1000, true, true)
+	drew := render.cursor_overlay_draw(&r, &o)
+	testing.expect(t, drew, "bar cursor must draw")
+	bar_quad := r.instances.instance_data[slot]
+	expected_bar_w := max(f32(2.0), math.floor(r.cell_width * 0.15))
+	testing.expect_value(t, bar_quad.cw, expected_bar_w)
+	testing.expect_value(t, bar_quad.ch, r.cell_height)
+
+	// Underline cursor (style = 3 or 4)
+	render.cursor_overlay_sync(&o, 2, 3, 4)
+	render.cursor_overlay_tick(&o, 1000, true, true)
+	drew = render.cursor_overlay_draw(&r, &o)
+	testing.expect(t, drew, "underline cursor must draw")
+	underline_quad := r.instances.instance_data[slot]
+	expected_underline_h := max(f32(2.0), math.floor(r.cell_height * 0.15))
+	testing.expect_value(t, underline_quad.cw, r.cell_width)
+	testing.expect_value(t, underline_quad.ch, expected_underline_h)
+	expected_underline_y := r.pad_y + f32(2) * r.cell_height + r.cell_height - expected_underline_h
+	testing.expect_value(t, underline_quad.y, expected_underline_y)
+
+	// Block cursor (style = 0, 1, or 2)
+	render.cursor_overlay_sync(&o, 2, 3, 2)
+	render.cursor_overlay_tick(&o, 1000, true, true)
+	drew = render.cursor_overlay_draw(&r, &o)
+	testing.expect(t, drew, "block cursor must draw")
+	block_quad := r.instances.instance_data[slot]
+	testing.expect_value(t, block_quad.cw, r.cell_width)
+	testing.expect_value(t, block_quad.ch, r.cell_height)
 }
 

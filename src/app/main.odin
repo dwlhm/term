@@ -23,6 +23,7 @@ import "core:fmt"
 import "core:time"
 
 import "core:os"
+import "core:strings"
 
 import "vendor:sdl3"
 import "vendor:wgpu"
@@ -85,14 +86,80 @@ APP_BANNER_EXIT_FMT :: "[ process exited (%d) - press R to relaunch, Q to quit ]
 // APP_BANNER_FAIL is the banner kept on screen when a relaunch fails.
 APP_BANNER_FAIL :: "[ relaunch failed - press R to retry, Q to quit ]"
 
+// APP_ALT_SCREEN_WHEEL_LINES is the number of arrow key events generated
+// per mouse wheel tick when running on the alternate screen.
+APP_ALT_SCREEN_WHEEL_LINES :: 3
+
+// APP_SYNC_OUTPUT_TIMEOUT_NS bounds how long synchronized output (mode 2026)
+// can defer rendering before forcing a frame (100ms safety timeout).
+APP_SYNC_OUTPUT_TIMEOUT_NS :: 100_000_000
+
+// _app_response_cb writes parser response bytes back to the PTY master.
+// Used for DA queries and other terminal responses that shells expect.
+_app_response_cb :: proc(data: []u8) {
+	// This is called from within parse_chunk; the PTY master is non-blocking
+	// so the write returns immediately. Small responses (DA = 7 bytes) always
+	// fit in the kernel buffer.
+	app_ptr := (^App)(rawptr(app_global))
+	if app_ptr != nil && app_ptr.pty.master >= 0 && app_ptr.pty.state == .Running {
+		pty.pty_write(&app_ptr.pty, data)
+	}
+}
+
+// _app_clipboard_cb delivers OSC 52 clipboard writes to the SDL clipboard.
+_app_clipboard_cb :: proc(data: []u8) {
+	app_ptr := (^App)(rawptr(app_global))
+	if app_ptr == nil {
+		return
+	}
+	win.window_set_clipboard_text(&app_ptr.window, string(data))
+}
+
+_app_clipboard_read_cb :: proc(user_data: rawptr, out: []u8) -> int {
+	if user_data == nil || len(out) == 0 { return 0 }
+	a := (^App)(user_data)
+	text := win.window_get_clipboard_text(&a.window)
+	if len(text) == 0 {
+		delete(text)
+		return 0
+	}
+	defer delete(text)
+	n := min(len(text), len(out))
+	copy(out[:n], text[:n])
+	return n
+}
+
+// app_global holds the App pointer for the response callback (which cannot
+// capture locals in Odin's proc type system). Set once in main after init.
+app_global: ^App
+
 // Font paths to try (in order).
 FONT_PATHS :: []string{
+	"assets/fonts/MapleMono-NF-Regular.ttf",
+	"assets/fonts/MapleMono-Regular.ttf",
+	"../assets/fonts/MapleMono-NF-Regular.ttf",
+	"../assets/fonts/MapleMono-Regular.ttf",
+	"~/Library/Fonts/MapleMono-NF-Regular.ttf",
+	"~/Library/Fonts/MapleMono-Regular.ttf",
+	"~/Library/Fonts/MesloLGS NF Regular.ttf",
+	"~/Library/Fonts/JetBrainsMonoNerdFont-Regular.ttf",
+	"/Library/Fonts/MesloLGS NF Regular.ttf",
+	"/Applications/Raycast.app/Contents/Resources/JetBrainsMono-Regular.ttf",
+	"/System/Applications/Utilities/Terminal.app/Contents/Resources/Fonts/SFMono-Terminal.ttf",
+	"/System/Library/Fonts/SFNSMono.ttf",
+	"/System/Library/Fonts/Monaco.ttf",
 	"/System/Library/Fonts/Menlo.ttc",
 	"/System/Library/Fonts/Supplemental/Courier New.ttf",
 }
 
 // Fallback font paths (in order).
 FALLBACK_FONT_PATHS :: []string{
+	"assets/fonts/SymbolsNerdFontMono-Regular.ttf",
+	"../assets/fonts/SymbolsNerdFontMono-Regular.ttf",
+	"~/Library/Fonts/SymbolsNerdFontMono-Regular.ttf",
+	"/Library/Fonts/SymbolsNerdFontMono-Regular.ttf",
+	"~/Library/Fonts/MesloLGS NF Regular.ttf",
+	"/Library/Fonts/MesloLGS NF Regular.ttf",
 	"/System/Library/Fonts/Apple Symbols.ttf",
 	"/System/Library/Fonts/SFNSMono.ttf",
 	"/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
@@ -125,6 +192,8 @@ App :: struct {
 	// last_px_w/h is the last window size consumed by app_on_resize.
 	last_px_w:   i32,
 	last_px_h:   i32,
+	last_mouse_col: int,
+	last_mouse_row: int,
 	// debug_frames gates TERM_DEBUG=1 frame diagnostics (init dump +
 	// per-frame line + first-damage grid dump). Cached once in app_init;
 	// when false the only per-frame cost is one bool check.
@@ -136,30 +205,73 @@ App :: struct {
 	queue:       gpu.Gpu_Queue,
 	surface:     gpu.Gpu_Surface,
 	instance:    rawptr,
+	// sync_output_start_ns tracks the start time of a synchronized update
+	// (DEC mode 2026) in monotonic nanoseconds, for safety timeout enforcement.
+	sync_output_start_ns: u64,
 }
 
 // find_font tries to find a usable font file.
 find_font :: proc() -> (path: string, ok: bool) {
 	for font_path in FONT_PATHS {
-		if data, err := os.read_entire_file(font_path, context.allocator); err == nil {
+		actual_path := font_path
+		if strings.has_prefix(font_path, "~/") {
+			if home, hok := os.lookup_env("HOME", context.temp_allocator); hok {
+				actual_path = strings.concatenate({home, font_path[1:]}, context.temp_allocator)
+			}
+		}
+		if data, err := os.read_entire_file(actual_path, context.allocator); err == nil {
 			delete(data)
-			return font_path, true
+			return actual_path, true
 		}
 	}
 	return "", false
 }
 
-// _resolve_shell returns $SHELL when set and non-empty, else the fallback.
-// The returned string is allocated only when $SHELL is used; the caller
-// frees it exactly in that case (see main).
+// _resolve_shell returns the preferred shell path. On macOS, if the user's
+// shell is /bin/zsh or fallback, it checks for modern Zsh in Homebrew
+// (/opt/homebrew/bin/zsh or /usr/local/bin/zsh) to avoid Apple's frozen
+// Unicode table. Returns (shell, allocated) where allocated indicates
+// whether the caller must free the string.
 _resolve_shell :: proc() -> (shell: string, allocated: bool) {
-	if val, found := os.lookup_env_alloc(APP_SHELL_ENV, context.allocator); found {
-		if len(val) > 0 {
-			return val, true
-		}
+	val, found := os.lookup_env_alloc(APP_SHELL_ENV, context.allocator)
+	shell_cand := APP_SHELL_FALLBACK
+	cand_alloc := false
+	if found && len(val) > 0 {
+		shell_cand = val
+		cand_alloc = true
+	} else if found {
 		delete(val)
 	}
-	return APP_SHELL_FALLBACK, false
+
+	if shell_cand == "/bin/zsh" || shell_cand == APP_SHELL_FALLBACK {
+		if os.exists("/opt/homebrew/bin/zsh") {
+			if cand_alloc {
+				delete(shell_cand)
+			}
+			return "/opt/homebrew/bin/zsh", false
+		}
+		if os.exists("/usr/local/bin/zsh") {
+			if cand_alloc {
+				delete(shell_cand)
+			}
+			return "/usr/local/bin/zsh", false
+		}
+	}
+
+	return shell_cand, cand_alloc
+}
+
+_SHELL_ARGV_ZSH := []string{"-l", "-o", "COMBINING_CHARS"}
+_SHELL_ARGV_DEFAULT := []string{"-l"}
+
+// _resolve_shell_argv returns the startup arguments for the spawned shell.
+// Launches as login shell (-l). For zsh, enables COMBINING_CHARS so ZLE
+// treats ZWJ (U+200D) as a native combining character.
+_resolve_shell_argv :: proc(shell: string) -> []string {
+	if strings.has_suffix(shell, "zsh") {
+		return _SHELL_ARGV_ZSH
+	}
+	return _SHELL_ARGV_DEFAULT
 }
 
 // app_init builds every subsystem in order: window -> backend/device ->
@@ -188,6 +300,9 @@ app_init :: proc(a: ^App, rows, cols: int, prog: string, argv: []string) -> bool
 	a.banner_shown = false
 	a.last_px_w = 0
 	a.last_px_h = 0
+	a.last_mouse_col = 0
+	a.last_mouse_row = 0
+	a.sync_output_start_ns = 0
 	// TERM_DEBUG gate, cached once (precedent: os.lookup_env_alloc in
 	// _resolve_shell). Only the exact value "1" enables diagnostics.
 	a.debug_frames = false
@@ -330,6 +445,11 @@ app_init :: proc(a: ^App, rows, cols: int, prog: string, argv: []string) -> bool
 		theme = termgrid.THEME_CATPPUCCIN_MOCHA,
 	)
 	parser.parser_init(&a.parser)
+	a.parser.response_cb = _app_response_cb
+	a.parser.clipboard_cb = _app_clipboard_cb
+	a.parser.clipboard_read_cb = _app_clipboard_read_cb
+	a.parser.clipboard_read_user_data = a
+	app_global = a
 	render.renderer_resize_grid(&a.renderer, &a.terminal, i32(init_rows), i32(init_cols))
 
 	// (7) PTY child.
@@ -378,6 +498,7 @@ app_init :: proc(a: ^App, rows, cols: int, prog: string, argv: []string) -> bool
 			font_path,
 		)
 	}
+	_ = sdl3.AddEventWatch(_app_event_watch, a)
 	return true
 }
 
@@ -388,6 +509,7 @@ app_destroy :: proc(a: ^App) {
 	if a == nil {
 		return
 	}
+	sdl3.RemoveEventWatch(_app_event_watch, a)
 	pty.pty_close(&a.pty)
 	render.renderer_destroy(&a.renderer)
 	termgrid.terminal_destroy(&a.terminal)
@@ -411,12 +533,28 @@ app_destroy :: proc(a: ^App) {
 // _app_sync_focus mirrors the live SDL input-focus state into a.focused
 // (parks the blink via tick). Flag polling (not event translation) keeps
 // window_poll_input as the only SDL event drain.
+// When focus_reporting mode (1004) is enabled, sends \e[I on focus gain
+// and \e[O on focus loss to the PTY.
 _app_sync_focus :: proc(a: ^App) {
 	if a == nil || a.window.handle == nil {
 		return
 	}
 	flags := sdl3.GetWindowFlags(a.window.handle)
-	a.focused = .INPUT_FOCUS in flags
+	new_focused := .INPUT_FOCUS in flags
+	// Detect focus transition
+	if new_focused != a.focused {
+		a.focused = new_focused
+		// Send focus reporting sequence if mode is enabled
+		if a.terminal.focus_reporting && a.pty.state == .Running {
+			if new_focused {
+				// Focus gained: \e[I
+				pty.pty_write(&a.pty, []u8{0x1B, '[', 'I'})
+			} else {
+				// Focus lost: \e[O
+				pty.pty_write(&a.pty, []u8{0x1B, '[', 'O'})
+			}
+		}
+	}
 }
 
 _app_grid_for_pixels :: proc(
@@ -534,9 +672,52 @@ _app_route_pointer :: proc(a: ^App, pointer: input.Input_Pointer_Event) -> bool 
 	if a == nil {
 		return false
 	}
+
+	if a.terminal.mouse_tracking != .None && !pointer.shift {
+		pt := _app_pointer_cell(a, pointer.x, pointer.y)
+		col := clamp(pt.col + 1, 1, max(1, a.terminal.grid.col_count))
+		row := clamp(pt.row + 1, 1, max(1, a.terminal.grid.row_count))
+
+		if pointer.kind == .Motion {
+			if a.terminal.mouse_tracking == .Normal {
+				return true
+			}
+			if a.terminal.mouse_tracking == .Button_Event && !pointer.primary_down && pointer.button == 0 {
+				return true
+			}
+			if col == a.last_mouse_col && row == a.last_mouse_row {
+				return true
+			}
+		}
+
+		buf: [32]u8
+		n := input.mouse_encode_sgr(pointer, col, row, pointer.shift, buf[:])
+		if n > 0 {
+			_ = pty.pty_write(&a.pty, buf[:n])
+		}
+		a.last_mouse_col = col
+		a.last_mouse_row = row
+		return true
+	}
+
 	switch pointer.kind {
 	case .Wheel:
 		if a.terminal.is_alt_screen {
+			delta := _app_pointer_wheel_delta(pointer)
+			if delta == 0 {
+				return true
+			}
+			steps := abs(delta) * APP_ALT_SCREEN_WHEEL_LINES
+			code: u8 = 'A' if delta > 0 else 'B'
+			seq: [3]u8
+			if a.terminal.app_cursor_keys {
+				seq = {0x1B, 'O', code}
+			} else {
+				seq = {0x1B, '[', code}
+			}
+			for _ in 0 ..< steps {
+				_ = pty.pty_write(&a.pty, seq[:])
+			}
 			return true
 		}
 		delta := _app_pointer_wheel_delta(pointer)
@@ -583,6 +764,29 @@ _app_copy_selection :: proc(a: ^App) -> bool {
 		return false
 	}
 	return win.window_set_clipboard_text(&a.window, copied)
+}
+
+_app_paste_clipboard :: proc(a: ^App) -> bool {
+	if a == nil || a.pty.state == .Exited {
+		return false
+	}
+	text := win.window_get_clipboard_text(&a.window)
+	if len(text) == 0 {
+		delete(text)
+		return true
+	}
+	defer delete(text)
+
+	// Bracketed paste: wrap with \e[200~ (start) and \e[201~ (end) when enabled.
+	// This lets shells like fish distinguish pasted text from typed text.
+	if a.terminal.bracketed_paste {
+		pty.pty_write(&a.pty, []u8{0x1B, '[', '2', '0', '0', '~'})
+	}
+	ok := pty.pty_write(&a.pty, transmute([]u8)text)
+	if a.terminal.bracketed_paste {
+		pty.pty_write(&a.pty, []u8{0x1B, '[', '2', '0', '1', '~'})
+	}
+	return ok
 }
 
 _app_request_zoom :: proc(a: ^App, direction: int) -> bool {
@@ -687,6 +891,10 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 				if !_app_copy_selection(a) {
 					ok = false
 				}
+			case .Paste:
+				if !_app_paste_clipboard(a) {
+					ok = false
+				}
 			case .Zoom_In:
 				_ = _app_request_zoom(a, 1)
 			case .Zoom_Out:
@@ -700,7 +908,8 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 		}
 	}
 	if key_count > 0 {
-		ok = input.input_pump_events(&a.pty, key_evs[:key_count]) && ok
+		kitty_flags := termgrid.terminal_kitty_active(&a.terminal).flags
+		ok = input.input_pump_events(&a.pty, key_evs[:key_count], kitty_flags, a.terminal.app_cursor_keys) && ok
 	}
 	quit = a.should_quit || !a.window.is_open
 	return quit, ok
@@ -898,12 +1107,36 @@ app_on_resize :: proc(a: ^App, pixel_w: i32, pixel_h: i32) -> (resized: bool) {
 	   pixel_w == a.last_px_w && pixel_h == a.last_px_h {
 		return false
 	}
-	termgrid.terminal_resize(&a.terminal, rows, cols)
-	render.renderer_resize_grid(&a.renderer, &a.terminal, i32(rows), i32(cols))
+	grid_changed := rows != a.terminal.grid.row_count || cols != a.terminal.grid.col_count
+	if grid_changed {
+		termgrid.terminal_resize(&a.terminal, rows, cols)
+		render.renderer_resize_grid(&a.renderer, &a.terminal, i32(rows), i32(cols))
+	}
 	render.renderer_resize(&a.renderer, u32(pixel_w), u32(pixel_h))
-	pty.pty_set_winsize(&a.pty, rows, cols)
+	if grid_changed {
+		pty.pty_set_winsize(&a.pty, rows, cols)
+	}
 	a.last_px_w = pixel_w
 	a.last_px_h = pixel_h
+	return true
+}
+
+_app_event_watch :: proc "c" (userdata: rawptr, event: ^sdl3.Event) -> bool {
+	if event == nil || userdata == nil {
+		return true
+	}
+	#partial switch event.type {
+	case .WINDOW_RESIZED, .WINDOW_PIXEL_SIZE_CHANGED, .WINDOW_EXPOSED:
+		context = runtime.default_context()
+		a := (^App)(userdata)
+		if a.window.handle != nil && event.window.windowID == sdl3.GetWindowID(a.window.handle) {
+			win.window_update_pixel_size(&a.window)
+			if a.window.pixel_w != a.last_px_w || a.window.pixel_h != a.last_px_h {
+				app_on_resize(a, a.window.pixel_w, a.window.pixel_h)
+				_ = render.renderer_frame(&a.renderer, &a.terminal, &a.view)
+			}
+		}
+	}
 	return true
 }
 
@@ -943,12 +1176,19 @@ app_frame :: proc(a: ^App) -> bool {
 		}
 	}
 
+	// (2b) Window title sync: OSC 0/1/2 stores a pending title on the
+	// terminal; apply it to the SDL window exactly once per distinct title.
+	if title := termgrid.terminal_take_title(&a.terminal); len(title) > 0 {
+		win.window_set_title(&a.window, title)
+	}
+
 	// (3) Cursor sync from the terminal cursor + blink tick.
 	cur := termgrid.terminal_get_cursor(&a.terminal)
+	style_changed := a.cursor.style != cur.style
 	position_changed := a.cursor.row != cur.row || a.cursor.col != cur.col
 	old_cursor_row := a.cursor.row
 	old_cursor_col := a.cursor.col
-	render.cursor_overlay_sync(&a.cursor, cur.row, cur.col)
+	render.cursor_overlay_sync(&a.cursor, cur.row, cur.col, cur.style)
 	now := platform.platform_ticks_to_ns(platform.platform_now())
 	cursor_changed := render.cursor_overlay_tick(&a.cursor, now, a.focused, cur.visible)
 
@@ -975,7 +1215,25 @@ app_frame :: proc(a: ^App) -> bool {
 		_ = _app_mark_cursor_dirty(a, old_cursor_row, old_cursor_col)
 		_ = _app_mark_cursor_dirty(a, cur.row, cur.col)
 	}
-	frame_ok := render.renderer_frame(&a.renderer, &a.terminal, &a.view)
+	if style_changed {
+		_ = _app_mark_cursor_dirty(a, cur.row, cur.col)
+	}
+	now_ns := u64(now)
+	frame_ok := false
+	if a.terminal.synchronized_output {
+		if a.sync_output_start_ns == 0 {
+			a.sync_output_start_ns = now_ns
+		}
+		if now_ns - a.sync_output_start_ns < APP_SYNC_OUTPUT_TIMEOUT_NS {
+			// Skip calling render.renderer_frame for this frame (defer presentation until update completes)
+		} else {
+			// Safety timeout reached — proceed with render.renderer_frame to prevent screen freezes
+			frame_ok = render.renderer_frame(&a.renderer, &a.terminal, &a.view)
+		}
+	} else {
+		a.sync_output_start_ns = 0
+		frame_ok = render.renderer_frame(&a.renderer, &a.terminal, &a.view)
+	}
 
 	// Per-frame line (TERM_DEBUG=1 only): dmg>0 + present=false =
 	// present-fail; dmg==0 + present=false = healthy skip; dmg>0 +
@@ -1020,10 +1278,11 @@ app_frame :: proc(a: ^App) -> bool {
 main :: proc() {
 	shell, shell_allocated := _resolve_shell()
 	defer if shell_allocated { delete(shell) }
+	shell_argv := _resolve_shell_argv(shell)
 	fmt.printf("Term: starting %s (%dx%d)\n", shell, APP_DEFAULT_COLS, APP_DEFAULT_ROWS)
 
 	app := new(App, runtime.heap_allocator())
-	if !app_init(app, APP_DEFAULT_ROWS, APP_DEFAULT_COLS, shell, nil) {
+	if !app_init(app, APP_DEFAULT_ROWS, APP_DEFAULT_COLS, shell, shell_argv) {
 		free(app, runtime.heap_allocator())
 		fmt.println("ERROR: app_init failed")
 		return

@@ -11,15 +11,20 @@ import termgrid "../terminal"
 // (evictions tracks foreign overwrites); correctness heals via re-resolve.
 SHAPE_CACHE_CAP :: 1024
 
-// Cluster_Key is the value identity of one cluster. Marks beyond the first
-// two are folded into mark1 at construction so distinct clusters stay
-// distinct in the hash.
+// Cluster_Key is the value identity of one cluster.
 Cluster_Key :: struct {
-	base:       rune,
-	mark0:      rune,
-	mark1:      rune,
-	mark_count: u8,
+	runes:      [termgrid.GRAPHEME_INLINE_CAP]rune,
+	rune_count: u8,
 	join_form:  Join_Form,
+}
+
+// cluster_key_make constructs a Cluster_Key from a single base rune.
+cluster_key_make :: proc(base: rune, join_form: Join_Form = .Isolated) -> Cluster_Key {
+	k: Cluster_Key
+	k.runes[0] = base
+	k.rune_count = 1
+	k.join_form = join_form
+	return k
 }
 
 // Shaped_Glyph is one resolved cluster. atlas_slot 0x1FF is UNRESOLVED.
@@ -40,57 +45,49 @@ Shape_Cache :: struct {
 }
 
 // cluster_key_from_handle copies a handle's cluster identity by value.
-// Literals copy directly; pool handles copy base + first two marks (extras
-// folded into mark1); out-of-range handles resolve to U+FFFD.
+// Literals copy directly; pool handles copy runes array; out-of-range handles resolve to U+FFFD.
 cluster_key_from_handle :: proc(
 	h: termgrid.Content_Handle,
 	store: ^termgrid.Grapheme_Store,
 	join_form: Join_Form,
 ) -> Cluster_Key {
 	if !termgrid.content_is_grapheme(h) {
-		return Cluster_Key{base = rune(h), join_form = join_form}
+		return cluster_key_make(rune(h), join_form)
 	}
 	if store == nil {
-		return Cluster_Key{base = 0xFFFD, join_form = join_form}
+		return cluster_key_make(0xFFFD, join_form)
 	}
 	idx := int(h - termgrid.CONTENT_GRAPHEME_BASE)
 	if idx < 0 || idx >= termgrid.GRAPHEME_STORE_CAP {
-		return Cluster_Key{base = 0xFFFD, join_form = join_form}
+		return cluster_key_make(0xFFFD, join_form)
 	}
 	e := &store.entries[idx]
-	k := Cluster_Key{base = e.base, mark_count = e.mark_count, join_form = join_form}
-	if e.mark_count > 0 {
-		k.mark0 = e.marks[0]
+	k: Cluster_Key
+	count := min(int(e.rune_count), termgrid.GRAPHEME_INLINE_CAP)
+	for i in 0..<count {
+		k.runes[i] = e.runes[i]
 	}
-	if e.mark_count > 1 {
-		k.mark1 = e.marks[1]
-	}
-	if e.mark_count > 2 {
-		for i in 2..<int(e.mark_count) {
-			k.mark1 = rune(i32(k.mark1) ~ i32(e.marks[i]))
-		}
-	}
+	k.rune_count = u8(count)
+	k.join_form = join_form
 	return k
 }
 
-// cluster_key_hash is FNV-1a over the key's three runes (12 bytes) with the
-// mark count and join form mixed in. Pure.
+// cluster_key_hash is FNV-1a over the key's runes with the
+// rune count and join form mixed in. Pure.
 cluster_key_hash :: proc(k: Cluster_Key) -> u32 {
 	h := u32(2166136261)
 	mix_byte :: proc(h: u32, b: u8) -> u32 {
 		return (h ~ u32(b)) * 16777619
 	}
 	shifts := [4]u32{0, 8, 16, 24}
-	for shift in shifts {
-		h = mix_byte(h, u8((u32(k.base) >> shift) & 0xFF))
+	count := min(int(k.rune_count), termgrid.GRAPHEME_INLINE_CAP)
+	for i in 0..<count {
+		r := u32(k.runes[i])
+		for shift in shifts {
+			h = mix_byte(h, u8((r >> shift) & 0xFF))
+		}
 	}
-	for shift in shifts {
-		h = mix_byte(h, u8((u32(k.mark0) >> shift) & 0xFF))
-	}
-	for shift in shifts {
-		h = mix_byte(h, u8((u32(k.mark1) >> shift) & 0xFF))
-	}
-	h = mix_byte(h, k.mark_count)
+	h = mix_byte(h, k.rune_count)
 	h = mix_byte(h, u8(k.join_form))
 	return h
 }

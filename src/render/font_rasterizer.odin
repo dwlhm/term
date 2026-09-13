@@ -7,6 +7,7 @@ import "base:runtime"
 import "core:c"
 import "core:math"
 import "core:os"
+import "core:strings"
 import "vendor:stb/truetype"
 
 // Font_Error represents font loading errors.
@@ -59,7 +60,14 @@ font_rasterizer_init :: proc(
 	}
 
 	// Read font file
-	font_data, err := os.read_entire_file(font_path, allocator)
+	actual_path := font_path
+	if strings.has_prefix(font_path, "~/") {
+		if home, ok := os.lookup_env("HOME", context.temp_allocator); ok {
+			actual_path = strings.concatenate({home, font_path[1:]}, context.temp_allocator)
+		}
+	}
+
+	font_data, err := os.read_entire_file(actual_path, allocator)
 	if err != nil {
 		if out_error != nil {
 			out_error^ = Font_Error.File_Not_Found
@@ -97,11 +105,23 @@ font_rasterizer_init :: proc(
 	r.metrics.line_gap = f32(line_gap) * r.scale
 	r.metrics.cell_height = math.ceil(r.metrics.ascent - r.metrics.descent + r.metrics.line_gap)
 
-	// For monospace fonts, all glyphs have the same advance width
-	// Use a representative glyph (e.g., 'M' = 0x4D) to get the advance
+	// For monospace fonts, all glyphs have the same advance width.
+	// Probe common glyphs in case 'M' is not in a symbol-only font.
 	advance_width, lsb: c.int
-	truetype.GetCodepointHMetrics(&r.info, rune(0x4D), &advance_width, &lsb)
-	r.metrics.cell_width = math.ceil(f32(advance_width) * r.scale)
+	sample_runes := []rune{'M', 'W', 'm', '0', 'A', ' ', 0x2500, 0xE0B0, 0xF179, 0xF07B}
+	for sr in sample_runes {
+		if truetype.FindGlyphIndex(&r.info, sr) != 0 {
+			truetype.GetCodepointHMetrics(&r.info, sr, &advance_width, &lsb)
+			if advance_width > 0 {
+				break
+			}
+		}
+	}
+	if advance_width > 0 {
+		r.metrics.cell_width = math.ceil(f32(advance_width) * r.scale)
+	} else {
+		r.metrics.cell_width = math.ceil(pixel_size * 0.6)
+	}
 
 	return true
 }
@@ -117,6 +137,97 @@ font_rasterizer_destroy :: proc(r: ^Font_Rasterizer) {
 	}
 }
 
+// is_symbol_or_pua returns true for PUA, Nerd Font icons, Powerline, and symbol ranges
+// that should be centered inside their cell rather than baseline-anchored.
+is_symbol_or_pua :: proc(cp: u32) -> bool {
+	return (cp >= 0xE000 && cp <= 0xF8FF) ||
+	       (cp >= 0xF0000 && cp <= 0x10FFFD) ||
+	       (cp >= 0x2500 && cp <= 0x27BF) ||
+	       (cp >= 0x2B00 && cp <= 0x2BFF)
+}
+
+// font_rasterize_glyph_fitted rasterizes a glyph proportionally scaled to fit within max_w and max_h.
+// When max_w and max_h are 0, it rasterizes at the font's unconstrained scale.
+// If the glyph bounding box exceeds max_w or max_h, it scales the glyph down proportionally
+// and centers it horizontally, preventing out-of-bounds clipping.
+font_rasterize_glyph_fitted :: proc(
+	r: ^Font_Rasterizer,
+	codepoint: u32,
+	max_w: int = 0,
+	max_h: int = 0,
+	allocator: runtime.Allocator = context.allocator,
+) -> Glyph_Bitmap {
+	result: Glyph_Bitmap
+
+	glyph_index := truetype.FindGlyphIndex(&r.info, rune(codepoint))
+	if glyph_index == 0 {
+		return result
+	}
+
+	scale := r.scale
+	x0, y0, x1, y1: c.int
+	truetype.GetCodepointBitmapBox(&r.info, rune(codepoint), scale, scale, &x0, &y0, &x1, &y1)
+	width := int(x1 - x0)
+	height := int(y1 - y0)
+
+	if width <= 0 || height <= 0 {
+		result.advance = r.metrics.cell_width
+		return result
+	}
+
+	if max_w > 0 && max_h > 0 && (width > max_w || height > max_h) {
+		fit_factor := min(f32(max_w) / f32(width), f32(max_h) / f32(height))
+		scale = r.scale * fit_factor
+		truetype.GetCodepointBitmapBox(&r.info, rune(codepoint), scale, scale, &x0, &y0, &x1, &y1)
+		width = int(x1 - x0)
+		height = int(y1 - y0)
+		for (width > max_w || height > max_h) && scale > 0.0001 {
+			scale *= 0.95
+			truetype.GetCodepointBitmapBox(&r.info, rune(codepoint), scale, scale, &x0, &y0, &x1, &y1)
+			width = int(x1 - x0)
+			height = int(y1 - y0)
+		}
+	}
+
+	if width <= 0 || height <= 0 {
+		result.advance = r.metrics.cell_width
+		return result
+	}
+
+	result.width = width
+	result.height = height
+	result.pixels = make([]u8, width * height, allocator)
+
+	truetype.MakeCodepointBitmap(&r.info, &result.pixels[0], c.int(width), c.int(height), c.int(width), scale, scale, rune(codepoint))
+
+	advance_width, lsb: c.int
+	truetype.GetCodepointHMetrics(&r.info, rune(codepoint), &advance_width, &lsb)
+	result.advance = f32(advance_width) * scale
+
+	if max_w > 0 && max_h > 0 {
+		if is_symbol_or_pua(codepoint) {
+			// Symbols and Nerd Font icons: optically center both horizontally and vertically
+			ascent_int := int(math.round(r.metrics.ascent))
+			result.bearing_x = f32(max_w - width) * 0.5
+			result.bearing_y = f32((max_h - height) / 2 - ascent_int)
+		} else {
+			// Text glyphs: keep baseline anchoring
+			result.bearing_y = f32(y0)
+			if int(x0) >= 0 && int(x0) + width <= max_w {
+				result.bearing_x = f32(x0)
+			} else {
+				result.bearing_x = f32(max_w - width) * 0.5
+			}
+		}
+	} else {
+		// Unconstrained scale
+		result.bearing_x = f32(x0)
+		result.bearing_y = f32(y0)
+	}
+
+	return result
+}
+
 // font_rasterize_glyph rasterizes a single glyph and returns its bitmap.
 // The caller is responsible for freeing the returned pixels slice.
 font_rasterize_glyph :: proc(
@@ -124,41 +235,7 @@ font_rasterize_glyph :: proc(
 	codepoint: u32,
 	allocator: runtime.Allocator = context.allocator,
 ) -> Glyph_Bitmap {
-	result: Glyph_Bitmap
-
-	// Get glyph bounding box
-	x0, y0, x1, y1: c.int
-	truetype.GetCodepointBitmapBox(&r.info, rune(codepoint), r.scale, r.scale, &x0, &y0, &x1, &y1)
-	width := int(x1 - x0)
-	height := int(y1 - y0)
-
-	if width <= 0 || height <= 0 {
-		// Empty glyph (e.g., space)
-		result.width = 0
-		result.height = 0
-		result.bearing_x = 0
-		result.bearing_y = 0
-		result.advance = r.metrics.cell_width
-		result.pixels = nil
-		return result
-	}
-
-	// Allocate bitmap
-	result.width = width
-	result.height = height
-	result.pixels = make([]u8, width * height, allocator)
-
-	// Rasterize glyph
-	truetype.MakeCodepointBitmap(&r.info, &result.pixels[0], c.int(width), c.int(height), c.int(width), r.scale, r.scale, rune(codepoint))
-
-	// Get metrics
-	advance_width, lsb: c.int
-	truetype.GetCodepointHMetrics(&r.info, rune(codepoint), &advance_width, &lsb)
-	result.advance = f32(advance_width) * r.scale
-	result.bearing_x = f32(x0)
-	result.bearing_y = f32(y0)
-
-	return result
+	return font_rasterize_glyph_fitted(r, codepoint, 0, 0, allocator)
 }
 
 // font_rasterize_glyph_into rasterizes a glyph directly into a destination buffer.

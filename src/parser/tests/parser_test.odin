@@ -474,3 +474,28 @@ test_integration_utf8 :: proc(t: ^testing.T) {
 	testing.expect(t, tg.grid_get_cell(&term.grid, 0, 2).content == 'f', "Row 0, col 2 should be 'f'")
 	testing.expect(t, tg.grid_get_cell(&term.grid, 0, 3).content == 0x00E9, "Row 0, col 3 should be 'é'")
 }
+
+@(test)
+test_parser_memory_layout :: proc(t: ^testing.T) {
+	testing.expect(t, offset_of(p.Parser, state) == 0, "offset state == 0")
+	testing.expect(t, offset_of(p.Parser, csi_count) == 1, "offset csi_count == 1")
+	testing.expect(t, offset_of(p.Parser, csi_subparam_mask) == 2, "offset csi_subparam_mask == 2")
+	testing.expect(t, offset_of(p.Parser, csi_values) == 4, "offset csi_values == 4 (0 padding)")
+	testing.expect(t, offset_of(p.Parser, utf8_state) == 68, "offset utf8_state == 68")
+	testing.expect(t, offset_of(p.Parser, utf8_len) == 69, "offset utf8_len == 69")
+	testing.expect(t, offset_of(p.Parser, utf8_buffer) == 70, "offset utf8_buffer == 70")
+	testing.expect(t, offset_of(p.Parser, intermediate) == 74, "offset intermediate == 74")
+	testing.expect(t, offset_of(p.Parser, string_esc_pending) == 75, "offset string_esc_pending == 75")
+	testing.expect(t, offset_of(p.Parser, osc_truncated) == 76, "offset osc_truncated == 76")
+	testing.expect(t, offset_of(p.Parser, osc_len) == 80, "offset osc_len == 80")
+	testing.expect(t, offset_of(p.Parser, osc_buffer) == 88, "offset osc_buffer == 88")
+	testing.expect(t, offset_of(p.Parser, dcs_len) == 600, "offset dcs_len == 600")
+	testing.expect(t, offset_of(p.Parser, dcs_buffer) == 608, "offset dcs_buffer == 608")
+	testing.expect(t, offset_of(p.Parser, print_run_start) == 1120, "offset print_run_start == 1120")
+	testing.expect(t, offset_of(p.Parser, print_run_len) == 1128, "offset print_run_len == 1128")
+	testing.expect(t, offset_of(p.Parser, response_cb) == 1136, "offset response_cb == 1136")
+	testing.expect(t, offset_of(p.Parser, clipboard_cb) == 1144, "offset clipboard_cb == 1144")
+	testing.expect(t, offset_of(p.Parser, clipboard_read_cb) == 1152, "offset clipboard_read_cb == 1152")
+	testing.expect(t, offset_of(p.Parser, clipboard_read_user_data) == 1160, "offset clipboard_read_user_data == 1160")
+	testing.expect(t, size_of(p.Parser) == 1168, "size_of(Parser) == 1168")
+}

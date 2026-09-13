@@ -187,20 +187,30 @@ _atlas_rasterize_into_slot :: proc(
 	tex_h := f32(a.tex_height)
 	slot.u0 = f32(x0) / tex_w
 	slot.v0 = f32(y0) / tex_h
-	slot.u1 = f32(x0 + int(rasterizer.metrics.cell_width)) / tex_w
-	slot.v1 = f32(y0 + int(rasterizer.metrics.cell_height)) / tex_h
-	slot.advance = rasterizer.metrics.cell_width
+	slot.u1 = f32(x0 + a.cell_width) / tex_w
+	slot.v1 = f32(y0 + a.cell_height) / tex_h
+	slot.advance = f32(a.cell_width)
 	slot.valid = true
 
 	// Rasterize glyph directly into atlas pixel buffer
-	font_rasterize_glyph_into(
-		rasterizer,
-		codepoint,
-		a.pixels,
-		a.tex_width,
-		x0, y0,
-		glyph_size, glyph_size,
-	)
+	if codepoint >= PINNED_POWERLINE_START && codepoint <= PINNED_POWERLINE_END {
+		cw := a.cell_width
+		ch := a.cell_height
+		bmp := font_rasterize_glyph_fitted(rasterizer, codepoint, cw, ch)
+		if bmp.pixels != nil {
+			_atlas_blit_bitmap(a, &bmp, slot_index, false, int(math.round(rasterizer.metrics.ascent)))
+			delete(bmp.pixels)
+		}
+	} else {
+		font_rasterize_glyph_into(
+			rasterizer,
+			codepoint,
+			a.pixels,
+			a.tex_width,
+			x0, y0,
+			glyph_size, glyph_size,
+		)
+	}
 }
 
 // atlas_lookup returns the atlas slot for a given codepoint.
@@ -340,7 +350,11 @@ atlas_dynamic_claim_p :: proc(
 
 	_atlas_clear_slot_rect(a, slot)
 
-	base_bmp := font_rasterize_glyph(f, shaped)
+	wide := termgrid.wcwidth(rune(shaped)) == 2
+	max_w := int(a.cell_width) * 2 if wide else int(a.cell_width)
+	max_h := int(a.cell_height)
+	base_bmp := font_rasterize_glyph_fitted(f, shaped, max_w, max_h)
+	base_advance := f32(base_bmp.advance)
 	if base_bmp.pixels != nil {
 		_atlas_blit_bitmap(a, &base_bmp, slot, false, int(math.round(f.metrics.ascent)))
 		delete(base_bmp.pixels)
@@ -360,7 +374,8 @@ atlas_dynamic_claim_p :: proc(
 		}
 	}
 
-	_atlas_setup_dynamic_slot(a, slot, f.metrics.cell_width)
+	adv := f32(a.cell_width * 2 if wide else a.cell_width)
+	_atlas_setup_dynamic_slot(a, slot, base_advance if base_advance > 0 else adv, wide)
 	a.gpu_dirty = true
 
 	if _atlas_slot_rect_empty(a, slot) && shaped != 0x20 {
@@ -386,7 +401,7 @@ atlas_ensure_glyph :: proc(
 	marks: []rune,
 	counters: ^Fallback_Counters,
 ) -> Shaped_Glyph {
-	wide := termgrid.wcwidth(rune(key.base)) == 2
+	wide := termgrid.wcwidth(rune(key.runes[0])) == 2
 	press := (^Atlas_Pressure)(nil)
 	if a != nil {
 		press = a.pressure
@@ -495,7 +510,8 @@ atlas_apply_completion :: proc(
 		}
 	}
 
-	_atlas_setup_dynamic_slot(a, slot, c.advance)
+	wide := termgrid.wcwidth(c.key.runes[0]) == 2
+	_atlas_setup_dynamic_slot(a, slot, c.advance, wide)
 	a.gpu_dirty = true
 
 	if _atlas_slot_rect_empty(a, slot) && c.shaped != 0x20 {
@@ -503,7 +519,6 @@ atlas_apply_completion :: proc(
 		return _atlas_apply_tofu(a, cache, c.key, chain, counters)
 	}
 	a.slots[slot].valid = true
-	wide := termgrid.wcwidth(c.key.base) == 2
 	g := Shaped_Glyph{
 		font_index       = u8(c.font_index),
 		shaped_codepoint = c.shaped,
@@ -696,6 +711,9 @@ _atlas_blit_bitmap :: proc(a: ^Atlas, bmp: ^Glyph_Bitmap, slot_index: int, blend
 		for gx in 0..<bmp.width {
 			dx := ox + gx
 			dy := oy + gy
+			if dx < x0 || dx >= x0 + a.glyph_size || dy < y0 || dy >= y0 + a.glyph_size {
+				continue
+			}
 			if dx < 0 || dx >= a.tex_width || dy < 0 || dy >= a.tex_height {
 				continue
 			}
@@ -715,9 +733,9 @@ _atlas_blit_bitmap :: proc(a: ^Atlas, bmp: ^Glyph_Bitmap, slot_index: int, blend
 }
 
 // _atlas_setup_dynamic_slot assigns texture coordinates and advance for a
-// dynamic slot (mirrors _atlas_rasterize_into_slot metadata, valid set by
-// the caller after the bitmap check).
-_atlas_setup_dynamic_slot :: proc(a: ^Atlas, slot_index: int, advance: f32) {
+// dynamic slot. Dynamic slots for wide characters span a double-cell width (a.cell_width * 2)
+// in texture space, eliminating truncation of wide glyphs.
+_atlas_setup_dynamic_slot :: proc(a: ^Atlas, slot_index: int, advance: f32, wide: bool = false) {
 	slot := &a.slots[slot_index]
 	col := slot_index % ATLAS_COLS
 	row := slot_index / ATLAS_COLS
@@ -726,10 +744,12 @@ _atlas_setup_dynamic_slot :: proc(a: ^Atlas, slot_index: int, advance: f32) {
 	y0 := row * glyph_size
 	tex_w := f32(a.tex_width)
 	tex_h := f32(a.tex_height)
+	slot_w := a.cell_width * 2 if wide else a.cell_width
+	slot_h := a.cell_height
 	slot.u0 = f32(x0) / tex_w
 	slot.v0 = f32(y0) / tex_h
-	slot.u1 = f32(x0 + a.cell_width) / tex_w
-	slot.v1 = f32(y0 + a.cell_height) / tex_h
+	slot.u1 = f32(x0 + slot_w) / tex_w
+	slot.v1 = f32(y0 + slot_h) / tex_h
 	slot.advance = advance
 }
 

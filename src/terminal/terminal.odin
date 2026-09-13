@@ -3,6 +3,38 @@ package termgrid
 import "base:runtime"
 import "core:unicode/utf8"
 
+// Kitty_Keyboard holds one screen's progressive-enhancement keyboard state
+// (kitty keyboard protocol). Only the disambiguate flag (0b1) is supported;
+// other requested bits are masked off and report as unset on query.
+Kitty_Keyboard :: struct {
+	flags: u8,      // active enhancement flags (subset of KITTY_KB_SUPPORTED)
+	stack: [8]u8,   // push/pop stack for CSI > / CSI < sequences
+	depth: u8,      // entries currently on the stack
+}
+
+// KITTY_KB_SUPPORTED is the supported progressive-enhancement subset.
+// Bit 0 (disambiguate escape codes) only; event types, alternate keys,
+// all-keys-as-escape, and associated text report as unsupported.
+KITTY_KB_SUPPORTED :: u8(0x01)
+
+// KITTY_KB_DISAMBIGUATE requests CSI u for ambiguous keys (Esc, alt/ctrl
+// combos) while Enter/Tab/Backspace stay legacy.
+KITTY_KB_DISAMBIGUATE :: u8(0x01)
+
+// Mouse_Tracking_Mode specifies the active mouse tracking protocol.
+Mouse_Tracking_Mode :: enum u8 {
+	None,
+	Normal,       // 1000: Button Press & Release
+	Button_Event, // 1002: Button Press, Release, & Drag Motion
+	Any_Event,    // 1003: All Motion
+}
+
+// Mouse_Format specifies the mouse reporting coordinate format.
+Mouse_Format :: enum u8 {
+	X10, // Legacy
+	SGR, // 1006
+}
+
 // Terminal is the top-level terminal emulator state.
 Terminal :: struct {
 	grid:               Grid,
@@ -20,6 +52,22 @@ Terminal :: struct {
 	render_epoch:       u64,
 	in_prompt_zone:     bool,
 	has_osc_133:        bool,
+	bracketed_paste:    bool, // mode 2004: paste wrapped with \e[200~ and \e[201~
+	focus_reporting:    bool, // mode 1004: send \e[I on focus gain, \e[O on focus loss
+	app_cursor_keys:    bool, // mode 1: DECCKM application cursor keys (\eOA vs \e[A)
+	mouse_tracking:     Mouse_Tracking_Mode, // modes 1000, 1002, 1003
+	mouse_format:       Mouse_Format,        // mode 1006
+	// OSC-retained shell integration state (fixed buffers, zero allocation).
+	window_title:     [256]u8, // OSC 0/1/2 window/tab title (UTF-8, truncated at 256)
+	window_title_len: int,
+	title_dirty:      bool,    // set when OSC 0/1/2 stores a new title
+	cwd:              [256]u8, // OSC 7 working directory (raw payload tail, truncated)
+	cwd_len:          int,
+	active_hyperlink: [512]u8,
+	active_hyperlink_len: int,
+	kitty_kb:         Kitty_Keyboard, // progressive-enhancement state, main screen
+	kitty_kb_alt:     Kitty_Keyboard, // progressive-enhancement state, alt screen
+	synchronized_output: bool, // mode 2026: synchronized output (defer presentation)
 }
 
 // Erase_Mode specifies how to erase content.
@@ -51,6 +99,16 @@ terminal_init :: proc(
 	scrollback_init(&t.scrollback, cols, allocator = allocator)
 	t.in_prompt_zone = false
 	t.has_osc_133 = false
+	t.app_cursor_keys = false
+	t.mouse_tracking = .None
+	t.mouse_format = .X10
+	t.window_title_len = 0
+	t.title_dirty = false
+	t.cwd_len = 0
+	t.active_hyperlink_len = 0
+	t.kitty_kb = Kitty_Keyboard{}
+	t.kitty_kb_alt = Kitty_Keyboard{}
+	t.synchronized_output = false
 }
 
 // terminal_destroy frees all terminal state.
@@ -64,7 +122,22 @@ terminal_destroy :: proc(t: ^Terminal, allocator: runtime.Allocator = context.al
 // terminal_put_char writes a character at the cursor position and advances the cursor.
 // ASCII (c < 0x80) takes the fast path verbatim (width 1, no width lookup);
 // all other runes delegate to terminal_put_char_slow. Signature unchanged.
+//
+// xenl integration: before writing, if cursor.pending_wrap is set (cursor was
+// at the last column from a previous write), perform the deferred line advance:
+// mark the row as wrapped, move to column 0 of the next row, and scroll if at
+// the bottom. This matches xterm/ghostty/kitty behavior.
 terminal_put_char :: proc(t: ^Terminal, c: rune) {
+	// xenl: apply deferred wrap before writing the next character.
+	if t.cursor.pending_wrap {
+		phys := _grid_physical_row(&t.grid, t.cursor.row)
+		t.grid.rows[phys].wrapped = true
+		scroll_needed := cursor_apply_pending_wrap(&t.cursor, t.grid.row_count)
+		if scroll_needed {
+			terminal_scroll_up(t, 1)
+		}
+	}
+
 	if c < 0x80 {
 		cell := Semantic_Cell{
 			content = Content_Handle(c),
@@ -76,6 +149,15 @@ terminal_put_char :: proc(t: ^Terminal, c: rune) {
 		row := t.cursor.row
 		col := t.cursor.col
 
+		// Wide-overwrite repair (same as the slow path): an ASCII write
+		// landing on half of a wide pair must blank the orphaned half,
+		// or the surviving half renders as an undeletable ghost. This is
+		// exactly what shells emit when destructively backspacing over a
+		// 2-cell emoji (BS, space, BS). Cost is one bounds-checked read
+		// plus flag compares in the common narrow case — O(1), no
+		// allocation, no width tables.
+		_wide_overwrite_repair(t, row, col, 1)
+
 		// Write the cell
 		ok := grid_set_cell(&t.grid, row, col, cell)
 		if ok {
@@ -84,13 +166,10 @@ terminal_put_char :: proc(t: ^Terminal, c: rune) {
 			damage_mark_cell(&t.damage, row, col, gen)
 		}
 
-		// Advance cursor
+		// Advance cursor (may set pending_wrap if at last column)
 		scroll_needed: bool
 		cursor_advance(&t.cursor, 1, t.grid.row_count, t.grid.col_count, &scroll_needed)
 
-		if t.cursor.row != row || scroll_needed {
-			t.grid.rows[_grid_physical_row(&t.grid, row)].wrapped = true
-		}
 		if scroll_needed {
 			terminal_scroll_up(t, 1)
 		}
@@ -99,10 +178,85 @@ terminal_put_char :: proc(t: ^Terminal, c: rune) {
 	terminal_put_char_slow(t, c)
 }
 
-// terminal_put_char_slow writes a non-ASCII rune: extend appends to the base
-// cluster (no advance), wide writes a lead+continuation pair (+2), else a
-// narrow cell (+1).
+// terminal_put_char_slow writes a non-ASCII rune: checks stateful anchor UAX #29 extension
+// first, then extends or widens existing cluster, or proceeds to standard character write.
+// xenl integration: applies pending_wrap before writing (mirrors terminal_put_char).
 terminal_put_char_slow :: proc(t: ^Terminal, c: rune) {
+	// xenl: apply deferred wrap before writing the next character.
+	if t.cursor.pending_wrap {
+		phys := _grid_physical_row(&t.grid, t.cursor.row)
+		t.grid.rows[phys].wrapped = true
+		scroll_needed := cursor_apply_pending_wrap(&t.cursor, t.grid.row_count)
+		if scroll_needed {
+			terminal_scroll_up(t, 1)
+		}
+	}
+
+	target_col := t.cursor.col - 1
+	if target_col >= 0 && _cell_is_continuation(grid_get_cell(&t.grid, t.cursor.row, target_col)) && t.cursor.col >= 2 {
+		target_col = t.cursor.col - 2
+	}
+
+	if target_col >= 0 {
+		row := t.cursor.row
+		anchor := grid_get_cell(&t.grid, row, target_col)
+		if anchor.content != 0 {
+			anchor_cluster: Grapheme_Cluster
+			if content_is_grapheme(anchor.content) {
+				idx := int(anchor.content - CONTENT_GRAPHEME_BASE)
+				if idx >= 0 && idx < GRAPHEME_STORE_CAP {
+					anchor_cluster = t.grapheme_store.entries[idx]
+				}
+			} else {
+				anchor_cluster = grapheme_cluster_make(rune(anchor.content), anchor.width)
+			}
+
+			if uax29_should_extend(&anchor_cluster, c) {
+				new_handle := grapheme_store_add_rune(&t.grapheme_store, anchor.content, c)
+				new_idx := int(new_handle - CONTENT_GRAPHEME_BASE)
+				new_width := anchor.width
+				if new_idx >= 0 && new_idx < GRAPHEME_STORE_CAP {
+					new_width = grapheme_cluster_width(&t.grapheme_store.entries[new_idx])
+				}
+
+				if new_width == 2 && anchor.width == 1 && target_col + 1 < t.grid.col_count {
+					// Widen anchor: anchor.width = 2, anchor.content = new_handle
+					anchor.width = 2
+					anchor.content = new_handle
+					grid_set_cell(&t.grid, row, target_col, anchor)
+					gen := t.grid.rows[_grid_physical_row(&t.grid, row)].generation
+					damage_mark_cell(&t.damage, row, target_col, gen)
+
+					// Continuation cell @ target_col + 1
+					cont_col := target_col + 1
+					grapheme_store_release(&t.grapheme_store, grid_get_cell(&t.grid, row, cont_col).content)
+					cont := Semantic_Cell{
+						content = 0,
+						style   = t.current_style,
+						width   = 1,
+						flags   = .Wide_Continuation,
+					}
+					grid_set_cell(&t.grid, row, cont_col, cont)
+					damage_mark_cell(&t.damage, row, cont_col, gen)
+
+					if t.cursor.col == cont_col {
+						scroll_needed: bool
+						cursor_advance(&t.cursor, 1, t.grid.row_count, t.grid.col_count, &scroll_needed)
+						if scroll_needed {
+							terminal_scroll_up(t, 1)
+						}
+					}
+				} else {
+					anchor.content = new_handle
+					grid_set_cell(&t.grid, row, target_col, anchor)
+					gen := t.grid.rows[_grid_physical_row(&t.grid, row)].generation
+					damage_mark_cell(&t.damage, row, target_col, gen)
+				}
+				return
+			}
+		}
+	}
+
 	if is_zero_width_extend(c) {
 		terminal_put_combining(t, c)
 		return
@@ -133,11 +287,64 @@ terminal_put_char_slow :: proc(t: ^Terminal, c: rune) {
 	scroll_needed: bool
 	cursor_advance(&t.cursor, 1, t.grid.row_count, t.grid.col_count, &scroll_needed)
 
-	if t.cursor.row != row || scroll_needed {
-		t.grid.rows[_grid_physical_row(&t.grid, row)].wrapped = true
-	}
 	if scroll_needed {
 		terminal_scroll_up(t, 1)
+	}
+}
+
+// terminal_print_span writes a contiguous byte slice (ASCII run) to the terminal,
+// batching writes into ring-buffer rows and issuing one damage_mark_span per row.
+terminal_print_span :: proc(t: ^Terminal, data: []u8, style: Style_Id) {
+	if t == nil || len(data) == 0 || t.grid.col_count <= 0 || t.grid.row_count <= 0 {
+		return
+	}
+
+	offset := 0
+	for offset < len(data) {
+		if t.cursor.pending_wrap {
+			phys := _grid_physical_row(&t.grid, t.cursor.row)
+			t.grid.rows[phys].wrapped = true
+			scroll_needed := cursor_apply_pending_wrap(&t.cursor, t.grid.row_count)
+			if scroll_needed {
+				terminal_scroll_up(t, 1)
+			}
+		}
+
+		remaining := len(data) - offset
+		avail := t.grid.col_count - t.cursor.col
+		if avail <= 0 {
+			t.cursor.pending_wrap = true
+			continue
+		}
+
+		chunk_len := min(remaining, avail)
+		phys_idx := _grid_physical_row(&t.grid, t.cursor.row)
+		phys_row := &t.grid.rows[phys_idx]
+
+		_wide_overwrite_repair(t, t.cursor.row, t.cursor.col, 1)
+		if chunk_len > 1 {
+			_wide_overwrite_repair(t, t.cursor.row, t.cursor.col + chunk_len - 1, 1)
+		}
+
+		for i in 0..<chunk_len {
+			phys_row.cells[t.cursor.col + i] = Semantic_Cell{
+				content = Content_Handle(data[offset + i]),
+				style   = style,
+				width   = 1,
+				flags   = .None,
+			}
+		}
+		phys_row.generation += 1
+
+		damage_mark_span(&t.damage, t.cursor.row, t.cursor.col, t.cursor.col + chunk_len - 1, phys_row.generation)
+
+		t.cursor.col += chunk_len
+		offset += chunk_len
+
+		if t.cursor.col == t.grid.col_count {
+			t.cursor.pending_wrap = true
+			t.cursor.col = t.grid.col_count - 1
+		}
 	}
 }
 
@@ -145,22 +352,34 @@ terminal_put_char_slow :: proc(t: ^Terminal, c: rune) {
 // advances +2. At the right edge (col == cols-1) the pair cannot split:
 // pad the edge cell blank, newline-advance, and write the pair on the next
 // row at cols 0..1.
+// xenl integration: applies pending_wrap before writing (mirrors terminal_put_char).
 terminal_put_wide :: proc(t: ^Terminal, c: rune) {
+	// xenl: apply deferred wrap before writing the next character.
+	if t.cursor.pending_wrap {
+		phys := _grid_physical_row(&t.grid, t.cursor.row)
+		t.grid.rows[phys].wrapped = true
+		scroll_needed := cursor_apply_pending_wrap(&t.cursor, t.grid.row_count)
+		if scroll_needed {
+			terminal_scroll_up(t, 1)
+		}
+	}
+
 	row := t.cursor.row
 	col := t.cursor.col
 
+	// Wide char at last column: can't split, pad and wrap to next line.
 	if col == t.grid.col_count - 1 {
 		grapheme_store_release(&t.grapheme_store, grid_get_cell(&t.grid, row, col).content)
 		if grid_set_cell(&t.grid, row, col, CELL_DEFAULT) {
 			gen := t.grid.rows[_grid_physical_row(&t.grid, row)].generation
 			damage_mark_cell(&t.damage, row, col, gen)
 		}
-		scroll_needed: bool
-		cursor_advance(&t.cursor, 1, t.grid.row_count, t.grid.col_count, &scroll_needed)
-		if t.cursor.row != row || scroll_needed {
-			t.grid.rows[_grid_physical_row(&t.grid, row)].wrapped = true
-		}
-		if scroll_needed {
+		t.grid.rows[_grid_physical_row(&t.grid, row)].wrapped = true
+		t.cursor.col = 0
+		t.cursor.row += 1
+		t.cursor.pending_wrap = false
+		if t.cursor.row >= t.grid.row_count {
+			t.cursor.row = t.grid.row_count - 1
 			terminal_scroll_up(t, 1)
 		}
 		row = t.cursor.row
@@ -197,12 +416,10 @@ terminal_put_wide :: proc(t: ^Terminal, c: rune) {
 		damage_mark_cell(&t.damage, row, col + 1, gen)
 	}
 
+	// Advance cursor by 2 (may set pending_wrap if at last column)
 	scroll_needed: bool
 	cursor_advance(&t.cursor, 2, t.grid.row_count, t.grid.col_count, &scroll_needed)
 
-	if t.cursor.row != row || scroll_needed {
-		t.grid.rows[_grid_physical_row(&t.grid, row)].wrapped = true
-	}
 	if scroll_needed {
 		terminal_scroll_up(t, 1)
 	}
@@ -219,9 +436,25 @@ terminal_put_combining :: proc(t: ^Terminal, c: rune) {
 		return
 	}
 
-	base_cell := grid_get_cell(&t.grid, row, col - 1)
+	target_col := col - 1
+	prev_cell := grid_get_cell(&t.grid, row, target_col)
+	if prev_cell.content == 0 && u8(prev_cell.flags) & u8(Cell_Flags.Wide_Continuation) != 0 && col >= 2 {
+		target_col = col - 2
+	}
+
+	base_cell := grid_get_cell(&t.grid, row, target_col)
 	if base_cell.content == 0 {
 		return
+	}
+
+	base_rune := grapheme_resolve_base(base_cell.content, &t.grapheme_store)
+	should_widen := false
+	if base_cell.width == 1 {
+		if c == 0x20E3 && ((base_rune >= '0' && base_rune <= '9') || base_rune == '#' || base_rune == '*') {
+			should_widen = true
+		} else if c == 0xFE0F && (is_emoji_codepoint(base_rune) || (base_rune >= '0' && base_rune <= '9') || base_rune == '#' || base_rune == '*') {
+			should_widen = true
+		}
 	}
 
 	new_handle := grapheme_store_add_mark(&t.grapheme_store, base_cell.content, c)
@@ -232,9 +465,32 @@ terminal_put_combining :: proc(t: ^Terminal, c: rune) {
 		flags   = base_cell.flags,
 	}
 
-	if grid_set_cell(&t.grid, row, col - 1, new_cell) {
+	if should_widen && target_col + 1 < t.grid.col_count {
+		new_cell.width = 2
+		cont_col := target_col + 1
+		grapheme_store_release(&t.grapheme_store, grid_get_cell(&t.grid, row, cont_col).content)
+		cont := Semantic_Cell{
+			content = 0,
+			style   = t.current_style,
+			width   = 1,
+			flags   = .Wide_Continuation,
+		}
+		if grid_set_cell(&t.grid, row, cont_col, cont) {
+			gen := t.grid.rows[_grid_physical_row(&t.grid, row)].generation
+			damage_mark_cell(&t.damage, row, cont_col, gen)
+		}
+		if t.cursor.col == cont_col {
+			scroll_needed: bool
+			cursor_advance(&t.cursor, 1, t.grid.row_count, t.grid.col_count, &scroll_needed)
+			if scroll_needed {
+				terminal_scroll_up(t, 1)
+			}
+		}
+	}
+
+	if grid_set_cell(&t.grid, row, target_col, new_cell) {
 		gen := t.grid.rows[_grid_physical_row(&t.grid, row)].generation
-		damage_mark_cell(&t.damage, row, col - 1, gen)
+		damage_mark_cell(&t.damage, row, target_col, gen)
 	}
 }
 
@@ -246,6 +502,24 @@ _cell_is_lead :: proc(cell: Semantic_Cell) -> bool {
 // _cell_is_continuation reports whether cell is a wide continuation (right half).
 _cell_is_continuation :: proc(cell: Semantic_Cell) -> bool {
 	return u8(cell.flags) & u8(Cell_Flags.Wide_Continuation) != 0
+}
+
+// _cell_has_trailing_zwj reports whether the grapheme cluster stored in h
+// ends with a ZWJ (U+200D) mark, indicating a ZWJ sequence is in progress.
+// Returns false for literal (non-pool) handles and out-of-range indices.
+_cell_has_trailing_zwj :: proc(h: Content_Handle, store: ^Grapheme_Store) -> bool {
+	if !content_is_grapheme(h) {
+		return false
+	}
+	idx := int(h - CONTENT_GRAPHEME_BASE)
+	if idx < 0 || idx >= GRAPHEME_STORE_CAP {
+		return false
+	}
+	e := &store.entries[idx]
+	if e.rune_count == 0 {
+		return false
+	}
+	return e.runes[e.rune_count - 1] == 0x200D
 }
 
 // _terminal_blank_cell resets a cell to CELL_DEFAULT, releasing any pool
@@ -291,21 +565,16 @@ _wide_overwrite_repair :: proc(t: ^Terminal, row: int, col: int, width: u8) {
 	}
 }
 
-// terminal_backspace moves the cursor left over one cell: -2 when col-1 is a
-// wide continuation (landing on the lead), else -1. Col 0 is a no-op.
+// terminal_backspace moves the cursor left by exactly one cell (standard VT100/xterm).
+// The shell/readline owns multibyte/wide-character column tracking and emits multiple
+// backspace bytes when navigating multi-column graphemes. Col 0 is a no-op.
 // Never touches the grid or the grapheme store.
+// Clears pending_wrap (backspace cancels deferred wrap per xenl).
 terminal_backspace :: proc(t: ^Terminal) {
-	if t.cursor.col == 0 {
-		return
+	if t.cursor.col > 0 {
+		t.cursor.col -= 1
 	}
-	if t.cursor.col >= 2 {
-		prev := grid_get_cell(&t.grid, t.cursor.row, t.cursor.col - 1)
-		if _cell_is_continuation(prev) {
-			t.cursor.col -= 2
-			return
-		}
-	}
-	t.cursor.col -= 1
+	t.cursor.pending_wrap = false
 }
 
 // terminal_put_string writes a string at the cursor position.
@@ -333,39 +602,47 @@ terminal_move_cursor :: proc(t: ^Terminal, row, col: int) {
 }
 
 // terminal_cursor_up moves the cursor up by n rows.
+// Clears pending_wrap (explicit movement cancels deferred wrap per xenl).
 terminal_cursor_up :: proc(t: ^Terminal, n: int) {
 	new_row := t.cursor.row - n
 	if new_row < 0 {
 		new_row = 0
 	}
 	t.cursor.row = new_row
+	t.cursor.pending_wrap = false
 }
 
 // terminal_cursor_down moves the cursor down by n rows.
+// Clears pending_wrap (explicit movement cancels deferred wrap per xenl).
 terminal_cursor_down :: proc(t: ^Terminal, n: int) {
 	new_row := t.cursor.row + n
 	if new_row >= t.grid.row_count {
 		new_row = t.grid.row_count - 1
 	}
 	t.cursor.row = new_row
+	t.cursor.pending_wrap = false
 }
 
 // terminal_cursor_left moves the cursor left by n columns.
+// Clears pending_wrap (explicit movement cancels deferred wrap per xenl).
 terminal_cursor_left :: proc(t: ^Terminal, n: int) {
 	new_col := t.cursor.col - n
 	if new_col < 0 {
 		new_col = 0
 	}
 	t.cursor.col = new_col
+	t.cursor.pending_wrap = false
 }
 
 // terminal_cursor_right moves the cursor right by n columns.
+// Clears pending_wrap (explicit movement cancels deferred wrap per xenl).
 terminal_cursor_right :: proc(t: ^Terminal, n: int) {
 	new_col := t.cursor.col + n
 	if new_col >= t.grid.col_count {
 		new_col = t.grid.col_count - 1
 	}
 	t.cursor.col = new_col
+	t.cursor.pending_wrap = false
 }
 
 // terminal_set_cursor_visible sets the DECTCEM cursor visibility state.
@@ -373,6 +650,12 @@ terminal_cursor_right :: proc(t: ^Terminal, n: int) {
 // Persists until the next DECTCEM sequence; plain output never changes it.
 terminal_set_cursor_visible :: proc(t: ^Terminal, visible: bool) {
 	t.cursor.visible = visible
+}
+
+// terminal_set_sync_output sets the DEC mode 2026 synchronized output state.
+terminal_set_sync_output :: proc(t: ^Terminal, enable: bool) {
+	if t == nil { return }
+	t.synchronized_output = enable
 }
 
 // _wide_erase_repair blanks orphaned wide halves after clearing the
@@ -496,12 +779,29 @@ terminal_save_cursor :: proc(t: ^Terminal) {
 }
 
 // terminal_restore_cursor restores the last DECSC position when available.
+// Does NOT call cursor_move (which clamps to grid bounds) — instead it
+// directly assigns row/col so the cursor returns exactly where it was
+// saved, matching xterm/VT220 behavior that fish shell relies on for
+// autosuggestion rendering.
+// Clears pending_wrap (restore cancels deferred wrap per xenl).
+// Marks damage at both old and new cursor positions so the renderer repaints
+// them (critical for fish autosuggestion clear+restore cycles).
 terminal_restore_cursor :: proc(t: ^Terminal) {
 	if t == nil || !t.saved_cursor_valid { return }
+	old_row := t.cursor.row
+	old_col := t.cursor.col
 	t.cursor.row = t.saved_cursor.row
 	t.cursor.col = t.saved_cursor.col
-	if t.grid.row_count > 0 && t.grid.col_count > 0 {
-		cursor_move(&t.cursor, t.cursor.row, t.cursor.col, t.grid.row_count, t.grid.col_count)
+	t.cursor.pending_wrap = false
+	// Damage old cursor cell
+	if old_row >= 0 && old_row < t.grid.row_count && old_col >= 0 && old_col < t.grid.col_count {
+		phys := _grid_physical_row(&t.grid, old_row)
+		damage_mark_cell(&t.damage, old_row, old_col, t.grid.rows[phys].generation)
+	}
+	// Damage new cursor cell
+	if t.cursor.row >= 0 && t.cursor.row < t.grid.row_count && t.cursor.col >= 0 && t.cursor.col < t.grid.col_count {
+		phys := _grid_physical_row(&t.grid, t.cursor.row)
+		damage_mark_cell(&t.damage, t.cursor.row, t.cursor.col, t.grid.rows[phys].generation)
 	}
 }
 
@@ -524,6 +824,11 @@ terminal_reset :: proc(t: ^Terminal) {
 	t.scroll_top = 0
 	t.scroll_bottom = t.grid.row_count - 1
 	t.saved_cursor_valid = false
+	t.app_cursor_keys = false
+	t.mouse_tracking = .None
+	t.mouse_format = .X10
+	t.kitty_kb = Kitty_Keyboard{}
+	t.kitty_kb_alt = Kitty_Keyboard{}
 }
 
 // terminal_set_scroll_region sets the scroll margins (0-indexed, inclusive).
@@ -646,10 +951,12 @@ terminal_scroll_down :: proc(t: ^Terminal, n: int) {
 }
 
 // terminal_newline moves the cursor to the beginning of the next line, scrolling if needed.
+// Clears pending_wrap (newline performs the wrap explicitly per xenl).
 terminal_newline :: proc(t: ^Terminal) {
 	if t == nil || t.grid.row_count == 0 { return }
 	t.grid.rows[_grid_physical_row(&t.grid, t.cursor.row)].wrapped = false
 	t.cursor.col = 0
+	t.cursor.pending_wrap = false
 	if t.cursor.row >= t.scroll_top && t.cursor.row <= t.scroll_bottom {
 		// Inside the scroll region.
 		if t.cursor.row == t.scroll_bottom {
@@ -672,9 +979,11 @@ terminal_newline :: proc(t: ^Terminal) {
 }
 
 // terminal_linefeed advances vertically without changing the column.
+// Clears pending_wrap (linefeed performs the wrap explicitly per xenl).
 terminal_linefeed :: proc(t: ^Terminal) {
 	if t == nil || t.grid.row_count == 0 { return }
 	t.grid.rows[_grid_physical_row(&t.grid, t.cursor.row)].wrapped = false
+	t.cursor.pending_wrap = false
 	if t.cursor.row >= t.scroll_top && t.cursor.row <= t.scroll_bottom {
 		if t.cursor.row == t.scroll_bottom {
 			terminal_scroll_up(t, 1)
@@ -814,6 +1123,7 @@ terminal_insert_lines :: proc(t: ^Terminal, n: int) {
 	}
 	scroll_down(&t.grid, &t.damage, t.cursor.row, t.scroll_bottom, n)
 	t.cursor.col = 0
+	t.cursor.pending_wrap = false
 	t.render_epoch += 1
 }
 
@@ -828,6 +1138,7 @@ terminal_delete_lines :: proc(t: ^Terminal, n: int) {
 	}
 	scroll_up(&t.grid, &t.damage, t.cursor.row, t.scroll_bottom, n)
 	t.cursor.col = 0
+	t.cursor.pending_wrap = false
 	t.render_epoch += 1
 }
 
@@ -888,4 +1199,145 @@ terminal_osc_133_command_end :: proc(t: ^Terminal) {
 	t.has_osc_133 = true
 	t.in_prompt_zone = false
 }
+
+// terminal_kitty_active returns the progressive-enhancement keyboard state
+// for the active screen. Main and alt screens keep independent states (and
+// stacks) per the kitty keyboard protocol.
+terminal_kitty_active :: proc(t: ^Terminal) -> ^Kitty_Keyboard {
+	if t.is_alt_screen {
+		return &t.kitty_kb_alt
+	}
+	return &t.kitty_kb
+}
+
+// terminal_kitty_set applies a CSI = flags ; mode u request to the active
+// screen. Mode 1 (default) replaces, mode 2 sets bits, mode 3 clears bits.
+// Requested bits are masked to KITTY_KB_SUPPORTED; other modes are ignored.
+terminal_kitty_set :: proc(t: ^Terminal, flags: u8, mode: u8) {
+	if t == nil { return }
+	kb := terminal_kitty_active(t)
+	req := flags & KITTY_KB_SUPPORTED
+	switch mode {
+	case 2:
+		kb.flags |= req
+	case 3:
+		kb.flags &= ~req
+	case:
+		kb.flags = req
+	}
+}
+
+// terminal_kitty_push implements CSI > flags u: saves the current flags on
+// the active screen's stack (evicting the oldest entry when full) and sets
+// the requested subset.
+terminal_kitty_push :: proc(t: ^Terminal, flags: u8) {
+	if t == nil { return }
+	kb := terminal_kitty_active(t)
+	if kb.depth >= u8(len(kb.stack)) {
+		// Stack full: evict the oldest entry.
+		for i in 1..<len(kb.stack) {
+			kb.stack[i - 1] = kb.stack[i]
+		}
+		kb.depth = u8(len(kb.stack)) - 1
+	}
+	kb.stack[kb.depth] = kb.flags
+	kb.depth += 1
+	kb.flags = flags & KITTY_KB_SUPPORTED
+}
+
+// terminal_kitty_pop implements CSI < n u: pops n entries from the active
+// screen's stack, restoring the state saved before those pushes. Only
+// over-popping (n deeper than the stack) resets all flags; popping exactly
+// the stacked entries restores the oldest saved state, which is what makes
+// push/pop useful when the baseline flags are non-zero (e.g. fish enables
+// disambiguate, vim pushes its own set, then pops back to fish's set).
+terminal_kitty_pop :: proc(t: ^Terminal, n: u8) {
+	if t == nil { return }
+	kb := terminal_kitty_active(t)
+	count := n
+	if count == 0 {
+		count = 1
+	}
+	if count > kb.depth {
+		kb.depth = 0
+		kb.flags = 0
+		return
+	}
+	kb.flags = kb.stack[kb.depth - count]
+	kb.depth -= count
+}
+
+// terminal_osc_set_title stores an OSC 0/1/2 window title (truncated at 256
+// bytes). title_dirty is set only when the title actually changed, so the app
+// layer issues the SDL title update exactly once per distinct title.
+terminal_osc_set_title :: proc(t: ^Terminal, title: []u8) {
+	if t == nil { return }
+	n := len(title)
+	if n > len(t.window_title) {
+		n = len(t.window_title)
+	}
+	changed := n != t.window_title_len
+	if !changed {
+		for i in 0..<n {
+			if t.window_title[i] != title[i] {
+				changed = true
+				break
+			}
+		}
+	}
+	if !changed {
+		return
+	}
+	for i in 0..<n {
+		t.window_title[i] = title[i]
+	}
+	t.window_title_len = n
+	t.title_dirty = true
+}
+
+// terminal_take_title returns the pending title and clears the dirty flag.
+// The app layer calls this per frame to sync the SDL window title.
+terminal_take_title :: proc(t: ^Terminal) -> string {
+	if t == nil || !t.title_dirty {
+		return ""
+	}
+	t.title_dirty = false
+	return string(t.window_title[:t.window_title_len])
+}
+
+// terminal_osc_set_cwd stores an OSC 7 working-directory payload tail
+// (truncated at 256 bytes) for shell integration (e.g. new windows
+// inheriting the live working directory).
+terminal_osc_set_cwd :: proc(t: ^Terminal, cwd: []u8) {
+	if t == nil { return }
+	n := len(cwd)
+	if n > len(t.cwd) {
+		n = len(t.cwd)
+	}
+	for i in 0..<n {
+		t.cwd[i] = cwd[i]
+	}
+	t.cwd_len = n
+}
+
+// terminal_osc_8_set_url sets the active hyperlink URL clamped to active_hyperlink buffer size.
+terminal_osc_8_set_url :: proc(t: ^Terminal, url: []u8) {
+	if t == nil { return }
+	n := min(len(url), len(t.active_hyperlink))
+	copy(t.active_hyperlink[:n], url[:n])
+	t.active_hyperlink_len = n
+}
+
+// terminal_osc_8_clear_url clears the active hyperlink URL.
+terminal_osc_8_clear_url :: proc(t: ^Terminal) {
+	if t == nil { return }
+	t.active_hyperlink_len = 0
+}
+
+// terminal_get_active_hyperlink returns the currently active hyperlink URL string.
+terminal_get_active_hyperlink :: proc(t: ^Terminal) -> string {
+	if t == nil { return "" }
+	return string(t.active_hyperlink[:t.active_hyperlink_len])
+}
+
 

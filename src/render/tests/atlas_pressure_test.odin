@@ -168,7 +168,7 @@ test_pressure_nil_parity :: proc(t: ^testing.T) {
 	ca, cb: render.Shape_Cache
 	fa, fb: render.Fallback_Counters
 	for p in cps {
-		key := render.Cluster_Key{base = p.cp, join_form = .Isolated}
+		key := render.cluster_key_make(p.cp, .Isolated)
 		render.atlas_ensure_glyph(&a, &chain, &ca, key, p.fi, u32(p.cp), nil, &fa)
 		render.atlas_ensure_glyph(&b, &chain, &cb, key, p.fi, u32(p.cp), nil, &fb)
 	}

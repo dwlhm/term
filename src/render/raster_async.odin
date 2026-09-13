@@ -202,7 +202,7 @@ raster_worker_shutdown :: proc(q: ^Raster_Queue) {
 }
 
 _raster_key_hash :: proc(key: Cluster_Key) -> int {
-	h := u64(u32(key.base)) * 0x9E3779B1
+	h := u64(u32(key.runes[0])) * 0x9E3779B1
 	h = h ~ (u64(u8(key.join_form)) * 0x85EBCA6B)
 	return int(h % u64(RASTER_QUEUE_CAP))
 }
@@ -417,7 +417,13 @@ _raster_rasterize :: proc(
 	}
 
 	rect: [ATLAS_GLYPH_SIZE * ATLAS_GLYPH_SIZE]u8
-	base := font_rasterize_glyph(f, group.shaped, heap)
+	primary := &chain.fonts[0]
+	wide := termgrid.wcwidth(rune(group.shaped)) == 2
+	primary_cw := int(primary.metrics.cell_width)
+	primary_ch := int(primary.metrics.cell_height)
+	max_w := primary_cw * 2 if wide else primary_cw
+	max_h := primary_ch
+	base := font_rasterize_glyph_fitted(f, group.shaped, max_w, max_h, heap)
 	if base.pixels != nil {
 		_raster_blit_rect(rect[:], ATLAS_GLYPH_SIZE, &base, false, int(math.round(f.metrics.ascent)))
 		delete(base.pixels, heap)
@@ -453,7 +459,7 @@ _raster_rasterize :: proc(
 	comp.pixels = pixels
 	comp.width = ATLAS_GLYPH_SIZE
 	comp.height = ATLAS_GLYPH_SIZE
-	comp.advance = f.metrics.cell_width
+	comp.advance = f32(primary_cw * 2 if wide else primary_cw)
 	comp.ok = true
 	return comp
 }

@@ -1,6 +1,8 @@
 package pty
 
 import "core:c"
+import "core:fmt"
+import "core:os"
 import "core:strings"
 import posix "core:sys/posix"
 import sys_darwin "core:sys/darwin"
@@ -23,6 +25,17 @@ TIOCSWINSZ :: 0x80087467
 // or exec fails after fork. The parent learns of the failure through the
 // error pipe, not through this status.
 PTY_CHILD_FAIL_EXIT :: 127
+
+// PTY environment overrides and defaults.
+PTY_ENV_TERM :: "TERM=xterm-256color"
+PTY_ENV_COLORTERM :: "COLORTERM=truecolor"
+PTY_ENV_TERM_PROGRAM :: "TERM_PROGRAM=Term"
+PTY_ENV_PROMPT_EOL_MARK :: "PROMPT_EOL_MARK="
+PTY_ENV_DEFAULT_LANG :: "LANG=en_US.UTF-8"
+PTY_ENV_DEFAULT_LC_ALL :: "LC_ALL=en_US.UTF-8"
+PTY_ENV_DEFAULT_PATH :: "PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+PTY_HOMEBREW_PREFIX :: "/opt/homebrew/bin:/usr/local/bin"
+PTY_HOMEBREW_PREFIX_COLON :: "/opt/homebrew/bin:/usr/local/bin:"
 
 // Pty_State tracks child liveness. Exit collection arrives in a later step.
 Pty_State :: enum u8 {
@@ -162,8 +175,75 @@ pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string) -
 	}
 	c_argv[argc - 1] = nil
 
-	// Clean environment for absolute/relative prog paths.
-	c_env: [6]cstring = {"TERM=xterm-256color", "COLORTERM=truecolor", "PATH=/usr/bin:/bin:/usr/sbin:/sbin", "PROMPT_EOL_MARK=", "TERM_PROGRAM=WezTerm", nil}
+	c_env_allocated := [dynamic]cstring{}
+	defer {
+		for s in c_env_allocated {
+			delete(s)
+		}
+		delete(c_env_allocated)
+	}
+
+	c_env := [dynamic]cstring{}
+	defer delete(c_env)
+
+	parent_env, _ := os.environ(context.temp_allocator)
+	has_lang := false
+	has_lc_all := false
+	parent_path: string
+	has_parent_path := false
+
+	for entry in parent_env {
+		if strings.has_prefix(entry, "TERM=") ||
+		   strings.has_prefix(entry, "COLORTERM=") ||
+		   strings.has_prefix(entry, "PROMPT_EOL_MARK=") ||
+		   strings.has_prefix(entry, "TERM_PROGRAM=") {
+			continue
+		}
+		if strings.has_prefix(entry, "PATH=") {
+			parent_path = entry[5:]
+			has_parent_path = true
+			continue
+		}
+		if strings.has_prefix(entry, "LANG=") {
+			has_lang = true
+		} else if strings.has_prefix(entry, "LC_ALL=") {
+			has_lc_all = true
+		}
+		cs := strings.clone_to_cstring(entry)
+		append(&c_env_allocated, cs)
+		append(&c_env, cs)
+	}
+
+	append(&c_env,
+		PTY_ENV_TERM,
+		PTY_ENV_COLORTERM,
+		PTY_ENV_TERM_PROGRAM,
+		PTY_ENV_PROMPT_EOL_MARK,
+	)
+
+	if !has_lang {
+		append(&c_env, PTY_ENV_DEFAULT_LANG)
+	}
+	if !has_lc_all {
+		append(&c_env, PTY_ENV_DEFAULT_LC_ALL)
+	}
+
+	if has_parent_path {
+		path_entry: string
+		if strings.has_prefix(parent_path, PTY_HOMEBREW_PREFIX_COLON) ||
+		   parent_path == PTY_HOMEBREW_PREFIX {
+			path_entry = fmt.aprintf("PATH=%s", parent_path)
+		} else {
+			path_entry = fmt.aprintf("PATH=%s:%s", PTY_HOMEBREW_PREFIX, parent_path)
+		}
+		cs := strings.clone_to_cstring(path_entry)
+		delete(path_entry)
+		append(&c_env_allocated, cs)
+		append(&c_env, cs)
+	} else {
+		append(&c_env, PTY_ENV_DEFAULT_PATH)
+	}
+	append(&c_env, nil)
 	has_slash := strings.contains(prog, "/")
 
 	pid := posix.fork()

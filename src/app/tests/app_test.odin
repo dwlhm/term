@@ -21,6 +21,7 @@ package app_test
 import "core:testing"
 import "core:time"
 import "core:os"
+import posix "core:sys/posix"
 import "vendor:sdl3"
 
 import app "../"
@@ -30,6 +31,7 @@ import render "../../render"
 import instance "../../render/instance"
 import win "../../platform/window"
 import pty "../../platform/pty"
+import input "../../platform/input"
 
 APP_TEST_ROWS :: 24
 APP_TEST_COLS :: 80
@@ -345,3 +347,125 @@ test_app_init_failure_unwind :: proc(t: ^testing.T) {
 	// exactly the completed prefix in reverse). A display/GPU run of
 	// app_init with a bad prog is the manual complement.
 }
+
+@(test)
+test_app_wheel_alt_screen_arrow_keys :: proc(t: ^testing.T) {
+	a := new(app.App)
+	defer free(a)
+	_bare_app(a)
+	defer _bare_destroy(a)
+
+	pipefd: [2]posix.FD
+	if posix.pipe(&pipefd) != .OK {
+		testing.expect(t, false, "posix.pipe must succeed")
+		return
+	}
+	defer {
+		posix.close(pipefd[0])
+		posix.close(pipefd[1])
+	}
+
+	a.pty.master = int(pipefd[1])
+	a.pty.state = .Running
+	a.terminal.is_alt_screen = true
+
+	// 1. Normal cursor keys (app_cursor_keys = false), Wheel Up (+1)
+	// Must emit 3x ESC [ A -> 9 bytes: "\x1b[A\x1b[A\x1b[A"
+	a.terminal.app_cursor_keys = false
+	ev_up := input.Input_Pointer_Event{
+		kind = .Wheel,
+		wheel_integer_y = 1,
+	}
+	testing.expect(t, app._app_route_pointer(a, ev_up), "route pointer wheel up must return true")
+
+	buf: [32]u8
+	n := posix.read(pipefd[0], raw_data(buf[:]), len(buf))
+	testing.expect_value(t, n, 9)
+	testing.expect_value(t, string(buf[:n]), "\x1b[A\x1b[A\x1b[A")
+
+	// 2. Normal cursor keys (app_cursor_keys = false), Wheel Down (-1)
+	// Must emit 3x ESC [ B -> 9 bytes: "\x1b[B\x1b[B\x1b[B"
+	ev_down := input.Input_Pointer_Event{
+		kind = .Wheel,
+		wheel_integer_y = -1,
+	}
+	testing.expect(t, app._app_route_pointer(a, ev_down), "route pointer wheel down must return true")
+
+	n = posix.read(pipefd[0], raw_data(buf[:]), len(buf))
+	testing.expect_value(t, n, 9)
+	testing.expect_value(t, string(buf[:n]), "\x1b[B\x1b[B\x1b[B")
+
+	// 3. App cursor keys (app_cursor_keys = true), Wheel Up (+1)
+	// Must emit 3x ESC O A -> 9 bytes: "\x1bOA\x1bOA\x1bOA"
+	a.terminal.app_cursor_keys = true
+	testing.expect(t, app._app_route_pointer(a, ev_up), "route pointer wheel up in app mode must return true")
+
+	n = posix.read(pipefd[0], raw_data(buf[:]), len(buf))
+	testing.expect_value(t, n, 9)
+	testing.expect_value(t, string(buf[:n]), "\x1bOA\x1bOA\x1bOA")
+
+	// 4. App cursor keys (app_cursor_keys = true), Wheel Down (-1)
+	// Must emit 3x ESC O B -> 9 bytes: "\x1bOB\x1bOB\x1bOB"
+	testing.expect(t, app._app_route_pointer(a, ev_down), "route pointer wheel down in app mode must return true")
+
+	n = posix.read(pipefd[0], raw_data(buf[:]), len(buf))
+	testing.expect_value(t, n, 9)
+	testing.expect_value(t, string(buf[:n]), "\x1bOB\x1bOB\x1bOB")
+
+	// 5. Zero delta wheel event on alt screen returns true without writing
+	ev_zero := input.Input_Pointer_Event{
+		kind = .Wheel,
+		wheel_integer_y = 0,
+	}
+	testing.expect(t, app._app_route_pointer(a, ev_zero), "zero wheel delta must return true")
+}
+
+@(test)
+test_app_synchronized_output_deferral_and_timeout :: proc(t: ^testing.T) {
+	a := new(app.App)
+	defer free(a)
+	_bare_app(a)
+	defer _bare_destroy(a)
+	_cpu_renderer(a)
+	defer _cpu_renderer_destroy(a)
+
+	termgrid.terminal_put_string(&a.terminal, "sync")
+	damage_before := _damage_cells(&a.terminal)
+	testing.expect(t, damage_before > 0, "putting string must create damage")
+
+	// 1. Enable synchronized output (Mode 2026)
+	termgrid.terminal_set_sync_output(&a.terminal, true)
+	testing.expect(t, a.terminal.synchronized_output, "synchronized output should be enabled")
+	testing.expect_value(t, a.sync_output_start_ns, u64(0))
+
+	// 2. Frame 1: Synchronized output active and within timeout -> renderer_frame must be skipped.
+	// Frame count stays 0 and sync_output_start_ns is recorded.
+	ok := app.app_frame(a)
+	testing.expect(t, ok, "app_frame must succeed")
+	testing.expect(t, a.sync_output_start_ns > 0, "sync_output_start_ns must record timestamp on first sync frame")
+	testing.expect_value(t, a.renderer.frame_count, u64(0))
+	testing.expect(t, _damage_cells(&a.terminal) > 0, "damage must remain queued while presentation is deferred")
+
+	// 3. Frame 2: Still within 100ms -> presentation remains deferred.
+	ok = app.app_frame(a)
+	testing.expect(t, ok, "app_frame must succeed on deferred frame")
+	testing.expect_value(t, a.renderer.frame_count, u64(0))
+	testing.expect(t, _damage_cells(&a.terminal) > 0, "damage must remain queued while presentation is deferred")
+
+	// 4. Timeout reached: set sync_output_start_ns to 1 (in the past relative to now >= 100ms).
+	// Safety timeout triggers -> renderer_frame proceeds, incrementing frame_count.
+	a.sync_output_start_ns = 1
+	ok = app.app_frame(a)
+	testing.expect(t, ok, "app_frame must succeed on safety timeout")
+	testing.expect_value(t, a.renderer.frame_count, u64(1))
+
+	// 5. Disable synchronized output: resets sync_output_start_ns to 0 and renders normally.
+	termgrid.terminal_set_sync_output(&a.terminal, false)
+	termgrid.terminal_put_string(&a.terminal, "more")
+	ok = app.app_frame(a)
+	testing.expect(t, ok, "app_frame must succeed when sync output is disabled")
+	testing.expect_value(t, a.sync_output_start_ns, u64(0))
+	testing.expect_value(t, a.renderer.frame_count, u64(2))
+}
+
+

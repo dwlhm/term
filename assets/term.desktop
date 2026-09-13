@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Term
+GenericName=Terminal Emulator
+Comment=High-performance GPU-accelerated terminal emulator written in Odin
+Exec=term
+Icon=term
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=terminal;emulator;pty;gpu;metal;wgpu;odin;
+StartupNotify=true

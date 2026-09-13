@@ -1,0 +1,56 @@
+name: Bug Report
+description: File a bug report to help improve Term
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting an issue! Please provide as much detail as possible to help us diagnose and resolve the problem.
+  - type: input
+    id: version
+    attributes:
+      label: Term Version / Git Commit
+      description: What version or commit hash of Term are you running?
+      placeholder: "e.g. v0.1.0 or git rev-parse --short HEAD"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating System & Hardware
+      description: OS version and hardware architecture
+      placeholder: "e.g. macOS Sonoma 14.5 (Apple Silicon M2 Pro)"
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the Bug
+      description: A clear and concise description of what the bug is.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to Reproduce
+      description: Step-by-step instructions to reproduce the behavior.
+      placeholder: |
+        1. Open Term
+        2. Run command '...'
+        3. Observe issue
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logs or Screenshots
+      description: Paste any terminal logs, stack traces, or attach screenshots here.
+      render: shell

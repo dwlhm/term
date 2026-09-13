@@ -120,6 +120,7 @@ STYLE_FLAG_ITALIC    :: u16(1 << 1)
 STYLE_FLAG_UNDERLINE :: u16(1 << 2)
 STYLE_FLAG_INVERSE   :: u16(1 << 3)
 STYLE_FLAG_STRIKE    :: u16(1 << 4)
+STYLE_FLAG_DIM       :: u16(1 << 5)
 
 // STYLE_TABLE_CAPACITY is the maximum number of styles in the table.
 STYLE_TABLE_CAPACITY :: 1024

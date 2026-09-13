@@ -144,6 +144,7 @@ test_close_then_poll :: proc(t: ^testing.T) {
 		return
 	}
 	pid := p.pid
+	time.sleep(10 * time.Millisecond)
 	pty.pty_close(&p)
 	testing.expect(t, p.master == -1, "close must park master at -1")
 	testing.expect(t, p.pid == pid, "close must preserve pid for poll")
