@@ -18,6 +18,9 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install System Dependencies
+        run: brew install sdl3
+
       - name: Setup WGPU Native
         run: make setup-wgpu
 

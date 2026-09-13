@@ -80,6 +80,7 @@ All architectural decisions are documented with empirical benchmarks in [LAPORAN
 ### Prerequisites
 - **macOS**: macOS 11.0 (Big Sur) or newer (Apple Silicon M1/M2/M3/M4 or Intel).
 - **Odin Compiler**: `dev-2026-08` or newer installed in your `PATH`.
+- **SDL3**: Required for windowing and event loop. Install via Homebrew: `brew install sdl3`.
 - **Make**: Standard POSIX `make` tool.
 
 ### Building & Running
