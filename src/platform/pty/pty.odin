@@ -5,7 +5,14 @@ import "core:fmt"
 import "core:os"
 import "core:strings"
 import posix "core:sys/posix"
-import sys_darwin "core:sys/darwin"
+
+when ODIN_OS == .Darwin {
+	foreign import libc "system:System.framework"
+	@(default_calling_convention="c")
+	foreign libc {
+		ioctl :: proc(fd: c.int, request: c.ulong, #c_vararg args: ..any) -> c.int ---
+	}
+}
 
 // PTY spawn (Langkah 1): posix_openpt + fork + setsid + slave setup.
 // Later steps add drain/write/winsize/exit here as separate procs —
@@ -61,9 +68,7 @@ Winsize :: struct {
 	ws_ypixel: c.ushort,
 }
 
-// NOTE: winsize is set via the raw ioctl syscall (core:sys/darwin), not
-// the libc ioctl wrapper: on Darwin the wrapper mishandles the TIOCSWINSZ
-// pointer argument (EFAULT) while raw SYS_ioctl succeeds.
+// Winsize is set via libc ioctl.
 
 // pty_spawn forks a child attached to a new pseudo-terminal.
 //
@@ -98,18 +103,20 @@ pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string) -
 	// has the master fd to clean up.
 	master := posix.posix_openpt({.RDWR, .NOCTTY})
 	if int(master) < 0 {
+		fmt.eprintfln("[pty_spawn error] posix_openpt failed, errno: %d (%v)", int(posix.errno()), posix.errno())
 		return false
 	}
-	if posix.grantpt(master) != .OK {
-		posix.close(master)
-		return false
-	}
+	// On modern macOS devfs manages slave permissions automatically;
+	// grantpt may fail or be unnecessary, so proceed if unlockpt and ptsname succeed.
+	_ = posix.grantpt(master)
 	if posix.unlockpt(master) != .OK {
+		fmt.eprintfln("[pty_spawn error] unlockpt failed, errno: %d (%v)", int(posix.errno()), posix.errno())
 		posix.close(master)
 		return false
 	}
 	slave_name := posix.ptsname(master)
 	if slave_name == nil {
+		fmt.eprintfln("[pty_spawn error] ptsname failed, errno: %d (%v)", int(posix.errno()), posix.errno())
 		posix.close(master)
 		return false
 	}
@@ -119,6 +126,7 @@ pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string) -
 	slave_buf: [128]u8
 	name := string(slave_name)
 	if len(name) <= 0 || len(name) >= len(slave_buf) {
+		fmt.eprintfln("[pty_spawn error] invalid slave name length: %d", len(name))
 		posix.close(master)
 		return false
 	}
@@ -129,10 +137,12 @@ pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string) -
 	// The master must never block the event loop.
 	flags := posix.fcntl(master, .GETFL)
 	if flags == -1 {
+		fmt.eprintfln("[pty_spawn error] fcntl GETFL failed, errno: %d (%v)", int(posix.errno()), posix.errno())
 		posix.close(master)
 		return false
 	}
 	if posix.fcntl(master, .SETFL, flags | c.int(posix.O_NONBLOCK)) == -1 {
+		fmt.eprintfln("[pty_spawn error] fcntl SETFL O_NONBLOCK failed, errno: %d (%v)", int(posix.errno()), posix.errno())
 		posix.close(master)
 		return false
 	}
@@ -146,10 +156,12 @@ pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string) -
 	// when exec succeeds and one byte when the child fails before exec.
 	errfd: [2]posix.FD
 	if posix.pipe(&errfd) != .OK {
+		fmt.eprintfln("[pty_spawn error] pipe failed, errno: %d (%v)", int(posix.errno()), posix.errno())
 		posix.close(master)
 		return false
 	}
 	if posix.fcntl(errfd[1], .SETFD, c.int(posix.FD_CLOEXEC)) == -1 {
+		fmt.eprintfln("[pty_spawn error] fcntl SETFD FD_CLOEXEC failed, errno: %d (%v)", int(posix.errno()), posix.errno())
 		posix.close(errfd[0])
 		posix.close(errfd[1])
 		posix.close(master)
@@ -251,20 +263,22 @@ pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string) -
 		// --- child: never returns, never touches parent allocators ---
 		posix.close(errfd[0])
 		if posix.setsid() == posix.pid_t(-1) {
-			_child_fail(errfd[1])
+			_child_fail(errfd[1], 1)
 		}
 		// Opened without NOCTTY after setsid, so the slave becomes the
 		// controlling terminal.
 		slave := posix.open(slave_path, {.RDWR})
 		if int(slave) < 0 {
-			_child_fail(errfd[1])
+			_child_fail(errfd[1], 2)
 		}
-		if sys_darwin.syscall_ioctl(c.int(slave), TIOCSWINSZ, rawptr(&ws)) != 0 {
-			_child_fail(errfd[1])
+		if ioctl(c.int(slave), TIOCSWINSZ, &ws) != 0 {
+			_child_fail(errfd[1], 3)
 		}
-		posix.dup2(slave, posix.FD(0))
-		posix.dup2(slave, posix.FD(1))
-		posix.dup2(slave, posix.FD(2))
+		if posix.dup2(slave, posix.FD(0)) == -1 ||
+		   posix.dup2(slave, posix.FD(1)) == -1 ||
+		   posix.dup2(slave, posix.FD(2)) == -1 {
+			_child_fail(errfd[1], 4)
+		}
 		if int(slave) > 2 {
 			posix.close(slave)
 		}
@@ -274,9 +288,10 @@ pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string) -
 		} else {
 			posix.execvp(c_argv[0], raw_data(c_argv))
 		}
-		_child_fail(errfd[1])
+		_child_fail(errfd[1], 5)
 	}
 	if int(pid) < 0 {
+		fmt.eprintfln("[pty_spawn error] fork failed, errno: %d (%v)", int(posix.errno()), posix.errno())
 		posix.close(errfd[0])
 		posix.close(errfd[1])
 		posix.close(master)
@@ -285,12 +300,13 @@ pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string) -
 
 	// --- parent: exec outcome arrives over the error pipe ---
 	posix.close(errfd[1])
-	mark: [1]byte
-	n := posix.read(errfd[0], raw_data(mark[:]), 1)
+	mark: [2]byte
+	n := posix.read(errfd[0], raw_data(mark[:]), 2)
 	posix.close(errfd[0])
 	if n != 0 {
 		status: c.int
 		if n > 0 {
+			fmt.eprintfln("[pty_spawn error] child pre-exec failed at stage %d, errno: %d", mark[0], mark[1])
 			// Child reported failure and already exited: reap it.
 			posix.waitpid(pid, &status, posix.Wait_Flags{})
 		} else {
@@ -469,7 +485,7 @@ pty_set_winsize :: proc(p: ^Pty, rows: int, cols: int) -> bool {
 		ncols = PTY_DEFAULT_COLS
 	}
 	ws := Winsize{ws_row = c.ushort(r), ws_col = c.ushort(ncols)}
-	if sys_darwin.syscall_ioctl(c.int(p.master), TIOCSWINSZ, rawptr(&ws)) != 0 {
+	if ioctl(c.int(p.master), TIOCSWINSZ, &ws) != 0 {
 		return false
 	}
 	p.rows = r
@@ -554,8 +570,8 @@ pty_close :: proc(p: ^Pty) {
 
 // _child_fail reports pre-exec failure to the parent over the error pipe
 // and exits. It must not run any parent cleanup or return.
-_child_fail :: proc(w: posix.FD) -> ! {
-	mark: [1]u8 = {1}
-	posix.write(w, raw_data(mark[:]), 1)
+_child_fail :: proc(w: posix.FD, stage: u8) -> ! {
+	mark: [2]u8 = {stage, byte(posix.errno())}
+	posix.write(w, raw_data(mark[:]), 2)
 	posix._exit(PTY_CHILD_FAIL_EXIT)
 }

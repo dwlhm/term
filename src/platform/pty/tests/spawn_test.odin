@@ -7,8 +7,15 @@ import "core:strings"
 import "core:testing"
 import "core:time"
 import posix "core:sys/posix"
-import sys_darwin "core:sys/darwin"
 import pty "../"
+
+when ODIN_OS == .Darwin {
+	foreign import libc "system:System.framework"
+	@(default_calling_convention="c")
+	foreign libc {
+		ioctl :: proc(fd: c.int, request: c.ulong, #c_vararg args: ..any) -> c.int ---
+	}
+}
 
 // TIOCGWINSZ reads the window size back (test-only; the setter is Langkah 4).
 TIOCGWINSZ :: 0x40087468
@@ -23,7 +30,7 @@ _Winsize :: struct {
 // _get_winsize reads the size visible through the master fd.
 _get_winsize :: proc(master: int) -> (rows, cols: int, ok: bool) {
 	ws: _Winsize
-	if sys_darwin.syscall_ioctl(c.int(master), TIOCGWINSZ, rawptr(&ws)) != 0 {
+	if ioctl(c.int(master), TIOCGWINSZ, &ws) != 0 {
 		return 0, 0, false
 	}
 	return int(ws.ws_row), int(ws.ws_col), true
