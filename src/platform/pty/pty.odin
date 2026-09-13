@@ -100,8 +100,9 @@ pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string) -
 	}
 
 	// Master-side setup happens fully before fork, so a fork failure only
-	// has the master fd to clean up.
-	master := posix.posix_openpt({.RDWR, .NOCTTY})
+	// has the master fd to clean up. Open with NONBLOCK atomically so master
+	// never blocks the event loop without requiring post-open fcntl.
+	master := posix.posix_openpt({.RDWR, .NOCTTY, .NONBLOCK})
 	if int(master) < 0 {
 		fmt.eprintfln("[pty_spawn error] posix_openpt failed, errno: %d (%v)", int(posix.errno()), posix.errno())
 		return false
@@ -133,19 +134,6 @@ pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string) -
 	copy(slave_buf[:], name)
 	slave_buf[len(name)] = 0
 	slave_path := cstring(&slave_buf[0])
-
-	// The master must never block the event loop.
-	flags := posix.fcntl(master, .GETFL)
-	if flags == -1 {
-		fmt.eprintfln("[pty_spawn error] fcntl GETFL failed, errno: %d (%v)", int(posix.errno()), posix.errno())
-		posix.close(master)
-		return false
-	}
-	if posix.fcntl(master, .SETFL, flags | c.int(posix.O_NONBLOCK)) == -1 {
-		fmt.eprintfln("[pty_spawn error] fcntl SETFL O_NONBLOCK failed, errno: %d (%v)", int(posix.errno()), posix.errno())
-		posix.close(master)
-		return false
-	}
 
 	// Initial size is applied to the slave in the child after fork: on
 	// Darwin TIOCSWINSZ is only valid on the slave side, and the size
