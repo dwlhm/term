@@ -89,16 +89,19 @@ All architectural decisions are documented with empirical benchmarks in [LAPORAN
 git clone https://github.com/dwlhm/term.git
 cd term
 
-# 2. Build debug executable (bin/term)
+# 2. Ensure WGPU native library is installed (downloads prebuilt binary if missing from Odin vendor)
+make setup-wgpu
+
+# 3. Build debug executable (bin/term)
 make build
 
-# 3. Build optimized release binary
+# 4. Build optimized release binary
 make release
 
-# 4. Build macOS application bundle (bin/Term.app)
+# 5. Build macOS application bundle (bin/Term.app)
 make bundle
 
-# 5. Launch Term
+# 6. Launch Term
 make run
 # or launch the native bundle:
 open bin/Term.app

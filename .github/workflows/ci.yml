@@ -18,6 +18,9 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Setup WGPU Native
+        run: make setup-wgpu
+
       - name: Check code
         run: make check
 
