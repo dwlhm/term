@@ -116,8 +116,8 @@ test_view_alt_screen_max_offset_zero :: proc(t: ^testing.T) {
 	tg.scrollback_push(&term.scrollback, cells, &term.grapheme_store)
 	delete(cells)
 
-	testing.expect(t, len(term.scrollback.rows) > 0, "scrollback must be non-empty")
-	testing.expect_value(t, tg.terminal_view_max_offset(&term), len(term.scrollback.rows))
+	testing.expect(t, tg.scrollback_len(&term.scrollback) > 0, "scrollback must be non-empty")
+	testing.expect_value(t, tg.terminal_view_max_offset(&term), tg.scrollback_len(&term.scrollback))
 
 	term.is_alt_screen = true
 	testing.expect_value(t, tg.terminal_view_max_offset(&term), 0)

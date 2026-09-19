@@ -837,19 +837,16 @@ test_resize_grow_does_not_pull_scrollback_if_screen_not_full :: proc(t: ^testing
 		tg.terminal_put_char(&term, rune('A' + i))
 	}
 
-	testing.expect(t, term.scrollback.count == 5, "5 rows pushed to scrollback")
+	testing.expect(t, term.scrollback.count == 5, "scrollback count at 5 before resize")
 
-	// Clear screen
+	tg.terminal_clear(&term)
 	tg.terminal_move_cursor(&term, 0, 0)
-	tg.terminal_erase_display(&term, .Entire)
-
-	// Write 3 lines (rows 0, 1, 2)
-	for i in 0..<3 {
-		if i > 0 {
-			tg.terminal_newline(&term)
-		}
-		tg.terminal_put_char(&term, rune('1' + i))
-	}
+	tg.terminal_put_char(&term, '1')
+	tg.terminal_move_cursor(&term, 1, 0)
+	tg.terminal_put_char(&term, '2')
+	tg.terminal_move_cursor(&term, 2, 0)
+	tg.terminal_put_char(&term, '3')
+	tg.terminal_move_cursor(&term, 2, 1)
 
 	testing.expect(t, term.cursor.row == 2, "cursor row at 2 before resize")
 
@@ -871,6 +868,147 @@ test_resize_grow_does_not_pull_scrollback_if_screen_not_full :: proc(t: ^testing
 	}
 }
 
+@(test)
+test_resize_seam_coalescence :: proc(t: ^testing.T) {
+	term: tg.Terminal
+	tg.terminal_init(&term, 5, 20)
+	defer tg.terminal_destroy(&term)
 
+	for i in 0..<4 {
+		tg.terminal_move_cursor(&term, i, 0)
+		for ch in "Row" {
+			tg.terminal_put_char(&term, ch)
+		}
+		tg.terminal_put_char(&term, rune('0' + i))
+	}
 
+	tg.terminal_move_cursor(&term, 4, 0)
+	long_str := "ABCDEFGHIJKLMNOPQRSTUVWXYZ1234"
+	for ch in long_str {
+		tg.terminal_put_char(&term, ch)
+	}
 
+	// In a 5-row terminal, writing 30 chars wrapped: "ABCDEFGHIJKLMNOPQRST" is at row 3 (wrapped=true),
+	// and "UVWXYZ1234" is at row 4.
+	// We scroll up 4 times so "ABCDEFGHIJKLMNOPQRST" moves into scrollback as the newest row,
+	// and "UVWXYZ1234" is at row 0 of the active grid.
+	tg.terminal_scroll_up(&term, 4)
+
+	testing.expect(t, term.scrollback.count > 0, "scrollback has pushed rows")
+	newest_sb := tg.scrollback_get(&term.scrollback, term.scrollback.count - 1)
+	testing.expect(t, newest_sb != nil && newest_sb.wrapped, "newest scrollback row must be wrapped")
+
+	// Resize width to 40 columns and height to 10 rows.
+	// Seam coalescence reunites "ABCDEFGHIJKLMNOPQRST" from scrollback and "UVWXYZ1234"
+	// from grid row 0 into ONE single logical line.
+	tg.terminal_resize(&term, 10, 40)
+
+	found_reunited := false
+	for r in 0..<term.grid.row_count {
+		match := true
+		for c in 0..<len(long_str) {
+			cell := tg.grid_get_cell(&term.grid, r, c)
+			if cell.content != tg.Content_Handle(long_str[c]) {
+				match = false
+				break
+			}
+		}
+		if match {
+			found_reunited = true
+			phys := tg._grid_physical_row(&term.grid, r)
+			testing.expect(t, !term.grid.rows[phys].wrapped, "reunited line must not be wrapped on 40 cols")
+			break
+		}
+	}
+	testing.expect(t, found_reunited, "reunited line must be present contiguously on one row without splits")
+}
+
+@(test)
+test_resize_prompt_truncation_without_wrapping :: proc(t: ^testing.T) {
+	term: tg.Terminal
+	tg.terminal_init(&term, 24, 80)
+	defer tg.terminal_destroy(&term)
+
+	// Build a prompt row with RPROMPT pattern (left text, gap >= 8, right text)
+	left_str := "~/project"
+	for ch in left_str {
+		tg.terminal_put_char(&term, ch)
+	}
+	for _ in 0..<50 {
+		tg.terminal_put_char(&term, ' ')
+	}
+	right_str := "git:(main)"
+	for ch in right_str {
+		tg.terminal_put_char(&term, ch)
+	}
+
+	phys := tg._grid_physical_row(&term.grid, 0)
+	term.grid.rows[phys].is_prompt = true
+	term.cursor.row = 0
+	term.cursor.col = len(left_str)
+
+	// Resize from 80 cols down to 60 cols
+	tg.terminal_resize(&term, 24, 60)
+
+	testing.expect(t, term.grid.col_count == 60, "cols should be 60")
+	phys_after := tg._grid_physical_row(&term.grid, 0)
+	testing.expect(t, !term.grid.rows[phys_after].wrapped, "row 0 prompt must not wrap")
+	testing.expect(t, term.cursor.row == 0, "cursor row remains 0")
+	for c in 0..<60 {
+		cell := tg.grid_get_cell(&term.grid, 1, c)
+		testing.expect(t, cell == tg.CELL_DEFAULT, "row 1 should remain default/empty, row count remains 1")
+	}
+}
+
+@(test)
+test_resize_multiline_prompt_preserves_height :: proc(t: ^testing.T) {
+	term: tg.Terminal
+	tg.terminal_init(&term, 24, 80)
+	defer tg.terminal_destroy(&term)
+
+	// 2-line prompt (line 1 with RPROMPT, line 2 with cursor)
+	// Line 1:
+	left_str := "my-project"
+	for ch in left_str {
+		tg.terminal_put_char(&term, ch)
+	}
+	for _ in 0..<50 {
+		tg.terminal_put_char(&term, ' ')
+	}
+	right_str := "[main]"
+	for ch in right_str {
+		tg.terminal_put_char(&term, ch)
+	}
+	phys0 := tg._grid_physical_row(&term.grid, 0)
+	term.grid.rows[phys0].is_prompt = true
+
+	// Line 2:
+	tg.terminal_newline(&term)
+	tg.terminal_put_char(&term, '>')
+	tg.terminal_put_char(&term, ' ')
+	phys1 := tg._grid_physical_row(&term.grid, 1)
+	term.grid.rows[phys1].is_prompt = true
+
+	testing.expect(t, term.cursor.row == 1 && term.cursor.col == 2, "cursor initially at row 1, col 2")
+
+	// Multi-step resize: 80 -> 60 -> 40 -> 80
+	resize_steps := []int{60, 40, 80}
+	for target_cols in resize_steps {
+		tg.terminal_resize(&term, 24, target_cols)
+		testing.expect(t, term.grid.col_count == target_cols, "cols must match target")
+		testing.expect(t, term.cursor.row == 1, "cursor row remains stable at 1")
+
+		p0 := tg._grid_physical_row(&term.grid, 0)
+		p1 := tg._grid_physical_row(&term.grid, 1)
+		testing.expect(t, !term.grid.rows[p0].wrapped, "line 1 (row 0) must not wrap")
+		testing.expect(t, !term.grid.rows[p1].wrapped, "line 2 (row 1) must not wrap")
+		testing.expect(t, term.grid.rows[p0].is_prompt, "row 0 remains prompt")
+		testing.expect(t, term.grid.rows[p1].is_prompt, "row 1 remains prompt")
+
+		// Verify row 2 is empty default
+		for c in 0..<target_cols {
+			cell := tg.grid_get_cell(&term.grid, 2, c)
+			testing.expect(t, cell == tg.CELL_DEFAULT, "row 2 must be empty default")
+		}
+	}
+}

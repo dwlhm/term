@@ -98,18 +98,20 @@ THEME_ARGB_OPAQUE :: u32(0xFF000000)
 // Style represents the visual attributes of a cell.
 // Size: 16 bytes
 Style :: struct {
-	fg:        u32, // foreground color (ARGB or palette index)
-	bg:        u32, // background color
-	underline: u32, // underline color
-	flags:     u16, // bitfield: bold, italic, underline_style, etc.
+	fg:           u32, // foreground color (ARGB or palette index)
+	bg:           u32, // background color
+	underline:    u32, // underline color
+	flags:        u16, // bitfield: bold, italic, underline_style, etc.
+	hyperlink_id: u16, // index into Hyperlink_Store (0 = none)
 }
 
 // STYLE_DEFAULT is the default style derived from the default theme.
 STYLE_DEFAULT :: Style{
-	fg        = THEME_CATPPUCCIN_MOCHA.foreground,
-	bg        = THEME_CATPPUCCIN_MOCHA.background,
-	underline = 0,
-	flags     = 0,
+	fg           = THEME_CATPPUCCIN_MOCHA.foreground,
+	bg           = THEME_CATPPUCCIN_MOCHA.background,
+	underline    = 0,
+	flags        = 0,
+	hyperlink_id = 0,
 }
 
 // Style attribute flag bits stored in Style.flags.
@@ -143,16 +145,17 @@ style_table_init :: proc(t: ^Style_Table, theme: Theme = THEME_CATPPUCCIN_MOCHA)
 // style_table_default returns the default style for the active theme.
 style_table_default :: proc(t: ^Style_Table) -> Style {
 	return Style{
-		fg        = t.theme.foreground,
-		bg        = t.theme.background,
-		underline = 0,
-		flags     = 0,
+		fg           = t.theme.foreground,
+		bg           = t.theme.background,
+		underline    = 0,
+		flags        = 0,
+		hyperlink_id = 0,
 	}
 }
 
 // _style_eq checks if two styles are equal (all fields match).
 _style_eq :: proc(a, b: Style) -> bool {
-	return a.fg == b.fg && a.bg == b.bg && a.underline == b.underline && a.flags == b.flags
+	return a.fg == b.fg && a.bg == b.bg && a.underline == b.underline && a.flags == b.flags && a.hyperlink_id == b.hyperlink_id
 }
 
 // style_table_insert inserts a style into the table and returns its ID.

@@ -6,6 +6,7 @@ import "base:runtime"
 // Capacity is always a power of 2 for fast modulo.
 Grid :: struct {
 	rows:        []Row,       // length = capacity (power of 2)
+	cells:       []Semantic_Cell, // Flattened contiguous memory backing all rows
 	row_count:   int,         // logical number of rows (visible area)
 	col_count:   int,         // number of columns
 	capacity:    int,         // power of 2, >= row_count
@@ -41,8 +42,14 @@ grid_init :: proc(
 	g.origin = 0
 
 	g.rows = make([]Row, g.capacity, allocator)
+	g.cells = make([]Semantic_Cell, g.capacity * cols, allocator)
 	for i in 0..<g.capacity {
-		row_init(&g.rows[i], cols, allocator)
+		// Initialize without standalone allocation
+		g.rows[i].cells = g.cells[i * cols : (i + 1) * cols]
+		for c in 0..<cols { g.rows[i].cells[c] = CELL_DEFAULT }
+		g.rows[i].generation = 0
+		g.rows[i].wrapped = false
+		g.rows[i].is_prompt = false
 	}
 
 	style_table_init(&g.style_table, theme)
@@ -50,11 +57,12 @@ grid_init :: proc(
 
 // grid_destroy frees all rows and the style table.
 grid_destroy :: proc(g: ^Grid, allocator: runtime.Allocator = context.allocator) {
-	for i in 0..<len(g.rows) {
-		row_destroy(&g.rows[i], allocator)
+	if g.cells != nil {
+		delete(g.cells, allocator)
+		g.cells = nil
 	}
 	if g.rows != nil {
-		delete(g.rows)
+		delete(g.rows, allocator)
 		g.rows = nil
 	}
 	g.row_count = 0

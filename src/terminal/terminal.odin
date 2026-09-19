@@ -4,7 +4,7 @@ import "base:runtime"
 import "core:unicode/utf8"
 
 // Kitty_Keyboard holds one screen's progressive-enhancement keyboard state
-// (kitty keyboard protocol). Only the disambiguate flag (0b1) is supported;
+// (kitty keyboard protocol). Progressive enhancement flags 0..31 (bits 0..4) are supported;
 // other requested bits are masked off and report as unset on query.
 Kitty_Keyboard :: struct {
 	flags: u8,      // active enhancement flags (subset of KITTY_KB_SUPPORTED)
@@ -12,14 +12,125 @@ Kitty_Keyboard :: struct {
 	depth: u8,      // entries currently on the stack
 }
 
-// KITTY_KB_SUPPORTED is the supported progressive-enhancement subset.
-// Bit 0 (disambiguate escape codes) only; event types, alternate keys,
-// all-keys-as-escape, and associated text report as unsupported.
-KITTY_KB_SUPPORTED :: u8(0x01)
+// KITTY_KB_SUPPORTED is the supported progressive-enhancement subset (bits 0..4).
+KITTY_KB_SUPPORTED :: u8(0x1F)
+
+// Kitty keyboard enhancement bit flags
+KITTY_FLAG_DISAMBIGUATE          :: u8(1 << 0) // 1: Disambiguate escape codes
+KITTY_FLAG_REPORT_EVENT_TYPES    :: u8(1 << 1) // 2: Report key event types (press, release)
+KITTY_FLAG_REPORT_ALTERNATE_KEYS :: u8(1 << 2) // 4: Report alternate key representations
+KITTY_FLAG_REPORT_ALL_KEYS_AS_ESC :: u8(1 << 3) // 8: Report all keys as escape codes
+KITTY_FLAG_REPORT_ASSOCIATED_TEXT :: u8(1 << 4) // 16: Report associated text
 
 // KITTY_KB_DISAMBIGUATE requests CSI u for ambiguous keys (Esc, alt/ctrl
 // combos) while Enter/Tab/Backspace stay legacy.
 KITTY_KB_DISAMBIGUATE :: u8(0x01)
+
+// Terminal Notification constants and struct
+TERMINAL_NOTIFICATION_TITLE_MAX   :: 64
+TERMINAL_NOTIFICATION_MESSAGE_MAX :: 256
+TERMINAL_NOTIFICATION_QUEUE_CAP   :: 16
+OSC_9_DEFAULT_TITLE               :: "Terminal"
+OSC_777_NOTIFY_PREFIX             :: "notify;"
+
+Terminal_Notification :: struct {
+	title:       [64]u8,
+	title_len:   int,
+	message:     [256]u8,
+	message_len: int,
+}
+
+// Hyperlink Store constants and struct
+HYPERLINK_URL_MAX   :: 512
+HYPERLINK_STORE_CAP :: 1024
+
+Hyperlink_Entry :: struct {
+	url:     [HYPERLINK_URL_MAX]u8,
+	url_len: u16,
+}
+
+Hyperlink_Store :: struct {
+	entries: [HYPERLINK_STORE_CAP]Hyperlink_Entry,
+	count:   u16,
+}
+
+// Terminal_Charset designates character sets for VT100 DEC Alternate Graphics
+Terminal_Charset :: enum u8 {
+	US_ASCII         = 0,
+	DEC_Line_Drawing = 1,
+}
+Charset :: Terminal_Charset
+
+terminal_designate_g0 :: proc(t: ^Terminal, cs: Terminal_Charset) {
+	if t == nil do return
+	t.charset_g0 = cs
+	if !t.active_charset_is_g1 {
+		t.active_charset_is_dec = (t.charset_g0 == .DEC_Line_Drawing)
+	}
+}
+
+terminal_designate_g1 :: proc(t: ^Terminal, cs: Terminal_Charset) {
+	if t == nil do return
+	t.charset_g1 = cs
+	if t.active_charset_is_g1 {
+		t.active_charset_is_dec = (t.charset_g1 == .DEC_Line_Drawing)
+	}
+}
+
+terminal_shift_in :: proc(t: ^Terminal) {
+	if t == nil do return
+	t.active_charset_is_g1 = false
+	t.active_charset_is_dec = (t.charset_g0 == .DEC_Line_Drawing)
+}
+
+terminal_shift_out :: proc(t: ^Terminal) {
+	if t == nil do return
+	t.active_charset_is_g1 = true
+	t.active_charset_is_dec = (t.charset_g1 == .DEC_Line_Drawing)
+}
+
+terminal_translate_dec_line :: proc(b: u8) -> rune {
+	switch b {
+	case 0x5F: return ' '
+	case 0x60: return '◆'
+	case 0x61: return '▒'
+	case 0x62: return '␉'
+	case 0x63: return '␌'
+	case 0x64: return '␍'
+	case 0x65: return '␊'
+	case 0x66: return '°'
+	case 0x67: return '±'
+	case 0x68: return '␤'
+	case 0x69: return '␋'
+	case 0x6A: return '┘'
+	case 0x6B: return '┐'
+	case 0x6C: return '┌'
+	case 0x6D: return '└'
+	case 0x6E: return '┼'
+	case 0x6F: return '⎺'
+	case 0x70: return '⎻'
+	case 0x71: return '─'
+	case 0x72: return '⎼'
+	case 0x73: return '⎽'
+	case 0x74: return '├'
+	case 0x75: return '┤'
+	case 0x76: return '┴'
+	case 0x77: return '┬'
+	case 0x78: return '│'
+	case 0x79: return '≤'
+	case 0x7A: return '≥'
+	case 0x7B: return 'π'
+	case 0x7C: return '≠'
+	case 0x7D: return '£'
+	case 0x7E: return '·'
+	case:      return rune(b)
+	}
+}
+
+terminal_is_dec_active :: #force_inline proc(t: ^Terminal) -> bool {
+	if t == nil do return false
+	return t.active_charset_is_dec
+}
 
 // Mouse_Tracking_Mode specifies the active mouse tracking protocol.
 Mouse_Tracking_Mode :: enum u8 {
@@ -68,6 +179,22 @@ Terminal :: struct {
 	kitty_kb:         Kitty_Keyboard, // progressive-enhancement state, main screen
 	kitty_kb_alt:     Kitty_Keyboard, // progressive-enhancement state, alt screen
 	synchronized_output: bool, // mode 2026: synchronized output (defer presentation)
+
+	// Notification and bell events
+	bell_event:          bool,
+	notifications:       [TERMINAL_NOTIFICATION_QUEUE_CAP]Terminal_Notification,
+	notification_head:   int,
+	notification_tail:   int,
+	notification_count:  int,
+
+	// Hyperlink store
+	hyperlinks:          Hyperlink_Store,
+
+	// DEC alternate character sets (G0/G1)
+	charset_g0:             Terminal_Charset,
+	charset_g1:             Terminal_Charset,
+	active_charset_is_g1:   bool,
+	active_charset_is_dec:  bool, // cached boolean: true if active slot is DEC_Line_Drawing
 }
 
 // Erase_Mode specifies how to erase content.
@@ -109,6 +236,15 @@ terminal_init :: proc(
 	t.kitty_kb = Kitty_Keyboard{}
 	t.kitty_kb_alt = Kitty_Keyboard{}
 	t.synchronized_output = false
+	t.bell_event = false
+	t.notification_head = 0
+	t.notification_tail = 0
+	t.notification_count = 0
+	hyperlink_store_init(&t.hyperlinks)
+	t.charset_g0 = .US_ASCII
+	t.charset_g1 = .US_ASCII
+	t.active_charset_is_g1 = false
+	t.active_charset_is_dec = false
 }
 
 // terminal_destroy frees all terminal state.
@@ -139,8 +275,12 @@ terminal_put_char :: proc(t: ^Terminal, c: rune) {
 	}
 
 	if c < 0x80 {
+		ch := c
+		if t.active_charset_is_dec && ch >= 0x5F && ch <= 0x7E {
+			ch = terminal_translate_dec_line(u8(ch))
+		}
 		cell := Semantic_Cell{
-			content = Content_Handle(c),
+			content = Content_Handle(ch),
 			style   = t.current_style,
 			width   = 1,
 			flags   = .None,
@@ -157,6 +297,8 @@ terminal_put_char :: proc(t: ^Terminal, c: rune) {
 		// plus flag compares in the common narrow case — O(1), no
 		// allocation, no width tables.
 		_wide_overwrite_repair(t, row, col, 1)
+
+		_terminal_release_cell_grapheme(t, row, col)
 
 		// Write the cell
 		ok := grid_set_cell(&t.grid, row, col, cell)
@@ -326,12 +468,31 @@ terminal_print_span :: proc(t: ^Terminal, data: []u8, style: Style_Id) {
 			_wide_overwrite_repair(t, t.cursor.row, t.cursor.col + chunk_len - 1, 1)
 		}
 
-		for i in 0..<chunk_len {
-			phys_row.cells[t.cursor.col + i] = Semantic_Cell{
-				content = Content_Handle(data[offset + i]),
-				style   = style,
-				width   = 1,
-				flags   = .None,
+		if t.grapheme_store.live_count > 0 {
+			for i in 0..<chunk_len {
+				grapheme_store_release(&t.grapheme_store, phys_row.cells[t.cursor.col + i].content)
+			}
+		}
+
+		if !t.active_charset_is_dec {
+			for i in 0..<chunk_len {
+				phys_row.cells[t.cursor.col + i] = Semantic_Cell{
+					content = Content_Handle(data[offset + i]),
+					style   = style,
+					width   = 1,
+					flags   = .None,
+				}
+			}
+		} else {
+			for i in 0..<chunk_len {
+				b := data[offset + i]
+				ch := terminal_translate_dec_line(b) if (b >= 0x5F && b <= 0x7E) else rune(b)
+				phys_row.cells[t.cursor.col + i] = Semantic_Cell{
+					content = Content_Handle(ch),
+					style   = style,
+					width   = 1,
+					flags   = .None,
+				}
 			}
 		}
 		phys_row.generation += 1
@@ -522,6 +683,13 @@ _cell_has_trailing_zwj :: proc(h: Content_Handle, store: ^Grapheme_Store) -> boo
 	return e.runes[e.rune_count - 1] == 0x200D
 }
 
+_terminal_release_cell_grapheme :: #force_inline proc(t: ^Terminal, row, col: int) {
+	if t.grapheme_store.live_count > 0 {
+		phys := _grid_physical_row(&t.grid, row)
+		grapheme_store_release(&t.grapheme_store, t.grid.rows[phys].cells[col].content)
+	}
+}
+
 // _terminal_blank_cell resets a cell to CELL_DEFAULT, releasing any pool
 // handle it held, and marks damage.
 _terminal_blank_cell :: proc(t: ^Terminal, row, col: int) {
@@ -621,6 +789,10 @@ terminal_cursor_down :: proc(t: ^Terminal, n: int) {
 	}
 	t.cursor.row = new_row
 	t.cursor.pending_wrap = false
+	if t.in_prompt_zone {
+		phys := _grid_physical_row(&t.grid, t.cursor.row)
+		t.grid.rows[phys].is_prompt = true
+	}
 }
 
 // terminal_cursor_left moves the cursor left by n columns.
@@ -771,6 +943,11 @@ terminal_erase_display :: proc(t: ^Terminal, mode: Erase_Mode) {
 	}
 }
 
+// terminal_clear clears the entire display without modifying scrollback.
+terminal_clear :: proc(t: ^Terminal) {
+	terminal_erase_display(t, .Entire)
+}
+
 // terminal_save_cursor stores the current cursor position for DECSC.
 terminal_save_cursor :: proc(t: ^Terminal) {
 	if t == nil { return }
@@ -790,8 +967,8 @@ terminal_restore_cursor :: proc(t: ^Terminal) {
 	if t == nil || !t.saved_cursor_valid { return }
 	old_row := t.cursor.row
 	old_col := t.cursor.col
-	t.cursor.row = t.saved_cursor.row
-	t.cursor.col = t.saved_cursor.col
+	t.cursor.row = clamp(t.saved_cursor.row, 0, max(0, t.grid.row_count - 1))
+	t.cursor.col = clamp(t.saved_cursor.col, 0, max(0, t.grid.col_count - 1))
 	t.cursor.pending_wrap = false
 	// Damage old cursor cell
 	if old_row >= 0 && old_row < t.grid.row_count && old_col >= 0 && old_col < t.grid.col_count {
@@ -817,6 +994,7 @@ terminal_reset :: proc(t: ^Terminal) {
 	if t == nil { return }
 	terminal_erase_display(t, .Entire)
 	terminal_clear_scrollback(t)
+	style_table_init(&t.grid.style_table, t.grid.style_table.theme)
 	if t.grid.row_count > 0 && t.grid.col_count > 0 {
 		t.cursor = Cursor{row = 0, col = 0, visible = true}
 	}
@@ -829,6 +1007,11 @@ terminal_reset :: proc(t: ^Terminal) {
 	t.mouse_format = .X10
 	t.kitty_kb = Kitty_Keyboard{}
 	t.kitty_kb_alt = Kitty_Keyboard{}
+	t.bell_event = false
+	t.charset_g0 = .US_ASCII
+	t.charset_g1 = .US_ASCII
+	t.active_charset_is_g1 = false
+	t.active_charset_is_dec = false
 }
 
 // terminal_set_scroll_region sets the scroll margins (0-indexed, inclusive).
@@ -922,7 +1105,7 @@ terminal_scroll_up :: proc(t: ^Terminal, n: int) {
 	if !t.is_alt_screen && top == 0 && bottom == t.grid.row_count - 1 && t.scrollback.col_count == t.grid.col_count {
 		for i in 0..<actual {
 			phys := _grid_physical_row(&t.grid, top + i)
-			scrollback_push(&t.scrollback, t.grid.rows[phys].cells, &t.grapheme_store)
+			scrollback_push(&t.scrollback, t.grid.rows[phys].cells, &t.grapheme_store, t.grid.rows[phys].wrapped)
 		}
 	} else {
 		for i in 0..<actual {
@@ -996,6 +1179,10 @@ terminal_linefeed :: proc(t: ^Terminal) {
 		if t.cursor.row >= t.grid.row_count {
 			t.cursor.row = t.grid.row_count - 1
 		}
+	}
+	if t.in_prompt_zone {
+		phys := _grid_physical_row(&t.grid, t.cursor.row)
+		t.grid.rows[phys].is_prompt = true
 	}
 }
 
@@ -1160,6 +1347,10 @@ terminal_index :: proc(t: ^Terminal) {
 	} else {
 		terminal_cursor_down(t, 1)
 	}
+	if t.in_prompt_zone {
+		phys := _grid_physical_row(&t.grid, t.cursor.row)
+		t.grid.rows[phys].is_prompt = true
+	}
 }
 
 // terminal_next_line moves cursor to beginning of next line, scrolling if at bottom margin.
@@ -1170,6 +1361,10 @@ terminal_next_line :: proc(t: ^Terminal) {
 		terminal_scroll_up(t, 1)
 	} else {
 		terminal_cursor_down(t, 1)
+	}
+	if t.in_prompt_zone {
+		phys := _grid_physical_row(&t.grid, t.cursor.row)
+		t.grid.rows[phys].is_prompt = true
 	}
 }
 
@@ -1186,6 +1381,8 @@ terminal_osc_133_prompt_end :: proc(t: ^Terminal) {
 	if t == nil { return }
 	t.has_osc_133 = true
 	t.in_prompt_zone = false
+	phys := _grid_physical_row(&t.grid, t.cursor.row)
+	t.grid.rows[phys].is_prompt = true
 }
 
 terminal_osc_133_command_start :: proc(t: ^Terminal) {
@@ -1320,24 +1517,139 @@ terminal_osc_set_cwd :: proc(t: ^Terminal, cwd: []u8) {
 	t.cwd_len = n
 }
 
-// terminal_osc_8_set_url sets the active hyperlink URL clamped to active_hyperlink buffer size.
+// terminal_osc_8_set_url registers the URL in the Hyperlink_Store and applies its ID to the active style.
 terminal_osc_8_set_url :: proc(t: ^Terminal, url: []u8) {
 	if t == nil { return }
 	n := min(len(url), len(t.active_hyperlink))
 	copy(t.active_hyperlink[:n], url[:n])
 	t.active_hyperlink_len = n
+
+	link_id := hyperlink_store_register(&t.hyperlinks, url[:n])
+	st := style_table_get(&t.grid.style_table, t.current_style)
+	st.hyperlink_id = link_id
+	t.current_style = style_table_insert(&t.grid.style_table, st)
 }
 
-// terminal_osc_8_clear_url clears the active hyperlink URL.
+// terminal_osc_8_clear_url clears the active hyperlink URL and unsets hyperlink_id on active style.
 terminal_osc_8_clear_url :: proc(t: ^Terminal) {
 	if t == nil { return }
 	t.active_hyperlink_len = 0
+
+	st := style_table_get(&t.grid.style_table, t.current_style)
+	st.hyperlink_id = 0
+	t.current_style = style_table_insert(&t.grid.style_table, st)
 }
 
 // terminal_get_active_hyperlink returns the currently active hyperlink URL string.
 terminal_get_active_hyperlink :: proc(t: ^Terminal) -> string {
 	if t == nil { return "" }
 	return string(t.active_hyperlink[:t.active_hyperlink_len])
+}
+
+// Hyperlink_Store operations
+
+hyperlink_store_init :: proc(s: ^Hyperlink_Store) {
+	if s == nil { return }
+	s.count = 0
+}
+
+hyperlink_store_register :: proc(s: ^Hyperlink_Store, url: []u8) -> u16 {
+	if s == nil || len(url) == 0 {
+		return 0
+	}
+	url_len := u16(min(len(url), HYPERLINK_URL_MAX))
+	for i in 1..=int(s.count) {
+		entry := &s.entries[i]
+		if entry.url_len == url_len {
+			if string(entry.url[:url_len]) == string(url[:url_len]) {
+				return u16(i)
+			}
+		}
+	}
+	if int(s.count) + 1 >= HYPERLINK_STORE_CAP {
+		return 0
+	}
+	s.count += 1
+	idx := s.count
+	entry := &s.entries[idx]
+	copy(entry.url[:url_len], url[:url_len])
+	entry.url_len = url_len
+	return idx
+}
+
+hyperlink_store_get :: proc(s: ^Hyperlink_Store, id: u16) -> string {
+	if s == nil || id == 0 || int(id) > int(s.count) {
+		return ""
+	}
+	entry := &s.entries[id]
+	return string(entry.url[:entry.url_len])
+}
+
+// Notification and Bell operations
+
+terminal_bell :: proc(t: ^Terminal) {
+	if t == nil { return }
+	t.bell_event = true
+}
+
+terminal_push_notification :: proc(t: ^Terminal, title: []u8, message: []u8) {
+	if t == nil { return }
+	if t.notification_count >= TERMINAL_NOTIFICATION_QUEUE_CAP {
+		t.notification_head = (t.notification_head + 1) % TERMINAL_NOTIFICATION_QUEUE_CAP
+		t.notification_count -= 1
+	}
+	slot := &t.notifications[t.notification_tail]
+	t.notification_tail = (t.notification_tail + 1) % TERMINAL_NOTIFICATION_QUEUE_CAP
+	t.notification_count += 1
+
+	t_len := min(len(title), TERMINAL_NOTIFICATION_TITLE_MAX)
+	if t_len > 0 {
+		copy(slot.title[:t_len], title[:t_len])
+	}
+	slot.title_len = t_len
+
+	m_len := min(len(message), min(255, TERMINAL_NOTIFICATION_MESSAGE_MAX))
+	if m_len > 0 {
+		copy(slot.message[:m_len], message[:m_len])
+	}
+	slot.message_len = m_len
+}
+
+terminal_osc_9_notify :: proc(t: ^Terminal, payload: []u8) {
+	if t == nil { return }
+	terminal_push_notification(t, transmute([]u8)string(OSC_9_DEFAULT_TITLE), payload)
+}
+
+terminal_osc_777_notify :: proc(t: ^Terminal, payload: []u8) {
+	if t == nil { return }
+	prefix := OSC_777_NOTIFY_PREFIX
+	if len(payload) < len(prefix) || string(payload[:len(prefix)]) != prefix {
+		return
+	}
+	rem := payload[len(prefix):]
+	sep := -1
+	for b, idx in rem {
+		if b == ';' {
+			sep = idx
+			break
+		}
+	}
+	if sep < 0 {
+		return
+	}
+	title := rem[:sep]
+	msg := rem[sep + 1:]
+	terminal_push_notification(t, title, msg)
+}
+
+terminal_pop_notification :: proc(t: ^Terminal) -> (Terminal_Notification, bool) {
+	if t == nil || t.notification_count == 0 {
+		return Terminal_Notification{}, false
+	}
+	notif := t.notifications[t.notification_head]
+	t.notification_head = (t.notification_head + 1) % TERMINAL_NOTIFICATION_QUEUE_CAP
+	t.notification_count -= 1
+	return notif, true
 }
 
 

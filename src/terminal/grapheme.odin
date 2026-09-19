@@ -115,6 +115,9 @@ grapheme_store_release :: proc(s: ^Grapheme_Store, h: Content_Handle) {
 	if idx < 0 || idx >= GRAPHEME_STORE_CAP {
 		return
 	}
+	if s.entries[idx].rune_count == 0 {
+		return
+	}
 	s.entries[idx] = {}
 	s.live_count -= 1
 	if s.live_count <= 0 {

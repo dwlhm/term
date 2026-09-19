@@ -152,8 +152,9 @@ test_terminal_init_custom_theme :: proc(t: ^testing.T) {
 @(test)
 test_row_init :: proc(t: ^testing.T) {
 	r: tg.Row
+	r.cells = make([]tg.Semantic_Cell, 10)
 	tg.row_init(&r, 10)
-	defer tg.row_destroy(&r)
+	defer delete(r.cells)
 
 	testing.expect(t, len(r.cells) == 10, "Row should have 10 cells")
 	testing.expect(t, r.generation == 0, "Initial generation should be 0")
@@ -168,8 +169,9 @@ test_row_init :: proc(t: ^testing.T) {
 @(test)
 test_row_set_cell :: proc(t: ^testing.T) {
 	r: tg.Row
+	r.cells = make([]tg.Semantic_Cell, 10)
 	tg.row_init(&r, 10)
-	defer tg.row_destroy(&r)
+	defer delete(r.cells)
 
 	cell := tg.Semantic_Cell{content = 'A', style = 0, width = 1, flags = .None}
 	ok := tg.row_set_cell(&r, 5, cell)
@@ -181,8 +183,9 @@ test_row_set_cell :: proc(t: ^testing.T) {
 @(test)
 test_row_set_cell_out_of_bounds :: proc(t: ^testing.T) {
 	r: tg.Row
+	r.cells = make([]tg.Semantic_Cell, 10)
 	tg.row_init(&r, 10)
-	defer tg.row_destroy(&r)
+	defer delete(r.cells)
 
 	cell := tg.Semantic_Cell{content = 'A', style = 0, width = 1, flags = .None}
 	ok := tg.row_set_cell(&r, -1, cell)
@@ -195,8 +198,9 @@ test_row_set_cell_out_of_bounds :: proc(t: ^testing.T) {
 @(test)
 test_row_clear :: proc(t: ^testing.T) {
 	r: tg.Row
+	r.cells = make([]tg.Semantic_Cell, 10)
 	tg.row_init(&r, 10)
-	defer tg.row_destroy(&r)
+	defer delete(r.cells)
 
 	cell := tg.Semantic_Cell{content = 'X', style = 0, width = 1, flags = .None}
 	tg.row_set_cell(&r, 5, cell)
@@ -755,3 +759,273 @@ test_integration_hello_world :: proc(t: ^testing.T) {
 	testing.expect(t, journal.dirty_rows[0].full, "Row 0 should be marked dirty")
 	testing.expect(t, journal.dirty_rows[1].full, "Row 1 should be marked dirty")
 }
+
+// --- Notification and Bell Tests ---
+
+@(test)
+test_terminal_bell :: proc(t: ^testing.T) {
+	term: tg.Terminal
+	tg.terminal_init(&term, 24, 80)
+	defer tg.terminal_destroy(&term)
+
+	testing.expect(t, !term.bell_event, "bell_event must start false")
+	tg.terminal_bell(&term)
+	testing.expect(t, term.bell_event, "bell_event must be true after terminal_bell")
+}
+
+@(test)
+test_terminal_osc_9_notify :: proc(t: ^testing.T) {
+	term: tg.Terminal
+	tg.terminal_init(&term, 24, 80)
+	defer tg.terminal_destroy(&term)
+
+	msg := "Build succeeded"
+	tg.terminal_osc_9_notify(&term, transmute([]u8)msg)
+
+	notif, ok := tg.terminal_pop_notification(&term)
+	testing.expect(t, ok, "notification pop should succeed")
+	testing.expect(t, string(notif.title[:notif.title_len]) == "Terminal", "OSC 9 default title should be 'Terminal'")
+	testing.expect(t, string(notif.message[:notif.message_len]) == msg, "OSC 9 message should match payload")
+
+	_, ok2 := tg.terminal_pop_notification(&term)
+	testing.expect(t, !ok2, "queue should be empty after pop")
+}
+
+@(test)
+test_terminal_osc_777_notify :: proc(t: ^testing.T) {
+	term: tg.Terminal
+	tg.terminal_init(&term, 24, 80)
+	defer tg.terminal_destroy(&term)
+
+	// Happy path
+	payload := "notify;Alert;Service online"
+	tg.terminal_osc_777_notify(&term, transmute([]u8)payload)
+
+	notif, ok := tg.terminal_pop_notification(&term)
+	testing.expect(t, ok, "notification pop should succeed")
+	testing.expect(t, string(notif.title[:notif.title_len]) == "Alert", "OSC 777 title should match")
+	testing.expect(t, string(notif.message[:notif.message_len]) == "Service online", "OSC 777 message should match")
+
+	// Missing semicolon (no message separator) -> dropped safely
+	invalid_payload := "notify;AlertOnly"
+	tg.terminal_osc_777_notify(&term, transmute([]u8)invalid_payload)
+	testing.expect(t, term.notification_count == 0, "malformed OSC 777 payload without semicolon must be dropped safely")
+
+	// Missing notify; prefix -> dropped safely
+	invalid_prefix := "alert;Alert;Message"
+	tg.terminal_osc_777_notify(&term, transmute([]u8)invalid_prefix)
+	testing.expect(t, term.notification_count == 0, "OSC 777 payload without notify; prefix must be dropped safely")
+}
+
+@(test)
+test_terminal_notification_queue_cap_and_drop_oldest :: proc(t: ^testing.T) {
+	term: tg.Terminal
+	tg.terminal_init(&term, 24, 80)
+	defer tg.terminal_destroy(&term)
+
+	// Push 18 notifications (capacity is 16)
+	for i in 0..<18 {
+		msg_buf: [16]u8
+		msg_buf[0] = 'm'
+		msg_buf[1] = u8('0' + (i % 10))
+		tg.terminal_osc_9_notify(&term, msg_buf[:2])
+	}
+
+	testing.expect(t, term.notification_count == 16, "notification count should cap at 16")
+
+	// First popped should be item index 2 ('m2') because items 0 and 1 were dropped
+	notif, ok := tg.terminal_pop_notification(&term)
+	testing.expect(t, ok, "pop should succeed")
+	testing.expect(t, string(notif.message[:notif.message_len]) == "m2", "oldest items should be dropped on queue overflow")
+}
+
+@(test)
+test_terminal_notification_clamping :: proc(t: ^testing.T) {
+	term: tg.Terminal
+	tg.terminal_init(&term, 24, 80)
+	defer tg.terminal_destroy(&term)
+
+	long_msg: [300]u8
+	for i in 0..<len(long_msg) {
+		long_msg[i] = 'A'
+	}
+
+	tg.terminal_osc_9_notify(&term, long_msg[:])
+
+	notif, ok := tg.terminal_pop_notification(&term)
+	testing.expect(t, ok, "pop should succeed")
+	testing.expect(t, notif.message_len == 255, "message length should clamp to 255 bytes")
+}
+
+@(test)
+test_terminal_dec_line_drawing_translation :: proc(t: ^testing.T) {
+	expected_mappings := [32]struct {
+		input:    u8,
+		expected: rune,
+	}{
+		{0x5F, ' '},
+		{0x60, '◆'},
+		{0x61, '▒'},
+		{0x62, '␉'},
+		{0x63, '␌'},
+		{0x64, '␍'},
+		{0x65, '␊'},
+		{0x66, '°'},
+		{0x67, '±'},
+		{0x68, '␤'},
+		{0x69, '␋'},
+		{0x6A, '┘'},
+		{0x6B, '┐'},
+		{0x6C, '┌'},
+		{0x6D, '└'},
+		{0x6E, '┼'},
+		{0x6F, '⎺'},
+		{0x70, '⎻'},
+		{0x71, '─'},
+		{0x72, '⎼'},
+		{0x73, '⎽'},
+		{0x74, '├'},
+		{0x75, '┤'},
+		{0x76, '┴'},
+		{0x77, '┬'},
+		{0x78, '│'},
+		{0x79, '≤'},
+		{0x7A, '≥'},
+		{0x7B, 'π'},
+		{0x7C, '≠'},
+		{0x7D, '£'},
+		{0x7E, '·'},
+	}
+
+	for m in expected_mappings {
+		actual := tg.terminal_translate_dec_line(m.input)
+		testing.expect(t, actual == m.expected, "DEC translation mapping mismatch")
+	}
+
+	// Any other byte must return rune(b) unchanged
+	testing.expect(t, tg.terminal_translate_dec_line('A') == 'A', "'A' should remain unchanged")
+	testing.expect(t, tg.terminal_translate_dec_line('1') == '1', "'1' should remain unchanged")
+	testing.expect(t, tg.terminal_translate_dec_line(' ') == ' ', "' ' should remain unchanged")
+	testing.expect(t, tg.terminal_translate_dec_line(0x7F) == 0x7F, "DEL should remain unchanged")
+}
+
+@(test)
+test_terminal_dec_charset_state_machine :: proc(t: ^testing.T) {
+	term: tg.Terminal
+	tg.terminal_init(&term, 24, 80)
+	defer tg.terminal_destroy(&term)
+
+	testing.expect(t, term.charset_g0 == .US_ASCII, "initial G0 must be US_ASCII")
+	testing.expect(t, term.charset_g1 == .US_ASCII, "initial G1 must be US_ASCII")
+	testing.expect(t, !term.active_charset_is_g1, "initial active charset must be G0")
+	testing.expect(t, !term.active_charset_is_dec, "initial active charset must not be DEC")
+
+	// Designate G0 to DEC_Line_Drawing -> active_charset_is_dec becomes true
+	tg.terminal_designate_g0(&term, .DEC_Line_Drawing)
+	testing.expect(t, term.charset_g0 == .DEC_Line_Drawing, "G0 must be DEC_Line_Drawing")
+	testing.expect(t, term.active_charset_is_dec, "active_charset_is_dec must be true when G0 active")
+
+	// Designate G0 back to US_ASCII
+	tg.terminal_designate_g0(&term, .US_ASCII)
+	testing.expect(t, term.charset_g0 == .US_ASCII, "G0 must be US_ASCII")
+	testing.expect(t, !term.active_charset_is_dec, "active_charset_is_dec must be false")
+
+	// Designate G1 to DEC_Line_Drawing; G0 is still active, so active_charset_is_dec remains false
+	tg.terminal_designate_g1(&term, .DEC_Line_Drawing)
+	testing.expect(t, term.charset_g1 == .DEC_Line_Drawing, "G1 must be DEC_Line_Drawing")
+	testing.expect(t, !term.active_charset_is_dec, "active_charset_is_dec must remain false while G0 active")
+
+	// Shift out -> G1 active
+	tg.terminal_shift_out(&term)
+	testing.expect(t, term.active_charset_is_g1, "active_charset_is_g1 must be true after shift out")
+	testing.expect(t, term.active_charset_is_dec, "active_charset_is_dec must be true after shift out to DEC G1")
+
+	// Shift in -> G0 active (US_ASCII)
+	tg.terminal_shift_in(&term)
+	testing.expect(t, !term.active_charset_is_g1, "active_charset_is_g1 must be false after shift in")
+	testing.expect(t, !term.active_charset_is_dec, "active_charset_is_dec must be false after shift in to US_ASCII G0")
+
+	// Reset terminal
+	tg.terminal_shift_out(&term)
+	tg.terminal_reset(&term)
+	testing.expect(t, term.charset_g0 == .US_ASCII, "reset must restore G0 to US_ASCII")
+	testing.expect(t, term.charset_g1 == .US_ASCII, "reset must restore G1 to US_ASCII")
+	testing.expect(t, !term.active_charset_is_g1, "reset must restore active to G0")
+	testing.expect(t, !term.active_charset_is_dec, "reset must clear active DEC flag")
+}
+
+@(test)
+test_terminal_dec_put_char_and_print_span :: proc(t: ^testing.T) {
+	term: tg.Terminal
+	tg.terminal_init(&term, 24, 80)
+	defer tg.terminal_destroy(&term)
+
+	// Activate DEC Line Drawing on G0
+	tg.terminal_designate_g0(&term, .DEC_Line_Drawing)
+
+	// Single char write via terminal_put_char
+	tg.terminal_put_char(&term, 'q')
+	cell0 := tg.grid_get_cell(&term.grid, 0, 0)
+	testing.expect(t, cell0.content == tg.Content_Handle('─'), "put_char 'q' should translate to '─'")
+
+	// Non-drawing ASCII char remains raw
+	tg.terminal_put_char(&term, 'A')
+	cell1 := tg.grid_get_cell(&term.grid, 0, 1)
+	testing.expect(t, cell1.content == tg.Content_Handle('A'), "put_char 'A' should remain 'A'")
+
+	// Batch write via terminal_print_span
+	tg.terminal_move_cursor(&term, 1, 0)
+	box_run := []u8{'l', 'q', 'k', 'x', 'm', 'j'}
+	tg.terminal_print_span(&term, box_run, 0)
+
+	expected_run := []rune{'┌', '─', '┐', '│', '└', '┘'}
+	for exp, i in expected_run {
+		cell := tg.grid_get_cell(&term.grid, 1, i)
+		testing.expect(t, cell.content == tg.Content_Handle(exp), "print_span box drawing rune must match")
+	}
+
+	// Switch back to US_ASCII and write again
+	tg.terminal_designate_g0(&term, .US_ASCII)
+	tg.terminal_move_cursor(&term, 2, 0)
+	tg.terminal_print_span(&term, box_run, 0)
+
+	for b, i in box_run {
+		cell := tg.grid_get_cell(&term.grid, 2, i)
+		testing.expect(t, cell.content == tg.Content_Handle(b), "plain ASCII print_span must match byte exactly")
+	}
+}
+
+@(test)
+test_terminal_prompt_zone_propagation :: proc(t: ^testing.T) {
+	term: tg.Terminal
+	tg.terminal_init(&term, 24, 80)
+	defer tg.terminal_destroy(&term)
+
+	tg.terminal_osc_133_prompt_start(&term)
+	testing.expect(t, term.grid.rows[0].is_prompt, "row 0 is prompt on start")
+
+	// terminal_linefeed propagates prompt mark
+	tg.terminal_linefeed(&term)
+	testing.expect(t, term.cursor.row == 1, "cursor row is 1 after linefeed")
+	testing.expect(t, term.grid.rows[1].is_prompt, "row 1 is prompt via linefeed propagation")
+
+	// terminal_index propagates prompt mark
+	tg.terminal_index(&term)
+	testing.expect(t, term.cursor.row == 2, "cursor row is 2 after index")
+	testing.expect(t, term.grid.rows[2].is_prompt, "row 2 is prompt via index propagation")
+
+	// terminal_next_line propagates prompt mark
+	tg.terminal_next_line(&term)
+	testing.expect(t, term.cursor.row == 3, "cursor row is 3 after next_line")
+	testing.expect(t, term.grid.rows[3].is_prompt, "row 3 is prompt via next_line propagation")
+
+	// End prompt zone
+	tg.terminal_osc_133_prompt_end(&term)
+	testing.expect(t, !term.in_prompt_zone, "in_prompt_zone is false after prompt_end")
+
+	// Next linefeed does not mark row 4 as prompt
+	tg.terminal_linefeed(&term)
+	testing.expect(t, term.cursor.row == 4, "cursor row is 4 after exit")
+	testing.expect(t, !term.grid.rows[4].is_prompt, "row 4 is not prompt after prompt_end")
+}
+

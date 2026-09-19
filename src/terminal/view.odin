@@ -13,6 +13,7 @@ Terminal_Point :: struct {
 // Endpoints are inclusive and are normalized before they are queried.
 Terminal_Selection :: struct {
 	active: bool,
+	block:  bool,
 	anchor: Terminal_Point,
 	focus:  Terminal_Point,
 }
@@ -22,6 +23,7 @@ Terminal_Selection :: struct {
 Terminal_View :: struct {
 	scrollback_offset: int,
 	selection:         Terminal_Selection,
+	visual_mode:       bool,
 }
 
 // terminal_view_max_offset returns the number of retained history rows that
@@ -30,7 +32,7 @@ terminal_view_max_offset :: proc(t: ^Terminal) -> int {
 	if t == nil || t.is_alt_screen {
 		return 0
 	}
-	return len(t.scrollback.rows)
+	return scrollback_len(&t.scrollback)
 }
 
 // terminal_view_set_offset clamps a local scrollback offset to the retained
@@ -60,7 +62,7 @@ terminal_view_document_row :: proc(t: ^Terminal, view: ^Terminal_View, viewport_
 		return -1
 	}
 	offset := clamp(view.scrollback_offset, 0, terminal_view_max_offset(t))
-	return len(t.scrollback.rows) - offset + viewport_row
+	return scrollback_len(&t.scrollback) - offset + viewport_row
 }
 
 // terminal_view_point_from_viewport maps a visible local point to a document
@@ -92,14 +94,14 @@ terminal_view_get_cell :: proc(t: ^Terminal, view: ^Terminal_View, viewport_row,
 	if document_row < 0 {
 		return CELL_DEFAULT
 	}
-	if document_row < len(t.scrollback.rows) {
-		row := t.scrollback.rows[document_row]
+	if document_row < scrollback_len(&t.scrollback) {
+		row := scrollback_get(&t.scrollback, document_row)^
 		if col < len(row.cells) {
 			return row.cells[col]
 		}
 		return CELL_DEFAULT
 	}
-	return grid_get_cell(&t.grid, document_row-len(t.scrollback.rows), col)
+	return grid_get_cell(&t.grid, document_row-scrollback_len(&t.scrollback), col)
 }
 
 // terminal_view_get_document_cell reads one combined-document cell without
@@ -108,14 +110,14 @@ terminal_view_get_document_cell :: proc(t: ^Terminal, point: Terminal_Point) -> 
 	if t == nil || point.row < 0 || point.col < 0 || point.col >= t.grid.col_count {
 		return CELL_DEFAULT
 	}
-	if point.row < len(t.scrollback.rows) {
-		row := t.scrollback.rows[point.row]
+	if point.row < scrollback_len(&t.scrollback) {
+		row := scrollback_get(&t.scrollback, point.row)^
 		if point.col < len(row.cells) {
 			return row.cells[point.col]
 		}
 		return CELL_DEFAULT
 	}
-	return grid_get_cell(&t.grid, point.row-len(t.scrollback.rows), point.col)
+	return grid_get_cell(&t.grid, point.row-scrollback_len(&t.scrollback), point.col)
 }
 
 // terminal_view_normalize_point clamps a document point and moves a wide
@@ -124,7 +126,7 @@ terminal_view_normalize_point :: proc(t: ^Terminal, point: Terminal_Point) -> Te
 	if t == nil || t.grid.row_count <= 0 || t.grid.col_count <= 0 {
 		return Terminal_Point{}
 	}
-	total_rows := len(t.scrollback.rows) + t.grid.row_count
+	total_rows := scrollback_len(&t.scrollback) + t.grid.row_count
 	result := point
 	result.row = clamp(result.row, 0, total_rows-1)
 	result.col = clamp(result.col, 0, t.grid.col_count-1)
@@ -157,6 +159,13 @@ terminal_view_selection_contains :: proc(t: ^Terminal, view: ^Terminal_View, poi
 		return false
 	}
 	p := terminal_view_normalize_point(t, point)
+	if view.selection.block {
+		min_row := min(start.row, end.row)
+		max_row := max(start.row, end.row)
+		min_col := min(start.col, end.col)
+		max_col := max(start.col, end.col)
+		return p.row >= min_row && p.row <= max_row && p.col >= min_col && p.col <= max_col
+	}
 	if p.row < start.row || p.row > end.row {
 		return false
 	}
@@ -182,8 +191,15 @@ terminal_view_copy :: proc(t: ^Terminal, view: ^Terminal_View) -> string {
 		if row > start.row {
 			strings.write_rune(&b, '\n')
 		}
-		line_start := row == start.row ? start.col : 0
-		line_end := row == end.row ? end.col : t.grid.col_count-1
+		line_start := 0
+		line_end := t.grid.col_count-1
+		if view.selection.block {
+			line_start = min(start.col, end.col)
+			line_end = min(max(start.col, end.col), t.grid.col_count-1)
+		} else {
+			line_start = row == start.row ? start.col : 0
+			line_end = row == end.row ? end.col : t.grid.col_count-1
+		}
 		last := line_end
 		for last >= line_start {
 			cell := terminal_view_get_document_cell(t, Terminal_Point{row = row, col = last})

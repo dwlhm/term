@@ -45,12 +45,74 @@ _terminal_resize_primary :: proc(t: ^Terminal, new_rows: int, new_cols: int, all
 		}
 	}
 
+	// Seam coalescence across scrollback and grid boundary:
+	// If the newest row in scrollback is wrapped, pop all consecutive wrapped rows
+	// belonging to that logical line and prepend them to row 0's logical line.
+	seam_rows := make([dynamic][]Semantic_Cell, allocator)
+	defer {
+		for row in seam_rows {
+			delete(row, allocator)
+		}
+		delete(seam_rows)
+	}
+
+	for t.scrollback.count > 0 {
+		newest := scrollback_get(&t.scrollback, t.scrollback.count - 1)
+		if newest == nil || !newest.wrapped {
+			break
+		}
+		row_buf := make([]Semantic_Cell, old_cols, allocator)
+		row_wrapped := false
+		if scrollback_pop_newest(&t.scrollback, row_buf, &row_wrapped) {
+			append(&seam_rows, row_buf)
+		} else {
+			delete(row_buf, allocator)
+			break
+		}
+	}
+
 	logical_lines := make([dynamic]_Logical_Line, allocator)
 	defer {
 		for &ll in logical_lines {
 			delete(ll.cells)
 		}
 		delete(logical_lines)
+	}
+
+	has_prompt_above := false
+	if !t.has_osc_133 && t.cursor.row > 0 {
+		for r_cand := max(0, t.cursor.row - 2); r_cand < t.cursor.row; r_cand += 1 {
+			cand_phys := _grid_physical_row(&t.grid, r_cand)
+			if !t.grid.rows[cand_phys].wrapped {
+				hl := false
+				gl := 0
+				hr := false
+				has_frame := false
+				for c in 0..<old_cols {
+					cell := t.grid.rows[cand_phys].cells[c]
+					if cell.content == 0x256D || cell.content == 0x2570 { // ╭ or ╰
+						has_frame = true
+					}
+					is_blank := (cell.content == 0 || cell.content == ' ') && cell.style == 0
+					if !is_blank {
+						if !hl {
+							hl = true
+						} else if gl >= 1 {
+							hr = true
+						}
+						gl = 0
+					} else {
+						if hl {
+							gl += 1
+						}
+					}
+				}
+				if has_frame || (hl && hr) {
+					has_prompt_above = true
+					break
+				}
+			}
+		}
 	}
 
 	r := 0
@@ -62,11 +124,57 @@ _terminal_resize_primary :: proc(t: ^Terminal, new_rows: int, new_cols: int, all
 		ll.wrapped = false
 		ll.is_prompt = false
 
+		if r == 0 && len(seam_rows) > 0 {
+			// seam_rows[0] is newest popped, seam_rows[len - 1] is oldest
+			for s_idx := len(seam_rows) - 1; s_idx >= 0; s_idx -= 1 {
+				s_row := seam_rows[s_idx]
+				take_cols := old_cols
+				for take_cols > 0 && s_row[take_cols - 1] == CELL_DEFAULT {
+					take_cols -= 1
+				}
+				for c in 0..<take_cols {
+					append(&ll.cells, s_row[c])
+				}
+			}
+		}
+
 		for {
 			phys := _grid_physical_row(&t.grid, r)
 			row_wrapped := t.grid.rows[phys].wrapped
 			if t.grid.rows[phys].is_prompt {
 				ll.is_prompt = true
+			}
+			if !t.has_osc_133 {
+				if r == t.cursor.row && !row_wrapped && has_prompt_above {
+					ll.is_prompt = true
+				} else if r < t.cursor.row && !row_wrapped && (t.cursor.row - r) <= 2 && has_prompt_above {
+					hl := false
+					gl := 0
+					hr := false
+					has_frame := false
+					for c in 0..<old_cols {
+						cell := t.grid.rows[phys].cells[c]
+						if cell.content == 0x256D || cell.content == 0x2570 {
+							has_frame = true
+						}
+						is_blank := (cell.content == 0 || cell.content == ' ') && cell.style == 0
+						if !is_blank {
+							if !hl {
+								hl = true
+							} else if gl >= 1 {
+								hr = true
+							}
+							gl = 0
+						} else {
+							if hl {
+								gl += 1
+							}
+						}
+					}
+					if has_frame || (hl && hr) {
+						ll.is_prompt = true
+					}
+				}
 			}
 
 			if r == t.cursor.row {
@@ -76,15 +184,13 @@ _terminal_resize_primary :: proc(t: ^Terminal, new_rows: int, new_cols: int, all
 
 			if row_wrapped {
 				take_cols := old_cols
-				if r + 1 < old_rows {
-					next_phys := _grid_physical_row(&t.grid, r + 1)
-					next_first := t.grid.rows[next_phys].cells[0]
-					if _cell_is_lead(next_first) && t.grid.rows[phys].cells[old_cols - 1] == CELL_DEFAULT {
-						take_cols = old_cols - 1
-						if r == t.cursor.row && t.cursor.col >= take_cols {
-							ll.cursor_offset = len(ll.cells) + take_cols
-						}
-					}
+				// If the wrapped row has trailing unwritten CELL_DEFAULT cells (e.g. from wide-char right margin or previous padding), do not absorb them:
+				for take_cols > 0 && t.grid.rows[phys].cells[take_cols - 1] == CELL_DEFAULT {
+					take_cols -= 1
+				}
+				// Ensure at least take_cols covers up to cursor if cursor is on this row
+				if r == t.cursor.row {
+					take_cols = max(take_cols, t.cursor.col)
 				}
 				for c in 0..<take_cols {
 					append(&ll.cells, t.grid.rows[phys].cells[c])
@@ -145,7 +251,7 @@ _terminal_resize_primary :: proc(t: ^Terminal, new_rows: int, new_cols: int, all
 	cursor_found := false
 
 	for &ll in logical_lines {
-		if ll.is_prompt && t.has_osc_133 {
+		if ll.is_prompt {
 			current_row := _reflow_make_row(new_cols, allocator)
 			current_row.is_prompt = true
 			current_row.wrapped = false
@@ -294,7 +400,7 @@ _terminal_resize_primary :: proc(t: ^Terminal, new_rows: int, new_cols: int, all
 			copy(new_backing[i].cells, src_row.cells)
 			new_backing[i].generation = src_row.generation
 			new_backing[i].wrapped = src_row.wrapped
-			new_backing[i].is_prompt = (t.has_osc_133 && src_row.is_prompt)
+			new_backing[i].is_prompt = src_row.is_prompt
 			delete(src_row.cells, allocator)
 		}
 		new_cursor_row -= overflow
@@ -317,7 +423,7 @@ _terminal_resize_primary :: proc(t: ^Terminal, new_rows: int, new_cols: int, all
 				copy(dest_row.cells, src_row.cells)
 				dest_row.generation = src_row.generation
 				dest_row.wrapped = src_row.wrapped
-				dest_row.is_prompt = (t.has_osc_133 && src_row.is_prompt)
+				dest_row.is_prompt = src_row.is_prompt
 				delete(src_row.cells, allocator)
 			}
 			new_cursor_row += pull_count
@@ -327,7 +433,7 @@ _terminal_resize_primary :: proc(t: ^Terminal, new_rows: int, new_cols: int, all
 				copy(new_backing[i].cells, src_row.cells)
 				new_backing[i].generation = src_row.generation
 				new_backing[i].wrapped = src_row.wrapped
-				new_backing[i].is_prompt = (t.has_osc_133 && src_row.is_prompt)
+				new_backing[i].is_prompt = src_row.is_prompt
 				delete(src_row.cells, allocator)
 			}
 		}

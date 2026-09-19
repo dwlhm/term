@@ -13,8 +13,11 @@ Row :: struct {
 
 // row_init initializes a row with the specified number of columns.
 // All cells are set to CELL_DEFAULT, generation = 0.
-row_init :: proc(r: ^Row, cols: int, allocator: runtime.Allocator = context.allocator) {
-	r.cells = make([]Semantic_Cell, cols, allocator)
+row_init :: proc(r: ^Row, cols: int) {
+	if len(r.cells) != cols {
+		// Expect caller to provide backing
+		return
+	}
 	for i in 0..<cols {
 		r.cells[i] = CELL_DEFAULT
 	}
@@ -23,22 +26,18 @@ row_init :: proc(r: ^Row, cols: int, allocator: runtime.Allocator = context.allo
 	r.is_prompt = false
 }
 
-// row_destroy frees the cells array.
-row_destroy :: proc(r: ^Row, allocator: runtime.Allocator = context.allocator) {
-	if r.cells != nil {
-		delete(r.cells)
-		r.cells = nil
-	}
+// row_destroy is a no-op since Grid owns memory contiguously
+row_destroy :: proc(r: ^Row) {
 	r.generation = 0
 	r.wrapped = false
 	r.is_prompt = false
 }
 
 // row_clear resets all cells to CELL_DEFAULT and increments generation.
+import "core:slice"
+
 row_clear :: proc(r: ^Row) {
-	for i in 0..<len(r.cells) {
-		r.cells[i] = CELL_DEFAULT
-	}
+	slice.fill(r.cells, CELL_DEFAULT)
 	r.generation += 1
 	r.wrapped = false
 	r.is_prompt = false
