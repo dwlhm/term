@@ -10,27 +10,14 @@ _Logical_Line :: struct {
 	is_prompt:     bool,
 }
 
-PROMPT_ELASTIC_GAP_MIN_LEN :: 4
-
 _reflow_make_row :: proc(cols: int, allocator: runtime.Allocator) -> Row {
 	r: Row
-	row_init(&r, cols, allocator)
+	r.cells = make([]Semantic_Cell, cols, allocator)
+	row_init(&r, cols)
 	return r
 }
 
-// terminal_resize changes the grid dimensions with bidirectional logical line reflow.
-// When columns shrink, text wraps down without being truncated or lost;
-// when columns expand back, text unwraps back to its original layout.
-// Live grapheme handles survive on wrapped lines.
-terminal_resize :: proc(t: ^Terminal, new_rows: int, new_cols: int, allocator := context.allocator) {
-	// a. Handle degenerate dims (<= 0) and same dims early out
-	if new_rows <= 0 || new_cols <= 0 {
-		return
-	}
-	if new_rows == t.grid.row_count && new_cols == t.grid.col_count {
-		return
-	}
-
+_terminal_resize_primary :: proc(t: ^Terminal, new_rows: int, new_cols: int, allocator: runtime.Allocator = context.allocator) {
 	old_rows := t.grid.row_count
 	old_cols := t.grid.col_count
 
@@ -139,104 +126,15 @@ terminal_resize :: proc(t: ^Terminal, new_rows: int, new_cols: int, allocator :=
 	// c. Allocate new_backing of capacity _next_pow2(new_rows), each row initialized with new_cols cells
 	new_cap := _next_pow2(new_rows)
 	new_backing := make([]Row, new_cap, allocator)
+	new_cells := make([]Semantic_Cell, new_cap * new_cols, allocator)
 	for i in 0..<new_cap {
-		row_init(&new_backing[i], new_cols, allocator)
+		new_backing[i].cells = new_cells[i * new_cols : (i + 1) * new_cols]
+		for c in 0..<new_cols { new_backing[i].cells[c] = CELL_DEFAULT }
+		new_backing[i].generation = 0
+		new_backing[i].wrapped = false
+		new_backing[i].is_prompt = false
 	}
 
-	// Active prompt elastic space gap compression:
-	// If new_cols < old_cols, active prompt lines containing an elastic space gap leading to RPROMPT
-	// (e.g. >= 6 consecutive unstyled spaces with text at both ends) are compressed by (old_cols - new_cols)
-	// so that the line stays on 1 physical row instead of wrapping, preserving prompt vertical stability.
-	if new_cols < old_cols {
-		for line_idx in 0..<len(logical_lines) {
-			ll := &logical_lines[line_idx]
-			if ll.wrapped {
-				continue
-			}
-			if t.has_osc_133 && !ll.is_prompt {
-				continue
-			}
-			if len(ll.cells) <= new_cols || old_cols < 30 {
-				continue
-			}
-
-			// Find first text cell
-			first_text := -1
-			for i in 0..<len(ll.cells) {
-				cell := ll.cells[i]
-				if cell.content != 0 && cell.content != ' ' {
-					first_text = i
-					break
-				}
-			}
-			if first_text < 0 {
-				continue
-			}
-
-			// Find last text cell
-			last_text := -1
-			for i := len(ll.cells) - 1; i >= 0; i -= 1 {
-				cell := ll.cells[i]
-				if cell.content != 0 && cell.content != ' ' {
-					last_text = i
-					break
-				}
-			}
-			if last_text <= first_text {
-				continue
-			}
-
-			// Find the longest run of spaces between first_text and last_text
-			best_gap_start := -1
-			best_gap_len := 0
-			cur_gap_start := -1
-			cur_gap_len := 0
-
-			for i in (first_text + 1)..=last_text {
-				is_space := false
-				if i < last_text {
-					cell := ll.cells[i]
-					if cell.content == 0 || cell.content == ' ' {
-						is_space = true
-					}
-				}
-				if is_space {
-					if cur_gap_start == -1 {
-						cur_gap_start = i
-						cur_gap_len = 1
-					} else {
-						cur_gap_len += 1
-					}
-				} else {
-					if cur_gap_len > best_gap_len {
-						best_gap_len = cur_gap_len
-						best_gap_start = cur_gap_start
-					}
-					cur_gap_start = -1
-					cur_gap_len = 0
-				}
-			}
-
-			should_compress := best_gap_len >= PROMPT_ELASTIC_GAP_MIN_LEN
-
-			cursor_ok := !ll.has_cursor || ll.cursor_offset <= best_gap_start + 1
-			if should_compress && cursor_ok {
-				ll.is_prompt = true
-				diff := len(ll.cells) - new_cols
-				compress := min(diff, best_gap_len)
-				if compress > 0 {
-					remove_start := best_gap_start + best_gap_len - compress
-					remove_end := best_gap_start + best_gap_len
-					copy(ll.cells[remove_start:], ll.cells[remove_end:])
-					resize(&ll.cells, len(ll.cells) - compress)
-
-					if ll.has_cursor && ll.cursor_offset > remove_start {
-						ll.cursor_offset = max(remove_start, ll.cursor_offset - compress)
-					}
-				}
-			}
-		}
-	}
 
 	// d. Reflow extracted logical lines into rows
 	reflowed_rows := make([dynamic]Row, allocator)
@@ -247,7 +145,7 @@ terminal_resize :: proc(t: ^Terminal, new_rows: int, new_cols: int, allocator :=
 	cursor_found := false
 
 	for &ll in logical_lines {
-		if ll.is_prompt {
+		if ll.is_prompt && t.has_osc_133 {
 			current_row := _reflow_make_row(new_cols, allocator)
 			current_row.is_prompt = true
 			current_row.wrapped = false
@@ -271,12 +169,6 @@ terminal_resize :: proc(t: ^Terminal, new_rows: int, new_cols: int, allocator :=
 					current_row.cells[col] = cell
 					col += 1
 					ci += 1
-				}
-			}
-
-			if t.grapheme_store.live_count > 0 && len(ll.cells) > limit {
-				for i in limit..<len(ll.cells) {
-					grapheme_store_release(&t.grapheme_store, ll.cells[i].content)
 				}
 			}
 
@@ -387,7 +279,7 @@ terminal_resize :: proc(t: ^Terminal, new_rows: int, new_cols: int, allocator :=
 		overflow := total_rows - new_rows
 		for i in 0..<overflow {
 			if t.scrollback.max_lines > 0 {
-				scrollback_push(&t.scrollback, reflowed_rows[i].cells, &t.grapheme_store, allocator)
+				scrollback_push(&t.scrollback, reflowed_rows[i].cells, &t.grapheme_store, reflowed_rows[i].wrapped, allocator)
 			} else {
 				if t.grapheme_store.live_count != 0 {
 					for c in 0..<len(reflowed_rows[i].cells) {
@@ -395,26 +287,61 @@ terminal_resize :: proc(t: ^Terminal, new_rows: int, new_cols: int, allocator :=
 					}
 				}
 			}
-			row_destroy(&reflowed_rows[i], allocator)
+			delete(reflowed_rows[i].cells, allocator)
 		}
 		for i in 0..<new_rows {
-			row_destroy(&new_backing[i], allocator)
-			new_backing[i] = reflowed_rows[overflow + i]
+			src_row := &reflowed_rows[overflow + i]
+			copy(new_backing[i].cells, src_row.cells)
+			new_backing[i].generation = src_row.generation
+			new_backing[i].wrapped = src_row.wrapped
+			new_backing[i].is_prompt = (t.has_osc_133 && src_row.is_prompt)
+			delete(src_row.cells, allocator)
 		}
 		new_cursor_row -= overflow
 	} else {
-		for i in 0..<total_rows {
-			row_destroy(&new_backing[i], allocator)
-			new_backing[i] = reflowed_rows[i]
+		is_screen_full := max_active_row >= old_rows - 1
+		pull_count := min(new_rows - total_rows, new_rows - old_rows, t.scrollback.count) if (new_rows > old_rows && is_screen_full) else 0
+		if pull_count > 0 {
+			// Pull pull_count newest rows from scrollback into new_backing[0 ..< pull_count]
+			for i := pull_count - 1; i >= 0; i -= 1 {
+				row_wrapped := false
+				_ = scrollback_pop_newest(&t.scrollback, new_backing[i].cells, &row_wrapped)
+				new_backing[i].generation = 0
+				new_backing[i].wrapped = row_wrapped
+				new_backing[i].is_prompt = false
+			}
+			// Place reflowed_rows at pull_count ..< pull_count + total_rows
+			for i in 0..<total_rows {
+				dest_row := &new_backing[pull_count + i]
+				src_row := &reflowed_rows[i]
+				copy(dest_row.cells, src_row.cells)
+				dest_row.generation = src_row.generation
+				dest_row.wrapped = src_row.wrapped
+				dest_row.is_prompt = (t.has_osc_133 && src_row.is_prompt)
+				delete(src_row.cells, allocator)
+			}
+			new_cursor_row += pull_count
+		} else {
+			for i in 0..<total_rows {
+				src_row := &reflowed_rows[i]
+				copy(new_backing[i].cells, src_row.cells)
+				new_backing[i].generation = src_row.generation
+				new_backing[i].wrapped = src_row.wrapped
+				new_backing[i].is_prompt = (t.has_osc_133 && src_row.is_prompt)
+				delete(src_row.cells, allocator)
+			}
 		}
 	}
 
 	// f. Set t.grid.rows = new_backing, ...
 	for i in 0..<len(t.grid.rows) {
-		row_destroy(&t.grid.rows[i], allocator)
+	}
+	if t.grid.cells != nil {
+		delete(t.grid.cells)
 	}
 	delete(t.grid.rows)
 	t.grid.rows = new_backing
+	t.grid.cells = new_cells
 	t.grid.row_count = new_rows
 	t.grid.col_count = new_cols
 	t.grid.capacity = new_cap
@@ -441,9 +368,119 @@ terminal_resize :: proc(t: ^Terminal, new_rows: int, new_cols: int, allocator :=
 	// i. Reset scroll region to full grid and bump render_epoch
 	terminal_reset_scroll_region(t)
 	t.render_epoch += 1
+}
 
-	// Keep alternate buffer in sync with window dimensions
+// terminal_resize changes the grid dimensions with bidirectional logical line reflow.
+// When columns shrink, text wraps down without being truncated or lost;
+// when columns expand back, text unwraps back to its original layout.
+// Live grapheme handles survive on wrapped lines.
+terminal_resize :: proc(t: ^Terminal, new_rows: int, new_cols: int, allocator := context.allocator) {
+	// a. Handle degenerate dims (<= 0) and same dims early out
+	if new_rows <= 0 || new_cols <= 0 {
+		return
+	}
+	if new_rows == t.grid.row_count && new_cols == t.grid.col_count {
+		return
+	}
+
+	if t.is_alt_screen {
+		// 1. Swap active grid and alt_grid so t.grid is primary screen
+		t.grid, t.alt_grid = t.alt_grid, t.grid
+		saved_alt_cursor := t.cursor
+		t.cursor = t.saved_cursor
+
+		// 2. Resize primary screen with full reflow & scrollback
+		_terminal_resize_primary(t, new_rows, new_cols, allocator)
+		t.saved_cursor = t.cursor
+
+		// 3. Resize alt screen grid (now in t.alt_grid) without scrollback
+		_grid_resize_alt(&t.alt_grid, new_rows, new_cols, &t.grapheme_store, allocator)
+
+		// 4. Swap back so t.grid is alt screen
+		t.grid, t.alt_grid = t.alt_grid, t.grid
+		t.cursor.row = clamp(saved_alt_cursor.row, 0, new_rows - 1)
+		t.cursor.col = clamp(saved_alt_cursor.col, 0, new_cols - 1)
+		t.cursor.pending_wrap = false
+		t.scroll_top = 0
+		t.scroll_bottom = new_rows - 1
+
+		damage_destroy(&t.damage, allocator)
+		damage_init(&t.damage, new_rows, new_cols, allocator)
+		gens := make([]u32, new_rows, allocator)
+		for i in 0..<new_rows {
+			gens[i] = t.grid.rows[i].generation
+		}
+		damage_mark_all(&t.damage, gens)
+		delete(gens, allocator)
+		t.render_epoch += 1
+		return
+	}
+	_terminal_resize_primary(t, new_rows, new_cols, allocator)
 	_grid_resize_clean(t, new_rows, new_cols, allocator)
+}
+
+_grid_resize_alt :: proc(g: ^Grid, new_rows, new_cols: int, store: ^Grapheme_Store, allocator: runtime.Allocator = context.allocator) {
+	old_rows := g.row_count
+	old_cols := g.col_count
+	old_rows_slice := g.rows
+	old_cells_slice := g.cells
+
+	new_cap := _next_pow2(new_rows)
+	new_rows_slice := make([]Row, new_cap, allocator)
+	new_cells_slice := make([]Semantic_Cell, new_cap * new_cols, allocator)
+
+	// Release grapheme handles from cells that will be discarded
+	if store != nil && store.live_count > 0 {
+		for r in new_rows..<min(old_rows, len(old_rows_slice)) {
+			for c in 0..<min(old_cols, len(old_rows_slice[r].cells)) {
+				grapheme_store_release(store, old_rows_slice[r].cells[c].content)
+			}
+		}
+		if new_cols < old_cols {
+			for r in 0..<min(old_rows, new_rows) {
+				if r < len(old_rows_slice) {
+					for c in new_cols..<min(old_cols, len(old_rows_slice[r].cells)) {
+						grapheme_store_release(store, old_rows_slice[r].cells[c].content)
+					}
+				}
+			}
+		}
+	}
+
+	copy_rows := min(old_rows, new_rows)
+	copy_cols := min(old_cols, new_cols)
+
+	for i in 0..<new_cap {
+		new_rows_slice[i].cells = new_cells_slice[i * new_cols : (i + 1) * new_cols]
+		for c in 0..<new_cols {
+			new_rows_slice[i].cells[c] = CELL_DEFAULT
+		}
+		if i < copy_rows && i < len(old_rows_slice) {
+			copy(new_rows_slice[i].cells[:copy_cols], old_rows_slice[i].cells[:copy_cols])
+			new_rows_slice[i].generation = old_rows_slice[i].generation + 1
+			new_rows_slice[i].wrapped = old_rows_slice[i].wrapped
+			new_rows_slice[i].is_prompt = false
+		} else {
+			new_rows_slice[i].generation = 0
+			new_rows_slice[i].wrapped = false
+			new_rows_slice[i].is_prompt = false
+		}
+	}
+
+	if old_cells_slice != nil {
+		delete(old_cells_slice)
+	}
+	if old_rows_slice != nil {
+		delete(old_rows_slice)
+	}
+
+	g.rows = new_rows_slice
+	g.cells = new_cells_slice
+	g.row_count = new_rows
+	g.col_count = new_cols
+	g.capacity = new_cap
+	g.mask = new_cap - 1
+	g.origin = 0
 }
 
 _grid_resize_clean :: proc(t: ^Terminal, new_rows, new_cols: int, allocator: runtime.Allocator = context.allocator) {
@@ -455,8 +492,8 @@ _grid_resize_clean :: proc(t: ^Terminal, new_rows, new_cols: int, allocator: run
 			}
 		}
 	}
-	for i in 0..<len(g.rows) {
-		row_destroy(&g.rows[i], allocator)
+	if g.cells != nil {
+		delete(g.cells)
 	}
 	if g.rows != nil {
 		delete(g.rows)
@@ -468,7 +505,12 @@ _grid_resize_clean :: proc(t: ^Terminal, new_rows, new_cols: int, allocator: run
 	g.mask = new_cap - 1
 	g.origin = 0
 	g.rows = make([]Row, new_cap, allocator)
+	g.cells = make([]Semantic_Cell, new_cap * new_cols, allocator)
 	for i in 0..<new_cap {
-		row_init(&g.rows[i], new_cols, allocator)
+		g.rows[i].cells = g.cells[i * new_cols : (i + 1) * new_cols]
+		for c in 0..<new_cols { g.rows[i].cells[c] = CELL_DEFAULT }
+		g.rows[i].generation = 0
+		g.rows[i].wrapped = false
+		g.rows[i].is_prompt = false
 	}
 }

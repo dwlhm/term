@@ -309,22 +309,22 @@ test_scrollback_preserved_on_resize :: proc(t: ^testing.T) {
 		}
 	}
 
-	for _ in 0..<5 {
+	for _ in 0..<40 {
 		tg.scrollback_push(&term.scrollback, row_cells, &term.grapheme_store)
 	}
-	testing.expect(t, len(term.scrollback.rows) == 5, "5 rows initially in scrollback")
+	testing.expect(t, tg.scrollback_len(&term.scrollback) == 40, "40 rows initially in scrollback")
 
 	tg.terminal_resize(&term, 30, 60)
 	testing.expect(t, term.scrollback.col_count == 60, "scrollback col_count is 60")
-	testing.expect(t, len(term.scrollback.rows) > 0, "scrollback rows preserved after shrink")
+	testing.expect(t, tg.scrollback_len(&term.scrollback) > 0, "scrollback rows preserved after shrink")
 	testing.expect(t, tg.terminal_view_max_offset(&term) > 0, "view max offset positive after shrink")
-	testing.expect(t, term.scrollback.rows[0].cells[0].content == 'A', "scrollback content intact after shrink")
+	testing.expect(t, tg.scrollback_get(&term.scrollback, 0)^.cells[0].content == 'A', "scrollback content intact after shrink")
 
 	tg.terminal_resize(&term, 24, 100)
 	testing.expect(t, term.scrollback.col_count == 100, "scrollback col_count is 100")
-	testing.expect(t, len(term.scrollback.rows) > 0, "scrollback rows preserved after grow")
+	testing.expect(t, tg.scrollback_len(&term.scrollback) > 0, "scrollback rows preserved after grow")
 	testing.expect(t, tg.terminal_view_max_offset(&term) > 0, "view max offset positive after grow")
-	testing.expect(t, term.scrollback.rows[0].cells[0].content == 'A', "scrollback content intact after grow")
+	testing.expect(t, tg.scrollback_get(&term.scrollback, 0)^.cells[0].content == 'A', "scrollback content intact after grow")
 }
 
 @(test)
@@ -447,28 +447,64 @@ test_resize_prompt_rprompt_elastic_gap :: proc(t: ^testing.T) {
 	tg.terminal_move_cursor(&term, 0, 10)
 	testing.expect(t, term.cursor.row == 0 && term.cursor.col == 10, "cursor at end of left prompt")
 
-	// Resize to 70 cols: gap compresses by 80 - 70 = 10 spaces, line stays on 1 row!
+	// Standard VT reflow shrink to 70 cols:
+	// 80 cols wraps into 2 rows: row 0 gets 70 cols (wrapped = true), row 1 gets 10 cols (wrapped = false)
 	tg.terminal_resize(&term, 24, 70)
 
 	testing.expect(t, term.grid.col_count == 70, "col_count is 70")
-	testing.expect(t, !term.grid.rows[0].wrapped, "row 0 stays on 1 row and is not wrapped")
+	testing.expect(t, term.grid.rows[0].wrapped, "row 0 wrapped is true after shrink to 70")
+	testing.expect(t, !term.grid.rows[1].wrapped, "row 1 wrapped is false")
 	testing.expect(t, term.cursor.row == 0, "cursor row stays on row 0")
 	testing.expect(t, term.cursor.col == 10, "cursor col preserved at 10")
 
-	// Verify left prompt intact
+	// Verify row 0 has left prompt (10 chars) + 60 spaces = 70 cols total, preserving 100% of spaces
 	for i in 0..<10 {
 		cell := tg.grid_get_cell(&term.grid, 0, i)
-		testing.expect(t, cell.content == tg.Content_Handle('0' + i), "left prompt intact")
+		testing.expect(t, cell.content == tg.Content_Handle('0' + i), "left prompt intact on row 0")
 	}
-	// Verify RPROMPT intact at right edge (cols 60..69)
+	for i in 10..<70 {
+		cell := tg.grid_get_cell(&term.grid, 0, i)
+		testing.expect(t, cell.content == ' ', "space gap intact on row 0")
+	}
+
+	// Verify row 1 has extra 10 cols (RPROMPT 'a'..'j') at cols 0..9, zero deletion/compression
 	for i in 0..<10 {
-		cell := tg.grid_get_cell(&term.grid, 0, 60 + i)
-		testing.expect(t, cell.content == tg.Content_Handle('a' + i), "rprompt intact at right edge")
-	}
-	// Verify row 1 is empty
-	for i in 0..<70 {
 		cell := tg.grid_get_cell(&term.grid, 1, i)
-		testing.expect(t, cell == tg.CELL_DEFAULT, "row 1 is empty default")
+		testing.expect(t, cell.content == tg.Content_Handle('a' + i), "rprompt wrapped intact to row 1")
+	}
+	// Rest of row 1 is blank
+	for i in 10..<70 {
+		cell := tg.grid_get_cell(&term.grid, 1, i)
+		testing.expect(t, cell == tg.CELL_DEFAULT, "row 1 tail is empty default")
+	}
+
+	// Expanding back to 80 cols unwraps the line back to a single row
+	tg.terminal_resize(&term, 24, 80)
+
+	testing.expect(t, term.grid.col_count == 80, "col_count is 80")
+	testing.expect(t, !term.grid.rows[0].wrapped, "row 0 wrapped is false after unwrap")
+	testing.expect(t, !term.grid.rows[1].wrapped, "row 1 wrapped is false")
+	testing.expect(t, term.cursor.row == 0, "cursor row stays on row 0 after unwrap")
+	testing.expect(t, term.cursor.col == 10, "cursor col preserved at 10 after unwrap")
+
+	// Verify row 0 restored completely
+	for i in 0..<10 {
+		cell := tg.grid_get_cell(&term.grid, 0, i)
+		testing.expect(t, cell.content == tg.Content_Handle('0' + i), "left prompt intact on row 0 after unwrap")
+	}
+	for i in 10..<70 {
+		cell := tg.grid_get_cell(&term.grid, 0, i)
+		testing.expect(t, cell.content == ' ', "space gap intact on row 0 after unwrap")
+	}
+	for i in 0..<10 {
+		cell := tg.grid_get_cell(&term.grid, 0, 70 + i)
+		testing.expect(t, cell.content == tg.Content_Handle('a' + i), "rprompt unwrapped intact at cols 70..79 on row 0")
+	}
+
+	// Verify row 1 is completely empty after unwrap
+	for i in 0..<80 {
+		cell := tg.grid_get_cell(&term.grid, 1, i)
+		testing.expect(t, cell == tg.CELL_DEFAULT, "row 1 is empty default after unwrap")
 	}
 }
 
@@ -632,20 +668,20 @@ test_resize_dual_engine_scrollback_preservation :: proc(t: ^testing.T) {
 		tg.terminal_newline(&term)
 	}
 
-	testing.expect(t, len(term.scrollback.rows) == 5, "5 rows in scrollback")
+	testing.expect(t, tg.scrollback_len(&term.scrollback) == 5, "5 rows in scrollback")
 	testing.expect(t, term.scrollback.col_count == 80, "scrollback col_count is 80")
 
 	// Resize to 50 cols: scrollback must not be cleared!
 	tg.terminal_resize(&term, 10, 50)
-	testing.expect(t, len(term.scrollback.rows) == 5, "5 rows preserved after resize to 50 cols")
+	testing.expect(t, tg.scrollback_len(&term.scrollback) == 5, "5 rows preserved after resize to 50 cols")
 	testing.expect(t, term.scrollback.col_count == 50, "scrollback col_count adapted to 50")
-	testing.expect(t, term.scrollback.rows[0].cells[0].content == tg.Content_Handle('A'), "oldest row content intact")
+	testing.expect(t, tg.scrollback_get(&term.scrollback, 0)^.cells[0].content == tg.Content_Handle('A'), "oldest row content intact")
 
 	// Resize to 100 cols: scrollback still preserved!
 	tg.terminal_resize(&term, 10, 100)
-	testing.expect(t, len(term.scrollback.rows) == 5, "5 rows preserved after resize to 100 cols")
+	testing.expect(t, tg.scrollback_len(&term.scrollback) == 5, "5 rows preserved after resize to 100 cols")
 	testing.expect(t, term.scrollback.col_count == 100, "scrollback col_count adapted to 100")
-	testing.expect(t, term.scrollback.rows[0].cells[0].content == tg.Content_Handle('A'), "oldest row content intact")
+	testing.expect(t, tg.scrollback_get(&term.scrollback, 0)^.cells[0].content == tg.Content_Handle('A'), "oldest row content intact")
 }
 
 @(test)
@@ -671,29 +707,170 @@ test_resize_prompt_rprompt_elastic_gap_styled :: proc(t: ^testing.T) {
 	tg.terminal_move_cursor(&term, 0, 10)
 	testing.expect(t, term.cursor.row == 0 && term.cursor.col == 10, "cursor at end of left prompt")
 
-	// Resize to 70 cols: gap compresses by 80 - 70 = 10 spaces, line stays on 1 row!
+	// Standard VT reflow shrink to 70 cols:
+	// 80 cols wraps into 2 rows: row 0 gets 70 cols (wrapped = true), row 1 gets 10 cols (wrapped = false)
 	tg.terminal_resize(&term, 24, 70)
 
 	testing.expect(t, term.grid.col_count == 70, "col_count is 70")
-	testing.expect(t, !term.grid.rows[0].wrapped, "row 0 stays on 1 row and is not wrapped")
+	testing.expect(t, term.grid.rows[0].wrapped, "row 0 wrapped is true after shrink to 70")
+	testing.expect(t, !term.grid.rows[1].wrapped, "row 1 wrapped is false")
 	testing.expect(t, term.cursor.row == 0, "cursor row stays on row 0")
 	testing.expect(t, term.cursor.col == 10, "cursor col preserved at 10")
 
-	// Verify left prompt intact
+	// Verify row 0 has left prompt (10 chars with style 1) + 60 spaces with style 2, zero deletion
 	for i in 0..<10 {
 		cell := tg.grid_get_cell(&term.grid, 0, i)
-		testing.expect(t, cell.content == tg.Content_Handle('0' + i), "left prompt intact")
+		testing.expect(t, cell.content == tg.Content_Handle('0' + i) && cell.style == 1, "styled left prompt intact on row 0")
 	}
-	// Verify RPROMPT intact at right edge (cols 60..69)
+	for i in 10..<70 {
+		cell := tg.grid_get_cell(&term.grid, 0, i)
+		testing.expect(t, cell.content == ' ' && cell.style == 2, "styled space gap intact on row 0")
+	}
+
+	// Verify row 1 has extra 10 cols (RPROMPT 'a'..'j' with style 3) at cols 0..9
 	for i in 0..<10 {
-		cell := tg.grid_get_cell(&term.grid, 0, 60 + i)
-		testing.expect(t, cell.content == tg.Content_Handle('a' + i), "rprompt intact at right edge")
-	}
-	// Verify row 1 is empty default
-	for i in 0..<70 {
 		cell := tg.grid_get_cell(&term.grid, 1, i)
-		testing.expect(t, cell == tg.CELL_DEFAULT, "row 1 is empty default")
+		testing.expect(t, cell.content == tg.Content_Handle('a' + i) && cell.style == 3, "styled rprompt wrapped intact to row 1")
+	}
+	// Rest of row 1 is blank default
+	for i in 10..<70 {
+		cell := tg.grid_get_cell(&term.grid, 1, i)
+		testing.expect(t, cell == tg.CELL_DEFAULT, "row 1 tail is empty default")
+	}
+
+	// Expanding back to 80 cols unwraps the line back to a single row
+	tg.terminal_resize(&term, 24, 80)
+
+	testing.expect(t, term.grid.col_count == 80, "col_count is 80")
+	testing.expect(t, !term.grid.rows[0].wrapped, "row 0 wrapped is false after unwrap")
+	testing.expect(t, !term.grid.rows[1].wrapped, "row 1 wrapped is false")
+	testing.expect(t, term.cursor.row == 0, "cursor row stays on row 0 after unwrap")
+	testing.expect(t, term.cursor.col == 10, "cursor col preserved at 10 after unwrap")
+
+	// Verify row 0 restored completely with all styles preserved
+	for i in 0..<10 {
+		cell := tg.grid_get_cell(&term.grid, 0, i)
+		testing.expect(t, cell.content == tg.Content_Handle('0' + i) && cell.style == 1, "styled left prompt restored on row 0")
+	}
+	for i in 10..<70 {
+		cell := tg.grid_get_cell(&term.grid, 0, i)
+		testing.expect(t, cell.content == ' ' && cell.style == 2, "styled space gap restored on row 0")
+	}
+	for i in 0..<10 {
+		cell := tg.grid_get_cell(&term.grid, 0, 70 + i)
+		testing.expect(t, cell.content == tg.Content_Handle('a' + i) && cell.style == 3, "styled rprompt restored at cols 70..79 on row 0")
+	}
+
+	// Verify row 1 is empty default after unwrap
+	for i in 0..<80 {
+		cell := tg.grid_get_cell(&term.grid, 1, i)
+		testing.expect(t, cell == tg.CELL_DEFAULT, "row 1 is empty default after unwrap")
 	}
 }
+
+@(test)
+test_resize_grow_pulls_from_scrollback :: proc(t: ^testing.T) {
+	term: tg.Terminal
+	tg.terminal_init(&term, 10, 80)
+	defer tg.terminal_destroy(&term)
+
+	for i in 0..<15 {
+		if i > 0 {
+			tg.terminal_newline(&term)
+		}
+		tg.terminal_put_char(&term, rune('A' + i))
+	}
+
+	testing.expect(t, term.scrollback.count == 5, "5 rows pushed to scrollback")
+	testing.expect(t, term.cursor.row == 9, "cursor row at 9 before resize")
+
+	tg.terminal_resize(&term, 15, 80)
+
+	testing.expect(t, term.grid.row_count == 15, "row_count should be 15")
+	testing.expect(t, term.scrollback.count == 0, "scrollback count should be 0")
+	testing.expect(t, term.cursor.row == 14, "cursor row should be shifted down by 5 to 14")
+
+	for i in 0..<15 {
+		cell := tg.grid_get_cell(&term.grid, i, 0)
+		testing.expect(t, cell.content == tg.Content_Handle('A' + i), "row content matches in order")
+	}
+}
+
+@(test)
+test_resize_shrink_and_grow_reversible :: proc(t: ^testing.T) {
+	term: tg.Terminal
+	tg.terminal_init(&term, 10, 80)
+	defer tg.terminal_destroy(&term)
+
+	for r in 0..<10 {
+		tg.terminal_move_cursor(&term, r, 0)
+		tg.terminal_put_char(&term, rune('A' + r))
+	}
+
+	tg.terminal_resize(&term, 6, 80)
+
+	testing.expect(t, term.grid.row_count == 6, "grid rows shrunk to 6")
+	testing.expect(t, term.scrollback.count == 4, "4 rows overflowed to scrollback")
+
+	tg.terminal_resize(&term, 10, 80)
+
+	testing.expect(t, term.grid.row_count == 10, "grid rows restored to 10")
+	testing.expect(t, term.scrollback.count == 0, "scrollback restored to 0")
+
+	for r in 0..<10 {
+		cell := tg.grid_get_cell(&term.grid, r, 0)
+		testing.expect(t, cell.content == tg.Content_Handle('A' + r), "row content restored identically")
+	}
+}
+
+@(test)
+test_resize_grow_does_not_pull_scrollback_if_screen_not_full :: proc(t: ^testing.T) {
+	term: tg.Terminal
+	tg.terminal_init(&term, 10, 80)
+	defer tg.terminal_destroy(&term)
+
+	// Write 15 lines (5 lines pushed to scrollback)
+	for i in 0..<15 {
+		if i > 0 {
+			tg.terminal_newline(&term)
+		}
+		tg.terminal_put_char(&term, rune('A' + i))
+	}
+
+	testing.expect(t, term.scrollback.count == 5, "5 rows pushed to scrollback")
+
+	// Clear screen
+	tg.terminal_move_cursor(&term, 0, 0)
+	tg.terminal_erase_display(&term, .Entire)
+
+	// Write 3 lines (rows 0, 1, 2)
+	for i in 0..<3 {
+		if i > 0 {
+			tg.terminal_newline(&term)
+		}
+		tg.terminal_put_char(&term, rune('1' + i))
+	}
+
+	testing.expect(t, term.cursor.row == 2, "cursor row at 2 before resize")
+
+	// Resize terminal to 15 rows, 80 cols
+	tg.terminal_resize(&term, 15, 80)
+
+	// Verify that term.scrollback.count == 5 (no rows pulled from scrollback!)
+	testing.expect(t, term.scrollback.count == 5, "scrollback count must remain 5, no rows pulled")
+	testing.expect(t, term.cursor.row == 2, "cursor row must stay at 2")
+
+	// Verify rows 0, 1, 2 retain their content
+	testing.expect(t, tg.grid_get_cell(&term.grid, 0, 0).content == tg.Content_Handle('1'), "row 0 retained")
+	testing.expect(t, tg.grid_get_cell(&term.grid, 1, 0).content == tg.Content_Handle('2'), "row 1 retained")
+	testing.expect(t, tg.grid_get_cell(&term.grid, 2, 0).content == tg.Content_Handle('3'), "row 2 retained")
+
+	// Rows 3..14 are empty
+	for r in 3..<15 {
+		testing.expect(t, tg.grid_get_cell(&term.grid, r, 0) == tg.CELL_DEFAULT, "rows 3..14 are empty")
+	}
+}
+
+
 
 
