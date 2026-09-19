@@ -326,6 +326,41 @@ test_pump_translate_delete_and_local_actions :: proc(t: ^testing.T) {
 
 	n, _, _ = input.input_translate_sdl(_pump_key(sdl3.K_KP_MINUS, sdl3.KMOD_CTRL), out[:])
 	testing.expect(t, n == 1 && out[0].event_type == .Local && out[0].action == .Zoom_Out, "Ctrl+keypad minus must be local zoom out")
+
+	// Cmd+Shift+R / Ctrl+Shift+R -> Reload_Config
+	n, _, _ = input.input_translate_sdl(_pump_key(sdl3.K_R, sdl3.KMOD_GUI|sdl3.KMOD_SHIFT), out[:])
+	testing.expect(t, n == 1 && out[0].event_type == .Local && out[0].action == .Reload_Config, "GUI+Shift+R must be local Reload_Config")
+
+	n, _, _ = input.input_translate_sdl(_pump_key(sdl3.K_R, sdl3.KMOD_CTRL|sdl3.KMOD_SHIFT), out[:])
+	testing.expect(t, n == 1 && out[0].event_type == .Local && out[0].action == .Reload_Config, "Ctrl+Shift+R must be local Reload_Config")
+
+	// Bare Ctrl+R -> Ctrl{r} for PTY (must not be intercepted)
+	n, _, _ = input.input_translate_sdl(_pump_key(sdl3.K_R, sdl3.KMOD_CTRL), out[:])
+	testing.expect(t, n == 1 && out[0].kind == .Ctrl && out[0].rune == 'r', "bare Ctrl+R must be Ctrl{r}")
+}
+
+@(test)
+test_pump_translate_reload_config_shortcut :: proc(t: ^testing.T) {
+	out: [4]input.Input_Event
+
+	// Cmd+Shift+R (macOS) -> Local Reload_Config
+	n, _, _ := input.input_translate_sdl(_pump_key(sdl3.K_R, sdl3.KMOD_GUI|sdl3.KMOD_SHIFT), out[:])
+	testing.expect(t, n == 1, "Cmd+Shift+R must yield 1 event")
+	testing.expect(t, out[0].event_type == .Local && out[0].action == .Reload_Config, "Cmd+Shift+R must be local Reload_Config")
+
+	// Ctrl+Shift+R (Linux / cross-platform) -> Local Reload_Config
+	n, _, _ = input.input_translate_sdl(_pump_key(sdl3.K_R, sdl3.KMOD_CTRL|sdl3.KMOD_SHIFT), out[:])
+	testing.expect(t, n == 1, "Ctrl+Shift+R must yield 1 event")
+	testing.expect(t, out[0].event_type == .Local && out[0].action == .Reload_Config, "Ctrl+Shift+R must be local Reload_Config")
+
+	// Bare Ctrl+R -> PTY Ctrl event (must NOT be intercepted as local action)
+	n, _, _ = input.input_translate_sdl(_pump_key(sdl3.K_R, sdl3.KMOD_CTRL), out[:])
+	testing.expect(t, n == 1, "bare Ctrl+R must yield 1 event")
+	testing.expect(t, out[0].event_type == .Key && out[0].kind == .Ctrl && out[0].rune == 'r', "bare Ctrl+R must be Ctrl{r} for PTY")
+
+	// Bare Cmd+R -> Not Reload_Config
+	n, _, _ = input.input_translate_sdl(_pump_key(sdl3.K_R, sdl3.KMOD_GUI), out[:])
+	testing.expect(t, out[0].action != .Reload_Config, "bare Cmd+R must not trigger Reload_Config")
 }
 
 @(test)

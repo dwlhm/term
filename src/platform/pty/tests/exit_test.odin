@@ -168,3 +168,31 @@ test_exit_rejects_bad_pty :: proc(t: ^testing.T) {
 	testing.expect(t, pty.pty_poll_exit(&already), "already-Exited poll must stay true without a syscall")
 	testing.expect(t, already.exit_code == 3, "exit_code stable on idempotent poll")
 }
+
+@(test)
+test_has_running_processes :: proc(t: ^testing.T) {
+	testing.expect(t, !pty.pty_has_running_processes(nil), "nil Pty must return false")
+
+	bad := pty.Pty{master = -1, pid = -1, state = .Running}
+	testing.expect(t, !pty.pty_has_running_processes(&bad), "invalid pid/master must return false")
+
+	pid_low := pty.Pty{master = 5, pid = 1, state = .Running}
+	testing.expect(t, !pty.pty_has_running_processes(&pid_low), "pid <= 1 must return false")
+
+	master_neg := pty.Pty{master = -1, pid = 1000, state = .Running}
+	testing.expect(t, !pty.pty_has_running_processes(&master_neg), "master < 0 must return false")
+
+	exited := pty.Pty{master = 5, pid = 1000, state = .Exited, exit_code = 0}
+	testing.expect(t, !pty.pty_has_running_processes(&exited), "exited state must return false")
+
+	p: pty.Pty
+	ok := pty.pty_spawn(&p, 24, 80, "/usr/bin/true", {})
+	testing.expect(t, ok, "pty_spawn /usr/bin/true must succeed")
+	if !ok {
+		return
+	}
+	defer pty.pty_close(&p)
+	_ = _exit_poll_until(&p)
+	testing.expect(t, p.state == .Exited, "true process reaped to Exited")
+	testing.expect(t, !pty.pty_has_running_processes(&p), "exited pty must return false")
+}

@@ -59,6 +59,8 @@ window_init :: proc(w: ^Window, title: string, width, height: i32) -> bool {
 		return false
 	}
 
+	platform_setup_unified_titlebar(w.handle)
+
 	// SDL3 delivers TEXT_INPUT only after an explicit opt-in. The input
 	// pump (Phase 9) translates TEXTINPUT into Printable runes, so text
 	// input starts here. Non-fatal on failure: the window still works, but
@@ -198,3 +200,20 @@ window_get_size :: proc(w: ^Window) -> (width: i32, height: i32) {
 	sdl3.GetWindowSize(w.handle, &lw, &lh)
 	return i32(lw), i32(lh)
 }
+
+// window_set_size sets the window size in pixels via SDL3 and synchronizes with the OS.
+window_set_size :: proc(w: ^Window, width, height: i32) -> bool {
+	if w == nil || w.handle == nil {
+		return false
+	}
+	res := bool(sdl3.SetWindowSize(w.handle, width, height))
+	sdl3.SyncWindow(w.handle)
+	window_update_pixel_size(w)
+	return res
+}
+
+// window_show_close_tab_alert displays a native confirmation alert when closing a tab with a running process.
+window_show_close_tab_alert :: proc(w: ^Window, tab_title: string) -> bool {
+	return platform_show_close_tab_alert(w, tab_title)
+}
+

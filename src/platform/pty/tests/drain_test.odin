@@ -239,3 +239,18 @@ test_drain_honors_small_buffer :: proc(t: ^testing.T) {
 	testing.expect(t, _drain_contains(total[:], "hello"), "small-buffer drain must still deliver all output")
 	testing.expect(t, capped, "at least one drain must fill the small buffer")
 }
+
+@(test)
+test_spawn_with_working_dir :: proc(t: ^testing.T) {
+	p: pty.Pty
+	ok := pty.pty_spawn(&p, 24, 80, "/bin/pwd", {}, "/tmp")
+	testing.expect(t, ok, "pty_spawn /bin/pwd with cwd=/tmp must succeed")
+	if !ok {
+		return
+	}
+	defer _teardown(&p)
+	got, found, _ := _drain_until(&p, "tmp", DRAIN_FRAME_CAP)
+	defer delete(got)
+	testing.expect(t, found, "drain must return child output containing tmp")
+	testing.expect(t, _drain_contains(got[:], "/tmp") || _drain_contains(got[:], "/private/tmp"), "output must match /tmp or /private/tmp")
+}

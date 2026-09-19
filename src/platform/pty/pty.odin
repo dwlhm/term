@@ -11,6 +11,9 @@ when ODIN_OS == .Darwin {
 	@(default_calling_convention="c")
 	foreign libc {
 		ioctl :: proc(fd: c.int, request: c.ulong, #c_vararg args: ..any) -> c.int ---
+		tcgetpgrp :: proc(fd: c.int) -> posix.pid_t ---
+		proc_name :: proc(pid: c.int, buffer: rawptr, buffersize: u32) -> c.int ---
+		proc_listchildpids :: proc(ppid: c.int, buffer: rawptr, buffersize: c.int) -> c.int ---
 	}
 }
 
@@ -38,6 +41,10 @@ PTY_ENV_TERM :: "TERM=xterm-256color"
 PTY_ENV_COLORTERM :: "COLORTERM=truecolor"
 PTY_ENV_TERM_PROGRAM :: "TERM_PROGRAM=Term"
 PTY_ENV_PROMPT_EOL_MARK :: "PROMPT_EOL_MARK="
+PTY_ENV_P10K_INTEGRATION   :: "POWERLEVEL9K_TERM_SHELL_INTEGRATION=true"
+PTY_ENV_KITTY_INTEGRATION  :: "KITTY_SHELL_INTEGRATION=enabled"
+PTY_ENV_ITERM_INTEGRATION  :: "ITERM_SHELL_INTEGRATION_INSTALLED=Yes"
+PTY_ENV_TERM_INTEGRATION   :: "TERM_SHELL_INTEGRATION=1"
 PTY_ENV_DEFAULT_LANG :: "LANG=en_US.UTF-8"
 PTY_ENV_DEFAULT_LC_ALL :: "LC_ALL=en_US.UTF-8"
 PTY_ENV_DEFAULT_PATH :: "PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -70,6 +77,48 @@ Winsize :: struct {
 
 // Winsize is set via libc ioctl.
 
+// _resolve_working_dir resolves the target working directory for pty_spawn.
+// Expands ~ or ~/ using HOME (or getpwuid fallback). Falls back to HOME if target doesn't exist.
+@(private="file")
+_resolve_working_dir :: proc(cwd: string) -> (target_path: string, c_cwd: cstring, ok: bool) {
+	if len(cwd) == 0 {
+		return "", nil, false
+	}
+
+	home_dir := ""
+	if home, hok := os.lookup_env("HOME", context.temp_allocator); hok && len(home) > 0 {
+		home_dir = home
+	} else {
+		pw := posix.getpwuid(posix.getuid())
+		if pw != nil && pw.pw_dir != nil {
+			home_dir = string(pw.pw_dir)
+		}
+	}
+
+	path := cwd
+	if cwd == "~" {
+		if len(home_dir) > 0 {
+			path = home_dir
+		}
+	} else if strings.has_prefix(cwd, "~/") {
+		if len(home_dir) > 0 {
+			path = fmt.tprintf("%s%s", home_dir, cwd[1:])
+		}
+	}
+
+	if !os.is_dir(path) {
+		fmt.eprintfln("[pty_spawn warning] working directory '%s' not found or not a directory, falling back to HOME", path)
+		if len(home_dir) > 0 && os.is_dir(home_dir) {
+			path = home_dir
+		} else {
+			path = "/"
+		}
+	}
+
+	c_str := strings.clone_to_cstring(path, context.temp_allocator)
+	return path, c_str, true
+}
+
 // pty_spawn forks a child attached to a new pseudo-terminal.
 //
 // The child gets a new session with the pty slave as its controlling
@@ -82,7 +131,7 @@ Winsize :: struct {
 // On success the parent returns true with master >= 0, pid > 0 and state
 // Running. On any failure all half-open fds are closed, the failed child
 // (if any) is reaped, *p is left untouched, and the result is false.
-pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string) -> bool {
+pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string, cwd: string = "") -> bool {
 	if p == nil {
 		return false
 	}
@@ -98,6 +147,8 @@ pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string) -
 	if ncols <= 0 {
 		ncols = PTY_DEFAULT_COLS
 	}
+
+	target_path, c_cwd, has_cwd := _resolve_working_dir(cwd)
 
 	// Master-side setup happens fully before fork, so a fork failure only
 	// has the master fd to clean up. Open with NONBLOCK atomically so master
@@ -199,6 +250,9 @@ pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string) -
 		   strings.has_prefix(entry, "TERM_PROGRAM=") {
 			continue
 		}
+		if has_cwd && strings.has_prefix(entry, "PWD=") {
+			continue
+		}
 		if strings.has_prefix(entry, "PATH=") {
 			parent_path = entry[5:]
 			has_parent_path = true
@@ -219,6 +273,10 @@ pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string) -
 		PTY_ENV_COLORTERM,
 		PTY_ENV_TERM_PROGRAM,
 		PTY_ENV_PROMPT_EOL_MARK,
+		PTY_ENV_P10K_INTEGRATION,
+		PTY_ENV_KITTY_INTEGRATION,
+		PTY_ENV_ITERM_INTEGRATION,
+		PTY_ENV_TERM_INTEGRATION,
 	)
 
 	if !has_lang {
@@ -243,6 +301,15 @@ pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string) -
 	} else {
 		append(&c_env, PTY_ENV_DEFAULT_PATH)
 	}
+
+	if has_cwd {
+		pwd_entry := fmt.aprintf("PWD=%s", target_path)
+		cs := strings.clone_to_cstring(pwd_entry)
+		delete(pwd_entry)
+		append(&c_env_allocated, cs)
+		append(&c_env, cs)
+	}
+
 	append(&c_env, nil)
 	has_slash := strings.contains(prog, "/")
 
@@ -271,6 +338,11 @@ pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string) -
 			posix.close(slave)
 		}
 		posix.close(master)
+		if c_cwd != nil {
+			if posix.chdir(c_cwd) != .OK {
+				_ = posix.chdir("/")
+			}
+		}
 		if has_slash {
 			posix.execve(c_argv[0], raw_data(c_argv), raw_data(c_env[:]))
 		} else {
@@ -340,25 +412,28 @@ pty_drain :: proc(p: ^Pty, out: []u8, max_bytes: int) -> (n: int, eof: bool) {
 	if max_bytes < want {
 		want = max_bytes
 	}
-	for {
-		r := posix.read(posix.FD(p.master), raw_data(out), c.size_t(want))
+	total_read := 0
+	for total_read < want {
+		r := posix.read(posix.FD(p.master), raw_data(out[total_read:]), c.size_t(want - total_read))
 		if r > 0 {
-			return int(r), false
+			total_read += int(r)
+			continue
 		}
 		if r == 0 {
-			return 0, true
+			return total_read, true
 		}
 		#partial switch posix.errno() {
 		case .EINTR:
 			continue
 		case .EAGAIN:
-			return 0, false
+			return total_read, false
 		case .EIO:
-			return 0, true
+			return total_read, true
 		case:
-			return 0, false
+			return total_read, false
 		}
 	}
+	return total_read, false
 }
 
 // pty_wait_readable waits for input or terminal completion without draining
@@ -554,6 +629,42 @@ pty_close :: proc(p: ^Pty) {
 	}
 	posix.close(posix.FD(p.master))
 	p.master = -1
+}
+
+pty_has_running_processes :: proc(p: ^Pty) -> bool {
+	if p == nil || p.state != .Running || p.pid <= 1 || p.master < 0 {
+		return false
+	}
+	when ODIN_OS == .Darwin {
+		fg_pgrp := int(tcgetpgrp(c.int(p.master)))
+		if fg_pgrp <= 0 {
+			return false
+		}
+
+		name_buf: [64]u8
+		n := proc_name(c.int(fg_pgrp), &name_buf[0], size_of(name_buf))
+		if n <= 0 {
+			// Jika tidak bisa query nama proses foreground, periksa apakah pgrp == pid shell
+			return fg_pgrp != p.pid
+		}
+
+		pname := string(cstring(&name_buf[0]))
+
+		// Ignore list standar Terminal.app / iTerm2:
+		// Shell dan helper/prompt daemon tidak memicu dialog konfirmasi
+		switch pname {
+		case "", "zsh", "bash", "sh", "fish", "csh", "tcsh", "ksh", "login":
+			return false
+		}
+		if strings.has_prefix(pname, "gitstatusd") || strings.has_prefix(pname, "zsh-") {
+			return false
+		}
+
+		// Ada proses foreground aktif pengguna (misal: vim, python, ssh, node, make, nano, git, dll.)
+		return true
+	} else {
+		return false
+	}
 }
 
 // _child_fail reports pre-exec failure to the parent over the error pipe

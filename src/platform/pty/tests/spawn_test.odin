@@ -217,3 +217,23 @@ test_spawn_env_inheritance :: proc(t: ^testing.T) {
 	testing.expect_value(t, output, test_env_val)
 }
 
+@(test)
+test_spawn_env_shell_integration :: proc(t: ^testing.T) {
+	p: pty.Pty
+	ok := pty.pty_spawn(&p, 24, 80, "/bin/sh", {"-c", "printf '%s|%s|%s|%s' \"$POWERLEVEL9K_TERM_SHELL_INTEGRATION\" \"$KITTY_SHELL_INTEGRATION\" \"$ITERM_SHELL_INTEGRATION_INSTALLED\" \"$TERM_SHELL_INTEGRATION\""})
+	testing.expect(t, ok, "spawn must succeed")
+	if !ok { return }
+	defer _teardown(&p)
+
+	buf: [256]u8
+	total := 0
+	for _ in 0..<200 {
+		n, eof := pty.pty_drain(&p, buf[total:], len(buf) - total)
+		total += n
+		if eof || total >= len(buf) { break }
+		time.sleep(1 * time.Millisecond)
+	}
+	output := string(buf[:total])
+	testing.expect_value(t, output, "true|enabled|Yes|1")
+}
+

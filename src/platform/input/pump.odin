@@ -128,11 +128,17 @@ input_translate_sdl :: proc(ev: sdl3.Event, out: []Input_Event) -> (n: int, quit
 			return 1, false, false
 		}
 		return 0, false, false
+	case .KEY_UP:
+		if _translate_key_release(ev.key.key, ev.key.mod, out) {
+			return 1, false, false
+		}
+		return 0, false, false
 	case .MOUSE_MOTION:
 		if len(out) == 0 {
 			return 0, false, false
 		}
 		shift := (sdl3.GetModState() & sdl3.KMOD_SHIFT) != sdl3.KMOD_NONE
+		gui := (sdl3.GetModState() & sdl3.KMOD_GUI) != sdl3.KMOD_NONE
 		out[0] = Input_Event{
 			event_type = .Pointer,
 			pointer = Input_Pointer_Event{
@@ -143,6 +149,7 @@ input_translate_sdl :: proc(ev: sdl3.Event, out: []Input_Event) -> (n: int, quit
 				dy = ev.motion.yrel,
 				primary_down = _mouse_primary_down(ev.motion.state),
 				shift = shift,
+				gui = gui,
 			},
 		}
 		return 1, false, false
@@ -151,6 +158,7 @@ input_translate_sdl :: proc(ev: sdl3.Event, out: []Input_Event) -> (n: int, quit
 			return 0, false, false
 		}
 		shift := (sdl3.GetModState() & sdl3.KMOD_SHIFT) != sdl3.KMOD_NONE
+		gui := (sdl3.GetModState() & sdl3.KMOD_GUI) != sdl3.KMOD_NONE
 		out[0] = Input_Event{
 			event_type = .Pointer,
 			pointer = Input_Pointer_Event{
@@ -158,9 +166,11 @@ input_translate_sdl :: proc(ev: sdl3.Event, out: []Input_Event) -> (n: int, quit
 				x = ev.button.x,
 				y = ev.button.y,
 				button = ev.button.button,
+				clicks = ev.button.clicks,
 				pressed = ev.button.down,
 				primary_down = ev.button.button == sdl3.BUTTON_LEFT && ev.button.down,
 				shift = shift,
+				gui = gui,
 			},
 		}
 		return 1, false, false
@@ -169,6 +179,7 @@ input_translate_sdl :: proc(ev: sdl3.Event, out: []Input_Event) -> (n: int, quit
 			return 0, false, false
 		}
 		shift := (sdl3.GetModState() & sdl3.KMOD_SHIFT) != sdl3.KMOD_NONE
+		gui := (sdl3.GetModState() & sdl3.KMOD_GUI) != sdl3.KMOD_NONE
 		out[0] = Input_Event{
 			event_type = .Pointer,
 			pointer = Input_Pointer_Event{
@@ -181,6 +192,7 @@ input_translate_sdl :: proc(ev: sdl3.Event, out: []Input_Event) -> (n: int, quit
 				wheel_integer_y = ev.wheel.integer_y,
 				wheel_flipped = ev.wheel.direction == .FLIPPED,
 				shift = shift,
+				gui = gui,
 			},
 		}
 		return 1, false, false
@@ -242,6 +254,11 @@ _translate_key :: proc(key: sdl3.Keycode, mod: sdl3.Keymod, out: []Input_Event) 
 	is_paste := (gui && !ctrl && key == sdl3.K_V) || (ctrl && shift && !gui && key == sdl3.K_V) || key == sdl3.K_PASTE
 	if is_paste {
 		out[0] = Input_Event{event_type = .Local, action = .Paste, ctrl = ctrl, gui = gui, shift = shift}
+		return true
+	}
+	is_reload := (gui || ctrl) && shift && key == sdl3.K_R
+	if is_reload {
+		out[0] = Input_Event{event_type = .Local, action = .Reload_Config, ctrl = ctrl, gui = gui, shift = shift}
 		return true
 	}
 	if (ctrl || gui) && shift && key == sdl3.K_EQUALS {
@@ -336,6 +353,83 @@ _translate_key :: proc(key: sdl3.Keycode, mod: sdl3.Keymod, out: []Input_Event) 
 				return true
 			}
 			return false
+		}
+		if gui {
+			r := rune(u32(key))
+			if r > 0 && r <= utf8.MAX_RUNE {
+				out[0] = Input_Event{event_type = .Key, kind = .Printable, rune = r, ctrl = ctrl, alt = alt, shift = shift, gui = true}
+				return true
+			}
+			return false
+		}
+		return false
+	}
+}
+
+// _translate_key_release maps one KEYUP event into out[0] with is_release = true.
+_translate_key_release :: proc(key: sdl3.Keycode, mod: sdl3.Keymod, out: []Input_Event) -> bool {
+	if len(out) == 0 {
+		return false
+	}
+	shift := (mod & sdl3.KMOD_SHIFT) != sdl3.KMOD_NONE
+	alt := (mod & sdl3.KMOD_ALT) != sdl3.KMOD_NONE
+	ctrl := (mod & sdl3.KMOD_CTRL) != sdl3.KMOD_NONE
+	gui := (mod & sdl3.KMOD_GUI) != sdl3.KMOD_NONE
+
+	switch key {
+	case sdl3.K_UP:
+		out[0] = Input_Event{event_type = .Key, kind = .Arrow_Up, shift = shift, alt = alt, ctrl = ctrl, gui = gui, is_release = true}
+		return true
+	case sdl3.K_DOWN:
+		out[0] = Input_Event{event_type = .Key, kind = .Arrow_Down, shift = shift, alt = alt, ctrl = ctrl, gui = gui, is_release = true}
+		return true
+	case sdl3.K_LEFT:
+		out[0] = Input_Event{event_type = .Key, kind = .Arrow_Left, shift = shift, alt = alt, ctrl = ctrl, gui = gui, is_release = true}
+		return true
+	case sdl3.K_RIGHT:
+		out[0] = Input_Event{event_type = .Key, kind = .Arrow_Right, shift = shift, alt = alt, ctrl = ctrl, gui = gui, is_release = true}
+		return true
+	case sdl3.K_HOME:
+		out[0] = Input_Event{event_type = .Key, kind = .Home, shift = shift, alt = alt, ctrl = ctrl, gui = gui, is_release = true}
+		return true
+	case sdl3.K_END:
+		out[0] = Input_Event{event_type = .Key, kind = .End, shift = shift, alt = alt, ctrl = ctrl, gui = gui, is_release = true}
+		return true
+	case sdl3.K_PAGEUP:
+		out[0] = Input_Event{event_type = .Key, kind = .PgUp, shift = shift, alt = alt, ctrl = ctrl, gui = gui, is_release = true}
+		return true
+	case sdl3.K_PAGEDOWN:
+		out[0] = Input_Event{event_type = .Key, kind = .PgDn, shift = shift, alt = alt, ctrl = ctrl, gui = gui, is_release = true}
+		return true
+	case sdl3.K_RETURN, sdl3.K_RETURN2, sdl3.K_KP_ENTER:
+		out[0] = Input_Event{event_type = .Key, kind = .Enter, shift = shift, alt = alt, ctrl = ctrl, gui = gui, is_release = true}
+		return true
+	case sdl3.K_BACKSPACE:
+		out[0] = Input_Event{event_type = .Key, kind = .Backspace, shift = shift, alt = alt, ctrl = ctrl, gui = gui, is_release = true}
+		return true
+	case sdl3.K_DELETE:
+		out[0] = Input_Event{event_type = .Key, kind = .Delete, shift = shift, alt = alt, ctrl = ctrl, gui = gui, is_release = true}
+		return true
+	case sdl3.K_TAB, sdl3.K_LEFT_TAB:
+		out[0] = Input_Event{event_type = .Key, kind = .Tab, shift = shift, alt = alt, ctrl = ctrl, gui = gui, is_release = true}
+		return true
+	case sdl3.K_ESCAPE:
+		out[0] = Input_Event{event_type = .Key, kind = .Escape, shift = shift, alt = alt, ctrl = ctrl, gui = gui, is_release = true}
+		return true
+	case:
+		r := rune(u32(key))
+		if r > 0 && r <= utf8.MAX_RUNE {
+			out[0] = Input_Event{
+				event_type = .Key,
+				kind       = .Printable,
+				rune       = r,
+				shift      = shift,
+				alt        = alt,
+				ctrl       = ctrl,
+				gui        = gui,
+				is_release = true,
+			}
+			return true
 		}
 		return false
 	}

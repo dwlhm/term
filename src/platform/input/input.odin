@@ -37,6 +37,7 @@ Input_Local_Action :: enum u8 {
 	Paste,
 	Zoom_In,
 	Zoom_Out,
+	Reload_Config,
 }
 
 // Input_Pointer_Event carries SDL mouse data without terminal mouse-reporting
@@ -47,6 +48,7 @@ Input_Pointer_Event :: struct {
 	x, y:              f32,
 	dx, dy:            f32,
 	button:            u8,
+	clicks:            u8,
 	pressed:           bool,
 	primary_down:      bool,
 	wheel_x, wheel_y:  f32,
@@ -54,6 +56,7 @@ Input_Pointer_Event :: struct {
 	wheel_integer_y:   i32,
 	wheel_flipped:     bool,
 	shift:             bool,
+	gui:               bool,
 }
 
 // Input_Key_Kind names the key carried by a key Input_Event.
@@ -88,6 +91,7 @@ Input_Event :: struct {
 	alt:        bool,
 	shift:      bool,
 	gui:        bool,
+	is_release: bool,
 	pointer:    Input_Pointer_Event,
 	action:     Input_Local_Action,
 }
@@ -163,10 +167,21 @@ _write_decimal :: proc(out: []u8, v: u32) -> int {
 }
 
 // _encode_csi_u writes ESC [ code [;mods] u (kitty keyboard encoding).
-// The modifier field is omitted when mods == 1 (no modifiers).
+KITTY_FLAG_DISAMBIGUATE           :: u8(1 << 0) // 1
+KITTY_FLAG_REPORT_EVENT_TYPES     :: u8(1 << 1) // 2
+KITTY_FLAG_REPORT_ALTERNATE_KEYS  :: u8(1 << 2) // 4
+KITTY_FLAG_REPORT_ALL_KEYS_AS_ESC :: u8(1 << 3) // 8
+KITTY_FLAG_REPORT_ASSOCIATED_TEXT :: u8(1 << 4) // 16
+
+KITTY_EVENT_TYPE_PRESS            :: 1
+KITTY_EVENT_TYPE_REPEAT           :: 2
+KITTY_EVENT_TYPE_RELEASE          :: 3
+
+// _encode_csi_u writes ESC [ code [;mods[:event_type]] u (kitty keyboard encoding).
+// The modifier field is omitted when mods == 1 and event_type == 1.
 // All-or-nothing: returns 0 and leaves out untouched when it does not fit.
-_encode_csi_u :: proc(code: u32, mods: int, out: []u8) -> int {
-	tmp: [16]u8
+_encode_csi_u :: proc(code: u32, mods: int, out: []u8, event_type: int = 1) -> int {
+	tmp: [24]u8
 	if len(tmp) < 4 {
 		return 0
 	}
@@ -178,7 +193,7 @@ _encode_csi_u :: proc(code: u32, mods: int, out: []u8) -> int {
 		return 0
 	}
 	n += w
-	if mods != 1 {
+	if mods != 1 || event_type != 1 {
 		if n + 1 >= len(tmp) {
 			return 0
 		}
@@ -189,6 +204,18 @@ _encode_csi_u :: proc(code: u32, mods: int, out: []u8) -> int {
 			return 0
 		}
 		n += w
+		if event_type != 1 {
+			if n + 2 >= len(tmp) {
+				return 0
+			}
+			tmp[n] = ':'
+			n += 1
+			w = _write_decimal(tmp[n:], u32(event_type))
+			if w == 0 {
+				return 0
+			}
+			n += w
+		}
 	}
 	if n >= len(tmp) {
 		return 0
@@ -204,7 +231,7 @@ _encode_csi_u :: proc(code: u32, mods: int, out: []u8) -> int {
 
 // _kitty_disambiguate reports whether the disambiguate enhancement is active.
 _kitty_disambiguate :: proc(kitty_flags: u8) -> bool {
-	return kitty_flags & 1 != 0
+	return kitty_flags & KITTY_FLAG_DISAMBIGUATE != 0
 }
 
 // input_encode writes the VT byte sequence for ev into out and
@@ -237,9 +264,62 @@ input_encode :: proc(ev: Input_Event, out: []u8, kitty_flags: u8 = 0, app_cursor
 	if ev.event_type != .Key {
 		return 0
 	}
+	if ev.is_release {
+		if (kitty_flags & KITTY_FLAG_REPORT_EVENT_TYPES) == 0 {
+			return 0
+		}
+		mods := _kitty_mods(ev)
+		code := u32(0)
+		#partial switch ev.kind {
+		case .Printable:
+			code = _kitty_unshifted(ev.rune)
+		case .Escape:
+			code = 27
+		case .Enter:
+			code = 13
+		case .Tab:
+			code = 9
+		case .Backspace:
+			code = 127
+		case .Delete:
+			code = 57375
+		case .Arrow_Up:
+			code = 57352
+		case .Arrow_Down:
+			code = 57353
+		case .Arrow_Right:
+			code = 57354
+		case .Arrow_Left:
+			code = 57355
+		case .Home:
+			code = 57350
+		case .End:
+			code = 57351
+		case .PgUp:
+			code = 57356
+		case .PgDn:
+			code = 57357
+		case:
+			if ev.rune != 0 {
+				code = _kitty_unshifted(ev.rune)
+			}
+		}
+		if code == 0 {
+			return 0
+		}
+		return _encode_csi_u(code, mods, out, KITTY_EVENT_TYPE_RELEASE)
+	}
 	disambiguate := _kitty_disambiguate(kitty_flags)
 	#partial switch ev.kind {
 	case .Printable:
+		if (kitty_flags & KITTY_FLAG_REPORT_ALL_KEYS_AS_ESC) != 0 && !ev.ctrl && !ev.alt {
+			code := _kitty_unshifted(ev.rune)
+			if code == 0 {
+				return 0
+			}
+			event_type := KITTY_EVENT_TYPE_PRESS if (kitty_flags & KITTY_FLAG_REPORT_EVENT_TYPES) != 0 else 1
+			return _encode_csi_u(code, _kitty_mods(ev), out, event_type)
+		}
 		if ev.ctrl || (disambiguate && ev.alt) {
 			if disambiguate {
 				code := _kitty_unshifted(ev.rune)
@@ -260,8 +340,14 @@ input_encode :: proc(ev: Input_Event, out: []u8, kitty_flags: u8 = 0, app_cursor
 		copy(out, buf[:n])
 		return n
 	case .Enter:
+		if (kitty_flags & KITTY_FLAG_REPORT_ALL_KEYS_AS_ESC) != 0 {
+			return _encode_csi_u(13, _kitty_mods(ev), out)
+		}
 		return _encode_byte(0x0D, out)
 	case .Backspace:
+		if (kitty_flags & KITTY_FLAG_REPORT_ALL_KEYS_AS_ESC) != 0 {
+			return _encode_csi_u(127, _kitty_mods(ev), out)
+		}
 		if ev.gui {
 			return _encode_byte(0x15, out)
 		}
@@ -280,12 +366,15 @@ input_encode :: proc(ev: Input_Event, out: []u8, kitty_flags: u8 = 0, app_cursor
 		}
 		return _encode_csi_tilde(INPUT_DELETE_CSI_PARAM, ev, out)
 	case .Tab:
+		if (kitty_flags & KITTY_FLAG_REPORT_ALL_KEYS_AS_ESC) != 0 {
+			return _encode_csi_u(9, _kitty_mods(ev), out)
+		}
 		if ev.shift && !ev.ctrl && !ev.alt {
 			return _encode_csi3('Z', out)
 		}
 		return _encode_byte(0x09, out)
 	case .Escape:
-		if disambiguate {
+		if disambiguate || (kitty_flags & KITTY_FLAG_REPORT_ALL_KEYS_AS_ESC) != 0 {
 			return _encode_csi_u(27, _kitty_mods(ev), out)
 		}
 		return _encode_byte(0x1B, out)
