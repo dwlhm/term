@@ -8,7 +8,7 @@ package render
 // freed here). Slots 1..3 are heap-loaded fallbacks owned by the chain.
 
 import "base:runtime"
-import "vendor:stb/truetype"
+import "core:sync"
 
 // FALLBACK_MAX_FONTS caps the chain; slot 0 is the primary.
 FALLBACK_MAX_FONTS :: 4
@@ -18,6 +18,7 @@ Fallback_Chain :: struct {
 	fonts:      [FALLBACK_MAX_FONTS]Font_Rasterizer,
 	count:      int,
 	pixel_size: f32,
+	mutex:      sync.Mutex,
 }
 
 // Fallback_Counters tracks slow-path resolver activity. Plain u64s, no alloc.
@@ -105,6 +106,8 @@ fallback_resolve :: proc(
 	if chain == nil {
 		return -1, false
 	}
+	sync.mutex_lock(&chain.mutex)
+	defer sync.mutex_unlock(&chain.mutex)
 	primary_missed := false
 	for i in 0..<chain.count {
 		f := &chain.fonts[i]
@@ -114,7 +117,7 @@ fallback_resolve :: proc(
 			}
 			continue
 		}
-		if truetype.FindGlyphIndex(&f.info, rune(codepoint)) != 0 {
+		if font_rasterizer_find_glyph_index(f, codepoint) != 0 {
 			if counters != nil {
 				counters.fallback_hit[i] += 1
 				if primary_missed {

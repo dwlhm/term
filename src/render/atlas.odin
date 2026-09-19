@@ -11,7 +11,7 @@ package render
 
 import "base:runtime"
 import "core:math"
-import "vendor:stb/truetype"
+import "core:sync"
 import "gpu"
 import termgrid "../terminal"
 
@@ -40,8 +40,8 @@ Atlas_Slot :: struct {
 // FALLBACK_SLOT_BASE is the first dynamic slot (== PINNED_TOTAL).
 FALLBACK_SLOT_BASE :: PINNED_TOTAL
 
-// FALLBACK_SLOT_COUNT is the number of dynamic slots (271..511).
-FALLBACK_SLOT_COUNT :: 241
+// FALLBACK_SLOT_COUNT is the number of dynamic slots (272..511).
+FALLBACK_SLOT_COUNT :: ATLAS_SLOT_COUNT - FALLBACK_SLOT_BASE
 
 // Atlas is a fixed-slot font atlas.
 Atlas :: struct {
@@ -193,7 +193,17 @@ _atlas_rasterize_into_slot :: proc(
 	slot.valid = true
 
 	// Rasterize glyph directly into atlas pixel buffer
-	if codepoint >= PINNED_POWERLINE_START && codepoint <= PINNED_POWERLINE_END {
+	if codepoint >= CONTENT_LIGATURE_BASE && codepoint < 0x1FFFFF {
+		g_idx := codepoint - CONTENT_LIGATURE_BASE
+		font_rasterize_glyph_index_into(
+			rasterizer,
+			g_idx,
+			a.pixels,
+			a.tex_width,
+			x0, y0,
+			glyph_size, glyph_size,
+		)
+	} else if codepoint >= PINNED_POWERLINE_START && codepoint <= PINNED_POWERLINE_END {
 		cw := a.cell_width
 		ch := a.cell_height
 		bmp := font_rasterize_glyph_fitted(rasterizer, codepoint, cw, ch)
@@ -326,6 +336,8 @@ atlas_dynamic_claim_p :: proc(
 	if a == nil || chain == nil {
 		return 0, false
 	}
+	sync.mutex_lock(&chain.mutex)
+	defer sync.mutex_unlock(&chain.mutex)
 	if font_index < 0 || font_index >= chain.count || font_index >= FALLBACK_MAX_FONTS {
 		return 0, false
 	}
@@ -333,7 +345,12 @@ atlas_dynamic_claim_p :: proc(
 	if f.font_data == nil {
 		return 0, false
 	}
-	if truetype.FindGlyphIndex(&f.info, rune(shaped)) == 0 {
+	if shaped >= CONTENT_LIGATURE_BASE && shaped < 0x1FFFFF {
+		g_idx := shaped - CONTENT_LIGATURE_BASE
+		if g_idx == 0 {
+			return 0, false
+		}
+	} else if font_rasterizer_find_glyph_index(f, shaped) == 0 {
 		return 0, false
 	}
 
@@ -353,7 +370,13 @@ atlas_dynamic_claim_p :: proc(
 	wide := termgrid.wcwidth(rune(shaped)) == 2
 	max_w := int(a.cell_width) * 2 if wide else int(a.cell_width)
 	max_h := int(a.cell_height)
-	base_bmp := font_rasterize_glyph_fitted(f, shaped, max_w, max_h)
+	base_bmp: Glyph_Bitmap
+	if shaped >= CONTENT_LIGATURE_BASE && shaped < 0x1FFFFF {
+		g_idx := shaped - CONTENT_LIGATURE_BASE
+		base_bmp = font_rasterize_glyph_index_fitted(f, g_idx, max_w, max_h)
+	} else {
+		base_bmp = font_rasterize_glyph_fitted(f, shaped, max_w, max_h)
+	}
 	base_advance := f32(base_bmp.advance)
 	if base_bmp.pixels != nil {
 		_atlas_blit_bitmap(a, &base_bmp, slot, false, int(math.round(f.metrics.ascent)))
@@ -595,7 +618,7 @@ atlas_pin_audit :: proc(a: ^Atlas, chain: ^Fallback_Chain) -> (promoted: int) {
 			if f.font_data == nil {
 				continue
 			}
-			if truetype.FindGlyphIndex(&f.info, rune(codepoint)) == 0 {
+			if font_rasterizer_find_glyph_index(f, u32(codepoint)) == 0 {
 				continue
 			}
 			_atlas_rasterize_into_slot(a, f, u32(codepoint), idx)
@@ -633,7 +656,7 @@ atlas_prewarm_chain :: proc(a: ^Atlas, chain: ^Fallback_Chain) {
 			if f.font_data == nil {
 				continue
 			}
-			if truetype.FindGlyphIndex(&f.info, rune(codepoint)) == 0 {
+			if font_rasterizer_find_glyph_index(f, u32(codepoint)) == 0 {
 				continue
 			}
 			_atlas_rasterize_into_slot(a, f, u32(codepoint), idx)
@@ -665,7 +688,7 @@ _fallback_font_for_mark :: proc(chain: ^Fallback_Chain, mark: rune) -> (f: ^Font
 		if f.font_data == nil {
 			continue
 		}
-		if truetype.FindGlyphIndex(&f.info, mark) != 0 {
+		if font_rasterizer_find_glyph_index(f, u32(mark)) != 0 {
 			return f, true
 		}
 	}

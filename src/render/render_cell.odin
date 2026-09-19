@@ -60,6 +60,12 @@ render_cell_unpack :: proc(cell: Render_Cell) -> (codepoint: u32, fg, bg: u16, f
 	return
 }
 
+// render_cell_set_codepoint returns a new Render_Cell with an updated codepoint.
+render_cell_set_codepoint :: proc(rc: Render_Cell, new_cp: u32) -> Render_Cell {
+	_, fg, bg, fl := render_cell_unpack(rc)
+	return render_cell_pack(new_cp, fg, bg, fl)
+}
+
 // render_cell_empty returns the default empty render cell (space, white on black).
 render_cell_empty :: proc() -> Render_Cell {
 	return render_cell_pack(0x20, 0xFFFF, 0x0000, Render_Cell_Flags(1))
@@ -151,11 +157,13 @@ Render_Cells_SoA :: struct {
 
 // Style_LUT pre-resolves Style_Table colors to R5G6B5 fg/bg (1024 entries, no alloc on rebuild).
 Style_LUT :: struct {
-	fg_r5g6b5: [1024]u16,
-	bg_r5g6b5: [1024]u16,
+	fg_r5g6b5:           [1024]u16,
+	bg_r5g6b5:           [1024]u16,
 	selection_fg_r5g6b5: u16,
 	selection_bg_r5g6b5: u16,
-	count:     u16,
+	count:               u16,
+	ul_r5g6b5:           [1024]u16,
+	flags:               [1024]u16,
 }
 
 // render_cell_pack_v2 packs content/style/width/cflags/glyph_slot into a Render_Cell_V2.
@@ -213,6 +221,17 @@ render_cell_empty_v2 :: proc() -> Render_Cell_V2 {
 	return render_cell_pack_v2(0x20, 0, RENDER_CELL_V2_WIDTH_NARROW, 0, RENDER_CELL_V2_SLOT_UNRESOLVED)
 }
 
+// _style_lut_brighten_argb scales an ARGB color's RGB channels up by 30% clamped to 255 for BOLD (SGR 1).
+_style_lut_brighten_argb :: proc(argb: u32) -> u32 {
+	r := (argb >> 16) & 0xFF
+	g := (argb >> 8) & 0xFF
+	b := argb & 0xFF
+	br := min(u32(255), (r * 130) / 100)
+	bg := min(u32(255), (g * 130) / 100)
+	bb := min(u32(255), (b * 130) / 100)
+	return (argb & 0xFF000000) | (br << 16) | (bg << 8) | bb
+}
+
 // _style_lut_dim_argb scales an ARGB color's RGB channels for DIM (SGR 2).
 // Matches the standard half-intensity dim used for fish autosuggestions.
 _style_lut_dim_argb :: proc(argb: u32) -> u32 {
@@ -240,11 +259,24 @@ style_lut_rebuild :: proc(lut: ^Style_LUT, table: ^termgrid.Style_Table) {
 			style = table.entries[i]
 		}
 		fg := style.fg
+		bg := style.bg
+		if style.flags & termgrid.STYLE_FLAG_INVERSE != 0 {
+			fg, bg = bg, fg
+		}
+		if style.flags & termgrid.STYLE_FLAG_BOLD != 0 {
+			fg = _style_lut_brighten_argb(fg)
+		}
 		if style.flags & termgrid.STYLE_FLAG_DIM != 0 {
 			fg = _style_lut_dim_argb(fg)
 		}
+		ul := fg
+		if style.underline != 0 {
+			ul = style.underline
+		}
 		lut.fg_r5g6b5[i] = color_to_r5g6b5(fg)
-		lut.bg_r5g6b5[i] = color_to_r5g6b5(style.bg)
+		lut.bg_r5g6b5[i] = color_to_r5g6b5(bg)
+		lut.ul_r5g6b5[i] = color_to_r5g6b5(ul)
+		lut.flags[i] = style.flags
 	}
 	lut.selection_fg_r5g6b5 = color_to_r5g6b5(table.theme.selection_foreground)
 	lut.selection_bg_r5g6b5 = color_to_r5g6b5(table.theme.selection_background)
@@ -267,12 +299,13 @@ render_cell_expand_instance :: proc(
 	emoji_out: ^instance.Instance_Data = nil,
 	emoji_atlas_ptr: ^Emoji_Atlas = nil,
 	store: ^termgrid.Grapheme_Store = nil,
-) -> (emit_bg: bool, emit_glyph: bool, emit_emoji: bool) {
+	decor_out: ^instance.Instance_Data = nil,
+) -> (emit_bg: bool, emit_glyph: bool, emit_emoji: bool, emit_decor: bool) {
 	content, style, width, cflags, slot := render_cell_unpack_v2(cell)
 
 	// Continuation cells emit nothing.
 	if width == RENDER_CELL_V2_WIDTH_CONTINUATION {
-		return false, false, false
+		return false, false, false, false
 	}
 
 	// LUT lookup with bounds fallback to entry 0.
@@ -286,10 +319,42 @@ render_cell_expand_instance :: proc(
 		fg = lut.selection_fg_r5g6b5
 		bg = lut.selection_bg_r5g6b5
 	}
+	flags := lut.flags[lut_idx]
+
+	// Decoration emission (underline, strikethrough).
+	if flags & termgrid.STYLE_FLAG_UNDERLINE != 0 {
+		cw := width == RENDER_CELL_V2_WIDTH_WIDE_LEAD ? cell_w * 2.0 : cell_w
+		ul_h := max(f32(1.0), math.floor(cell_h * 0.08))
+		ul_y := y + cell_h - max(f32(2.0), math.floor(cell_h * 0.14))
+		if decor_out != nil {
+			dr, dg, db := instance.unpack_r5g6b5(lut.ul_r5g6b5[lut_idx])
+			decor_out^ = instance.Instance_Data{
+				x = x, y = ul_y,
+				cw = cw, ch = ul_h,
+				u0 = 0, v0 = 0, u1 = 0, v1 = 0,
+				r = dr, g = dg, b = db, a = 1.0,
+			}
+		}
+		emit_decor = true
+	} else if flags & termgrid.STYLE_FLAG_STRIKE != 0 {
+		cw := width == RENDER_CELL_V2_WIDTH_WIDE_LEAD ? cell_w * 2.0 : cell_w
+		strike_y := y + math.floor(cell_h * 0.5)
+		strike_h := max(f32(1.0), math.floor(cell_h * 0.08))
+		if decor_out != nil {
+			dr, dg, db := instance.unpack_r5g6b5(lut.fg_r5g6b5[lut_idx])
+			decor_out^ = instance.Instance_Data{
+				x = x, y = strike_y,
+				cw = cw, ch = strike_h,
+				u0 = 0, v0 = 0, u1 = 0, v1 = 0,
+				r = dr, g = dg, b = db, a = 1.0,
+			}
+		}
+		emit_decor = true
+	}
 
 	// Empty skip: space or NUL with default/black bg emits nothing.
 	if (content == 0x20 || content == 0) && (bg == 0x0000 || bg == lut.bg_r5g6b5[0]) {
-		return false, false, false
+		return false, false, false, emit_decor
 	}
 
 	// Background instance. Wide leads span double width.
@@ -310,7 +375,7 @@ render_cell_expand_instance :: proc(
 
 	// Spaces and NUL emit no glyph.
 	if content == 0x20 || content == 0 {
-		return true, false, false
+		return true, false, false, emit_decor
 	}
 
 	is_emoji := cflags & RENDER_CELL_V2_CFLAG_EMOJI != 0
@@ -352,10 +417,10 @@ render_cell_expand_instance :: proc(
 					v1 = emoji_info.uv[3],
 					r = 1.0, g = 1.0, b = 1.0, a = 1.0,
 				}
-				return true, false, true
+				return true, false, true, emit_decor
 			}
 		}
-		return true, false, false
+		return true, false, false, emit_decor
 	}
 
 	// Resolve the glyph slot: pinned slot when unresolved, stored slot otherwise.
@@ -388,7 +453,7 @@ render_cell_expand_instance :: proc(
 	}
 	if slot_entry == nil || !slot_entry.valid {
 		// GlyphSlotInvalid → skip glyph, keep bg.
-		return true, false, false
+		return true, false, false, emit_decor
 	}
 
 	// Glyph instance (wide leads span double width).
@@ -406,5 +471,5 @@ render_cell_expand_instance :: proc(
 			r = fg_r, g = fg_g, b = fg_b, a = 1.0,
 		}
 	}
-	return true, true, false
+	return true, true, false, emit_decor
 }

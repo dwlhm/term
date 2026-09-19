@@ -46,6 +46,15 @@ render_compiler_destroy :: proc(f: ^Compiled_Frame, allocator: runtime.Allocator
 	f.cell_count = 0
 }
 
+// _is_ligature_candidate checks if a byte is an eligible ligature symbol candidate.
+_is_ligature_candidate :: proc(b: u8) -> bool {
+	switch b {
+	case '=', '>', '<', '-', '+', '!', '*', '&', '|', '/', ':', '~', '^', '.', '?':
+		return true
+	}
+	return false
+}
+
 // render_compile compiles a terminal grid into packed render cells,
 // processing only the dirty ranges specified by the damage journal.
 render_compile :: proc(
@@ -53,6 +62,8 @@ render_compile :: proc(
 	terminal: ^termgrid.Terminal,
 	journal: ^termgrid.Damage_Journal,
 	style_table: ^termgrid.Style_Table,
+	lig_cache: ^Ligature_Cache = nil,
+	rasterizer: ^Font_Rasterizer = nil,
 ) {
 	rows := int(f.rows)
 	cols := int(f.cols)
@@ -73,14 +84,14 @@ render_compile :: proc(
 		// Compile the dirty spans in this row
 		if dr.full {
 			// Entire row is dirty: compile all columns
-			_compile_row_range(f, terminal, style_table, row_idx, 0, cols)
+			_compile_row_range(f, terminal, style_table, row_idx, 0, cols, lig_cache, rasterizer)
 		} else {
 			// Compile only the dirty spans
 			for span_idx in 0..<int(dr.span_count) {
 				span := &dr.spans[span_idx]
 				col_start := int(span.col_start)
 				col_end   := int(span.col_end)
-				_compile_row_range(f, terminal, style_table, row_idx, col_start, col_end)
+				_compile_row_range(f, terminal, style_table, row_idx, col_start, col_end, lig_cache, rasterizer)
 			}
 		}
 	}
@@ -94,12 +105,16 @@ _compile_row_range :: proc(
 	row: int,
 	col_start: int,
 	col_end: int,
+	lig_cache: ^Ligature_Cache = nil,
+	rasterizer: ^Font_Rasterizer = nil,
 ) {
 	cols := int(f.cols)
 	cs := col_start
 	ce := col_end
 	if cs < 0 { cs = 0 }
 	if ce > cols { ce = cols }
+
+	has_candidate := false
 
 	for col in cs..<ce {
 		cell := termgrid.grid_get_cell(&terminal.grid, row, col)
@@ -120,6 +135,62 @@ _compile_row_range :: proc(
 		if idx < len(f.cells) {
 			f.cells[idx] = rc
 		}
+
+		if !has_candidate && cell.content < 128 && _is_ligature_candidate(u8(cell.content)) {
+			has_candidate = true
+		}
+	}
+
+	if !has_candidate || lig_cache == nil || rasterizer == nil {
+		return
+	}
+
+	// Probe candidate runs of adjacent symbols (2..4 length)
+	col := cs
+	for col < ce {
+		cell := termgrid.grid_get_cell(&terminal.grid, row, col)
+		if cell.content >= 128 || !_is_ligature_candidate(u8(cell.content)) {
+			col += 1
+			continue
+		}
+
+		run_len := 0
+		run_buf: [LIGATURE_MAX_LEN]u8
+		for col + run_len < ce && run_len < LIGATURE_MAX_LEN {
+			next_cell := termgrid.grid_get_cell(&terminal.grid, row, col + run_len)
+			if next_cell.content < 128 && _is_ligature_candidate(u8(next_cell.content)) {
+				run_buf[run_len] = u8(next_cell.content)
+				run_len += 1
+			} else {
+				break
+			}
+		}
+
+		if run_len < 2 {
+			col += 1
+			continue
+		}
+
+		matched := false
+		for try_len := min(run_len, 3); try_len >= 2; try_len -= 1 {
+			glyphs, is_lig := ligature_cache_lookup(lig_cache, rasterizer, run_buf[:try_len])
+			if is_lig && len(glyphs) > 0 {
+				for i in 0..<try_len {
+					c_idx := row * cols + (col + i)
+					if c_idx < len(f.cells) {
+						g_id := glyphs[i] if i < len(glyphs) else glyphs[len(glyphs) - 1]
+						f.cells[c_idx] = render_cell_set_codepoint(f.cells[c_idx], CONTENT_LIGATURE_BASE + g_id)
+					}
+				}
+				col += try_len
+				matched = true
+				break
+			}
+		}
+
+		if !matched {
+			col += 1
+		}
 	}
 }
 
@@ -129,12 +200,14 @@ render_compile_full :: proc(
 	f: ^Compiled_Frame,
 	terminal: ^termgrid.Terminal,
 	style_table: ^termgrid.Style_Table,
+	lig_cache: ^Ligature_Cache = nil,
+	rasterizer: ^Font_Rasterizer = nil,
 ) {
 	rows := int(f.rows)
 	cols := int(f.cols)
 
 	for row in 0..<rows {
-		_compile_row_range(f, terminal, style_table, row, 0, cols)
+		_compile_row_range(f, terminal, style_table, row, 0, cols, lig_cache, rasterizer)
 	}
 	f.cell_count = i32(rows * cols)
 }
@@ -265,11 +338,11 @@ _compile_row_range_v2 :: proc(
 	historical := false
 	if view != nil {
 		document_row = termgrid.terminal_view_document_row(terminal, view, row)
-		historical = document_row >= 0 && document_row < len(terminal.scrollback.rows)
+		historical = document_row >= 0 && document_row < termgrid.scrollback_len(&terminal.scrollback)
 	}
 	source_row := row
 	if view != nil && !historical {
-		source_row = document_row - len(terminal.scrollback.rows)
+		source_row = document_row - termgrid.scrollback_len(&terminal.scrollback)
 	}
 	row_snapshot := termgrid.terminal_damage_target(terminal, source_row, 0)
 	row_generation := row_snapshot.row_generation
@@ -407,35 +480,11 @@ shaped_cell_from_cluster :: proc(
 		}
 	}
 
-	// Arabic join form from the nearest non-transparent neighbors.
-	// Transparent marks look through (assumed joining); ZWNJ/ZWJ, space,
-	// ASCII, EOL, and non-joining letters are boundaries.
-	self_type := arabic_join_type(base)
-	join_form := Join_Form.Isolated
-	shaped_arabic := false
-	if self_type == .Dual_Joining || self_type == .Right_Joining {
-		lj, rj := false, false
-		if !_arabic_is_boundary(left_cp) {
-			lt := arabic_join_type(left_cp)
-			if lt == .Transparent {
-				lj = true
-			} else {
-				lj = arabic_left_joins(left_cp, lt)
-			}
-		}
-		if !own_zwj && !_arabic_is_boundary(right_cp) {
-			rt := arabic_join_type(right_cp)
-			if rt == .Transparent {
-				rj = self_type == .Dual_Joining
-			} else if self_type == .Dual_Joining {
-				rj = rt == .Dual_Joining || rt == .Right_Joining
-			}
-		}
-		join_form = arabic_join_form(lj, rj, self_type)
-		shaped_arabic = true
-	}
+	_ = left_cp
+	_ = right_cp
+	_ = own_zwj
 
-	key := cluster_key_from_handle(handle, store, join_form)
+	key := cluster_key_from_handle(handle, store)
 	if g, hit := shape_cache_lookup(cache, key); hit {
 		if _shaped_slot_fresh(atlas, g) {
 			return render_cell_pack_v2(cell.content, style, w, cf, g.atlas_slot)
@@ -443,27 +492,12 @@ shaped_cell_from_cluster :: proc(
 		// Stale FIFO slot: fall through and lazily re-resolve.
 	}
 
-
-	// Resolve: presentation form first for joining Arabic (retry logical
-	// when the presentation is uncovered), logical otherwise.
+	// Resolve: probe fallback chain
 	shaped := u32(base)
 	font_index := 0
 	covered := false
-	if shaped_arabic {
-		if pshaped, ok := arabic_presentation_form(base, join_form); ok {
-			if fi, cov := fallback_resolve(chain, pshaped, counters); cov {
-				shaped, font_index, covered = pshaped, fi, true
-			}
-		}
-		if !covered {
-			if fi, cov := fallback_resolve(chain, u32(base), counters); cov {
-				shaped, font_index, covered = u32(base), fi, true
-			}
-		}
-	} else {
-		if fi, cov := fallback_resolve(chain, u32(base), counters); cov {
-			shaped, font_index, covered = u32(base), fi, true
-		}
+	if fi, cov := fallback_resolve(chain, u32(base), counters); cov {
+		shaped, font_index, covered = u32(base), fi, true
 	}
 
 	// Chain exhausted (fallback_miss counted in resolve): tofu when a tofu

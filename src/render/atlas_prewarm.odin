@@ -31,14 +31,20 @@ PINNED_POWERLINE_START :: 0xE0B0
 PINNED_POWERLINE_END   :: 0xE0BF
 PINNED_POWERLINE_COUNT :: PINNED_POWERLINE_END - PINNED_POWERLINE_START + 1  // 16
 
+// UI Symbols range (0x2715 tab close cross)
+PINNED_UI_START :: 0x2715
+PINNED_UI_END   :: 0x2715
+PINNED_UI_COUNT :: 1
+
 // Total pinned glyphs
-PINNED_TOTAL :: PINNED_ASCII_COUNT + PINNED_BOX_COUNT + PINNED_BLOCK_COUNT + PINNED_POWERLINE_COUNT  // 271
+PINNED_TOTAL :: PINNED_ASCII_COUNT + PINNED_BOX_COUNT + PINNED_BLOCK_COUNT + PINNED_POWERLINE_COUNT + PINNED_UI_COUNT  // 272
 
 // Slot offsets (contiguous layout)
-PINNED_SLOT_ASCII    :: 0
-PINNED_SLOT_BOX      :: PINNED_ASCII_COUNT  // 95
-PINNED_SLOT_BLOCK    :: PINNED_SLOT_BOX + PINNED_BOX_COUNT  // 223
+PINNED_SLOT_ASCII     :: 0
+PINNED_SLOT_BOX       :: PINNED_ASCII_COUNT  // 95
+PINNED_SLOT_BLOCK     :: PINNED_SLOT_BOX + PINNED_BOX_COUNT  // 223
 PINNED_SLOT_POWERLINE :: PINNED_SLOT_BLOCK + PINNED_BLOCK_COUNT  // 255
+PINNED_SLOT_UI        :: PINNED_SLOT_POWERLINE + PINNED_POWERLINE_COUNT  // 271
 
 // atlas_prewarm_set returns a static slice of all pinned codepoints.
 atlas_prewarm_set :: proc() -> []rune {
@@ -70,6 +76,12 @@ atlas_prewarm_set :: proc() -> []rune {
 		idx += 1
 	}
 
+	// UI Symbols range (0x2715)
+	for cp in PINNED_UI_START..=PINNED_UI_END {
+		set[idx] = rune(cp)
+		idx += 1
+	}
+
 	return set
 }
 
@@ -95,6 +107,11 @@ atlas_pinned_slot_index :: proc(codepoint: u32) -> (index: int, ok: bool) {
 	// Powerline range
 	if codepoint >= PINNED_POWERLINE_START && codepoint <= PINNED_POWERLINE_END {
 		return PINNED_SLOT_POWERLINE + int(codepoint - PINNED_POWERLINE_START), true
+	}
+
+	// UI Symbols range (0x2715)
+	if codepoint >= PINNED_UI_START && codepoint <= PINNED_UI_END {
+		return PINNED_SLOT_UI + int(codepoint - PINNED_UI_START), true
 	}
 
 	// Not pinned

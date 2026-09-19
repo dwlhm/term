@@ -6,7 +6,6 @@ import "core:testing"
 import "core:os"
 import "core:fmt"
 import "base:runtime"
-import "vendor:stb/truetype"
 import "../"
 
 // Test font paths (macOS system fonts)
@@ -157,6 +156,13 @@ test_atlas_pinned_slot_index_powerline :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_atlas_pinned_slot_index_ui :: proc(t: ^testing.T) {
+	index, ok := render.atlas_pinned_slot_index(0x2715)
+	testing.expect(t, ok, "UI codepoint 0x2715 should be pinned")
+	testing.expect_value(t, index, render.PINNED_SLOT_UI)
+}
+
+@(test)
 test_atlas_pinned_slot_index_non_pinned :: proc(t: ^testing.T) {
 	// Test non-pinned codepoints
 	_, ok1 := render.atlas_pinned_slot_index(31)  // Below ASCII range
@@ -172,7 +178,7 @@ test_atlas_pinned_slot_index_non_pinned :: proc(t: ^testing.T) {
 @(test)
 test_atlas_prewarm_set_completeness :: proc(t: ^testing.T) {
 	set := render.atlas_prewarm_set()
-	testing.expect(t, len(set) == 271, "Prewarm set should have 271 codepoints")
+	testing.expect(t, len(set) == 272, "Prewarm set should have 272 codepoints")
 
 	// Check no duplicates
 	seen: map[rune]bool
@@ -383,7 +389,7 @@ test_fitted_glyph_invariant :: proc(t: ^testing.T) {
 	codepoints := []u32{0x2500, 0xE0B0, 0xE0B6, 0xF179, 0xF07B, 0xF017, 0xE0A0}
 
 	for cp in codepoints {
-		if truetype.FindGlyphIndex(&r.info, rune(cp)) == 0 {
+		if render.font_rasterizer_find_glyph_index(&r, cp) == 0 {
 			continue
 		}
 		bmp := render.font_rasterize_glyph_fitted(&r, cp, max_w, max_h)

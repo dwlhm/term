@@ -15,7 +15,6 @@ import "base:runtime"
 import "core:math"
 import "core:sync"
 import "core:thread"
-import "vendor:stb/truetype"
 import termgrid "../terminal"
 
 // RASTER_QUEUE_CAP bounds pending requests. Overflow drops the incoming
@@ -81,7 +80,7 @@ Raster_Counters :: struct {
 
 // Raster_Queue is the request/completion ring pair plus the in-flight set.
 // Atlas slots, pixels, tags, cursor, and gpu_dirty stay render-thread-only;
-// the shape cache stays render-only; chain fonts are concurrent read-read.
+// the shape cache stays render-only; chain fonts are protected by chain.mutex.
 Raster_Queue :: struct {
 	mutex:          sync.Mutex,
 	cond:           sync.Cond,
@@ -203,7 +202,7 @@ raster_worker_shutdown :: proc(q: ^Raster_Queue) {
 
 _raster_key_hash :: proc(key: Cluster_Key) -> int {
 	h := u64(u32(key.runes[0])) * 0x9E3779B1
-	h = h ~ (u64(u8(key.join_form)) * 0x85EBCA6B)
+	// h = h ~ (u64(u8(key.join_form)) * 0x85EBCA6B)
 	return int(h % u64(RASTER_QUEUE_CAP))
 }
 
@@ -339,7 +338,7 @@ _raster_retry_groups_locked :: proc(q: ^Raster_Queue) {
 }
 
 // raster_worker_main pops requests under Mutex, waits on Cond when idle,
-// and rasterizes WITHOUT the lock via font_rasterize_glyph. Each request
+// and rasterizes under chain.mutex via font_rasterize_glyph. Each request
 // becomes exactly one completion push (ok=false for zero bitmaps or
 // uncovered glyphs). Exits when shutdown && req_count == 0, so a pending
 // shutdown still converts every queued request before the join returns.
@@ -405,6 +404,8 @@ _raster_rasterize :: proc(
 	if chain == nil || group == nil {
 		return comp
 	}
+	sync.mutex_lock(&chain.mutex)
+	defer sync.mutex_unlock(&chain.mutex)
 	if group.font_index < 0 || group.font_index >= chain.count {
 		return comp
 	}
@@ -412,7 +413,7 @@ _raster_rasterize :: proc(
 	if f.font_data == nil {
 		return comp
 	}
-	if truetype.FindGlyphIndex(&f.info, rune(group.shaped)) == 0 {
+	if font_rasterizer_find_glyph_index(f, group.shaped) == 0 {
 		return comp
 	}
 
