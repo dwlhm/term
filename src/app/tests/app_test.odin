@@ -32,6 +32,8 @@ import instance "../../render/instance"
 import win "../../platform/window"
 import pty "../../platform/pty"
 import input "../../platform/input"
+import config "../../config"
+import interaction "../../interaction"
 
 APP_TEST_ROWS :: 24
 APP_TEST_COLS :: 80
@@ -62,11 +64,14 @@ _bare_app :: proc(a: ^app.App) {
 	a.pty.master = -1
 	a.pty.pid = -1
 	a.focused = true
+	a.config = config.config_default()
 	termgrid.terminal_init(&a.terminal, APP_TEST_ROWS, APP_TEST_COLS)
 	parser.parser_init(&a.parser)
+	a.drain_buf = make([]u8, app.APP_DRAIN_CAP, context.allocator)
 }
 
 _bare_destroy :: proc(a: ^app.App) {
+	config.config_destroy(&a.config)
 	termgrid.terminal_destroy(&a.terminal)
 	parser.parser_destroy(&a.parser)
 }
@@ -466,6 +471,348 @@ test_app_synchronized_output_deferral_and_timeout :: proc(t: ^testing.T) {
 	testing.expect(t, ok, "app_frame must succeed when sync output is disabled")
 	testing.expect_value(t, a.sync_output_start_ns, u64(0))
 	testing.expect_value(t, a.renderer.frame_count, u64(2))
+}
+
+@(test)
+test_app_reload_config :: proc(t: ^testing.T) {
+	a: app.App
+	_bare_app(&a)
+	defer _bare_destroy(&a)
+
+	render.style_lut_rebuild(&a.lut, &a.terminal.grid.style_table)
+
+	// Verify initial config
+	testing.expect_value(t, a.config.theme_name, "Catppuccin Mocha")
+
+	// Set a custom config via TERM_CONFIG
+	tmp_cfg := "./term.odin"
+	cfg_content := `
+theme = "Catppuccin Mocha"
+background = 0xFF000000
+foreground = 0xFFFFFFFF
+font_size = 18.0
+`
+	_ = os.write_entire_file(tmp_cfg, transmute([]u8)cfg_content)
+	defer os.remove(tmp_cfg)
+	os.set_env("TERM_CONFIG", tmp_cfg)
+	defer os.unset_env("TERM_CONFIG")
+
+	ok := app.app_reload_config(&a)
+	testing.expect(t, ok, "app_reload_config must succeed on valid config")
+	testing.expect_value(t, a.config.background, u32(0xFF000000))
+	testing.expect_value(t, a.config.foreground, u32(0xFFFFFFFF))
+	testing.expect_value(t, a.config.font_size, f32(18.0))
+	testing.expect_value(t, a.terminal.grid.style_table.theme.background, u32(0xFF000000))
+
+	// Now test reloading with syntax error in config
+	bad_cfg_content := `
+background = = 1234
+`
+	_ = os.write_entire_file(tmp_cfg, transmute([]u8)bad_cfg_content)
+
+	bad_ok := app.app_reload_config(&a)
+	testing.expect(t, !bad_ok, "app_reload_config must fail on syntax error")
+	// State must be 100% retained
+	testing.expect_value(t, a.config.background, u32(0xFF000000))
+	testing.expect_value(t, a.terminal.grid.style_table.theme.background, u32(0xFF000000))
+}
+
+@(test)
+test_backend_threaded_worker_and_double_buffer :: proc(t: ^testing.T) {
+	b: app.Backend
+	theme := termgrid.Theme{
+		name                 = "test",
+		foreground           = 0xFFFFFFFF,
+		background           = 0xFF000000,
+		selection_foreground = 0xFF000000,
+		selection_background = 0xFFFFFFFF,
+		palette_256_policy   = .Xterm_Cube_Grayscale,
+	}
+	cfg := config.config_default()
+	defer config.config_destroy(&cfg)
+
+	ok := app.backend_init(&b, 24, 80, "/bin/sh", {}, &cfg, theme)
+	testing.expect(t, ok, "backend_init must succeed")
+	defer app.backend_destroy(&b)
+
+	// Start worker thread
+	started := app.backend_start_thread(&b)
+	testing.expect(t, started, "backend_start_thread must succeed")
+	testing.expect(t, app.backend_is_threaded(&b), "backend_is_threaded must report true")
+
+	// Push key event to write echo command to child shell
+	echo_cmd := "echo THREAD_OK\n"
+	for ch in echo_cmd {
+		ev := input.Input_Event{
+			event_type = .Key,
+			kind       = .Printable if ch != '\n' else .Enter,
+			rune       = ch,
+		}
+		app.backend_push_event(&b, app.UI_Event{type = .Input, input = ev})
+	}
+
+	// Poll front buffer render state until the text appears in front buffer
+	found := false
+	for _ in 0..<100 {
+		app.backend_lock_render(&b)
+		state := app.backend_get_render_state(&b)
+		if state.terminal != nil {
+			// Scan front buffer grid for THREAD_OK
+			for r in 0..<state.terminal.grid.row_count {
+				for c in 0..=(state.terminal.grid.col_count - 9) {
+					match := true
+					target := "THREAD_OK"
+					for i in 0..<len(target) {
+						cell := termgrid.terminal_get_cell(state.terminal, r, c + i)
+						if u32(cell.content) != u32(target[i]) {
+							match = false
+							break
+						}
+					}
+					if match {
+						found = true
+						break
+					}
+				}
+				if found {
+					break
+				}
+			}
+		}
+		app.backend_unlock_render(&b)
+		if found {
+			break
+		}
+		time.sleep(10 * time.Millisecond)
+	}
+	testing.expect(t, found, "front buffer must receive parsed output from background thread")
+
+	// Stop thread and verify clean join
+	app.backend_stop_thread(&b)
+	testing.expect(t, !app.backend_is_threaded(&b), "backend_is_threaded must report false after stop")
+}
+
+@(test)
+test_ui_event_queue :: proc(t: ^testing.T) {
+	q: app.UI_Event_Queue
+	ev1 := app.UI_Event{type = .Focus, focused = true}
+	ev2 := app.UI_Event{type = .Resize, rows = 30, cols = 100}
+
+	ok1 := app.ui_event_queue_push(&q, ev1)
+	ok2 := app.ui_event_queue_push(&q, ev2)
+	testing.expect(t, ok1 && ok2, "event queue push must succeed")
+
+	out: [4]app.UI_Event
+	n := app.ui_event_queue_pop_all(&q, out[:])
+	testing.expect_value(t, n, 2)
+	testing.expect(t, out[0].type == .Focus && out[0].focused, "first popped event must be Focus")
+	testing.expect(t, out[1].type == .Resize && out[1].rows == 30 && out[1].cols == 100, "second popped event must be Resize")
+}
+
+@(test)
+test_app_interaction_dispatch_integration :: proc(t: ^testing.T) {
+	b: app.Backend
+	termgrid.terminal_init(&b.terminal, APP_TEST_ROWS, APP_TEST_COLS)
+	defer termgrid.terminal_destroy(&b.terminal)
+	parser.parser_init(&b.parser)
+	defer parser.parser_destroy(&b.parser)
+	interaction.interaction_init(&b.interaction)
+	b.view = termgrid.Terminal_View{}
+	b.drain_buf = make([]u8, app.APP_DRAIN_CAP, context.allocator)
+	defer delete(b.drain_buf)
+
+	// 1. Initial passthrough state
+	testing.expect_value(t, b.interaction.mode, interaction.Interaction_Mode.Passthrough)
+	testing.expect(t, !b.interaction.selection_active, "selection must start inactive")
+
+	// Render state interaction pointer verification
+	state := app.backend_get_render_state(&b)
+	testing.expect(t, state.interaction != nil, "render state must include interaction pointer")
+	testing.expect_value(t, state.interaction.mode, interaction.Interaction_Mode.Passthrough)
+
+	// Put initial text into terminal
+	termgrid.terminal_put_string(&b.terminal, "apple banana cherry\r\n")
+
+	// 2. Dispatch Cmd+Shift+Space to enter Visual Mode
+	enter_visual_ev := app.UI_Event{
+		type = .Input,
+		input = input.Input_Event{
+			event_type = .Key,
+			kind       = .Printable,
+			rune       = ' ',
+			gui        = true,
+			shift      = true,
+		},
+	}
+	app.backend_handle_ui_event(&b, enter_visual_ev)
+
+	testing.expect_value(t, b.interaction.mode, interaction.Interaction_Mode.Visual)
+	testing.expect(t, b.interaction.selection_active, "selection must be active in visual mode")
+	testing.expect(t, b.view.selection.active, "view selection active must mirror interaction")
+
+	// 3. Dispatch visual navigation 'l' (cursor right)
+	col_before := b.interaction.visual_cursor.col
+	nav_ev := app.UI_Event{
+		type = .Input,
+		input = input.Input_Event{
+			event_type = .Key,
+			kind       = .Printable,
+			rune       = 'l',
+		},
+	}
+	app.backend_handle_ui_event(&b, nav_ev)
+	testing.expect_value(t, b.interaction.visual_cursor.col, col_before + 1)
+	testing.expect_value(t, b.view.selection.focus.col, col_before + 1)
+
+	// 4. Double click pointer selection (word detection)
+	ptr_ev := app.UI_Event{
+		type = .Input,
+		input = input.Input_Event{
+			event_type = .Pointer,
+			pointer = input.Input_Pointer_Event{
+				kind   = .Button_Down,
+				button = 1,
+				clicks = 2,
+			},
+		},
+		rows = 0,
+		cols = 8, // inside "banana"
+	}
+	app.backend_handle_ui_event(&b, ptr_ev)
+	testing.expect(t, b.interaction.selection_active, "selection must remain active after double click")
+	extracted := interaction.interaction_extract_selection_text(&b.terminal, &b.interaction)
+	defer delete(extracted)
+	testing.expect_value(t, extracted, "banana")
+
+	// 5. HUD Title computation verification
+	hud_visual := app.app_compute_hud_title(&b.interaction)
+	testing.expect_value(t, hud_visual, "[ VISUAL CHAR ]")
+
+	b.interaction.paused_lines_accumulated = 15
+	hud_visual_paused := app.app_compute_hud_title(&b.interaction)
+	testing.expect_value(t, hud_visual_paused, "[ VISUAL CHAR (+15 lines) ]")
+
+	// 6. Yank / Copy key 'y' exits visual mode back to passthrough
+	yank_ev := app.UI_Event{
+		type = .Input,
+		input = input.Input_Event{
+			event_type = .Key,
+			kind       = .Printable,
+			rune       = 'y',
+		},
+	}
+	app.backend_handle_ui_event(&b, yank_ev)
+	testing.expect_value(t, b.interaction.mode, interaction.Interaction_Mode.Passthrough)
+	testing.expect(t, !b.interaction.selection_active, "selection must be cleared after yank")
+	testing.expect(t, !b.view.selection.active, "view selection must be cleared after yank")
+
+	// 7. Search mode dispatch and HUD title
+	b.interaction.mode = .Search
+	b.interaction.search_len = 6
+	copy(b.interaction.search_query[:6], "banana")
+	b.interaction.search_match_count = 3
+	b.interaction.search_match_idx = 0
+	hud_find := app.app_compute_hud_title(&b.interaction)
+	testing.expect_value(t, hud_find, "[ FIND: 'banana' (1/3) ]")
+
+	// 8. Viewport paused flow and camera lock scrollback compensation
+	interaction.interaction_init(&b.interaction)
+	interaction.interaction_pause_viewport(&b.interaction, 10)
+	b.view.scrollback_offset = 10
+	hud_paused := app.app_compute_hud_title(&b.interaction)
+	testing.expect_value(t, hud_paused, "[ ⏸ PAUSED • Esc to Resume ]")
+
+	interaction.interaction_on_scrollback_push(&b.interaction, 5)
+	testing.expect_value(t, b.interaction.paused_offset, 15)
+	testing.expect_value(t, b.interaction.paused_lines_accumulated, 5)
+
+	hud_paused_acc := app.app_compute_hud_title(&b.interaction)
+	testing.expect_value(t, hud_paused_acc, "[ ⏸ PAUSED (+5 lines) • Esc to Resume ]")
+}
+
+@(test)
+test_app_search_and_tab_sync :: proc(t: ^testing.T) {
+	a: app.App
+	_bare_app(&a)
+	defer _bare_destroy(&a)
+	app.session_manager_init(&a.session_mgr, 4)
+	defer app.session_manager_destroy(&a.session_mgr)
+
+	idx, spawn_ok := app.session_spawn(&a.session_mgr, "/bin/echo", {"test"}, APP_TEST_ROWS, APP_TEST_COLS, nil, termgrid.Theme{})
+	testing.expect(t, spawn_ok, "session_spawn must succeed")
+	testing.expect_value(t, idx, 0)
+	a.session_mgr.active_idx = 0
+
+	active_b := app.app_active_backend(&a)
+	testing.expect(t, active_b != nil, "active backend must exist")
+	termgrid.terminal_put_string(&active_b.terminal, "hello search world hello\r\n")
+
+	// 1. Dispatch Cmd+F -> opens search bar, enters search mode
+	cmd_f := input.Input_Event{
+		event_type = .Key,
+		kind       = .Printable,
+		rune       = 'f',
+		gui        = true,
+	}
+	app.app_dispatch_input_events(&a, {cmd_f})
+	testing.expect(t, a.search_bar.visible, "search bar must be visible after Cmd+F")
+	testing.expect_value(t, active_b.interaction.mode, interaction.Interaction_Mode.Search)
+	testing.expect(t, active_b.interaction.search_active, "search_active must be true")
+	testing.expect(t, a.renderer.full_redraw_pending, "full_redraw_pending must be true")
+	a.renderer.full_redraw_pending = false
+
+	// 2. Type 'h', 'e', 'l', 'l', 'o'
+	for r in "hello" {
+		ev := input.Input_Event{
+			event_type = .Key,
+			kind       = .Printable,
+			rune       = r,
+		}
+		app.app_dispatch_input_events(&a, {ev})
+	}
+	testing.expect_value(t, string(a.search_bar.query[:a.search_bar.query_len]), "hello")
+	testing.expect_value(t, string(active_b.interaction.search_query[:active_b.interaction.search_len]), "hello")
+	testing.expect(t, a.search_bar.match_count >= 2, "match count must be >= 2")
+	testing.expect_value(t, active_b.interaction.search_match_count, a.search_bar.match_count)
+	testing.expect(t, a.renderer.full_redraw_pending, "full_redraw_pending must be true after query change")
+
+	// 3. Next match via Enter
+	enter_ev := input.Input_Event{
+		event_type = .Key,
+		kind       = .Enter,
+	}
+	app.app_dispatch_input_events(&a, {enter_ev})
+	testing.expect_value(t, a.search_bar.match_idx, 1)
+	testing.expect_value(t, active_b.interaction.search_match_idx, 1)
+
+	// 4. Escape -> close search bar, exit to passthrough
+	esc_ev := input.Input_Event{
+		event_type = .Key,
+		kind       = .Escape,
+	}
+	app.app_dispatch_input_events(&a, {esc_ev})
+	testing.expect(t, !a.search_bar.visible, "search bar must be hidden after Escape")
+	testing.expect_value(t, active_b.interaction.mode, interaction.Interaction_Mode.Passthrough)
+	testing.expect(t, !active_b.interaction.search_active, "search_active must be false after Escape")
+
+	// 5. Pointer outside tab bar clears hover states
+	a.tab_bar.hover_tab_idx = 0
+	a.tab_bar.hover_close_idx = 0
+	a.tab_bar.hover_new_tab = true
+	a.renderer.full_redraw_pending = false
+	outside_ptr := input.Input_Event{
+		event_type = .Pointer,
+		pointer = input.Input_Pointer_Event{
+			kind = .Motion,
+			x    = 100.0,
+			y    = 100.0,
+		},
+	}
+	app.app_dispatch_input_events(&a, {outside_ptr})
+	testing.expect_value(t, a.tab_bar.hover_tab_idx, -1)
+	testing.expect_value(t, a.tab_bar.hover_close_idx, -1)
+	testing.expect(t, !a.tab_bar.hover_new_tab, "hover_new_tab must be cleared")
+	testing.expect(t, a.renderer.full_redraw_pending, "full_redraw_pending must be triggered on hover clear")
 }
 
 
