@@ -122,8 +122,8 @@ _compute_tile_trace :: proc(strategy: int, tile_w: u32, tile_h: u32, trace: int,
 		_, uploaded, fell_back := render.dirty_upload_frame(&d, &r, &term, &journal, &lut, &ranges)
 		if fell_back {
 			render.render_compile_full_v2(&r.compiled_v2, &term)
-			bg_count, glyph_count, _ := render._prepare_instances_v2(&r, &lut)
-			uploaded = u64(bg_count + glyph_count) * instance.INSTANCE_STRIDE
+			bg_count, glyph_count, _, decor_count := render._prepare_instances_v2(&r, &lut)
+			uploaded = u64(bg_count + glyph_count + decor_count) * instance.INSTANCE_STRIDE
 		}
 		bytes = int(uploaded)
 	} else {
