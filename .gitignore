@@ -39,3 +39,10 @@ scratch/
 .DS_Store
 .vscode/
 .idea/
+
+# Scratch scripts and temporary binaries
+*.py
+term_test
+term_resize_repro
+test_slice.odin
+/artifacts/
