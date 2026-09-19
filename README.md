@@ -56,11 +56,15 @@ Rather than forcing a single rendering method across varying terminal workloads,
 - Robust POSIX pseudo-terminal lifecycle (`posix_openpt`, non-blocking drains, `TIOCSWINSZ` window size propagation, and zombie process cleanup).
 - Low-latency native Cocoa window event loop with macOS accent press-and-hold key repeat handling.
 
+### 📑 Native Multi-Tab UI & Interactive Selection (v0.2.0)
+- **Multi-Tab Sessions**: Concurrent independent terminal sessions with isolated PTY lifecycles, tab bar chrome, tab switching (`Cmd+1`..`Cmd+9`, `Cmd+Shift+[` / `]`), and non-blocking in-terminal search overlay (`Cmd+F`).
+- **Interactive Mouse Selection & URLs**: Linear, word, line, and rectangular block selection rendered via a zero-cost Metal overlay pipeline, with OSC 8 hyperlink detection and `Cmd+Click` opening.
+
 ---
 
 ## Benchmarks & Verification
 
-All architectural decisions are documented with empirical benchmarks in [LAPORAN.md](file:///Users/dwlhm/project/term/LAPORAN.md). Key findings include:
+All architectural decisions are documented with empirical benchmarks in [LAPORAN.md](file:///Users/dwlhm/project/term/LAPORAN.md), with external comparative throughput and latency evaluations against Alacritty and Ghostty in [COMPARATIVE_BENCHMARKS.md](file:///Users/dwlhm/project/term/COMPARATIVE_BENCHMARKS.md). Key findings include:
 
 | Metric / Component | Measured Result | Architectural Decision |
 |---|---|---|
@@ -145,16 +149,22 @@ term/
 │   ├── term.desktop         # Linux FreeDesktop entry
 │   └── fonts/               # Embedded Maple Mono and Nerd Font assets
 ├── bin/                     # Output binaries (term, Term.app, benchmarks)
-├── docs/                    # Architectural notes & research records
+├── docs/                    # Architectural notes, research records, and historical archives
+├── scripts/                 # Comparative benchmark suites and utility scripts
 ├── src/
 │   ├── app/                 # Main application loop, Cocoa/SDL integration
 │   ├── bench/               # Benchmark harness, trace replay, statistics
+│   ├── config/              # Declarative configuration, themes, and keybindings
+│   ├── interaction/         # Mouse selection, URL detection, clipboard actions
 │   ├── parser/              # VT state machine, UTF-8 parser, CSI handlers
 │   ├── platform/            # PTY lifecycle, keyboard/mouse input, windowing
 │   ├── render/              # Atlas, compiler, adaptive strategies (Instance, Tile, Fullscreen)
-│   └── terminal/            # O(1) ring grid, grapheme segmentation, damage hierarchy
+│   ├── terminal/            # O(1) ring grid, grapheme segmentation, damage hierarchy
+│   └── ui/                  # Native tab bar, search overlay, modal dialogs, and chrome
+├── COMPARATIVE_BENCHMARKS.md # Empirical head-to-head benchmarks (Term vs. Alacritty vs. Ghostty)
 ├── LAPORAN.md               # Comprehensive 21-phase engineering report & benchmarks
 ├── Makefile                 # Build, test, release, bundle, and benchmark automation
+├── RELEASE_NOTES.md         # Release history and feature notes (v0.2.0)
 ├── LICENSE                  # MIT License
 └── logo.svg                 # Vector source logo
 ```

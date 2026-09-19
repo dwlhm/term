@@ -48,6 +48,8 @@ check:
 	$(ODIN) check src/render $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/platform $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/config $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/ui $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/interaction $(CHECK_FLAGS) -no-entry-point
 
 test: test-config test-terminal test-parser test-pty test-input test-ui test-interaction test-render test-app test-bench
 
@@ -96,18 +98,19 @@ setup-wgpu:
 	@ODIN_PATH=$$(odin root); \
 	TARGET_DIR="$$ODIN_PATH/vendor/wgpu/lib/wgpu-macos-aarch64-release"; \
 	if [ ! -f "$$TARGET_DIR/lib/libwgpu_native.a" ]; then \
-		echo "Downloading wgpu-native v29.0.1.1..."; \
 		mkdir -p "$$TARGET_DIR"; \
-		curl -sSL "https://github.com/gfx-rs/wgpu-native/releases/download/v29.0.1.1/wgpu-macos-aarch64-release.zip" -o /tmp/wgpu.zip; \
+		if [ ! -f "/tmp/wgpu.zip" ]; then \
+			echo "Downloading wgpu-native v29.0.1.1..."; \
+			curl -sSL "https://github.com/gfx-rs/wgpu-native/releases/download/v29.0.1.1/wgpu-macos-aarch64-release.zip" -o /tmp/wgpu.zip; \
+		fi; \
 		unzip -q -o /tmp/wgpu.zip -d "$$TARGET_DIR"; \
-		rm -f /tmp/wgpu.zip; \
 		echo "wgpu-native installed successfully."; \
 	else \
 		echo "wgpu-native already installed at $$TARGET_DIR."; \
 	fi
 
 clean:
-	rm -rf $(OUT_DIR) $(OUT_DIR)/Term.app $(OUT_DIR)/Term.dmg $(OUT_DIR)/dmg_staging build term-app app.bin
+	rm -rf $(OUT_DIR) $(OUT_DIR)/Term.app $(OUT_DIR)/Term.dmg $(OUT_DIR)/dmg_staging build term-app app.bin *.dSYM
 
 help:
 	@echo "Usage: make [target]"

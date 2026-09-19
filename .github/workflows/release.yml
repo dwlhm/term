@@ -10,6 +10,9 @@ jobs:
     runs-on: macos-14
     permissions:
       contents: write
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      HOMEBREW_NO_INSTALL_CLEANUP: 1
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -22,6 +25,12 @@ jobs:
       - name: Install System Dependencies
         run: brew install sdl3
 
+      - name: Cache WGPU Native
+        uses: actions/cache@v4
+        with:
+          path: /tmp/wgpu.zip
+          key: wgpu-v29.0.1.1-macos-aarch64
+
       - name: Setup WGPU Native
         run: make setup-wgpu
 
@@ -31,16 +40,23 @@ jobs:
       - name: Build macOS app bundle
         run: make bundle
 
+      - name: Build macOS disk image
+        run: make dmg
+
       - name: Package release archives
         run: |
           tar -czf term-macos-arm64.tar.gz -C bin Term.app
           cd bin && zip -ry ../term-macos-arm64.zip Term.app && cd ..
+          cp bin/Term.dmg .
+          shasum -a 256 Term.dmg term-macos-arm64.tar.gz term-macos-arm64.zip > SHA256SUMS.txt
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
+            Term.dmg
             term-macos-arm64.tar.gz
             term-macos-arm64.zip
+            SHA256SUMS.txt
           draft: false
           prerelease: false

@@ -6,9 +6,16 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-test:
     runs-on: macos-14
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      HOMEBREW_NO_INSTALL_CLEANUP: 1
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -20,6 +27,12 @@ jobs:
 
       - name: Install System Dependencies
         run: brew install sdl3
+
+      - name: Cache WGPU Native
+        uses: actions/cache@v4
+        with:
+          path: /tmp/wgpu.zip
+          key: wgpu-v29.0.1.1-macos-aarch64
 
       - name: Setup WGPU Native
         run: make setup-wgpu
@@ -35,3 +48,6 @@ jobs:
 
       - name: Build macOS app bundle
         run: make bundle
+
+      - name: Verify DMG creation
+        run: make dmg
