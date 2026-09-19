@@ -310,7 +310,7 @@ test_tui_alt_screen_1049 :: proc(t: ^testing.T) {
 
 	// Scrolling in alt screen must NOT pollute scrollback
 	p.parse_chunk(&parser, &term, []u8{0x1B, '[', '3', '0', 'S'}) // SU 30
-	testing.expect_value(t, len(term.scrollback.rows), 0)
+	testing.expect_value(t, tg.scrollback_len(&term.scrollback), 0)
 
 	// Leave alt screen: CSI ? 1049 l
 	p.parse_chunk(&parser, &term, []u8{0x1B, '[', '?', '1', '0', '4', '9', 'l'})
@@ -330,4 +330,21 @@ test_tui_alt_screen_1049 :: proc(t: ^testing.T) {
 	testing.expect(t, term.is_alt_screen, "Terminal should enter alt screen with ?47h")
 	p.parse_chunk(&parser, &term, []u8{0x1B, '[', '?', '4', '7', 'l'})
 	testing.expect(t, !term.is_alt_screen, "Terminal should leave alt screen with ?47l")
+}
+
+@(test)
+test_tui_alt_screen_1047 :: proc(t: ^testing.T) {
+	parser: p.Parser
+	term: tg.Terminal
+	tg.terminal_init(&term, 24, 80)
+	defer tg.terminal_destroy(&term)
+	p.parser_init(&parser)
+
+	// Enter alt screen: CSI ? 1047 h
+	p.parse_chunk(&parser, &term, transmute([]u8)string("\x1b[?1047h"))
+	testing.expect(t, term.is_alt_screen, "CSI ? 1047 h must switch to alt screen")
+
+	// Leave alt screen: CSI ? 1047 l
+	p.parse_chunk(&parser, &term, transmute([]u8)string("\x1b[?1047l"))
+	testing.expect(t, !term.is_alt_screen, "CSI ? 1047 l must switch back to primary screen")
 }

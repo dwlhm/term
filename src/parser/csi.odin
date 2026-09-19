@@ -31,6 +31,8 @@ ALT_SCREEN_PARAM :: 1049
 // ALT_SCREEN_PARAM_LEGACY is the legacy DEC private mode number for alternate screen buffer (CSI ? 47 h/l).
 ALT_SCREEN_PARAM_LEGACY :: 47
 
+ALT_SCREEN_PARAM_1047 :: 1047
+
 // csi_collect_param collects a CSI parameter byte.
 // Handles digits (0-9), semicolon (;) as parameter separator, and colon (:)
 // as ECMA-48 sub-parameter separator. Colon-joined params are flagged in
@@ -40,7 +42,10 @@ csi_collect_param :: proc(p: ^Parser, b: u8) {
 	if b >= 0x30 && b <= 0x39 {
 		// Digit: accumulate into current parameter
 		if p.csi_count < 16 {
-			p.csi_values[p.csi_count] = p.csi_values[p.csi_count] * 10 + u32(b - 0x30)
+			cur := p.csi_values[p.csi_count]
+			if cur <= 200_000_000 {
+				p.csi_values[p.csi_count] = cur * 10 + u32(b - 0x30)
+			}
 		}
 	} else if b == 0x3B {
 		// Semicolon: next parameter (not a sub-parameter)
@@ -366,7 +371,7 @@ _csi_execute_dl :: proc(t: ^termgrid.Terminal, params: CSI_Params) {
 _csi_execute_alt_screen :: proc(t: ^termgrid.Terminal, params: CSI_Params, enter: bool) {
 	for i in 0..<int(params.count) {
 		val := int(params.values[i])
-		if val == ALT_SCREEN_PARAM || val == ALT_SCREEN_PARAM_LEGACY {
+		if val == ALT_SCREEN_PARAM || val == ALT_SCREEN_PARAM_LEGACY || val == ALT_SCREEN_PARAM_1047 {
 			if enter {
 				termgrid.terminal_enter_alt_screen(t)
 			} else {
@@ -552,8 +557,8 @@ _csi_execute_xtversion :: proc(t: ^termgrid.Terminal, params: CSI_Params, p: ^Pa
 //   parameters applies them (the enable form fish documents).
 // - '>': CSI > flags u pushes the current flags and sets the new subset.
 // - '<': CSI < n u pops n stack entries (default 1).
-// Only the disambiguate flag (0b1) is supported; other bits are masked off
-// and report as unset, which applications detect via the query response.
+// Progressive enhancement flags (bits 0..4, values 0..31) are supported; other bits
+// are masked off and report as unset, which applications detect via the query response.
 _csi_execute_kitty_keyboard :: proc(t: ^termgrid.Terminal, params: CSI_Params, p: ^Parser) {
 	count := int(params.count)
 	flags := u8(0)
@@ -575,12 +580,17 @@ _csi_execute_kitty_keyboard :: proc(t: ^termgrid.Terminal, params: CSI_Params, p
 				return
 			}
 			active := termgrid.terminal_kitty_active(t)
-			resp: [8]u8
+			resp: [16]u8
 			n := 0
 			resp[n] = 0x1B; n += 1
 			resp[n] = '['; n += 1
 			resp[n] = '?'; n += 1
-			if active.flags >= 10 {
+			if active.flags >= 100 {
+				resp[n] = '0' + active.flags / 100
+				n += 1
+				resp[n] = '0' + (active.flags / 10) % 10
+				n += 1
+			} else if active.flags >= 10 {
 				resp[n] = '0' + active.flags / 10
 				n += 1
 			}

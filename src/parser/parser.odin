@@ -26,9 +26,10 @@ Parser :: struct {
 	utf8_buffer: [4]u8,
 
 	// Small persistent state & flags
-	intermediate:       u8,
-	string_esc_pending: bool,
-	osc_truncated:      bool, // true when the OSC payload exceeded osc_buffer
+	intermediate:         u8,
+	string_esc_pending:   bool,
+	osc_truncated:        bool, // true when the OSC payload exceeded osc_buffer
+	allow_clipboard_read: bool,
 
 	// String buffers (OSC / DCS)
 	osc_len:    int,
@@ -66,6 +67,7 @@ parser_init :: proc(p: ^Parser) {
 	p.print_run_len = 0
 	p.osc_len = 0
 	p.osc_truncated = false
+	p.allow_clipboard_read = false
 	p.dcs_len = 0
 
 	// Clear CSI values
@@ -118,8 +120,16 @@ parse_chunk :: proc(p: ^Parser, t: ^termgrid.Terminal, input: []u8) {
 				}
 				if byte == 0x1B {
 					p.string_esc_pending = true
+					pos += 1
+					continue
 				}
-				pos += 1
+				// Any other byte after ESC: the OSC/DCS string is aborted by an escape sequence!
+				// Discard string buffer, enter Escape state, and re-parse current byte in Escape state.
+				p.osc_len = 0
+				p.osc_truncated = false
+				p.dcs_len = 0
+				p.state = .Escape
+				// Do NOT increment pos: the loop will re-process 'byte' under p.state = .Escape
 				continue
 			}
 			if byte == 0x07 || byte == 0x9C {
@@ -176,11 +186,18 @@ parse_chunk :: proc(p: ^Parser, t: ^termgrid.Terminal, input: []u8) {
 		byte := input[pos]
 		transition := TRANSITION_TABLE[p.state][byte]
 		
+		if p.state == .Utf8 && transition.next_state != .Utf8 {
+			if p.utf8_state != .Ground {
+				termgrid.terminal_put_char(t, 0xFFFD)
+				p.utf8_state = .Ground
+				p.utf8_len = 0
+			}
+		}
+
 		// Execute the action
 		#partial switch transition.action {
 		case .Print:
-			// Accumulate print run (for non-fast-path cases)
-			accumulate_print_run(p, byte)
+			termgrid.terminal_put_char(t, rune(byte))
 		case .Execute:
 			execute_c0(t, byte)
 		case .Clear:
@@ -282,6 +299,8 @@ terminal_print_run :: proc(t: ^termgrid.Terminal, data: []u8, style: termgrid.St
 // execute_c0 executes a C0 control character.
 execute_c0 :: proc(t: ^termgrid.Terminal, b: u8) {
 	switch b {
+	case 0x07: // BEL (Bell)
+		termgrid.terminal_bell(t)
 	case 0x08: // BS (Backspace)
 		termgrid.terminal_backspace(t)
 	case 0x09: // TAB
@@ -293,12 +312,28 @@ execute_c0 :: proc(t: ^termgrid.Terminal, b: u8) {
 	case 0x0D: // CR (Carriage Return)
 		t.cursor.col = 0
 		t.cursor.pending_wrap = false
+	case 0x0E: // SO (Shift Out) -> G1 active
+		termgrid.terminal_shift_out(t)
+	case 0x0F: // SI (Shift In) -> G0 active
+		termgrid.terminal_shift_in(t)
 	}
 }
 
 // esc_dispatch dispatches an escape sequence.
 esc_dispatch :: proc(p: ^Parser, t: ^termgrid.Terminal, final_byte: u8) {
-	_ = p
+	if p != nil && p.intermediate == '(' {
+		switch final_byte {
+		case '0': termgrid.terminal_designate_g0(t, .DEC_Line_Drawing)
+		case 'B': termgrid.terminal_designate_g0(t, .US_ASCII)
+		}
+		return
+	} else if p != nil && p.intermediate == ')' {
+		switch final_byte {
+		case '0': termgrid.terminal_designate_g1(t, .DEC_Line_Drawing)
+		case 'B': termgrid.terminal_designate_g1(t, .US_ASCII)
+		}
+		return
+	}
 	switch final_byte {
 	case '7':
 		termgrid.terminal_save_cursor(t)
@@ -321,7 +356,9 @@ _osc_number :: proc(payload: []u8) -> (num: int, next: int) {
 	num = 0
 	i := 0
 	for i < len(payload) && payload[i] >= '0' && payload[i] <= '9' {
-		num = num * 10 + int(payload[i] - '0')
+		if num <= 100_000 {
+			num = num * 10 + int(payload[i] - '0')
+		}
 		i += 1
 	}
 	return num, i
@@ -481,7 +518,9 @@ osc_dispatch :: proc(p: ^Parser, t: ^termgrid.Terminal, payload: []u8) {
 		idx_val := 0
 		i := 0
 		for i < len(body) && body[i] >= '0' && body[i] <= '9' {
-			idx_val = idx_val * 10 + int(body[i] - '0')
+			if idx_val <= 1000 {
+				idx_val = idx_val * 10 + int(body[i] - '0')
+			}
 			i += 1
 		}
 		if i > 0 && i + 2 == len(body) && body[i] == ';' && body[i + 1] == '?' && idx_val >= 0 && idx_val <= 255 {
@@ -532,6 +571,10 @@ osc_dispatch :: proc(p: ^Parser, t: ^termgrid.Terminal, payload: []u8) {
 				termgrid.terminal_osc_8_clear_url(t)
 			}
 		}
+	case 9:
+		// OSC 9 ("9;<message>")
+		// iTerm2 / ConEmu desktop notification
+		termgrid.terminal_osc_9_notify(t, body)
 	case 10:
 		// Foreground color query ("10;?"): respond rgb:RRRR/GGGG/BBBB
 		// with 16-bit channels scaled from the theme foreground.
@@ -590,7 +633,7 @@ osc_dispatch :: proc(p: ^Parser, t: ^termgrid.Terminal, payload: []u8) {
 		}
 	case 52:
 		// Clipboard query ("52;c;?") and write ("52;c;<base64>").
-		if len(body) >= 3 && body[0] == 'c' && body[1] == ';' && body[2] == '?' {
+		if p.allow_clipboard_read && len(body) >= 3 && body[0] == 'c' && body[1] == ';' && body[2] == '?' {
 			if p.clipboard_read_cb != nil && p.response_cb != nil {
 				raw_buf: [512]u8
 				raw_len := p.clipboard_read_cb(p.clipboard_read_user_data, raw_buf[:])
@@ -637,6 +680,10 @@ osc_dispatch :: proc(p: ^Parser, t: ^termgrid.Terminal, payload: []u8) {
 		case 'C': termgrid.terminal_osc_133_command_start(t)
 		case 'D': termgrid.terminal_osc_133_command_end(t)
 		}
+	case 777:
+		// OSC 777 ("777;notify;<title>;<message>")
+		// rxvt-unicode / libvte notification protocol
+		termgrid.terminal_osc_777_notify(t, body)
 	}
 }
 

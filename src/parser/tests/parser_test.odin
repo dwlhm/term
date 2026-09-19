@@ -499,3 +499,56 @@ test_parser_memory_layout :: proc(t: ^testing.T) {
 	testing.expect(t, offset_of(p.Parser, clipboard_read_user_data) == 1160, "offset clipboard_read_user_data == 1160")
 	testing.expect(t, size_of(p.Parser) == 1168, "size_of(Parser) == 1168")
 }
+
+@(test)
+test_utf8_interrupted_by_ascii :: proc(t: ^testing.T) {
+	parser: p.Parser
+	p.parser_init(&parser)
+	term: tg.Terminal
+	tg.terminal_init(&term, 24, 80)
+	defer tg.terminal_destroy(&term)
+
+	// Send incomplete UTF-8 3-byte lead (\xE2\x82) followed by ASCII 'X'
+	p.parse_chunk(&parser, &term, []u8{0xE2, 0x82, 'X'})
+
+	cell0 := tg.terminal_get_cell(&term, 0, 0)
+	cell1 := tg.terminal_get_cell(&term, 0, 1)
+	testing.expect(t, cell0.content == 0xFFFD, "Interrupted UTF-8 lead must emit U+FFFD")
+	testing.expect(t, cell1.content == 'X', "Interrupting ASCII must be printed")
+}
+
+@(test)
+test_utf8_interrupted_by_escape :: proc(t: ^testing.T) {
+	parser: p.Parser
+	p.parser_init(&parser)
+	term: tg.Terminal
+	tg.terminal_init(&term, 24, 80)
+	defer tg.terminal_destroy(&term)
+
+	// Send incomplete UTF-8 2-byte lead (\xC3) followed by \x1b[31mY
+	p.parse_chunk(&parser, &term, []u8{0xC3, 0x1B, '[', '3', '1', 'm', 'Y'})
+
+	cell0 := tg.terminal_get_cell(&term, 0, 0)
+	cell1 := tg.terminal_get_cell(&term, 0, 1)
+	testing.expect(t, cell0.content == 0xFFFD, "Interrupted UTF-8 lead must emit U+FFFD")
+	testing.expect(t, cell1.content == 'Y', "Interrupting text must be printed")
+	style := tg.style_table_get(&term.grid.style_table, cell1.style)
+	testing.expect(t, style.fg == tg.theme_palette_256(term.grid.style_table.theme, 1), "Color must be red (SGR 31)")
+}
+
+@(test)
+test_osc_aborted_by_csi :: proc(t: ^testing.T) {
+	parser: p.Parser
+	p.parser_init(&parser)
+	term: tg.Terminal
+	tg.terminal_init(&term, 24, 80)
+	defer tg.terminal_destroy(&term)
+
+	// OSC aborted by CSI without ST: \x1b]0;Title\x1b[32mHello\x1b\\
+	p.parse_chunk(&parser, &term, []u8{0x1B, ']', '0', ';', 'T', 'i', 't', 'l', 'e', 0x1B, '[', '3', '2', 'm', 'H', 'e', 'l', 'l', 'o'})
+
+	cell := tg.terminal_get_cell(&term, 0, 0)
+	testing.expect(t, cell.content == 'H', "First character must be 'H'")
+	style := tg.style_table_get(&term.grid.style_table, cell.style)
+	testing.expect(t, style.fg == tg.theme_palette_256(term.grid.style_table.theme, 2), "Color must be green (SGR 32)")
+}

@@ -334,9 +334,20 @@ init_transition_table :: proc() -> [len(Parser_State)][256]Transition {
 	}
 	
 	// Utf8 state
-	for byte in 0x00..=0x7F {
+	for byte in 0x00..=0x17 {
+		table[7][byte] = Transition{.Execute, .Ground}
+	}
+	table[7][0x18] = Transition{.Execute, .Ground} // CAN
+	table[7][0x19] = Transition{.Execute, .Ground} // EM
+	table[7][0x1A] = Transition{.Execute, .Ground} // SUB
+	for byte in 0x1C..=0x1F {
+		table[7][byte] = Transition{.Execute, .Ground}
+	}
+	table[7][0x1B] = Transition{.Clear, .Escape} // ESC
+	for byte in 0x20..=0x7E {
 		table[7][byte] = Transition{.Print, .Ground} // ASCII resets to Ground
 	}
+	table[7][0x7F] = Transition{.Ignore, .Ground} // DEL
 	for byte in 0x80..=0xBF {
 		table[7][byte] = Transition{.Utf8, .Utf8} // continuation
 	}

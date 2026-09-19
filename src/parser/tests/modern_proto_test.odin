@@ -453,6 +453,12 @@ test_osc_52_clipboard_query :: proc(t: ^testing.T) {
 	tg.terminal_init(&term, 24, 80)
 	defer tg.terminal_destroy(&term)
 
+	// By default (parser.allow_clipboard_read == false), query produces NO response
+	p.parse_chunk(&parser, &term, []u8{0x1B, ']', '5', '2', ';', 'c', ';', '?', 0x1B, '\\'})
+	testing.expect(t, len(_proto_response()) == 0, "OSC 52;c;? query must produce no response when allow_clipboard_read is false")
+
+	// When allow_clipboard_read is set to true, query responds with base64 clipboard content
+	parser.allow_clipboard_read = true
 	// Base64 of "hello world" is "aGVsbG8gd29ybGQ="
 	p.parse_chunk(&parser, &term, []u8{0x1B, ']', '5', '2', ';', 'c', ';', '?', 0x1B, '\\'})
 	want := "\x1b]52;c;aGVsbG8gd29ybGQ=\x1b\\"
@@ -486,6 +492,183 @@ test_osc_8_hyperlinks :: proc(t: ^testing.T) {
 	seq_clear := "\x1b]8;;\x1b\\"
 	p.parse_chunk(&parser, &term, transmute([]u8)seq_clear)
 	testing.expect(t, tg.terminal_get_active_hyperlink(&term) == "", "active hyperlink must be empty after clear")
+}
+
+// --- Bell and Notification Protocol Tests ---
+
+@(test)
+test_c0_bell :: proc(t: ^testing.T) {
+	parser: p.Parser
+	p.parser_init(&parser)
+
+	term: tg.Terminal
+	tg.terminal_init(&term, 24, 80)
+	defer tg.terminal_destroy(&term)
+
+	testing.expect(t, !term.bell_event, "bell_event must start false")
+
+	// BEL byte 0x07
+	p.parse_chunk(&parser, &term, []u8{0x07})
+	testing.expect(t, term.bell_event, "bell_event must be set after BEL (0x07)")
+}
+
+@(test)
+test_osc_9_notification :: proc(t: ^testing.T) {
+	parser: p.Parser
+	p.parser_init(&parser)
+
+	term: tg.Terminal
+	tg.terminal_init(&term, 24, 80)
+	defer tg.terminal_destroy(&term)
+
+	// Happy path: ESC ] 9 ; Hello World BEL
+	seq := "\x1b]9;Hello World\x07"
+	p.parse_chunk(&parser, &term, transmute([]u8)seq)
+
+	notif, ok := tg.terminal_pop_notification(&term)
+	testing.expect(t, ok, "OSC 9 notification must be queued")
+	testing.expect(t, string(notif.title[:notif.title_len]) == "Terminal", "OSC 9 title should default to Terminal")
+	testing.expect(t, string(notif.message[:notif.message_len]) == "Hello World", "OSC 9 message should match")
+
+	// Missing semicolon in OSC 9: ESC ] 9 BEL
+	seq_no_semi := "\x1b]9\x07"
+	p.parse_chunk(&parser, &term, transmute([]u8)seq_no_semi)
+	testing.expect(t, term.notification_count == 0, "OSC 9 without semicolon must be dropped safely")
+}
+
+@(test)
+test_osc_777_notification :: proc(t: ^testing.T) {
+	parser: p.Parser
+	p.parser_init(&parser)
+
+	term: tg.Terminal
+	tg.terminal_init(&term, 24, 80)
+	defer tg.terminal_destroy(&term)
+
+	// Happy path: ESC ] 777 ; notify ; Title ; Message BEL
+	seq := "\x1b]777;notify;Task Alert;Finished successfully\x07"
+	p.parse_chunk(&parser, &term, transmute([]u8)seq)
+
+	notif, ok := tg.terminal_pop_notification(&term)
+	testing.expect(t, ok, "OSC 777 notification must be queued")
+	testing.expect(t, string(notif.title[:notif.title_len]) == "Task Alert", "OSC 777 title should match")
+	testing.expect(t, string(notif.message[:notif.message_len]) == "Finished successfully", "OSC 777 message should match")
+
+	// Missing semicolon between title and message: ESC ] 777 ; notify ; AlertOnly BEL
+	seq_missing_semi := "\x1b]777;notify;AlertOnly\x07"
+	p.parse_chunk(&parser, &term, transmute([]u8)seq_missing_semi)
+	testing.expect(t, term.notification_count == 0, "OSC 777 with missing semicolon must be dropped safely")
+
+	// ST terminator instead of BEL: ESC ] 777 ; notify ; Title ; Message ESC \
+	seq_st := "\x1b]777;notify;Title;Message\x1b\\"
+	p.parse_chunk(&parser, &term, transmute([]u8)seq_st)
+
+	notif2, ok2 := tg.terminal_pop_notification(&term)
+	testing.expect(t, ok2, "OSC 777 with ST terminator must be queued")
+	testing.expect(t, string(notif2.title[:notif2.title_len]) == "Title", "OSC 777 title should match")
+	testing.expect(t, string(notif2.message[:notif2.message_len]) == "Message", "OSC 777 message should match")
+}
+
+// --- DEC Line Drawing Character Set (DECALTCS) Tests ---
+
+@(test)
+test_parser_dec_line_drawing_g0 :: proc(t: ^testing.T) {
+	parser: p.Parser
+	p.parser_init(&parser)
+
+	term: tg.Terminal
+	tg.terminal_init(&term, 24, 80)
+	defer tg.terminal_destroy(&term)
+
+	// ESC ( 0 designates G0 as DEC Line Drawing
+	seq1 := "\x1b(0lqqk"
+	p.parse_chunk(&parser, &term, transmute([]u8)seq1)
+
+	expected_box := []rune{'┌', '─', '─', '┐'}
+	for exp, i in expected_box {
+		cell := tg.grid_get_cell(&term.grid, 0, i)
+		testing.expect(t, cell.content == tg.Content_Handle(exp), "G0 DEC box drawing char must match")
+	}
+
+	// ESC ( B restores G0 to US_ASCII
+	seq2 := "\x1b(Blqqk"
+	p.parse_chunk(&parser, &term, transmute([]u8)seq2)
+
+	expected_ascii := []u8{'l', 'q', 'q', 'k'}
+	for exp, i in expected_ascii {
+		cell := tg.grid_get_cell(&term.grid, 0, 4 + i)
+		testing.expect(t, cell.content == tg.Content_Handle(exp), "G0 ASCII char must match")
+	}
+}
+
+@(test)
+test_parser_dec_line_drawing_g1_shift :: proc(t: ^testing.T) {
+	parser: p.Parser
+	p.parser_init(&parser)
+
+	term: tg.Terminal
+	tg.terminal_init(&term, 24, 80)
+	defer tg.terminal_destroy(&term)
+
+	// ESC ) 0 designates G1 as DEC Line Drawing; G0 remains US_ASCII
+	// Write "AB", then Shift Out (0x0E), write "qq", then Shift In (0x0F), write "CD"
+	seq := "\x1b)0AB\x0Eqq\x0FCD"
+	p.parse_chunk(&parser, &term, transmute([]u8)seq)
+
+	// "AB" at cols 0..1
+	c0 := tg.grid_get_cell(&term.grid, 0, 0)
+	c1 := tg.grid_get_cell(&term.grid, 0, 1)
+	testing.expect(t, c0.content == tg.Content_Handle('A'), "col 0 should be 'A'")
+	testing.expect(t, c1.content == tg.Content_Handle('B'), "col 1 should be 'B'")
+
+	// "qq" at cols 2..3 should translate to '─'
+	c2 := tg.grid_get_cell(&term.grid, 0, 2)
+	c3 := tg.grid_get_cell(&term.grid, 0, 3)
+	testing.expect(t, c2.content == tg.Content_Handle('─'), "col 2 should be '─'")
+	testing.expect(t, c3.content == tg.Content_Handle('─'), "col 3 should be '─'")
+
+	// "CD" at cols 4..5 should be plain ASCII
+	c4 := tg.grid_get_cell(&term.grid, 0, 4)
+	c5 := tg.grid_get_cell(&term.grid, 0, 5)
+	testing.expect(t, c4.content == tg.Content_Handle('C'), "col 4 should be 'C'")
+	testing.expect(t, c5.content == tg.Content_Handle('D'), "col 5 should be 'D'")
+}
+
+@(test)
+test_parser_dec_line_drawing_unknown_designation :: proc(t: ^testing.T) {
+	parser: p.Parser
+	p.parser_init(&parser)
+
+	term: tg.Terminal
+	tg.terminal_init(&term, 24, 80)
+	defer tg.terminal_destroy(&term)
+
+	// ESC ( Z is unknown designation; should be ignored safely
+	seq := "\x1b(Zhello"
+	p.parse_chunk(&parser, &term, transmute([]u8)seq)
+
+	expected := "hello"
+	for i in 0..<len(expected) {
+		cell := tg.grid_get_cell(&term.grid, 0, i)
+		testing.expect(t, cell.content == tg.Content_Handle(expected[i]), "unknown designation must safely ignore")
+	}
+}
+
+@(test)
+test_parser_dec_line_drawing_reset :: proc(t: ^testing.T) {
+	parser: p.Parser
+	p.parser_init(&parser)
+
+	term: tg.Terminal
+	tg.terminal_init(&term, 24, 80)
+	defer tg.terminal_destroy(&term)
+
+	// Activate DEC, then issue ESC c (RIS Reset), then write 'q'
+	seq := "\x1b(0\x1bcq"
+	p.parse_chunk(&parser, &term, transmute([]u8)seq)
+
+	cell := tg.grid_get_cell(&term.grid, 0, 0)
+	testing.expect(t, cell.content == tg.Content_Handle('q'), "reset must restore plain ASCII")
 }
 
 

@@ -164,14 +164,29 @@ test_fx_kitty_set_and_query :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_fx_kitty_flags_31_query :: proc(t: ^testing.T) {
+	_fx_reset()
+	term := _fx_term(24, 80)
+	defer tg.terminal_destroy(&term)
+	parser := _fx_parser()
+
+	p.parse_chunk(&parser, &term, []u8{0x1B, '[', '=', '3', '1', 'u'})
+	testing.expect(t, tg.terminal_kitty_active(&term).flags == 31, "CSI = 31 u must set all flags")
+
+	_fx_reset()
+	p.parse_chunk(&parser, &term, []u8{0x1B, '[', '?', 'u'})
+	_fx_bytes_eq(t, _fx_response(), []u8{0x1B, '[', '?', '3', '1', 'u'}, "CSI ? u must report 31 without truncation")
+}
+
+@(test)
 test_fx_kitty_unsupported_masked :: proc(t: ^testing.T) {
 	term := _fx_term(24, 80)
 	defer tg.terminal_destroy(&term)
 	parser := _fx_parser()
 
-	// Request disambiguate + event types (3); only disambiguate sticks.
-	p.parse_chunk(&parser, &term, []u8{0x1B, '[', '=', '3', 'u'})
-	testing.expect(t, tg.terminal_kitty_active(&term).flags == 1, "unsupported bits must be masked off")
+	// Request flags with unsupported bit (35 = 1 | 2 | 32); unsupported bit (32) masked off.
+	p.parse_chunk(&parser, &term, []u8{0x1B, '[', '=', '3', '5', 'u'})
+	testing.expect(t, tg.terminal_kitty_active(&term).flags == 3, "unsupported bits must be masked off")
 
 	// Mode 2 sets bits without clearing.
 	p.parse_chunk(&parser, &term, []u8{0x1B, '[', '=', '0', 'u'})
