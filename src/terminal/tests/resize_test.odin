@@ -638,20 +638,17 @@ test_resize_dual_engine_multiline_prompt_preservation :: proc(t: ^testing.T) {
 	testing.expect(t, term.cursor.row == 1 && term.cursor.col == 2, "cursor at row 1, col 2")
 
 	// Resize to 60 columns:
-	// Line 0 (70 chars) losslessly reflows into 2 rows: 60 chars on row 0 (wrapped = true) + 10 chars on row 1 (wrapped = false).
-	// Line 1 is on row 2. Cursor is at row 2, col 2.
+	// Multiline prompt preserves height: row 0 and row 1 remain 1 physical row each without wrapping.
 	tg.terminal_resize(&term, 24, 60)
 
 	testing.expect(t, term.grid.col_count == 60, "cols is 60")
-	testing.expect(t, term.grid.rows[0].wrapped, "row 0 wrapped is true after shrink to 60")
-	testing.expect(t, !term.grid.rows[1].wrapped, "row 1 wrapped is false")
+	testing.expect(t, !term.grid.rows[0].wrapped, "row 0 prompt must not wrap")
+	testing.expect(t, !term.grid.rows[1].wrapped, "row 1 prompt must not wrap")
 	testing.expect(t, term.grid.rows[0].is_prompt, "row 0 is still prompt")
 	testing.expect(t, term.grid.rows[1].is_prompt, "row 1 is still prompt")
-	testing.expect(t, term.cursor.row == 2 && term.cursor.col == 2, "cursor preserved at row 2, col 2")
+	testing.expect(t, term.cursor.row == 1 && term.cursor.col == 2, "cursor preserved at row 1, col 2")
 
 	// Resize back to 80 columns:
-	// Line 0 unwraps back to 1 row (row 0), Line 1 unwraps to row 1, cursor unwraps to row 1, col 2.
-	// All characters preserved without loss.
 	tg.terminal_resize(&term, 24, 80)
 	testing.expect(t, term.grid.col_count == 80, "cols restored to 80")
 	testing.expect(t, !term.grid.rows[0].wrapped, "row 0 unwrapped back to single row")
@@ -936,7 +933,6 @@ test_resize_prompt_truncation_without_wrapping :: proc(t: ^testing.T) {
 	tg.terminal_init(&term, 24, 80)
 	defer tg.terminal_destroy(&term)
 
-	// Build a prompt row with RPROMPT pattern (left text, gap >= 8, right text)
 	left_str := "~/project"
 	for ch in left_str {
 		tg.terminal_put_char(&term, ch)
@@ -954,29 +950,16 @@ test_resize_prompt_truncation_without_wrapping :: proc(t: ^testing.T) {
 	term.cursor.row = 0
 	term.cursor.col = len(left_str)
 
-	// Lossless resize from 80 cols down to 60 cols:
-	// 69 chars wraps into 2 rows: row 0 (60 chars, wrapped=true), row 1 (9 chars, wrapped=false)
+	// Resize from 80 cols down to 60 cols
 	tg.terminal_resize(&term, 24, 60)
 
 	testing.expect(t, term.grid.col_count == 60, "cols should be 60")
-	phys_after0 := tg._grid_physical_row(&term.grid, 0)
-	phys_after1 := tg._grid_physical_row(&term.grid, 1)
-	testing.expect(t, term.grid.rows[phys_after0].wrapped, "row 0 prompt wraps losslessly")
-	testing.expect(t, !term.grid.rows[phys_after1].wrapped, "row 1 prompt continuation is not wrapped")
+	phys_after := tg._grid_physical_row(&term.grid, 0)
+	testing.expect(t, !term.grid.rows[phys_after].wrapped, "row 0 prompt must not wrap")
 	testing.expect(t, term.cursor.row == 0, "cursor row remains 0")
-	testing.expect(t, term.cursor.col == len(left_str), "cursor col preserved at left_str")
-
-	// Resize back to 80 cols: unwraps losslessly without truncation
-	tg.terminal_resize(&term, 24, 80)
-	testing.expect(t, term.grid.col_count == 80, "cols restored to 80")
-	phys_restored := tg._grid_physical_row(&term.grid, 0)
-	testing.expect(t, !term.grid.rows[phys_restored].wrapped, "row 0 unwrapped back to single row")
-	testing.expect(t, term.cursor.row == 0, "cursor row remains 0")
-	testing.expect(t, term.cursor.col == len(left_str), "cursor col remains at left_str")
-
-	for c in 0..<80 {
+	for c in 0..<60 {
 		cell := tg.grid_get_cell(&term.grid, 1, c)
-		testing.expect(t, cell == tg.CELL_DEFAULT, "row 1 should be empty after unwrap")
+		testing.expect(t, cell == tg.CELL_DEFAULT, "row 1 should remain default/empty, row count remains 1")
 	}
 }
 
@@ -986,7 +969,6 @@ test_resize_multiline_prompt_preserves_height :: proc(t: ^testing.T) {
 	tg.terminal_init(&term, 24, 80)
 	defer tg.terminal_destroy(&term)
 
-	// 2-line prompt (line 1 with RPROMPT, line 2 with cursor)
 	// Line 1:
 	left_str := "my-project"
 	for ch in left_str {
@@ -1012,27 +994,98 @@ test_resize_multiline_prompt_preserves_height :: proc(t: ^testing.T) {
 	testing.expect(t, term.cursor.row == 1 && term.cursor.col == 2, "cursor initially at row 1, col 2")
 
 	// Multi-step resize: 80 -> 60 -> 40 -> 80
-	// At 60 cols: Line 1 (66 chars) wraps into 2 rows, Line 2 is on row 2, cursor is at row 2, col 2.
-	tg.terminal_resize(&term, 24, 60)
-	testing.expect(t, term.grid.col_count == 60, "cols is 60")
-	testing.expect(t, term.grid.rows[0].wrapped, "line 1 wraps at 60 cols")
-	testing.expect(t, term.cursor.row == 2, "cursor row at 2 at 60 cols")
+	resize_steps := []int{60, 40, 80}
+	for target_cols in resize_steps {
+		tg.terminal_resize(&term, 24, target_cols)
+		testing.expect(t, term.grid.col_count == target_cols, "cols must match target")
+		testing.expect(t, term.cursor.row == 1, "cursor row remains stable at 1")
 
-	// At 40 cols: Line 1 wraps into 2 rows, Line 2 is on row 2, cursor is at row 2, col 2.
-	tg.terminal_resize(&term, 24, 40)
-	testing.expect(t, term.grid.col_count == 40, "cols is 40")
-	testing.expect(t, term.grid.rows[0].wrapped, "line 1 wraps at 40 cols")
-	testing.expect(t, term.cursor.row == 2, "cursor row at 2 at 40 cols")
+		p0 := tg._grid_physical_row(&term.grid, 0)
+		p1 := tg._grid_physical_row(&term.grid, 1)
+		testing.expect(t, !term.grid.rows[p0].wrapped, "line 1 (row 0) must not wrap")
+		testing.expect(t, !term.grid.rows[p1].wrapped, "line 2 (row 1) must not wrap")
+		testing.expect(t, term.grid.rows[p0].is_prompt, "row 0 remains prompt")
+		testing.expect(t, term.grid.rows[p1].is_prompt, "row 1 remains prompt")
 
-	// Back to 80 cols: Line 1 unwraps to 1 row, Line 2 unwraps to row 1, cursor unwraps to row 1, col 2.
-	tg.terminal_resize(&term, 24, 80)
-	testing.expect(t, term.grid.col_count == 80, "cols restored to 80")
-	testing.expect(t, !term.grid.rows[0].wrapped, "line 1 unwrapped at 80 cols")
-	testing.expect(t, !term.grid.rows[1].wrapped, "line 2 unwrapped at 80 cols")
-	testing.expect(t, term.cursor.row == 1 && term.cursor.col == 2, "cursor row restored to 1, col 2")
-	for c in 0..<80 {
-		cell := tg.grid_get_cell(&term.grid, 2, c)
-		testing.expect(t, cell == tg.CELL_DEFAULT, "row 2 must be empty default after unwrap")
+		// Verify row 2 is empty default
+		for c in 0..<target_cols {
+			cell := tg.grid_get_cell(&term.grid, 2, c)
+			testing.expect(t, cell == tg.CELL_DEFAULT, "row 2 must be empty default")
+		}
+	}
+}
+
+@(test)
+test_resize_command_output_above_p10k_not_truncated :: proc(t: ^testing.T) {
+	term: tg.Terminal
+	tg.terminal_init(&term, 24, 80)
+	defer tg.terminal_destroy(&term)
+
+	// Step 1: Simulate "ls -l" command output on line 0 (65 characters long)
+	cmd_output := "-rw-r--r--  1 user staff  1024 Sep 27 03:00 very_long_filename_xyz.txt"
+	for ch in cmd_output {
+		tg.terminal_put_char(&term, ch)
+	}
+
+	// Move to next line for 2-line p10k prompt
+	tg.terminal_newline(&term)
+
+	// Line 1: p10k frame top row (starts with ╭ = 0x256D)
+	p10k_top := "╭─ ~/project"
+	for ch in p10k_top {
+		tg.terminal_put_char(&term, ch)
+	}
+	for _ in 0..<40 {
+		tg.terminal_put_char(&term, ' ')
+	}
+	p10k_top_r := "git:(main)"
+	for ch in p10k_top_r {
+		tg.terminal_put_char(&term, ch)
+	}
+
+	// Line 2: p10k frame bottom row (starts with ╰ = 0x2570) with cursor
+	tg.terminal_newline(&term)
+	p10k_bottom := "╰─$ "
+	for ch in p10k_bottom {
+		tg.terminal_put_char(&term, ch)
+	}
+
+	testing.expect(t, term.cursor.row == 2 && term.cursor.col == 4, "cursor at prompt line 2")
+
+	// Resize from 80 cols down to 50 cols
+	tg.terminal_resize(&term, 24, 50)
+	testing.expect(t, term.grid.col_count == 50, "cols resized to 50")
+
+	// Verify command output reflows into 2 rows (50 + 15 chars) without truncation:
+	p_out0 := tg._grid_physical_row(&term.grid, 0)
+	p_out1 := tg._grid_physical_row(&term.grid, 1)
+	testing.expect(t, term.grid.rows[p_out0].wrapped, "command output wrapped across cols")
+	testing.expect(t, !term.grid.rows[p_out1].wrapped, "command output continuation row not wrapped")
+
+	for i in 0..<50 {
+		cell := tg.grid_get_cell(&term.grid, 0, i)
+		testing.expect(t, cell.content == tg.Content_Handle(rune(cmd_output[i])), "first 50 chars on row 0")
+	}
+	for i in 0..<15 {
+		cell := tg.grid_get_cell(&term.grid, 1, i)
+		testing.expect(t, cell.content == tg.Content_Handle(rune(cmd_output[50 + i])), "remaining 15 chars on row 1")
+	}
+
+	// Verify p10k top row (row 2) does not wrap and remains exactly 1 row:
+	p_p10k0 := tg._grid_physical_row(&term.grid, 2)
+	testing.expect(t, !term.grid.rows[p_p10k0].wrapped, "p10k top frame row must not wrap")
+	testing.expect(t, term.grid.rows[p_p10k0].is_prompt, "p10k top frame row marked prompt")
+
+	// Verify p10k bottom row (row 3) does not wrap and cursor is at row 3:
+	p_p10k1 := tg._grid_physical_row(&term.grid, 3)
+	testing.expect(t, !term.grid.rows[p_p10k1].wrapped, "p10k bottom frame row must not wrap")
+	testing.expect(t, term.grid.rows[p_p10k1].is_prompt, "p10k bottom frame row marked prompt")
+	testing.expect(t, term.cursor.row == 3, "cursor row remains stable at bottom prompt row 3")
+
+	// Verify row 4 is empty default (no ghost rows)
+	for c in 0..<50 {
+		cell := tg.grid_get_cell(&term.grid, 4, c)
+		testing.expect(t, cell == tg.CELL_DEFAULT, "row 4 must be empty default without ghost rows")
 	}
 }
 

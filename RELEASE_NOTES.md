@@ -1,3 +1,27 @@
+# Release Notes - Term v0.2.1
+
+Term v0.2.1 is a patch release focused on rendering polish, window resize resilience, and terminal reflow stability on macOS.
+
+---
+
+## 🐛 Bug Fixes & Improvements
+
+### 1. macOS Live Window Resize Font Stability
+- Fixed an issue where glyphs momentarily stretched horizontally and snapped back during live window resize.
+- Explicitly configured `CAMetalLayer` with `kCAGravityTopLeft` and native display `backingScaleFactor` so stale frames remain pinned 1:1 at the top-left rather than being bilinearly distorted by CoreAnimation before the next GPU frame completes.
+
+### 2. Elimination of Window Resize Pillarboxing
+- Fixed a bug where resizing the window wider resulted in a solid black column on the right side of the window (pillarboxing).
+- Removed AppKit `NSViewLayerContentsPlacement` and `layerContentsRedrawPolicy` interference that previously locked view aspect ratios.
+- Streamlined `_app_event_watch` to immediately redraw intermediate frames across the entire window viewport during interactive resize.
+
+### 3. Powerlevel10k & Multi-Line Prompt Resize Preservation
+- Resolved a defect where resizing the window repeatedly added ghost newlines between the last command output and the zsh p10k prompt.
+- Added prompt frame detection (`╭`, `╰`, `┌`, `└`) to preserve active prompt row heights without wrapping, allowing zsh ZLE redraw sequences (`\x1b[1A`) to cleanly clear and repaint the prompt without stranding ghost lines.
+- Maintained 100% lossless VT reflow for all command outputs (`ls -l`, compiler logs, etc.).
+
+---
+
 # Release Notes - Term v0.2.0
 
 Term v0.2.0 marks a major milestone in the evolution of Term as a next-generation, high-performance GPU-accelerated terminal emulator for macOS. Built from first principles in [Odin](https://odin-lang.org) with a Metal/wgpu rendering pipeline, this release introduces multi-tab session management, interactive UI chrome, full mouse text selection and hyperlink handling, native CoreText font fallback and advanced shaping (including ligatures and Arabic script), an optimized circular ring buffer with dynamic scrollback reflow, comparative benchmarking tooling, and native `.dmg` distribution packaging.

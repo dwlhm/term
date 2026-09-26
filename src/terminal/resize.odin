@@ -17,6 +17,31 @@ _reflow_make_row :: proc(cols: int, allocator: runtime.Allocator) -> Row {
 	return r
 }
 
+_row_has_prompt_frame :: proc(row: ^Row) -> bool {
+	if row == nil do return false
+	for c in 0..<len(row.cells) {
+		ch := row.cells[c].content
+		if ch == 0 || ch == ' ' do continue
+		if ch == 0x256D || ch == 0x2570 || ch == 0x250C || ch == 0x2514 {
+			return true
+		}
+		break
+	}
+	return false
+}
+
+_has_active_prompt_frame :: proc(t: ^Terminal) -> bool {
+	if t == nil do return false
+	start_r := max(0, t.cursor.row - 2)
+	for cr := start_r; cr <= t.cursor.row; cr += 1 {
+		p := _grid_physical_row(&t.grid, cr)
+		if _row_has_prompt_frame(&t.grid.rows[p]) {
+			return true
+		}
+	}
+	return false
+}
+
 _terminal_resize_primary :: proc(t: ^Terminal, new_rows: int, new_cols: int, allocator: runtime.Allocator = context.allocator) {
 	old_rows := t.grid.row_count
 	old_cols := t.grid.col_count
@@ -94,6 +119,14 @@ _terminal_resize_primary :: proc(t: ^Terminal, new_rows: int, new_cols: int, all
 			row_wrapped := t.grid.rows[phys].wrapped
 			if t.grid.rows[phys].is_prompt {
 				ll.is_prompt = true
+			} else if r == t.cursor.row {
+				if _has_active_prompt_frame(t) {
+					ll.is_prompt = true
+				}
+			} else if r < t.cursor.row && r >= t.cursor.row - 2 {
+				if _row_has_prompt_frame(&t.grid.rows[phys]) {
+					ll.is_prompt = true
+				}
 			}
 			if r == t.cursor.row {
 				ll.has_cursor = true
@@ -170,6 +203,49 @@ _terminal_resize_primary :: proc(t: ^Terminal, new_rows: int, new_cols: int, all
 	cursor_found := false
 
 	for &ll in logical_lines {
+		if ll.is_prompt {
+			current_row := _reflow_make_row(new_cols, context.temp_allocator)
+			current_row.is_prompt = true
+			current_row.wrapped = false
+
+			limit := min(len(ll.cells), new_cols)
+			col := 0
+			ci := 0
+			for ci < limit {
+				cell := ll.cells[ci]
+				is_lead := _cell_is_lead(cell)
+				if is_lead && col == new_cols - 1 {
+					current_row.cells[col] = CELL_DEFAULT
+					break
+				}
+				if is_lead && ci + 1 < limit && _cell_is_continuation(ll.cells[ci + 1]) {
+					current_row.cells[col] = cell
+					current_row.cells[col + 1] = ll.cells[ci + 1]
+					col += 2
+					ci += 2
+				} else {
+					current_row.cells[col] = cell
+					col += 1
+					ci += 1
+				}
+			}
+
+			if ll.has_cursor && !cursor_found {
+				new_cursor_row = len(reflowed_rows)
+				if ll.cursor_offset >= new_cols {
+					new_cursor_col = new_cols - 1
+					cursor_pending_wrap = true
+				} else {
+					new_cursor_col = clamp(ll.cursor_offset, 0, new_cols - 1)
+					cursor_pending_wrap = false
+				}
+				cursor_found = true
+			}
+
+			append(&reflowed_rows, current_row)
+			continue
+		}
+
 		current_row := _reflow_make_row(new_cols, context.temp_allocator)
 		current_row.is_prompt = ll.is_prompt
 		col := 0
