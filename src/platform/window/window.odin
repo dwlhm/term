@@ -3,6 +3,7 @@ package window
 // SDL3 window management for the terminal emulator.
 // Creates and manages an SDL3 window with a WGPU-compatible surface.
 
+import "base:runtime"
 import "core:c"
 import "core:strings"
 import "vendor:sdl3"
@@ -212,8 +213,77 @@ window_set_size :: proc(w: ^Window, width, height: i32) -> bool {
 	return res
 }
 
-// window_show_close_tab_alert displays a native confirmation alert when closing a tab with a running process.
-window_show_close_tab_alert :: proc(w: ^Window, tab_title: string) -> bool {
-	return platform_show_close_tab_alert(w, tab_title)
+// window_set_size_no_sync sets the window logical size without blocking on
+// SyncWindow; the size change is delivered through SDL resize events (drag path).
+window_set_size_no_sync :: proc(w: ^Window, width, height: i32) -> bool {
+	if w == nil || w.handle == nil { return false }
+	res := bool(sdl3.SetWindowSize(w.handle, width, height))
+	window_update_pixel_size(w)
+	return res
 }
 
+// Drag_Region describes a logical, top-left-origin rectangle the OS may use to
+// move the window when the pointer drags inside it. The caller owns the value,
+// and it must outlive the window it is installed on (App owns it).
+Drag_Region :: struct {
+	x, y, w, h: f32,
+	enabled:    bool,
+	pending_double_click: bool,
+	last_native_event: i64, // NSEvent eventNumber + 1; zero means no event yet.
+}
+
+// _window_hit_test is the SDL hit-test callback. It reports a draggable region
+// when the point lies inside an enabled drag rect, otherwise a normal region.
+// Native double-clicks are queued on the caller-owned region for the event loop;
+// resizing never runs reentrantly inside SDL's native mouse dispatch.
+_window_hit_test :: proc "c" (win: ^sdl3.Window, area: ^sdl3.Point, data: rawptr) -> sdl3.HitTestResult {
+	if data == nil || area == nil do return .NORMAL
+	context = runtime.default_context()
+	region := cast(^Drag_Region)data
+	if !region.enabled do return .NORMAL
+	px := f32(area[0])
+	py := f32(area[1])
+	if px >= region.x && px < region.x + region.w && py >= region.y && py < region.y + region.h {
+		if platform_titlebar_double_click(win, &region.last_native_event) {
+			region.pending_double_click = true
+		}
+		return .DRAGGABLE
+	}
+	return .NORMAL
+}
+
+// window_take_titlebar_double_click consumes one queued native titlebar action.
+window_take_titlebar_double_click :: proc(region: ^Drag_Region) -> bool {
+	if region == nil do return false
+	pending := region.pending_double_click
+	region.pending_double_click = false
+	return pending
+}
+
+// window_zoom performs the platform's window zoom/restore action outside event callbacks.
+window_zoom :: proc(w: ^Window) -> bool {
+	if w == nil || w.handle == nil do return false
+	when ODIN_OS == .Darwin {
+		return platform_zoom_window(w.handle)
+	} else {
+		flags := sdl3.GetWindowFlags(w.handle)
+		if .FULLSCREEN in flags do return false
+		if .MAXIMIZED in flags do return bool(sdl3.RestoreWindow(w.handle))
+		return bool(sdl3.MaximizeWindow(w.handle))
+	}
+}
+
+// window_set_drag_region installs a live OS hit-test region so dragging the
+// trailing toolbar area moves the whole window. Nil window/handle/region return
+// false without touching SDL. The region must stay valid while installed.
+window_set_drag_region :: proc(w: ^Window, region: ^Drag_Region) -> bool {
+	if w == nil || w.handle == nil || region == nil do return false
+	return sdl3.SetWindowHitTest(w.handle, _window_hit_test, rawptr(region))
+}
+
+// window_clear_drag_region removes the OS hit-test region so every area is
+// normal again. Nil window/handle return false without touching SDL.
+window_clear_drag_region :: proc(w: ^Window) -> bool {
+	if w == nil || w.handle == nil do return false
+	return sdl3.SetWindowHitTest(w.handle, nil, nil)
+}

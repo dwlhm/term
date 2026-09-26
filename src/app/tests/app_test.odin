@@ -610,6 +610,29 @@ test_ui_event_queue :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_ui_event_queue_resize_coalescing :: proc(t: ^testing.T) {
+	q: app.UI_Event_Queue
+	testing.expect(t, !app.ui_event_queue_has_resize(&q), "empty queue must have no resize")
+
+	// Push an initial resize
+	_ = app.ui_event_queue_push(&q, app.UI_Event{type = .Resize, rows = 24, cols = 80, pixel_w = 800, pixel_h = 600})
+	testing.expect(t, app.ui_event_queue_has_resize(&q), "queue must indicate pending resize")
+
+	// Push another resize - should coalesce in-place rather than appending a new event
+	_ = app.ui_event_queue_push(&q, app.UI_Event{type = .Resize, rows = 30, cols = 100, pixel_w = 1000, pixel_h = 750})
+	testing.expect_value(t, q.count, 1)
+
+	out: [2]app.UI_Event
+	n := app.ui_event_queue_pop_all(&q, out[:])
+	testing.expect_value(t, n, 1)
+	testing.expect_value(t, out[0].rows, 30)
+	testing.expect_value(t, out[0].cols, 100)
+	testing.expect_value(t, out[0].pixel_w, 1000)
+	testing.expect_value(t, out[0].pixel_h, 750)
+	testing.expect(t, !app.ui_event_queue_has_resize(&q), "queue must have no resize after pop")
+}
+
+@(test)
 test_app_interaction_dispatch_integration :: proc(t: ^testing.T) {
 	b: app.Backend
 	termgrid.terminal_init(&b.terminal, APP_TEST_ROWS, APP_TEST_COLS)
@@ -813,6 +836,28 @@ test_app_search_and_tab_sync :: proc(t: ^testing.T) {
 	testing.expect_value(t, a.tab_bar.hover_close_idx, -1)
 	testing.expect(t, !a.tab_bar.hover_new_tab, "hover_new_tab must be cleared")
 	testing.expect(t, a.renderer.full_redraw_pending, "full_redraw_pending must be triggered on hover clear")
+}
+
+@(test)
+test_app_cmd_r_renames_active_tab :: proc(t: ^testing.T) {
+	a: app.App
+	app.session_manager_init(&a.session_mgr, 4)
+	defer app.session_manager_destroy(&a.session_mgr)
+	tab: app.Tab_Session
+	tab.id = 1
+	tab.backend.pty.master = -1
+	tab.backend.pty.pid = -1
+	append(&a.session_mgr.tabs, tab)
+	a.session_mgr.active_idx = 0
+
+	ev: input.Input_Event
+	ev.event_type = .Key
+	ev.kind = .Printable
+	ev.gui = true
+	ev.rune = 'r'
+	evs := [1]input.Input_Event{ev}
+	_, _ = app.app_dispatch_input_events(&a, evs[:])
+	testing.expect(t, a.tab_rename.active, "Cmd+R must start inline rename on the active tab")
 }
 
 

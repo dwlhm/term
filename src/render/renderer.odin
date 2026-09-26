@@ -27,6 +27,10 @@ BG_WGSL :: #load("shaders/bg.wgsl")
 GLYPH_WGSL :: #load("shaders/glyph.wgsl")
 EMOJI_WGSL :: #load("shaders/emoji.wgsl")
 
+BG_MSL :: #load("shaders/msl_spike/bg.msl")
+GLYPH_MSL :: #load("shaders/msl_spike/glyph.msl")
+EMOJI_MSL :: #load("shaders/msl_spike/emoji.msl")
+
 // Render_Strategy selects the frame path. Instance is the zero value and the
 // default; Compute_Tiles routes renderer_frame_compute through the tiled
 // compute sibling path with per-frame instance fallback; Fullscreen routes
@@ -65,6 +69,8 @@ Render_Frame_Transaction :: struct {
 	cursor_offset: u64,
 	interaction_offset: u64,
 	interaction_count:  u32,
+	scrollbar_offset:   u64,
+	scrollbar_count:    u32,
 	ui_bg_offset:    u64,
 	ui_bg_count:     u32,
 	ui_glyph_offset: u64,
@@ -132,6 +138,9 @@ Renderer :: struct {
 	interaction_staged:     bool, // interaction_overlay_draw staged quads
 	interaction_slot_start: u32,  // starting instance slot for interaction quads
 	interaction_quad_count: int,  // count of staged interaction quads
+	scrollbar_staged:       bool, // scrollbar_overlay_draw staged quads
+	scrollbar_count:        u32,  // count of staged scrollbar quads
+	scrollbar_data:         [2]instance.Instance_Data,
 	device:                 gpu.Gpu_Device,
 	queue:       gpu.Gpu_Queue,
 	backend:     ^gpu.Gpu_Backend_VTable,
@@ -253,8 +262,8 @@ renderer_init :: proc(
 		r.atlas.gpu_texture,
 		r.atlas.gpu_view,
 		format,
-		string(BG_WGSL),
-		string(GLYPH_WGSL),
+		string(BG_MSL),
+		string(GLYPH_MSL),
 		screen_w,
 		screen_h,
 		allocator,
@@ -270,7 +279,7 @@ renderer_init :: proc(
 			&r.instances,
 			r.emoji_atlas.gpu_texture,
 			r.emoji_atlas.gpu_view,
-			string(EMOJI_WGSL),
+			string(EMOJI_MSL),
 			format,
 			allocator,
 		)
@@ -302,7 +311,7 @@ renderer_destroy :: proc(r: ^Renderer, allocator: runtime.Allocator = context.al
 	raster_drain_completions(&r.raster, &r.atlas, &r.shape_cache, nil, &r.fallback, &r.fallback_counters)
 	raster_queue_destroy(&r.raster, allocator)
 
-	atlas_destroy(&r.atlas, allocator)
+	atlas_destroy(&r.atlas, r.backend, allocator)
 	render_compiler_destroy(&r.compiled, allocator)
 	render_compiler_destroy_v2(&r.compiled_v2, allocator)
 	if rawptr(r.dirty.buffer) != nil && r.backend != nil {
@@ -313,7 +322,7 @@ renderer_destroy :: proc(r: ^Renderer, allocator: runtime.Allocator = context.al
 	upload_ring_destroy(&r.upload_ring, allocator)
 	instance.instance_renderer_destroy(&r.instances, allocator)
 	when ODIN_OS == .Darwin {
-		emoji_atlas_destroy(&r.emoji_atlas)
+		emoji_atlas_destroy(&r.emoji_atlas, r.backend)
 	}
 
 	// Optional sibling renderers are not initialized by the production path;
@@ -716,6 +725,11 @@ _renderer_surface_commit :: proc(r: ^Renderer, frame: ^Render_Frame_Transaction)
 	frame.texture = gpu.Gpu_Texture(nil)
 	frame.view = gpu.Gpu_TextureView(nil)
 	frame.state = .Released
+
+	if r.backend != nil && r.backend.poll_device != nil && rawptr(r.device) != nil {
+		_ = r.backend.poll_device(r.device, false)
+	}
+
 	return true
 }
 
@@ -726,13 +740,15 @@ _renderer_upload_instances :: proc(r: ^Renderer, base_count: u32, frame: ^Render
 	if r.cursor_staged { cursor_count = 1 }
 	interaction_count: u64 = 0
 	if r.interaction_staged && r.interaction_quad_count > 0 { interaction_count = u64(r.interaction_quad_count) }
+	scrollbar_count: u64 = 0
+	if r.scrollbar_staged && r.scrollbar_count > 0 { scrollbar_count = u64(r.scrollbar_count) }
 	ui_bg_count: u64 = 0
 	ui_glyph_count: u64 = 0
 	if r.ui_staged {
 		ui_bg_count = u64(r.ui_bg_count)
 		ui_glyph_count = u64(r.ui_glyph_count)
 	}
-	total := count + cursor_count + interaction_count + ui_bg_count + ui_glyph_count
+	total := count + cursor_count + interaction_count + scrollbar_count + ui_bg_count + ui_glyph_count
 	byte_count := total * instance.INSTANCE_STRIDE
 	upload := upload_ring_begin(&r.upload_ring)
 	if !upload.reserved { return false }
@@ -749,6 +765,8 @@ _renderer_upload_instances :: proc(r: ^Renderer, base_count: u32, frame: ^Render
 	frame.cursor_offset = 0
 	frame.interaction_offset = 0
 	frame.interaction_count = 0
+	frame.scrollbar_offset = 0
+	frame.scrollbar_count = 0
 	frame.ui_bg_offset = 0
 	frame.ui_bg_count = 0
 	frame.ui_glyph_offset = 0
@@ -774,6 +792,13 @@ _renderer_upload_instances :: proc(r: ^Renderer, base_count: u32, frame: ^Render
 			mem.copy(raw_data(staging[offset:]), &r.instances.instance_data[slot], bytes)
 			offset += bytes
 		}
+	}
+	if scrollbar_count > 0 {
+		frame.scrollbar_offset = u64(offset)
+		frame.scrollbar_count = u32(scrollbar_count)
+		bytes := int(scrollbar_count * instance.INSTANCE_STRIDE)
+		mem.copy(raw_data(staging[offset:]), raw_data(r.scrollbar_data[:]), bytes)
+		offset += bytes
 	}
 	if ui_bg_count > 0 {
 		frame.ui_bg_offset = u64(offset)
@@ -990,6 +1015,8 @@ _renderer_frame_published :: proc(r: ^Renderer, view: ^termgrid.Terminal_View = 
 	r.interaction_staged = false
 	r.interaction_slot_start = 0
 	r.interaction_quad_count = 0
+	r.scrollbar_staged = false
+	r.scrollbar_count = 0
 	r.last_view = view
 	r.last_view_fingerprint = _renderer_view_fingerprint(view)
 	r.last_view_valid = true
@@ -1056,6 +1083,12 @@ _draw_instance_buffer :: proc(
 		}
 	}
 	if ok { ok = _draw_cursor_overlay(r, frame) }
+	if ok && frame.scrollbar_count > 0 {
+		r.backend.render_set_pipeline(pass, r.instances.bg_pipeline)
+		r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_bg)
+		r.backend.render_set_vertex_buffer(pass, 0, buffer, frame.scrollbar_offset)
+		r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, frame.scrollbar_count)
+	}
 	if ok && frame.ui_bg_count > 0 {
 		r.backend.render_set_pipeline(pass, r.instances.bg_pipeline)
 		r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_bg)
@@ -1474,9 +1507,6 @@ renderer_strategy_unpin :: proc(r: ^Renderer) {
 
 // renderer_resize handles window resize events.
 renderer_resize :: proc(r: ^Renderer, new_width_px: u32, new_height_px: u32) {
-	if !_renderer_wait_for_gpu(r) {
-		return
-	}
 	r.screen_w = f32(new_width_px)
 	r.screen_h = f32(new_height_px)
 	r.surface_w = new_width_px

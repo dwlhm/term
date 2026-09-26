@@ -36,9 +36,23 @@ UI_Event_Queue :: struct {
 	mutex:  sync.Mutex,
 }
 
+// ui_event_queue_push enqueues an event thread-safely with capacity guard.
+// .Resize events are coalesced in-place so intermediate steps are dropped
+// and only the latest resize geometry is queued for calculation.
 ui_event_queue_push :: proc(q: ^UI_Event_Queue, ev: UI_Event) -> bool {
 	sync.mutex_lock(&q.mutex)
 	defer sync.mutex_unlock(&q.mutex)
+
+	if ev.type == .Resize {
+		for i in 0 ..< q.count {
+			idx := (q.head + i) % UI_EVENT_QUEUE_CAP
+			if q.events[idx].type == .Resize {
+				q.events[idx] = ev
+				return true
+			}
+		}
+	}
+
 	if q.count >= UI_EVENT_QUEUE_CAP {
 		return false
 	}
@@ -46,6 +60,19 @@ ui_event_queue_push :: proc(q: ^UI_Event_Queue, ev: UI_Event) -> bool {
 	q.tail = (q.tail + 1) % UI_EVENT_QUEUE_CAP
 	q.count += 1
 	return true
+}
+
+// ui_event_queue_has_resize returns true if a .Resize event is currently pending in the queue.
+ui_event_queue_has_resize :: proc(q: ^UI_Event_Queue) -> bool {
+	sync.mutex_lock(&q.mutex)
+	defer sync.mutex_unlock(&q.mutex)
+	for i in 0 ..< q.count {
+		idx := (q.head + i) % UI_EVENT_QUEUE_CAP
+		if q.events[idx].type == .Resize {
+			return true
+		}
+	}
+	return false
 }
 
 ui_event_queue_pop_all :: proc(q: ^UI_Event_Queue, out: []UI_Event) -> int {
@@ -101,6 +128,7 @@ Backend :: struct {
 	swap_mutex:           sync.Mutex,
 	event_queue:          UI_Event_Queue,
 	drain_buf:            []u8,
+	resize_generation:    u64,
 }
 
 // backend_global holds the active Backend pointer for C-style callbacks
@@ -388,7 +416,8 @@ backend_sync_cursor :: proc(
 	if b == nil {
 		return false, false, false, 0, 0
 	}
-	cur := termgrid.terminal_get_cursor(&b.terminal)
+	t := &b.front_terminal if b.thread != nil else &b.terminal
+	cur := termgrid.terminal_get_cursor(t)
 	style_changed = b.cursor.style != cur.style
 	position_changed = b.cursor.row != cur.row || b.cursor.col != cur.col
 	old_row = b.cursor.row
@@ -404,19 +433,26 @@ backend_mark_cursor_dirty :: proc(b: ^Backend, row, col: int) -> bool {
 	if b == nil {
 		return false
 	}
-	g := &b.terminal.grid
-	if g.row_count <= 0 || g.col_count <= 0 || len(g.rows) == 0 {
-		return false
+	mark_term :: proc(t: ^termgrid.Terminal, r, c: int) -> bool {
+		g := &t.grid
+		if g.row_count <= 0 || g.col_count <= 0 || len(g.rows) == 0 {
+			return false
+		}
+		if r < 0 || r >= g.row_count || c < 0 || c >= g.col_count {
+			return false
+		}
+		phys := (g.origin + r) & g.mask
+		if phys < 0 || phys >= len(g.rows) {
+			return false
+		}
+		termgrid.damage_mark_cell(&t.damage, r, c, g.rows[phys].generation)
+		return true
 	}
-	if row < 0 || row >= g.row_count || col < 0 || col >= g.col_count {
-		return false
+
+	if b.thread != nil {
+		_ = mark_term(&b.front_terminal, row, col)
 	}
-	phys := (g.origin + row) & g.mask
-	if phys < 0 || phys >= len(g.rows) {
-		return false
-	}
-	termgrid.damage_mark_cell(&b.terminal.damage, row, col, g.rows[phys].generation)
-	return true
+	return mark_term(&b.terminal, row, col)
 }
 
 // backend_get_render_state constructs a Render_State snapshot for the frontend.
@@ -744,6 +780,9 @@ _terminal_sync_to_front :: proc(dst: ^termgrid.Terminal, src: ^termgrid.Terminal
 	}
 	termgrid.terminal_clear_damage(src)
 
+	dst.cwd = src.cwd
+	dst.cwd_len = clamp(src.cwd_len, 0, len(dst.cwd))
+
 	// 6. Transfer title dirty state and auxiliary flags and states
 	if src.title_dirty {
 		dst.window_title = src.window_title
@@ -849,6 +888,9 @@ backend_unlock_render :: proc(b: ^Backend) {
 backend_push_event :: proc(b: ^Backend, ev: UI_Event) -> bool {
 	if b == nil {
 		return false
+	}
+	if ev.type == .Resize {
+		sync.atomic_add(&b.resize_generation, 1)
 	}
 	return ui_event_queue_push(&b.event_queue, ev)
 }
@@ -1076,7 +1118,15 @@ backend_handle_ui_event :: proc(b: ^Backend, ev: UI_Event) {
 		}
 	case .Resize:
 		if ev.rows > 0 && ev.cols > 0 {
+			// Cancellation guard: if a newer resize is already waiting in queue,
+			// drop this stale calculation immediately.
+			if ui_event_queue_has_resize(&b.event_queue) {
+				return
+			}
+			started_ns := profile_clock_ns()
 			backend_on_resize(b, ev.rows, ev.cols)
+			elapsed := profile_elapsed_ns(started_ns)
+			profile_record_resize(.Idle, .Resize_Stage, ev.pixel_w, ev.pixel_h, ev.pixel_w, ev.pixel_h, i32(ev.rows), i32(ev.cols), i32(b.terminal.grid.row_count), i32(b.terminal.grid.col_count), elapsed, true)
 		}
 	case .Focus:
 		backend_set_focused(b, ev.focused)
@@ -1137,6 +1187,11 @@ backend_worker_proc :: proc(t: ^thread.Thread) {
 		}
 		
 		if pending_swap {
+			// If a new resize is queued, skip swapping stale buffers to avoid
+			// heavy deep copies while window geometry is actively changing.
+			if ui_event_queue_has_resize(&b.event_queue) {
+				continue
+			}
 			if bytes_read > 0 {
 				if sync.mutex_try_lock(&b.swap_mutex) {
 					_terminal_sync_to_front(&b.front_terminal, &b.terminal)
@@ -1171,4 +1226,20 @@ backend_worker_proc :: proc(t: ^thread.Thread) {
 			}
 		}
 	}
+}
+
+// Copy title metadata while holding the snapshot lock; no borrowed worker data
+// escapes to the session title resolver.
+backend_title_metadata :: proc(b: ^Backend, title, cwd: []u8) -> (title_len, cwd_len: int, fresh: bool) {
+	if b == nil do return
+	if b.thread != nil do sync.mutex_lock(&b.swap_mutex)
+	defer { if b.thread != nil do sync.mutex_unlock(&b.swap_mutex) }
+	t := &b.front_terminal if b.thread != nil else &b.terminal
+	f := t.title_dirty
+	if f {
+		title_len = copy(title, t.window_title[:clamp(t.window_title_len, 0, len(t.window_title))])
+		t.title_dirty = false
+	}
+	cwd_len = copy(cwd, t.cwd[:clamp(t.cwd_len, 0, len(t.cwd))])
+	return
 }

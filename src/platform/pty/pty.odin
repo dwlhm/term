@@ -12,6 +12,7 @@ when ODIN_OS == .Darwin {
 	foreign libc {
 		ioctl :: proc(fd: c.int, request: c.ulong, #c_vararg args: ..any) -> c.int ---
 		tcgetpgrp :: proc(fd: c.int) -> posix.pid_t ---
+		proc_pidinfo :: proc(pid: c.int, flavor: c.int, arg: u64, buffer: rawptr, buffersize: c.int) -> c.int ---
 		proc_name :: proc(pid: c.int, buffer: rawptr, buffersize: u32) -> c.int ---
 		proc_listchildpids :: proc(ppid: c.int, buffer: rawptr, buffersize: c.int) -> c.int ---
 	}
@@ -673,4 +674,42 @@ _child_fail :: proc(w: posix.FD, stage: u8) -> ! {
 	mark: [2]u8 = {stage, byte(posix.errno())}
 	posix.write(w, raw_data(mark[:]), 2)
 	posix._exit(PTY_CHILD_FAIL_EXIT)
+}
+
+// Darwin libproc ABI: sys/proc_info.h vinfo_stat and proc_vnodepathinfo.
+when ODIN_OS == .Darwin {
+	PROC_PIDVNODEPATHINFO :: 9
+	PROC_MAXPATHLEN :: 1024
+	Proc_Vinfo_Stat :: struct {
+		dev: u32, mode: u16, nlink: u16, ino: u64, uid: u32, gid: u32,
+		atime, atimensec, mtime, mtimensec, ctime, ctimensec: i64,
+		birthtime, birthtimensec, size, blocks: i64,
+		blksize: i32, flags, gen, rdev: u32, qspare: [2]i64,
+	}
+	Proc_Vnode_Info :: struct { stat: Proc_Vinfo_Stat, kind, pad: i32, fsid: [2]i32 }
+	Proc_Vnode_Info_Path :: struct { info: Proc_Vnode_Info, path: [PROC_MAXPATHLEN]u8 }
+	Proc_Vnode_Path_Info :: struct { cdir, rdir: Proc_Vnode_Info_Path }
+}
+
+pty_foreground_name :: proc(p: ^Pty, dst: []u8) -> int {
+	if p == nil || p.state != .Running || p.pid <= 1 || p.master < 0 || len(dst) == 0 do return 0
+	when ODIN_OS == .Darwin {
+		fg := tcgetpgrp(c.int(p.master))
+		if fg <= 1 || int(fg) == p.pid do return 0
+		if proc_name(c.int(fg), raw_data(dst), u32(len(dst))) <= 0 do return 0
+		for b, i in dst { if b == 0 do return i }
+	}
+	return 0
+}
+
+pty_working_directory :: proc(p: ^Pty, dst: []u8) -> int {
+	if p == nil || p.state != .Running || p.pid <= 1 || p.master < 0 || len(dst) == 0 do return 0
+	when ODIN_OS == .Darwin {
+		info: Proc_Vnode_Path_Info
+		if proc_pidinfo(c.int(p.pid), PROC_PIDVNODEPATHINFO, 0, &info, size_of(info)) != size_of(info) do return 0
+		for b, i in info.cdir.path {
+			if b == 0 do return copy(dst, info.cdir.path[:i])
+		}
+	}
+	return 0
 }

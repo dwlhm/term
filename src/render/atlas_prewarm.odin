@@ -36,8 +36,20 @@ PINNED_UI_START :: 0x2715
 PINNED_UI_END   :: 0x2715
 PINNED_UI_COUNT :: 1
 
+// Extra UI action symbols (macOS modifiers / return / tab)
+PINNED_EXTRA_CODEPOINTS := [6]rune{
+	0x2318, // ⌘ command
+	0x2325, // ⌥ option
+	0x21E7, // ⇧ shift
+	0x2303, // ⌃ control
+	0x21E5, // ⇥ tab
+	0x21B5, // ↵ return
+}
+PINNED_EXTRA_COUNT :: len(PINNED_EXTRA_CODEPOINTS)
+PINNED_SLOT_EXTRA :: PINNED_SLOT_UI + PINNED_UI_COUNT
+
 // Total pinned glyphs
-PINNED_TOTAL :: PINNED_ASCII_COUNT + PINNED_BOX_COUNT + PINNED_BLOCK_COUNT + PINNED_POWERLINE_COUNT + PINNED_UI_COUNT  // 272
+PINNED_TOTAL :: PINNED_ASCII_COUNT + PINNED_BOX_COUNT + PINNED_BLOCK_COUNT + PINNED_POWERLINE_COUNT + PINNED_UI_COUNT + PINNED_EXTRA_COUNT  // 278
 
 // Slot offsets (contiguous layout)
 PINNED_SLOT_ASCII     :: 0
@@ -82,6 +94,11 @@ atlas_prewarm_set :: proc() -> []rune {
 		idx += 1
 	}
 
+	for cp in PINNED_EXTRA_CODEPOINTS {
+		set[idx] = cp
+		idx += 1
+	}
+
 	return set
 }
 
@@ -112,6 +129,10 @@ atlas_pinned_slot_index :: proc(codepoint: u32) -> (index: int, ok: bool) {
 	// UI Symbols range (0x2715)
 	if codepoint >= PINNED_UI_START && codepoint <= PINNED_UI_END {
 		return PINNED_SLOT_UI + int(codepoint - PINNED_UI_START), true
+	}
+
+	for cp, i in PINNED_EXTRA_CODEPOINTS {
+		if codepoint == u32(cp) do return PINNED_SLOT_EXTRA + i, true
 	}
 
 	// Not pinned

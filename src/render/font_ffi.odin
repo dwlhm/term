@@ -210,6 +210,7 @@ FT_Pixel_Mode :: enum u8 {
 foreign libfreetype {
 	FT_Init_FreeType   :: proc(alibrary: ^FT_Library) -> FT_Error ---
 	FT_Done_FreeType   :: proc(library: FT_Library) -> FT_Error ---
+	FT_New_Face        :: proc(library: FT_Library, filepathname: cstring, face_index: FT_Long, aface: ^FT_Face) -> FT_Error ---
 	FT_New_Memory_Face :: proc(library: FT_Library, file_base: [^]u8, file_size: FT_Long, face_index: FT_Long, aface: ^FT_Face) -> FT_Error ---
 	FT_Done_Face       :: proc(face: FT_Face) -> FT_Error ---
 	FT_Set_Pixel_Sizes :: proc(face: FT_Face, pixel_width: FT_UInt, pixel_height: FT_UInt) -> FT_Error ---

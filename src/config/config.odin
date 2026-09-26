@@ -25,6 +25,8 @@ Config :: struct {
 	alt_screen_wheel_lines:   int,
 	padding_x:                int,
 	padding_y:                int,
+	locale:                   string,
+	tab_max_title_len:        int,
 }
 
 // config_default returns a default terminal configuration struct matching standard defaults.
@@ -50,6 +52,8 @@ config_default :: proc() -> Config {
 		alt_screen_wheel_lines   = 3,
 		padding_x                = 6,
 		padding_y                = 4,
+		locale                   = strings.clone(""),
+		tab_max_title_len        = 16,
 	}
 }
 
@@ -63,5 +67,6 @@ config_destroy :: proc(cfg: ^Config) {
 	delete(cfg.shell)
 	delete(cfg.working_directory)
 	delete(cfg.theme_name)
+	delete(cfg.locale)
 	cfg^ = {}
 }

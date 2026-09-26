@@ -108,18 +108,12 @@ scrollback_resize :: proc(s: ^Scrollback, new_cols: int, store: ^Grapheme_Store,
 		wrapped: bool,
 	}
 
-	logical_lines := make([dynamic]_SB_Logical_Line, allocator)
-	defer {
-		for &ll in logical_lines {
-			delete(ll.cells)
-		}
-		delete(logical_lines)
-	}
+	logical_lines := make([dynamic]_SB_Logical_Line, context.temp_allocator)
 
 	r := 0
 	for r < s.count {
 		ll: _SB_Logical_Line
-		ll.cells = make([dynamic]Semantic_Cell, allocator)
+		ll.cells = make([dynamic]Semantic_Cell, context.temp_allocator)
 		ll.wrapped = false
 
 		for r < s.count {
@@ -162,19 +156,41 @@ scrollback_resize :: proc(s: ^Scrollback, new_cols: int, store: ^Grapheme_Store,
 		append(&logical_lines, ll)
 	}
 
-	new_rows := make([dynamic]Scrollback_Row, allocator)
-	defer {
-		for i in 0..<len(new_rows) {
-			delete(new_rows[i].cells, allocator)
-		}
-		delete(new_rows)
-	}
-
+	total_lines := 0
 	for &ll in logical_lines {
 		if len(ll.cells) == 0 {
-			nr := make([]Semantic_Cell, new_cols, allocator)
+			total_lines += 1
+			continue
+		}
+		ci := 0
+		n_cells := len(ll.cells)
+		for ci < n_cells {
+			take := new_cols
+			if ci + take > n_cells {
+				take = n_cells - ci
+			}
+			if take == new_cols && ci + take < n_cells {
+				if _cell_is_lead(ll.cells[ci + take - 1]) && _cell_is_continuation(ll.cells[ci + take]) {
+					take -= 1
+				}
+			}
+			total_lines += 1
+			ci += take
+		}
+	}
+
+	cells_backing := make([]Semantic_Cell, max(1, total_lines) * new_cols, allocator)
+	defer delete(cells_backing, allocator)
+
+	new_rows := make([dynamic]Scrollback_Row, context.temp_allocator)
+
+	row_idx := 0
+	for &ll in logical_lines {
+		if len(ll.cells) == 0 {
+			nr := cells_backing[row_idx * new_cols : (row_idx + 1) * new_cols]
 			for c in 0..<new_cols { nr[c] = CELL_DEFAULT }
 			append(&new_rows, Scrollback_Row{cells = nr, wrapped = false})
+			row_idx += 1
 			continue
 		}
 
@@ -190,7 +206,7 @@ scrollback_resize :: proc(s: ^Scrollback, new_cols: int, store: ^Grapheme_Store,
 					take -= 1
 				}
 			}
-			nr := make([]Semantic_Cell, new_cols, allocator)
+			nr := cells_backing[row_idx * new_cols : (row_idx + 1) * new_cols]
 			for c in 0..<new_cols { nr[c] = CELL_DEFAULT }
 			copy(nr[:take], ll.cells[ci : ci + take])
 
@@ -202,15 +218,18 @@ scrollback_resize :: proc(s: ^Scrollback, new_cols: int, store: ^Grapheme_Store,
 			}
 
 			append(&new_rows, Scrollback_Row{cells = nr, wrapped = row_wrapped})
+			row_idx += 1
 			ci += take
 		}
 	}
 
-	for len(new_rows) > s.max_lines {
-		old := new_rows[0]
-		_scrollback_release_row(&old, store)
-		delete(old.cells, allocator)
-		ordered_remove(&new_rows, 0)
+	surviving_rows := new_rows[:]
+	if len(surviving_rows) > s.max_lines {
+		evict_count := len(surviving_rows) - s.max_lines
+		for i in 0..<evict_count {
+			_scrollback_release_row(&surviving_rows[i], store)
+		}
+		surviving_rows = surviving_rows[evict_count:]
 	}
 
 	if s.cells != nil {
@@ -222,13 +241,13 @@ scrollback_resize :: proc(s: ^Scrollback, new_cols: int, store: ^Grapheme_Store,
 		s.rows[i].wrapped = false
 	}
 
-	for i in 0..<len(new_rows) {
-		copy(s.rows[i].cells, new_rows[i].cells)
-		s.rows[i].wrapped = new_rows[i].wrapped
+	for i in 0..<len(surviving_rows) {
+		copy(s.rows[i].cells, surviving_rows[i].cells)
+		s.rows[i].wrapped = surviving_rows[i].wrapped
 	}
 
 	s.head = 0
-	s.count = len(new_rows)
+	s.count = len(surviving_rows)
 	s.col_count = new_cols
 }
 

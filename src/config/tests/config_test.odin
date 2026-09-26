@@ -25,6 +25,7 @@ test_config_default :: proc(t: ^testing.T) {
 	testing.expect_value(t, cfg.alt_screen_wheel_lines, 3)
 	testing.expect_value(t, cfg.padding_x, 6)
 	testing.expect_value(t, cfg.padding_y, 4)
+	testing.expect_value(t, cfg.locale, "")
 }
 
 @(test)
@@ -195,4 +196,16 @@ cwd = "/tmp"
 
 	testing.expect(t, ok2, "cwd alias must parse successfully")
 	testing.expect_value(t, cfg2.working_directory, "/tmp")
+}
+
+@(test)
+test_parse_config_locale :: proc(t: ^testing.T) {
+	src := `
+locale = "id"
+`
+	cfg, ok, _ := config.parse_config(src)
+	defer config.config_destroy(&cfg)
+
+	testing.expect(t, ok, "locale config must parse successfully")
+	testing.expect_value(t, cfg.locale, "id")
 }

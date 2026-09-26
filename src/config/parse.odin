@@ -261,6 +261,11 @@ _apply_key_value :: proc(cfg: ^Config, key: string, val_expr: ^odin_ast.Expr) {
 			delete(cfg.working_directory)
 			cfg.working_directory = strings.clone(s)
 		}
+	case "locale":
+		if s, ok := _expr_to_string(val_expr); ok {
+			delete(cfg.locale)
+			cfg.locale = strings.clone(s)
+		}
 	case "cursor_blink":
 		if lit, ok := _expr_to_lit_text(val_expr); ok {
 			if v, vok := _parse_bool(lit); vok {
@@ -337,6 +342,12 @@ _apply_key_value :: proc(cfg: ^Config, key: string, val_expr: ^odin_ast.Expr) {
 		if lit, ok := _expr_to_lit_text(val_expr); ok {
 			if v, vok := _parse_int(lit); vok && v >= 0 {
 				cfg.padding_y = v
+			}
+		}
+	case "tab_max_title_len", "tab_title_max_len":
+		if lit, ok := _expr_to_lit_text(val_expr); ok {
+			if v, vok := _parse_int(lit); vok && v > 0 {
+				cfg.tab_max_title_len = v
 			}
 		}
 	case "ansi16":

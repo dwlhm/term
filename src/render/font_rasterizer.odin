@@ -43,7 +43,6 @@ Font_Rasterizer :: struct {
 	ft_lib:     FT_Library,
 	face:       FT_Face,
 	hb_font:    hb_font_t,
-	font_data:  []u8,          // raw font file data (pinned, must stay alive while face is valid)
 	scale:      f32,           // pixels per em
 	metrics:    Font_Metrics,
 	allocator:  runtime.Allocator,
@@ -61,7 +60,7 @@ font_rasterizer_init :: proc(
 		out_error^ = Font_Error.None
 	}
 
-	// Read font file
+	// Resolve path
 	actual_path := font_path
 	if strings.has_prefix(font_path, "~/") {
 		if home, ok := os.lookup_env("HOME", context.temp_allocator); ok {
@@ -69,41 +68,32 @@ font_rasterizer_init :: proc(
 		}
 	}
 
-	font_data, err := os.read_entire_file(actual_path, allocator)
-	if err != nil {
-		if out_error != nil {
-			out_error^ = Font_Error.File_Not_Found
-		}
-		return false
-	}
-
-	// Pin font data in rasterizer
-	r.font_data = font_data
-	r.allocator = allocator
-
 	// 1. Initialize FreeType library
 	ft_err := FT_Init_FreeType(&r.ft_lib)
 	if ft_err != 0 {
 		if out_error != nil {
 			out_error^ = Font_Error.Invalid_Font
 		}
-		delete(font_data, allocator)
-		r.font_data = nil
 		return false
 	}
 
-	// 2. Create FreeType face from memory
-	ft_err = FT_New_Memory_Face(r.ft_lib, raw_data(r.font_data), FT_Long(len(r.font_data)), 0, &r.face)
+	// 2. Create FreeType face from file path (OS kernel mmap)
+	c_path := strings.clone_to_cstring(actual_path, context.temp_allocator)
+	ft_err = FT_New_Face(r.ft_lib, c_path, 0, &r.face)
 	if ft_err != 0 || r.face == nil {
 		if out_error != nil {
-			out_error^ = Font_Error.Invalid_Font
+			if !os.exists(actual_path) {
+				out_error^ = Font_Error.File_Not_Found
+			} else {
+				out_error^ = Font_Error.Invalid_Font
+			}
 		}
 		FT_Done_FreeType(r.ft_lib)
 		r.ft_lib = nil
-		delete(font_data, allocator)
-		r.font_data = nil
 		return false
 	}
+
+	r.allocator = allocator
 
 	// Set pixel sizes
 	FT_Set_Pixel_Sizes(r.face, 0, FT_UInt(pixel_size))
@@ -166,7 +156,7 @@ font_rasterizer_destroy :: proc(r: ^Font_Rasterizer) {
 	if r == nil {
 		return
 	}
-	// Teardown sequence: hb_font -> face -> ft_lib -> font_data
+	// Teardown sequence: hb_font -> face -> ft_lib
 	if r.hb_font != nil {
 		hb_font_destroy(r.hb_font)
 		r.hb_font = nil
@@ -178,10 +168,6 @@ font_rasterizer_destroy :: proc(r: ^Font_Rasterizer) {
 	if r.ft_lib != nil {
 		FT_Done_FreeType(r.ft_lib)
 		r.ft_lib = nil
-	}
-	if r.font_data != nil {
-		delete(r.font_data, r.allocator)
-		r.font_data = nil
 	}
 }
 

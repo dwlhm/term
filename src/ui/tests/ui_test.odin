@@ -11,6 +11,7 @@ import inter "../../interaction"
 import input "../../platform/input"
 import render "../../render"
 import instance "../../render/instance"
+import i18n "../../i18n"
 import app "../../app"
 
 @test
@@ -20,19 +21,20 @@ test_tab_bar_layout_and_hit_test :: proc(t: ^testing.T) {
 
 	tab_rects: [16]ui.Rect_f32
 
-	// 1. Single tab on wide window (1000px): must clamp to TAB_MAX_W (220px)
+	// 1. Single tab on wide window (1000px): content-driven width
 	n := ui.tab_bar_layout(&state, 1000.0, 1, tab_rects[:])
 	testing.expect_value(t, n, 1)
-	testing.expect_value(t, tab_rects[0].w, ui.TAB_MAX_W)
+	testing.expect(t, tab_rects[0].w > 0)
 	testing.expect_value(t, tab_rects[0].h, ui.TAB_BAR_HEIGHT)
 
-	// 2. Many tabs fit the available width with the new-tab button reserved.
+	// 2. Many tabs exceed the available width:
 	n = ui.tab_bar_layout(&state, 800.0, 10, tab_rects[:])
 	testing.expect_value(t, n, 10)
-	testing.expect(t, tab_rects[0].w < ui.TAB_MIN_W)
+	testing.expect(t, tab_rects[0].w > 0)
+	testing.expect(t, state.scroll_max > 0, "overflow must expose a positive scroll range")
 	testing.expect(t, state.new_tab_rect.x + state.new_tab_rect.w <= state.rect.w)
 
-	// 3. Hit-testing: tab item, close button, new tab button, and outside
+	// 3. Hit-testing: tab item, new tab button, and outside
 	n = ui.tab_bar_layout(&state, 1000.0, 3, tab_rects[:])
 	tab_x := tab_rects[0].x
 	tab_w := tab_rects[0].w
@@ -42,14 +44,13 @@ test_tab_bar_layout_and_hit_test :: proc(t: ^testing.T) {
 	testing.expect_value(t, target, ui.Tab_Hit_Target.Tab_Item)
 	testing.expect_value(t, idx, 0)
 
-	// Right edge of Tab 0 -> Btn_Close
-	target, idx = ui.tab_bar_hit_test(&state, 3, tab_rects[:3], tab_x + tab_w - 10.0, 16.0)
-	testing.expect_value(t, target, ui.Tab_Hit_Target.Btn_Close)
+	// Right edge of Tab 0 -> Tab_Item (close button removed from tab strip)
+	target, idx = ui.tab_bar_hit_test(&state, 3, tab_rects[:3], tab_x + tab_w - 5.0, 16.0)
+	testing.expect_value(t, target, ui.Tab_Hit_Target.Tab_Item)
 	testing.expect_value(t, idx, 0)
 
 	// Right next to the last tab -> Btn_New_Tab
-	last_tab := tab_rects[2]
-	target, idx = ui.tab_bar_hit_test(&state, 3, tab_rects[:3], last_tab.x + last_tab.w + 10.0, 16.0)
+	target, idx = ui.tab_bar_hit_test(&state, 3, tab_rects[:3], state.new_tab_rect.x + 5.0, 16.0)
 	testing.expect_value(t, target, ui.Tab_Hit_Target.Btn_New_Tab)
 	testing.expect_value(t, idx, -1)
 
@@ -64,12 +65,13 @@ test_tab_bar_layout_and_hit_test :: proc(t: ^testing.T) {
 	testing.expect_value(t, action, ui.Tab_Action.Switch_Tab)
 	testing.expect_value(t, t_idx, 0)
 
-	consumed, action, t_idx = ui.tab_bar_dispatch_pointer(&state, 3, tab_rects[:3], tab_x + tab_w - 10.0, 16.0, true)
-	testing.expect(t, consumed, "pointer down on close button must be consumed")
-	testing.expect_value(t, action, ui.Tab_Action.Close_Tab)
+	// Right-click on tab -> Context_Menu
+	consumed, action, t_idx = ui.tab_bar_dispatch_pointer(&state, 3, tab_rects[:3], tab_x + tab_w - 5.0, 16.0, true, 3, 1)
+	testing.expect(t, consumed, "right-click on tab must be consumed")
+	testing.expect_value(t, action, ui.Tab_Action.Context_Menu)
 	testing.expect_value(t, t_idx, 0)
 
-	consumed, action, t_idx = ui.tab_bar_dispatch_pointer(&state, 3, tab_rects[:3], last_tab.x + last_tab.w + 10.0, 16.0, true)
+	consumed, action, t_idx = ui.tab_bar_dispatch_pointer(&state, 3, tab_rects[:3], state.new_tab_rect.x + 5.0, 16.0, true)
 	testing.expect(t, consumed, "pointer down on new tab must be consumed")
 	testing.expect_value(t, action, ui.Tab_Action.New_Tab)
 	testing.expect_value(t, t_idx, -1)
@@ -80,10 +82,10 @@ test_tab_bar_layout_and_hit_test :: proc(t: ^testing.T) {
 	testing.expect_value(t, action, ui.Tab_Action.Close_Tab)
 	testing.expect_value(t, t_idx, 0)
 
-	// Double-click on empty tab bar area -> New_Tab
+	// Double-click on the trailing drag region -> Window_Zoom (native titlebar action)
 	consumed, action, t_idx = ui.tab_bar_dispatch_pointer(&state, 3, tab_rects[:3], 850.0, 16.0, true, 1, 2)
 	testing.expect(t, consumed, "double-click on empty tab bar must be consumed")
-	testing.expect_value(t, action, ui.Tab_Action.New_Tab)
+	testing.expect_value(t, action, ui.Tab_Action.Window_Zoom)
 	testing.expect_value(t, t_idx, -1)
 }
 
@@ -252,10 +254,9 @@ test_ui_render_staging_bounds :: proc(t: ^testing.T) {
 	staged := ui.ui_render_stage(
 		r,
 		&theme,
-		.Modern_Flat,
+		i18n.i18n_get(),
 		&tab_state,
 		tabs[:],
-		0,
 		tab_rects[:],
 		&search_state,
 		800.0,
@@ -266,6 +267,37 @@ test_ui_render_staging_bounds :: proc(t: ^testing.T) {
 	testing.expect(t, staged <= ui.UI_MAX_INSTANCES, "staging must not exceed UI_MAX_INSTANCES quota")
 	testing.expect(t, r.ui_staged, "r.ui_staged must be true after staging")
 	testing.expect(t, r.ui_bg_count > 0, "r.ui_bg_count must be > 0 after staging")
+}
+
+@test
+test_ui_render_confirm_dialog_stages :: proc(t: ^testing.T) {
+	r := new(render.Renderer)
+	defer free(r)
+	r.cell_width = 8.0
+	r.cell_height = 16.0
+	max_inst: u32 = 1024
+	r.instances.max_instances = max_inst
+	r.instances.instance_data = make([]instance.Instance_Data, int(max_inst))
+	defer delete(r.instances.instance_data)
+
+	theme := ui.theme_catppuccin_mocha()
+	tab_state: ui.Tab_Bar_State
+	ui.tab_bar_init(&tab_state)
+	rects: [1]ui.Rect_f32
+	_ = ui.tab_bar_layout(&tab_state, 800, 1, rects[:])
+	tabs := [1]ui.UI_Tab_Info{{is_active = true}}
+
+	confirm: ui.Confirm_Dialog_State
+	ui.confirm_dialog_init(&confirm)
+	ui.confirm_dialog_layout(&confirm, 800, 600)
+
+	hidden_count := ui.ui_render_stage(r, &theme, i18n.i18n_get(), &tab_state, tabs[:], rects[:], nil, 800, 600)
+
+	ui.confirm_dialog_show(&confirm, 0, 1)
+	shown_count := ui.ui_render_stage(r, &theme, i18n.i18n_get(), &tab_state, tabs[:], rects[:], nil, 800, 600, 1, "", nil, nil, nil, &confirm)
+
+	testing.expect(t, shown_count > hidden_count, "visible dialog must stage additional card and button quads")
+	testing.expect(t, r.ui_bg_count > 0, "dialog card background must be staged")
 }
 
 @test
@@ -280,13 +312,14 @@ test_ui_render_logical_to_physical_scale :: proc(t: ^testing.T) {
 		_ = ui.tab_bar_layout(&state, 800, 1, rects[:])
 		tabs := [1]ui.UI_Tab_Info{{is_active = true}}
 		theme := ui.theme_catppuccin_mocha()
-		_ = ui.ui_render_stage(r, &theme, .Modern_Flat, &state, tabs[:], 0, rects[:], nil, 800, 600, scale)
+		_ = ui.ui_render_stage(r, &theme, i18n.i18n_get(), &state, tabs[:], rects[:], nil, 800, 600, scale)
 		testing.expect_value(t, r.ui_bg_data[0].cw, state.rect.w * scale)
 		testing.expect_value(t, r.ui_bg_data[0].ch, ui.TAB_BAR_HEIGHT * scale)
+		// ui_bg_data[2] is the active tab underline at rects[0].x.
 		testing.expect_value(t, r.ui_bg_data[2].x, rects[0].x * scale)
-		target, _ := ui.tab_bar_hit_test(&state, 1, rects[:], rects[0].x + rects[0].w - ui.CLOSE_BTN_WIDTH / 2, ui.TAB_BAR_HEIGHT / 2)
-		testing.expect_value(t, target, ui.Tab_Hit_Target.Btn_Close)
-		target, _ = ui.tab_bar_hit_test(&state, 1, rects[:], rects[0].x + rects[0].w + ui.NEW_TAB_BTN_WIDTH / 2, ui.TAB_BAR_HEIGHT / 2)
+		target, _ := ui.tab_bar_hit_test(&state, 1, rects[:], rects[0].x + rects[0].w / 2, ui.TAB_BAR_HEIGHT / 2)
+		testing.expect_value(t, target, ui.Tab_Hit_Target.Tab_Item)
+		target, _ = ui.tab_bar_hit_test(&state, 1, rects[:], state.new_tab_rect.x + state.new_tab_rect.w / 2, ui.TAB_BAR_HEIGHT / 2)
 		testing.expect_value(t, target, ui.Tab_Hit_Target.Btn_New_Tab)
 	}
 }
@@ -298,22 +331,141 @@ test_tab_overflow_and_tiny_window_bounds :: proc(t: ^testing.T) {
 		rects: [16]ui.Rect_f32
 		for count in ([]int{0, 1, 16}) {
 			_ = ui.tab_bar_layout(&state, width, count, rects[:])
-			testing.expect(t, state.new_tab_rect.x >= 0 && state.new_tab_rect.x + state.new_tab_rect.w <= width)
+
+			// The new-tab control must always stay inside the window, overflow or not.
+			testing.expect(t, state.new_tab_rect.x >= 0 && state.new_tab_rect.w >= 0)
+			testing.expect(t, state.new_tab_rect.x + state.new_tab_rect.w <= width + 0.001)
+
+			overflow := state.scroll_max > 0
 			for i in 0..<count {
 				r := rects[i]
-				testing.expect(t, r.x >= 0 && r.w >= 0 && r.x + r.w <= width)
-				if r.w > 0 && r.w < ui.TAB_CLOSE_MIN_WIDTH {
-					target, idx := ui.tab_bar_hit_test(&state, count, rects[:count], r.x + r.w / 2, r.h / 2)
-					testing.expect_value(t, target, ui.Tab_Hit_Target.Tab_Item)
-					testing.expect_value(t, idx, i)
+				if overflow {
+					// In content-driven layout, visible tabs have positive width within bounds,
+					// while overflowing tabs not currently visible have w == 0.
+					if r.w > 0 {
+						testing.expect(t, r.x >= 0 && r.x + r.w <= width + 0.001)
+					}
+				} else {
+					testing.expect(t, r.x >= 0 && r.w >= 0 && r.x + r.w <= width + 0.001)
 				}
 			}
+
+			// A point inside the visible viewport maps to the logical tab index under it.
+			if count > 0 && state.viewport_rect.w > 1 && state.visible_tab_count > 0 {
+				probe_x := state.viewport_rect.x + 1.0
+				target, idx := ui.tab_bar_hit_test(&state, count, rects[:count], probe_x, ui.TAB_BAR_HEIGHT / 2)
+				testing.expect_value(t, target, ui.Tab_Hit_Target.Tab_Item)
+				testing.expect_value(t, idx, state.display_start)
+			}
+
 			if state.new_tab_rect.w > 0 {
 				target, _ := ui.tab_bar_hit_test(&state, count, rects[:count], state.new_tab_rect.x, ui.TAB_BAR_HEIGHT / 2)
 				testing.expect_value(t, target, ui.Tab_Hit_Target.Btn_New_Tab)
 			}
 		}
 	}
+}
+
+@test
+test_tab_bar_scroll_clamps :: proc(t: ^testing.T) {
+	state: ui.Tab_Bar_State
+	ui.tab_bar_init(&state)
+	rects: [16]ui.Rect_f32
+	_ = ui.tab_bar_layout(&state, 800.0, 16, rects[:])
+	testing.expect(t, state.scroll_max > 0, "layout must produce a scrollable strip")
+
+	// Scrolling toward the start at the origin must not move the offset.
+	changed := ui.tab_bar_scroll(&state, 10)
+	testing.expect(t, !changed, "scrolling left at origin must not change offset")
+	testing.expect_value(t, state.scroll_offset, 0.0)
+
+	// Forward wheel moves the strip by whole steps.
+	changed = ui.tab_bar_scroll(&state, -1)
+	testing.expect(t, changed, "scrolling forward must change offset")
+	testing.expect(t, state.scroll_offset > 0.0)
+
+	// Must clamp at the far end.
+	_ = ui.tab_bar_scroll(&state, -1000)
+	testing.expect_value(t, state.scroll_offset, state.scroll_max)
+
+	// Must clamp back at the origin.
+	_ = ui.tab_bar_scroll(&state, 1000)
+	testing.expect_value(t, state.scroll_offset, 0.0)
+}
+
+@test
+test_tab_bar_scroll_to_tab_keeps_target_visible :: proc(t: ^testing.T) {
+	state: ui.Tab_Bar_State
+	ui.tab_bar_init(&state)
+	rects: [16]ui.Rect_f32
+	_ = ui.tab_bar_layout(&state, 800.0, 16, rects[:])
+
+	// Scrolling to the last tab must bring it fully inside the viewport.
+	changed := ui.tab_bar_scroll_to_tab(&state, 15)
+	testing.expect(t, changed, "scrolling to an off-screen tab must change offset")
+	_ = ui.tab_bar_layout(&state, 800.0, 16, rects[:])
+	last := rects[15]
+	testing.expect(t, last.x >= state.viewport_rect.x - 0.001, "tab left edge must be inside the viewport")
+	testing.expect(t, last.x + last.w <= state.viewport_rect.x + state.viewport_rect.w + 0.001, "tab right edge must be inside the viewport")
+
+	// Scrolling back to the first tab must restore visibility.
+	changed = ui.tab_bar_scroll_to_tab(&state, 0)
+	testing.expect(t, changed, "scrolling back to the first tab must change offset")
+	_ = ui.tab_bar_layout(&state, 800.0, 16, rects[:])
+	first := rects[0]
+	testing.expect(t, first.x >= state.viewport_rect.x - 0.001, "first tab left edge must be inside the viewport")
+	testing.expect(t, first.x + first.w <= state.viewport_rect.x + state.viewport_rect.w + 0.001, "first tab right edge must be inside the viewport")
+}
+
+@test
+test_tab_bar_hit_test_after_scroll :: proc(t: ^testing.T) {
+	state: ui.Tab_Bar_State
+	ui.tab_bar_init(&state)
+	rects: [16]ui.Rect_f32
+	_ = ui.tab_bar_layout(&state, 800.0, 16, rects[:])
+	_ = ui.tab_bar_scroll(&state, -6) // six wheel steps forward
+	_ = ui.tab_bar_layout(&state, 800.0, 16, rects[:])
+	testing.expect(t, state.scroll_offset > 0.0, "offset must have advanced")
+
+	// A fixed point inside the viewport must map to the logical tab whose shifted rect contains it.
+	probe_x := state.viewport_rect.x + 10.0
+	target, idx := ui.tab_bar_hit_test(&state, 16, rects[:], probe_x, ui.TAB_BAR_HEIGHT / 2)
+	testing.expect_value(t, target, ui.Tab_Hit_Target.Tab_Item)
+	testing.expect_value(t, idx, state.display_start)
+	testing.expect(t, idx > 0, "scrolling must shift the logical index under a fixed point")
+}
+
+@test
+test_tab_bar_anim_update_settles :: proc(t: ^testing.T) {
+	state: ui.Tab_Bar_State
+	ui.tab_bar_init(&state)
+	theme := ui.theme_catppuccin_mocha()
+
+	// An idle animation must not request a repaint.
+	testing.expect(t, !ui.tab_bar_anim_update(&state, 1, 16.0, theme.motion.hover_ms, theme.motion.active_ms), "inactive animation must report no repaint")
+
+	state.hover_tab_idx = 2
+	state.hover_close_idx = 3
+	state.hover_new_tab = true
+	ui.tab_bar_anim_activate(&state)
+
+	testing.expect(t, ui.tab_bar_anim_update(&state, 1, 16.0, theme.motion.hover_ms, theme.motion.active_ms), "animation must report repaint while transitioning")
+
+	settled := false
+	for _ in 0..<600 {
+		if !ui.tab_bar_anim_update(&state, 1, 16.0, theme.motion.hover_ms, theme.motion.active_ms) {
+			settled = true
+			break
+		}
+	}
+	testing.expect(t, settled, "animation must settle to rest")
+	testing.expect(t, !state.anim.anim_active, "anim_active must clear at rest")
+	testing.expect_value(t, state.anim.hover_t[2], 1.0)
+	testing.expect_value(t, state.anim.hover_t[0], 0.0)
+	testing.expect_value(t, state.anim.active_t[1], 1.0)
+	testing.expect_value(t, state.anim.active_t[0], 0.0)
+	testing.expect_value(t, state.anim.close_t[3], 1.0)
+	testing.expect_value(t, state.anim.new_tab_t, 1.0)
 }
 
 @test
@@ -466,4 +618,162 @@ test_session_terminating_reap_on_poll :: proc(t: ^testing.T) {
 	testing.expect(t, reaped, "terminating tab must be reaped and removed by session_poll_all")
 	testing.expect_value(t, len(sm.tabs), 0)
 	testing.expect_value(t, sm.active_idx, -1)
+}
+
+@test
+test_tab_bar_geometry_tokens :: proc(t: ^testing.T) {
+	testing.expect_value(t, ui.TAB_BAR_HEIGHT, f32(28))
+	testing.expect_value(t, ui.TAB_MIN_W, f32(110))
+	testing.expect_value(t, ui.TAB_MAX_W, f32(200))
+	testing.expect_value(t, ui.NEW_TAB_BTN_WIDTH, f32(28))
+	testing.expect_value(t, ui.CLOSE_BTN_WIDTH, f32(22))
+	testing.expect_value(t, ui.TAB_TITLE_PAD_LEFT, f32(10))
+
+	state: ui.Tab_Bar_State
+	rects: [8]ui.Rect_f32
+	n := ui.tab_bar_layout(&state, 800.0, 3, rects[:])
+	testing.expect_value(t, n, 3)
+	for i in 0 ..< n {
+		testing.expect_value(t, rects[i].h, ui.TAB_BAR_HEIGHT)
+	}
+}
+
+@test
+test_tab_bar_reserves_drag_area :: proc(t: ^testing.T) {
+	for width in ([]f32{400.0, 800.0, 1200.0}) {
+		for count in ([]int{1, 4, 16}) {
+			state: ui.Tab_Bar_State
+			rects: [16]ui.Rect_f32
+			_ = ui.tab_bar_layout(&state, width, count, rects[:])
+			testing.expect(
+				t,
+				state.drag_rect.w >= ui.TAB_BAR_MIN_DRAG_W - 0.001,
+				"tab bar must reserve a trailing free drag area",
+			)
+		}
+	}
+}
+
+@test
+test_tab_overflow_dropdown_key_navigation :: proc(t: ^testing.T) {
+	bar: ui.Tab_Bar_State
+	rects: [16]ui.Rect_f32
+	_ = ui.tab_bar_layout(&bar, 800.0, 16, rects[:])
+	testing.expect(t, bar.overflow_rect.w > 0, "16 tabs on an 800px window must overflow")
+
+	tabs: [16]ui.UI_Tab_Info
+	for i in 0 ..< 16 {
+		tabs[i].id = u32(i + 1)
+		tabs[i].is_active = (i == 2)
+	}
+
+	m: ui.Tab_Overflow_State
+	m.visible = true
+	ui.tab_overflow_refresh(&m, tabs[:], &bar, 800, 600)
+	testing.expect_value(t, m.selected_tab_id, u32(3))
+
+	ev: input.Input_Event
+	ev.event_type = .Key
+
+	ev.kind = .Arrow_Down
+	testing.expect_value(t, ui.tab_overflow_dispatch_key(&m, tabs[:], ev), ui.Tab_Overflow_Action.None)
+	testing.expect_value(t, m.selected_tab_id, u32(4))
+
+	ev.kind = .Arrow_Up
+	testing.expect_value(t, ui.tab_overflow_dispatch_key(&m, tabs[:], ev), ui.Tab_Overflow_Action.None)
+	testing.expect_value(t, m.selected_tab_id, u32(3))
+
+	ev.kind = .Home
+	testing.expect_value(t, ui.tab_overflow_dispatch_key(&m, tabs[:], ev), ui.Tab_Overflow_Action.None)
+	testing.expect_value(t, m.selected_tab_id, u32(1))
+
+	ev.kind = .End
+	testing.expect_value(t, ui.tab_overflow_dispatch_key(&m, tabs[:], ev), ui.Tab_Overflow_Action.None)
+	testing.expect_value(t, m.selected_tab_id, u32(16))
+
+	ev.kind = .Enter
+	testing.expect_value(t, ui.tab_overflow_dispatch_key(&m, tabs[:], ev), ui.Tab_Overflow_Action.Activate)
+
+	ev.kind = .Escape
+	testing.expect_value(t, ui.tab_overflow_dispatch_key(&m, tabs[:], ev), ui.Tab_Overflow_Action.Dismiss)
+}
+
+@test
+test_tab_overflow_dropdown_pointer_and_autoclose :: proc(t: ^testing.T) {
+	bar: ui.Tab_Bar_State
+	rects: [16]ui.Rect_f32
+	_ = ui.tab_bar_layout(&bar, 800.0, 16, rects[:])
+
+	tabs: [16]ui.UI_Tab_Info
+	for i in 0 ..< 16 {
+		tabs[i].id = u32(i + 1)
+		tabs[i].is_active = (i == 2)
+	}
+
+	m: ui.Tab_Overflow_State
+	m.visible = true
+	ui.tab_overflow_refresh(&m, tabs[:], &bar, 800, 600)
+
+	r1 := ui.tab_overflow_row_rect(&m, 1)
+	act := ui.tab_overflow_dispatch_pointer(&m, tabs[:], r1.x + r1.w * 0.5, r1.y + r1.h * 0.5, true, 0)
+	testing.expect_value(t, act, ui.Tab_Overflow_Action.Activate)
+	testing.expect_value(t, m.selected_tab_id, u32(2))
+
+	act = ui.tab_overflow_dispatch_pointer(&m, tabs[:], m.rect.x - 50, m.rect.y - 50, true, 0)
+	testing.expect_value(t, act, ui.Tab_Overflow_Action.Dismiss)
+
+	bar2: ui.Tab_Bar_State
+	rects2: [2]ui.Rect_f32
+	_ = ui.tab_bar_layout(&bar2, 800.0, 2, rects2[:])
+	m2: ui.Tab_Overflow_State
+	m2.visible = true
+	ui.tab_overflow_refresh(&m2, tabs[:2], &bar2, 800, 600)
+	testing.expect(t, !m2.visible, "dropdown must auto-close when no overflow remains")
+}
+
+@test
+test_shortcut_registry_labels :: proc(t: ^testing.T) {
+	testing.expect_value(t, ui.ui_shortcut_label(.New_Tab), "\u2318T")
+	testing.expect_value(t, ui.ui_shortcut_label(.Close_Tab), "\u2318W")
+	testing.expect_value(t, ui.ui_shortcut_label(.Close_Others), "\u2325\u2318W")
+	testing.expect_value(t, ui.ui_shortcut_label(.Close_To_Right), "\u2325\u21E7\u2318W")
+	testing.expect_value(t, ui.ui_shortcut_label(.Overflow), "\u21E7\u2318\\")
+	testing.expect_value(t, ui.ui_shortcut_label(.Window_Zoom), "\u2303\u2318Z")
+	testing.expect_value(t, ui.ui_shortcut_label(.Cancel), "esc")
+	testing.expect_value(t, ui.ui_shortcut_tab_label(0, 3), "\u23181")
+	testing.expect_value(t, ui.ui_shortcut_tab_label(7, 16), "\u23188")
+	testing.expect_value(t, ui.ui_shortcut_tab_label(15, 16), "\u23189")
+	testing.expect_value(t, ui.ui_shortcut_tab_label(9, 16), "")
+}
+
+@test
+test_ui_render_overflow_hints_stage :: proc(t: ^testing.T) {
+	r := new(render.Renderer)
+	defer free(r)
+	r.cell_width = 8.0
+	r.cell_height = 16.0
+	max_inst: u32 = 2048
+	r.instances.max_instances = max_inst
+	r.instances.instance_data = make([]instance.Instance_Data, int(max_inst))
+	defer delete(r.instances.instance_data)
+	for &s in r.atlas.slots do s.valid = true
+
+	theme := ui.theme_catppuccin_mocha()
+	state: ui.Tab_Bar_State
+	ui.tab_bar_init(&state)
+	rects: [16]ui.Rect_f32
+	_ = ui.tab_bar_layout(&state, 800.0, 16, rects[:])
+	tabs: [16]ui.UI_Tab_Info
+	for i in 0 ..< 16 {
+		tabs[i] = {id = u32(i + 1), title = "Tab", is_active = (i == 0)}
+	}
+
+	hidden := ui.ui_render_stage(r, &theme, i18n.i18n_get(), &state, tabs[:], rects[:], nil, 800, 600)
+
+	overflow: ui.Tab_Overflow_State
+	overflow.visible = true
+	overflow.selected_tab_id = 1
+	ui.tab_overflow_refresh(&overflow, tabs[:], &state, 800, 600)
+	shown := ui.ui_render_stage(r, &theme, i18n.i18n_get(), &state, tabs[:], rects[:], nil, 800, 600, 1, "", nil, nil, nil, nil, &overflow)
+	testing.expect(t, shown > hidden, "visible overflow dropdown must stage extra rows and shortcut badges")
 }

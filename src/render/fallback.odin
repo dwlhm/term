@@ -111,7 +111,7 @@ fallback_resolve :: proc(
 	primary_missed := false
 	for i in 0..<chain.count {
 		f := &chain.fonts[i]
-		if f.font_data == nil {
+		if f.face == nil {
 			if i == 0 {
 				primary_missed = true
 			}

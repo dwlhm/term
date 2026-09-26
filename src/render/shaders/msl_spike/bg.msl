@@ -32,9 +32,9 @@ struct BenchBgVertexOut {
     float4 color;
 };
 
-vertex BenchBgVertexOut bench_bg_vs(
+vertex BenchBgVertexOut vs_main(
     BenchBgVertexIn      in       [[stage_in]],
-    constant BenchUniforms &uniforms [[buffer(0)]],
+    constant BenchUniforms &uniforms [[buffer(1)]],
     uint                 vid      [[vertex_id]])
 {
     // Quad corners match bg.wgsl quad_positions (triangle list, 6 verts).
@@ -52,6 +52,6 @@ vertex BenchBgVertexOut bench_bg_vs(
     return out;
 }
 
-fragment float4 bench_bg_fs(BenchBgVertexOut in [[stage_in]]) {
+fragment float4 fs_main(BenchBgVertexOut in [[stage_in]]) {
     return in.color;
 }

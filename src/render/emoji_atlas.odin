@@ -35,7 +35,6 @@ Emoji_Atlas :: struct {
 	ft_lib:         FT_Library,
 	face:           FT_Face,
 	hb_font:        hb_font_t,
-	font_data:      []u8,
 	has_font:       bool,
 }
 
@@ -78,24 +77,28 @@ emoji_atlas_init :: proc(a: ^Emoji_Atlas, font_size_px: f32, display_scale: f32 
 				actual_path = strings.concatenate({home, path[1:]}, context.temp_allocator)
 			}
 		}
-		if data, err := os.read_entire_file(actual_path, context.allocator); err == nil {
-			a.font_data = data
-			if FT_New_Memory_Face(a.ft_lib, raw_data(a.font_data), FT_Long(len(a.font_data)), 0, &a.face) == 0 && a.face != nil {
-				FT_Set_Pixel_Sizes(a.face, 0, FT_UInt(font_size_px))
-				a.hb_font = hb_ft_font_create_referenced(a.face)
-				a.has_font = true
-				break
-			}
-			delete(data)
-			a.font_data = nil
+		c_path := strings.clone_to_cstring(actual_path, context.temp_allocator)
+		if FT_New_Face(a.ft_lib, c_path, 0, &a.face) == 0 && a.face != nil {
+			FT_Set_Pixel_Sizes(a.face, 0, FT_UInt(font_size_px))
+			a.hb_font = hb_ft_font_create_referenced(a.face)
+			a.has_font = true
+			break
 		}
 	}
 
 	return true
 }
 
-emoji_atlas_destroy :: proc(a: ^Emoji_Atlas) {
+emoji_atlas_destroy :: proc(a: ^Emoji_Atlas, backend: ^gpu.Gpu_Backend_VTable = nil) {
 	if a == nil do return
+	if backend != nil {
+		if rawptr(a.gpu_view) != nil {
+			backend.destroy_texture_view(a.gpu_view)
+		}
+		if rawptr(a.gpu_texture) != nil {
+			backend.destroy_texture(a.gpu_texture)
+		}
+	}
 	if a.hb_font != nil {
 		hb_font_destroy(a.hb_font)
 		a.hb_font = nil
@@ -107,10 +110,6 @@ emoji_atlas_destroy :: proc(a: ^Emoji_Atlas) {
 	if a.ft_lib != nil {
 		FT_Done_FreeType(a.ft_lib)
 		a.ft_lib = nil
-	}
-	if a.font_data != nil {
-		delete(a.font_data)
-		a.font_data = nil
 	}
 	if len(a.pixels) > 0 {
 		delete(a.pixels)

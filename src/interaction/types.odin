@@ -28,11 +28,7 @@ Interaction_Action :: enum u8 {
 	Open_Link       = 5,
 }
 
-Search_Match :: struct {
-	row:       int,
-	col_start: int,
-	col_end:   int,
-}
+Search_Match :: termgrid.Search_Match
 
 MAX_SEARCH_MATCHES :: 256
 

@@ -67,10 +67,19 @@ test_layout_dispatch_refreshes_logical_chrome :: proc(t: ^testing.T) {
 	ev := [1]input.Input_Event{{event_type = .Pointer, pointer = {kind = .Button_Down, button = sdl3.BUTTON_RIGHT, x = point.x + point.w / 2, y = point.h / 2}}}
 	_, _ = app.app_dispatch_input_events(a, ev[:])
 	testing.expect_value(t, a.session_mgr.active_idx, 0)
+	testing.expect(t, a.tab_menu.visible, "right-click on a tab must open the context menu")
+	// The context menu is modal: dismiss it before the left-click reaches the tab.
+	esc := [1]input.Input_Event{{event_type = .Key, kind = .Escape}}
+	_, _ = app.app_dispatch_input_events(a, esc[:])
+	testing.expect_value(t, a.tab_menu.visible, false)
 	testing.expect_value(t, a.tab_bar.rect.w, f32(a.window.width))
 	ev[0].pointer.button = sdl3.BUTTON_LEFT
 	_, _ = app.app_dispatch_input_events(a, ev[:])
 	testing.expect_value(t, a.session_mgr.active_idx, 1)
+	// Release the press so the latent drag gesture ends before the resize dispatch.
+	up := [1]input.Input_Event{{event_type = .Pointer, pointer = {kind = .Button_Up, button = sdl3.BUTTON_LEFT, x = point.x + point.w / 2, y = point.h / 2}}}
+	_, _ = app.app_dispatch_input_events(a, up[:])
+	testing.expect_value(t, a.tab_drag.phase, ui.Tab_Drag_Phase.Idle)
 	// A subsequent resize must change hit rectangles before another draw.
 	a.window.width /= 2
 	_, _ = app.app_dispatch_input_events(a, ev[:])

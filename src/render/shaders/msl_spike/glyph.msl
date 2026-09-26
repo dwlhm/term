@@ -32,9 +32,9 @@ struct BenchGlyphVertexOut {
     float4 color;
 };
 
-vertex BenchGlyphVertexOut bench_glyph_vs(
+vertex BenchGlyphVertexOut vs_main(
     BenchGlyphVertexIn   in       [[stage_in]],
-    constant BenchUniforms &uniforms [[buffer(0)]],
+    constant BenchUniforms &uniforms [[buffer(1)]],
     uint                 vid      [[vertex_id]])
 {
     float2 corners[6] = {
@@ -53,12 +53,15 @@ vertex BenchGlyphVertexOut bench_glyph_vs(
     return out;
 }
 
-fragment float4 bench_glyph_fs(
-    BenchGlyphVertexOut  in      [[stage_in]],
-    texture2d<float>     atlas   [[texture(0)]],
-    sampler              atlas_sampler [[sampler(0)]])
+fragment float4 fs_main(
+    BenchGlyphVertexOut  in            [[stage_in]],
+    texture2d<float>     atlas         [[texture(1)]],
+    sampler              atlas_sampler [[sampler(2)]])
 {
     constexpr sampler s(address::clamp_to_edge, filter::nearest);
     float alpha = atlas.sample(s, in.tex_coord).r;
+    if (alpha < 0.01) {
+        discard_fragment();
+    }
     return float4(in.color.rgb, in.color.a * alpha);
 }

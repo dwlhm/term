@@ -11,17 +11,25 @@ import "core:strings"
 
 import "vendor:wgpu"
 import wgpu_sdl3_glue "vendor:wgpu/sdl3glue"
+import "vendor:sdl3"
+import CA "vendor:darwin/QuartzCore"
 
 import termgrid "../terminal"
 import render "../render"
 import gpu "../render/gpu"
 import instance "../render/instance"
 import wgpu_backend "../render/gpu/wgpu"
+import metal_backend "../render/gpu/metal"
 import win "../platform/window"
+import pure_ui "../pinnacle_ui"
+import pinnacle_wgpu "../pinnacle_ui/wgpu_adapter"
+import pinnacle_app "../pinnacle_ui/adapters"
+
 import input "../platform/input"
 import pty "../platform/pty"
 import config "../config"
 import platform "../platform"
+import platform_tabs "../platform/tabs"
 import ui "../ui"
 
 UI_MAX_INSTANCES :: ui.UI_MAX_INSTANCES
@@ -64,6 +72,13 @@ FALLBACK_FONT_PATHS :: []string{
 Frontend :: struct {
 	window:                   win.Window,
 	renderer:                 render.Renderer,
+
+	use_pinnacle:             bool,
+	p_engine:                 ^pure_ui.Core_Engine,
+	p_gpu_adapter:            pinnacle_wgpu.WGPU_Adapter,
+	p_gpu_port:               pure_ui.Renderer_Port,
+	p_term_adapter:           pinnacle_app.Terminal_UI_Adapter,
+
 	gpu_backend:              ^gpu.Gpu_Backend_VTable,
 	device:                   gpu.Gpu_Device,
 	queue:                    gpu.Gpu_Queue,
@@ -93,7 +108,7 @@ frontend_update_padding :: proc(f: ^Frontend) {
 	}
 	scale := frontend_content_scale(f)
 	f.renderer.pad_x = FRONTEND_CONTENT_PADDING * scale
-	f.renderer.pad_y = (FRONTEND_CONTENT_PADDING + ui.TAB_BAR_HEIGHT) * scale
+	f.renderer.pad_y = (FRONTEND_CONTENT_PADDING + platform_tabs.TAB_BAR_HEIGHT) * scale
 }
 
 // find_font tries to find a usable font file.
@@ -139,34 +154,77 @@ frontend_init :: proc(
 		return 0, 0, 0, 0, false
 	}
 
-	f.gpu_backend = wgpu_backend.wgpu_backend_vtable()
-	f.instance = f.gpu_backend.create_instance()
-	if f.instance == nil {
-		win.window_destroy(&f.window)
-		fmt.eprintf("frontend_init: create_instance failed\n")
-		return 0, 0, 0, 0, false
-	}
+	when ODIN_OS == .Darwin {
+		f.gpu_backend = metal_backend.create_metal_backend()
+		f.instance = f.gpu_backend.create_instance()
+		if f.instance == nil {
+			win.window_destroy(&f.window)
+			fmt.eprintf("frontend_init: create_instance failed\n")
+			return 0, 0, 0, 0, false
+		}
 
-	f.surface = gpu.Gpu_Surface(wgpu_sdl3_glue.GetSurface(wgpu.Instance(f.instance), f.window.handle))
-	if rawptr(f.surface) == nil {
-		f.gpu_backend.destroy_instance(f.instance)
-		f.instance = nil
-		win.window_destroy(&f.window)
-		fmt.eprintf("frontend_init: GetSurface failed\n")
-		return 0, 0, 0, 0, false
-	}
+		metal_view := sdl3.Metal_CreateView(f.window.handle)
+		if metal_view == nil {
+			f.gpu_backend.destroy_instance(f.instance)
+			f.instance = nil
+			win.window_destroy(&f.window)
+			fmt.eprintf("frontend_init: Metal_CreateView failed\n")
+			return 0, 0, 0, 0, false
+		}
+		layer := (^CA.MetalLayer)(sdl3.Metal_GetLayer(metal_view))
+		f.surface = gpu.Gpu_Surface(metal_backend.create_surface(layer))
+		if rawptr(f.surface) == nil {
+			sdl3.Metal_DestroyView(metal_view)
+			f.gpu_backend.destroy_instance(f.instance)
+			f.instance = nil
+			win.window_destroy(&f.window)
+			fmt.eprintf("frontend_init: create_surface failed\n")
+			return 0, 0, 0, 0, false
+		}
 
-	f.device, f.queue = f.gpu_backend.request_device(f.instance, rawptr(f.surface))
-	if rawptr(f.device) == nil || rawptr(f.queue) == nil {
-		f.device = gpu.Gpu_Device(nil)
-		f.queue = gpu.Gpu_Queue(nil)
-		wgpu.SurfaceRelease(wgpu.Surface(rawptr(f.surface)))
-		f.surface = gpu.Gpu_Surface(nil)
-		f.gpu_backend.destroy_instance(f.instance)
-		f.instance = nil
-		win.window_destroy(&f.window)
-		fmt.eprintf("frontend_init: request_device failed\n")
-		return 0, 0, 0, 0, false
+		f.device, f.queue = f.gpu_backend.request_device(f.instance, rawptr(f.surface))
+		if rawptr(f.device) == nil || rawptr(f.queue) == nil {
+			f.device = gpu.Gpu_Device(nil)
+			f.queue = gpu.Gpu_Queue(nil)
+			metal_backend.destroy_surface((^metal_backend.Metal_Surface)(rawptr(f.surface)))
+			f.surface = gpu.Gpu_Surface(nil)
+			sdl3.Metal_DestroyView(metal_view)
+			f.gpu_backend.destroy_instance(f.instance)
+			f.instance = nil
+			win.window_destroy(&f.window)
+			fmt.eprintf("frontend_init: request_device failed\n")
+			return 0, 0, 0, 0, false
+		}
+	} else {
+		f.gpu_backend = wgpu_backend.wgpu_backend_vtable()
+		f.instance = f.gpu_backend.create_instance()
+		if f.instance == nil {
+			win.window_destroy(&f.window)
+			fmt.eprintf("frontend_init: create_instance failed\n")
+			return 0, 0, 0, 0, false
+		}
+
+		f.surface = gpu.Gpu_Surface(wgpu_sdl3_glue.GetSurface(wgpu.Instance(f.instance), f.window.handle))
+		if rawptr(f.surface) == nil {
+			f.gpu_backend.destroy_instance(f.instance)
+			f.instance = nil
+			win.window_destroy(&f.window)
+			fmt.eprintf("frontend_init: GetSurface failed\n")
+			return 0, 0, 0, 0, false
+		}
+
+		f.device, f.queue = f.gpu_backend.request_device(f.instance, rawptr(f.surface))
+		if rawptr(f.device) == nil || rawptr(f.queue) == nil {
+			f.device = gpu.Gpu_Device(nil)
+			f.queue = gpu.Gpu_Queue(nil)
+			wgpu.SurfaceRelease(wgpu.Surface(rawptr(f.surface)))
+			f.surface = gpu.Gpu_Surface(nil)
+			f.gpu_backend.destroy_instance(f.instance)
+			f.instance = nil
+			win.window_destroy(&f.window)
+			fmt.eprintf("frontend_init: request_device failed\n")
+			return 0, 0, 0, 0, false
+		}
 	}
 
 	font_path, font_ok := find_font()
@@ -174,7 +232,11 @@ frontend_init :: proc(
 		f.gpu_backend.destroy_device(f.device)
 		f.device = gpu.Gpu_Device(nil)
 		f.queue = gpu.Gpu_Queue(nil)
-		wgpu.SurfaceRelease(wgpu.Surface(rawptr(f.surface)))
+		when ODIN_OS == .Darwin {
+			metal_backend.destroy_surface((^metal_backend.Metal_Surface)(rawptr(f.surface)))
+		} else {
+			wgpu.SurfaceRelease(wgpu.Surface(rawptr(f.surface)))
+		}
 		f.surface = gpu.Gpu_Surface(nil)
 		f.gpu_backend.destroy_instance(f.instance)
 		f.instance = nil
@@ -214,7 +276,11 @@ frontend_init :: proc(
 		f.gpu_backend.destroy_device(f.device)
 		f.device = gpu.Gpu_Device(nil)
 		f.queue = gpu.Gpu_Queue(nil)
-		wgpu.SurfaceRelease(wgpu.Surface(rawptr(f.surface)))
+		when ODIN_OS == .Darwin {
+			metal_backend.destroy_surface((^metal_backend.Metal_Surface)(rawptr(f.surface)))
+		} else {
+			wgpu.SurfaceRelease(wgpu.Surface(rawptr(f.surface)))
+		}
 		f.surface = gpu.Gpu_Surface(nil)
 		f.gpu_backend.destroy_instance(f.instance)
 		f.instance = nil
@@ -240,8 +306,25 @@ frontend_init :: proc(
 		delete(val)
 	}
 
+
+	val, _ := os.lookup_env("TERM_USE_PINNACLE", context.temp_allocator); f.use_pinnacle = val == "1"
+	if f.use_pinnacle {
+		fmt.eprintf("🔥 PINNACLE ENGINE ARCHITECTURE ACTIVATED 🔥\n")
+		p_config := pure_ui.default_config()
+		p_config.max_ui_elements = u32(rows * cols) * 2 + 100
+		
+		f.p_gpu_port = pinnacle_wgpu.create_wgpu_port(&f.p_gpu_adapter, f.gpu_backend, f.device, f.queue, f.surface)
+		f.p_engine = pure_ui.init_engine(p_config, &f.p_gpu_port)
+		
+		if f.p_engine != nil {
+			ui_svc := pure_ui.create_ui_service(f.p_engine)
+			pinnacle_app.init_terminal_adapter(&f.p_term_adapter, ui_svc, i32(rows), i32(cols), f.renderer.cell_width, f.renderer.cell_height)
+		}
+	}
+
 	return f.renderer.cell_width, f.renderer.cell_height, f.renderer.pad_x, f.renderer.pad_y, true
 }
+
 
 // frontend_destroy unwinds GPU resources and closes window.
 frontend_destroy :: proc(f: ^Frontend) {
@@ -250,7 +333,11 @@ frontend_destroy :: proc(f: ^Frontend) {
 	}
 	render.renderer_destroy(&f.renderer)
 	if rawptr(f.surface) != nil {
-		wgpu.SurfaceRelease(wgpu.Surface(rawptr(f.surface)))
+		when ODIN_OS == .Darwin {
+			metal_backend.destroy_surface((^metal_backend.Metal_Surface)(rawptr(f.surface)))
+		} else {
+			wgpu.SurfaceRelease(wgpu.Surface(rawptr(f.surface)))
+		}
 		f.surface = gpu.Gpu_Surface(nil)
 	}
 	if rawptr(f.device) != nil && f.gpu_backend != nil {
@@ -304,6 +391,12 @@ frontend_render :: proc(f: ^Frontend, state: ^Render_State) -> bool {
 		return false
 	}
 
+	if f.use_pinnacle && f.p_engine != nil {
+		pinnacle_app.update_from_damage(&f.p_term_adapter, state.terminal, &state.terminal.damage)
+		pure_ui.engine_tick(f.p_engine)
+		return true
+	}
+
 	// Stage cursor overlay before frame acquisition
 	if state.cursor != nil && state.view != nil {
 		_ = render.cursor_overlay_draw(&f.renderer, state.cursor, state.view.scrollback_offset)
@@ -312,6 +405,17 @@ frontend_render :: proc(f: ^Frontend, state: ^Render_State) -> bool {
 	// Stage interaction overlay before frame acquisition
 	if state.interaction != nil && state.view != nil && state.terminal != nil {
 		_ = render.interaction_overlay_draw(&f.renderer, state.interaction, state.view, state.terminal)
+	}
+
+	// Stage scrollbar overlay before frame acquisition
+	if state.terminal != nil {
+		total_lines := termgrid.scrollback_len(&state.terminal.scrollback) + state.terminal.grid.row_count
+		visible_lines := state.terminal.grid.row_count
+		offset := state.view.scrollback_offset if state.view != nil else 0
+		viewport_w := f32(f.renderer.surface_w)
+		viewport_h := f32(f.renderer.surface_h)
+		termgrid.scrollbar_update(&state.terminal.scrollbar, total_lines, visible_lines, offset, viewport_w, viewport_h)
+		_ = render.scrollbar_overlay_draw(&f.renderer, &state.terminal.scrollbar)
 	}
 
 	dbg_dmg, dbg_total := 0, 0
@@ -470,7 +574,7 @@ frontend_apply_zoom :: proc(
 	)
 	if terminal != nil {
 		termgrid.terminal_resize(terminal, rows, cols)
-		render.renderer_resize_grid(&f.renderer, terminal, i32(rows), i32(cols))
+		if f.use_pinnacle { pinnacle_app.resize_terminal_adapter(&f.p_term_adapter, i32(rows), i32(cols)) } else { render.renderer_resize_grid(&f.renderer, terminal, i32(rows), i32(cols)) }
 	}
 	pty.pty_set_winsize(pty_ptr, rows, cols)
 	if pixel_w > 0 && pixel_h > 0 {
@@ -511,7 +615,7 @@ frontend_on_resize :: proc(
 	if grid_changed {
 		if terminal != nil {
 			termgrid.terminal_resize(terminal, rows, cols)
-			render.renderer_resize_grid(&f.renderer, terminal, i32(rows), i32(cols))
+			if f.use_pinnacle { pinnacle_app.resize_terminal_adapter(&f.p_term_adapter, i32(rows), i32(cols)) } else { render.renderer_resize_grid(&f.renderer, terminal, i32(rows), i32(cols)) }
 		}
 		if pty_ptr != nil {
 			pty.pty_set_winsize(pty_ptr, rows, cols)

@@ -40,7 +40,7 @@ Atlas_Slot :: struct {
 // FALLBACK_SLOT_BASE is the first dynamic slot (== PINNED_TOTAL).
 FALLBACK_SLOT_BASE :: PINNED_TOTAL
 
-// FALLBACK_SLOT_COUNT is the number of dynamic slots (272..511).
+// FALLBACK_SLOT_COUNT is the number of dynamic slots (PINNED_TOTAL..511).
 FALLBACK_SLOT_COUNT :: ATLAS_SLOT_COUNT - FALLBACK_SLOT_BASE
 
 // Atlas is a fixed-slot font atlas.
@@ -119,16 +119,23 @@ atlas_init :: proc(a: ^Atlas, rasterizer: ^Font_Rasterizer, allocator: runtime.A
 }
 
 // atlas_destroy frees the atlas pixel buffer and GPU resources.
-atlas_destroy :: proc(a: ^Atlas, allocator: runtime.Allocator = context.allocator) {
-	if a.pixels != nil {
-		delete(a.pixels)
-		a.pixels = nil
+atlas_destroy :: proc(a: ^Atlas, backend: ^gpu.Gpu_Backend_VTable = nil, allocator: runtime.Allocator = context.allocator) {
+	if a == nil do return
+	if backend != nil {
+		if rawptr(a.gpu_view) != nil {
+			backend.destroy_texture_view(a.gpu_view)
+		}
+		if rawptr(a.gpu_texture) != nil {
+			backend.destroy_texture(a.gpu_texture)
+		}
 	}
-
-	// Note: GPU resources are released by the backend when the device is destroyed.
-	// We just clear the handles here.
 	a.gpu_texture = gpu.Gpu_Texture(nil)
 	a.gpu_view = gpu.Gpu_TextureView(nil)
+
+	if a.pixels != nil {
+		delete(a.pixels, allocator)
+		a.pixels = nil
+	}
 }
 
 // atlas_get_slot returns the atlas slot for a given codepoint.
@@ -342,7 +349,7 @@ atlas_dynamic_claim_p :: proc(
 		return 0, false
 	}
 	f := &chain.fonts[font_index]
-	if f.font_data == nil {
+	if f.face == nil {
 		return 0, false
 	}
 	if shaped >= CONTENT_LIGATURE_BASE && shaped < 0x1FFFFF {
@@ -615,7 +622,7 @@ atlas_pin_audit :: proc(a: ^Atlas, chain: ^Fallback_Chain) -> (promoted: int) {
 		}
 		for fi in 0..<chain.count {
 			f := &chain.fonts[fi]
-			if f.font_data == nil {
+			if f.face == nil {
 				continue
 			}
 			if font_rasterizer_find_glyph_index(f, u32(codepoint)) == 0 {
@@ -653,7 +660,7 @@ atlas_prewarm_chain :: proc(a: ^Atlas, chain: ^Fallback_Chain) {
 		}
 		for fi in 0..<chain.count {
 			f := &chain.fonts[fi]
-			if f.font_data == nil {
+			if f.face == nil {
 				continue
 			}
 			if font_rasterizer_find_glyph_index(f, u32(codepoint)) == 0 {
@@ -685,7 +692,7 @@ _fallback_font_for_mark :: proc(chain: ^Fallback_Chain, mark: rune) -> (f: ^Font
 	}
 	for i in 0..<chain.count {
 		f := &chain.fonts[i]
-		if f.font_data == nil {
+		if f.face == nil {
 			continue
 		}
 		if font_rasterizer_find_glyph_index(f, u32(mark)) != 0 {

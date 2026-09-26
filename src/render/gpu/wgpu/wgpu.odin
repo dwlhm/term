@@ -26,6 +26,7 @@ _wgpu_vtable: gpu.Gpu_Backend_VTable = gpu.Gpu_Backend_VTable{
 	destroy_instance    = _wgpu_destroy_instance,
 	request_device      = _wgpu_request_device,
 	destroy_device      = _wgpu_destroy_device,
+	poll_device         = _wgpu_poll_device,
 	configure_surface   = _wgpu_configure_surface,
 	get_surface_texture = _wgpu_get_surface_texture,
 	present_surface     = _wgpu_present_surface,
@@ -713,6 +714,11 @@ _wgpu_wait_for_idle :: proc(device: gpu.Gpu_Device) -> bool {
 		return false
 	}
 	return wgpu.DevicePoll(wgpu.Device(device), true, nil) != false
+}
+
+_wgpu_poll_device :: proc(device: gpu.Gpu_Device, wait: bool) -> bool {
+	if rawptr(device) == nil do return false
+	return wgpu.DevicePoll(wgpu.Device(device), b32(wait), nil) != false
 }
 
 // --- Render Pass Commands ---

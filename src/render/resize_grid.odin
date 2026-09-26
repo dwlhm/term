@@ -45,9 +45,6 @@ renderer_resize_grid :: proc(r: ^Renderer, t: ^termgrid.Terminal, rows: i32, col
 	if rows == r.rows && cols == r.cols {
 		return
 	}
-	if !_renderer_wait_for_gpu(r) {
-		return
-	}
 
 	// 1. Compiled frames: allocate new backing before freeing old.
 	new_compiled: Compiled_Frame

@@ -8,6 +8,78 @@ import "vendor:sdl3"
 
 APPLE_PRESS_AND_HOLD_ENABLED_KEY :: "ApplePressAndHoldEnabled"
 
+// SDL consumes draggable mouse events before producing button events. Inspect
+// AppKit's current event while SDL calls our hit test, then defer the action.
+platform_titlebar_double_click :: proc(handle: ^sdl3.Window, last_event: ^i64) -> bool {
+	when ODIN_OS == .Darwin {
+		if handle == nil || last_event == nil do return false
+		nswindow := id(sdl3.GetPointerProperty(sdl3.GetWindowProperties(handle), sdl3.PROP_WINDOW_COCOA_WINDOW_POINTER, nil))
+		if nswindow == nil do return false
+		cls_app := objc_getClass("NSApplication")
+		if cls_app == nil do return false
+		Get_Object :: #type proc "c" (target: id, sel: SEL) -> id
+		Get_Integer :: #type proc "c" (target: id, sel: SEL) -> int
+		sel_shared := sel_registerName("sharedApplication")
+		imp_shared := class_getMethodImplementation(object_getClass(id(cls_app)), sel_shared)
+		if imp_shared == nil do return false
+		app := Get_Object(imp_shared)(id(cls_app), sel_shared)
+		if app == nil do return false
+		sel_event := sel_registerName("currentEvent")
+		imp_event := class_getMethodImplementation(object_getClass(app), sel_event)
+		if imp_event == nil do return false
+		event := Get_Object(imp_event)(app, sel_event)
+		if event == nil do return false
+		cls_event := object_getClass(event)
+		sel_type := sel_registerName("type")
+		imp_type := class_getMethodImplementation(cls_event, sel_type)
+		if imp_type == nil do return false
+		NS_EVENT_LEFT_MOUSE_DOWN :: 1
+		if Get_Integer(imp_type)(event, sel_type) != NS_EVENT_LEFT_MOUSE_DOWN do return false
+		sel_window := sel_registerName("window")
+		imp_window := class_getMethodImplementation(cls_event, sel_window)
+		if imp_window == nil || Get_Object(imp_window)(event, sel_window) != nswindow do return false
+		sel_clicks := sel_registerName("clickCount")
+		imp_clicks := class_getMethodImplementation(cls_event, sel_clicks)
+		DOUBLE_CLICK_COUNT :: 2
+		if imp_clicks == nil || Get_Integer(imp_clicks)(event, sel_clicks) != DOUBLE_CLICK_COUNT do return false
+		sel_number := sel_registerName("eventNumber")
+		imp_number := class_getMethodImplementation(cls_event, sel_number)
+		if imp_number == nil do return false
+		number := Get_Integer(imp_number)(event, sel_number)
+		if number < 0 || number == max(int) do return false
+		identity := i64(number) + 1
+		if identity == last_event^ do return false
+		last_event^ = identity
+		return true
+	} else {
+		return false
+	}
+}
+
+// platform_zoom_window invokes the native standard zoom action, never fullscreen.
+platform_zoom_window :: proc(handle: ^sdl3.Window) -> bool {
+	when ODIN_OS == .Darwin {
+		if handle == nil do return false
+		nswindow := id(sdl3.GetPointerProperty(sdl3.GetWindowProperties(handle), sdl3.PROP_WINDOW_COCOA_WINDOW_POINTER, nil))
+		if nswindow == nil do return false
+		cls_window := object_getClass(nswindow)
+		sel_mask := sel_registerName("styleMask")
+		imp_mask := class_getMethodImplementation(cls_window, sel_mask)
+		if imp_mask == nil do return false
+		Get_Mask :: #type proc "c" (target: id, sel: SEL) -> uint
+		NS_WINDOW_FULLSCREEN: uint : 1 << 14
+		if Get_Mask(imp_mask)(nswindow, sel_mask) & NS_WINDOW_FULLSCREEN != 0 do return false
+		sel_zoom := sel_registerName("performZoom:")
+		imp_zoom := class_getMethodImplementation(cls_window, sel_zoom)
+		if imp_zoom == nil do return false
+		Perform_Zoom :: #type proc "c" (target: id, sel: SEL, sender: id)
+		Perform_Zoom(imp_zoom)(nswindow, sel_zoom, nil)
+		return true
+	} else {
+		return false
+	}
+}
+
 when ODIN_OS == .Darwin {
 	foreign import libobjc "system:objc"
 	foreign import CoreFoundation "system:CoreFoundation.framework"
@@ -25,6 +97,8 @@ when ODIN_OS == .Darwin {
 		sel_registerName :: proc(name: cstring) -> SEL ---
 		object_getClass :: proc(obj: id) -> Class ---
 		class_getMethodImplementation :: proc(cls: Class, name: SEL) -> rawptr ---
+		objc_autoreleasePoolPush :: proc() -> rawptr ---
+		objc_autoreleasePoolPop  :: proc(pool: rawptr) ---
 	}
 
 	@(default_calling_convention="c")
@@ -77,6 +151,22 @@ when ODIN_OS == .Darwin {
 } else {
 	// platform_disable_press_and_hold is a no-op on non-Darwin platforms.
 	platform_disable_press_and_hold :: proc() {
+	}
+}
+
+platform_autorelease_pool_push :: proc() -> rawptr {
+	when ODIN_OS == .Darwin {
+		return objc_autoreleasePoolPush()
+	} else {
+		return nil
+	}
+}
+
+platform_autorelease_pool_pop :: proc(pool: rawptr) {
+	when ODIN_OS == .Darwin {
+		if pool != nil {
+			objc_autoreleasePoolPop(pool)
+		}
 	}
 }
 
@@ -138,121 +228,81 @@ platform_setup_unified_titlebar :: proc(sdl_window: ^sdl3.Window) -> bool {
 			(Set_Transparent_Proc(imp_set_transparent))(nswindow, sel_set_transparent, true)
 		}
 
+		platform_setup_metal_layer(sdl_window)
 		return true
 	} else {
 		return false
 	}
 }
 
-platform_show_close_tab_alert :: proc(sdl_window: ^Window, tab_title: string) -> bool {
-	_ = sdl_window
-	_ = tab_title
-	when ODIN_OS == .Darwin {
-		cls_alert := objc_getClass("NSAlert")
-		if cls_alert == nil do return true
-
-		sel_alloc := sel_registerName("alloc")
-		sel_init := sel_registerName("init")
-		sel_set_msg := sel_registerName("setMessageText:")
-		sel_set_inf := sel_registerName("setInformativeText:")
-		sel_add_btn := sel_registerName("addButtonWithTitle:")
-		sel_set_style := sel_registerName("setAlertStyle:")
-		sel_run_modal := sel_registerName("runModal")
-
-		meta_alert := object_getClass(id(cls_alert))
-		imp_alloc := class_getMethodImplementation(meta_alert, sel_alloc)
-		if imp_alloc == nil do return true
-		Alloc_Proc :: #type proc "c" (cls: Class, sel: SEL) -> id
-		alert_inst := (Alloc_Proc(imp_alloc))(cls_alert, sel_alloc)
-		if alert_inst == nil do return true
-
-		imp_init := class_getMethodImplementation(object_getClass(alert_inst), sel_init)
-		if imp_init == nil do return true
-		Init_Proc :: #type proc "c" (inst: id, sel: SEL) -> id
-		alert := (Init_Proc(imp_init))(alert_inst, sel_init)
-		if alert == nil do return true
-
-		cls_inst := object_getClass(alert)
-
-		// Title: "Close Tab?"
-		title_cf := CFStringCreateWithCString(nil, "Close Tab?", kCFStringEncodingUTF8)
-		if title_cf != nil {
-			defer CFRelease(title_cf)
-			imp_msg := class_getMethodImplementation(cls_inst, sel_set_msg)
-			if imp_msg != nil {
-				Set_String_Proc :: #type proc "c" (inst: id, sel: SEL, str: rawptr)
-				(Set_String_Proc(imp_msg))(alert, sel_set_msg, title_cf)
+when ODIN_OS == .Darwin {
+	_platform_configure_metal_layer :: proc(v: id, cf_top_left: rawptr) {
+		if v == nil do return
+		cls_v := object_getClass(v)
+		Get_Obj_Proc :: #type proc "c" (target: id, sel: SEL) -> id
+		sel_layer := sel_registerName("layer")
+		imp_layer := class_getMethodImplementation(cls_v, sel_layer)
+		if imp_layer != nil {
+			layer := (Get_Obj_Proc(imp_layer))(v, sel_layer)
+			if layer != nil && cf_top_left != nil {
+				cls_layer := object_getClass(layer)
+				sel_set_gravity := sel_registerName("setContentsGravity:")
+				imp_set_gravity := class_getMethodImplementation(cls_layer, sel_set_gravity)
+				if imp_set_gravity != nil {
+					Set_Obj_Proc :: #type proc "c" (target: id, sel: SEL, obj: id)
+					(Set_Obj_Proc(imp_set_gravity))(layer, sel_set_gravity, id(cf_top_left))
+				}
 			}
 		}
-
-		// Informative text
-		info_cf := CFStringCreateWithCString(nil, "Process is still running in this tab. Are you sure you want to close it?", kCFStringEncodingUTF8)
-		if info_cf != nil {
-			defer CFRelease(info_cf)
-			imp_inf := class_getMethodImplementation(cls_inst, sel_set_inf)
-			if imp_inf != nil {
-				Set_String_Proc :: #type proc "c" (inst: id, sel: SEL, str: rawptr)
-				(Set_String_Proc(imp_inf))(alert, sel_set_inf, info_cf)
-			}
-		}
-
-		// Button 1 (Default): "Close Tab" (returns 1000)
-		btn1_cf := CFStringCreateWithCString(nil, "Close Tab", kCFStringEncodingUTF8)
-		if btn1_cf != nil {
-			defer CFRelease(btn1_cf)
-			imp_btn := class_getMethodImplementation(cls_inst, sel_add_btn)
-			if imp_btn != nil {
-				Add_Btn_Proc :: #type proc "c" (inst: id, sel: SEL, title: rawptr) -> id
-				(Add_Btn_Proc(imp_btn))(alert, sel_add_btn, btn1_cf)
-			}
-		}
-
-		// Button 2: "Cancel" (returns 1001)
-		btn2_cf := CFStringCreateWithCString(nil, "Cancel", kCFStringEncodingUTF8)
-		if btn2_cf != nil {
-			defer CFRelease(btn2_cf)
-			imp_btn := class_getMethodImplementation(cls_inst, sel_add_btn)
-			if imp_btn != nil {
-				Add_Btn_Proc :: #type proc "c" (inst: id, sel: SEL, title: rawptr) -> id
-				(Add_Btn_Proc(imp_btn))(alert, sel_add_btn, btn2_cf)
-			}
-		}
-
-		// Alert Style: NSAlertStyleWarning = 1
-		imp_style := class_getMethodImplementation(cls_inst, sel_set_style)
-		if imp_style != nil {
-			Set_Style_Proc :: #type proc "c" (inst: id, sel: SEL, style: int)
-			(Set_Style_Proc(imp_style))(alert, sel_set_style, 1)
-		}
-
-		// Run modal
-		imp_run := class_getMethodImplementation(cls_inst, sel_run_modal)
-		if imp_run != nil {
-			Run_Proc :: #type proc "c" (inst: id, sel: SEL) -> int
-			response := (Run_Proc(imp_run))(alert, sel_run_modal)
-
-			// Aktifkan kembali jendela SDL agar langsung menjadi Key Window
-			if sdl_window != nil && sdl_window.handle != nil {
-				props := sdl3.GetWindowProperties(sdl_window.handle)
-				nswindow := id(sdl3.GetPointerProperty(props, sdl3.PROP_WINDOW_COCOA_WINDOW_POINTER, nil))
-				if nswindow != nil {
-					cls_win := object_getClass(nswindow)
-					sel_make_key := sel_registerName("makeKeyAndOrderFront:")
-					imp_make_key := class_getMethodImplementation(cls_win, sel_make_key)
-					if imp_make_key != nil {
-						Make_Key_Proc :: #type proc "c" (target: id, sel: SEL, sender: id)
-						(Make_Key_Proc(imp_make_key))(nswindow, sel_make_key, nil)
+		sel_subviews := sel_registerName("subviews")
+		imp_subviews := class_getMethodImplementation(cls_v, sel_subviews)
+		if imp_subviews != nil {
+			subviews := (Get_Obj_Proc(imp_subviews))(v, sel_subviews)
+			if subviews != nil {
+				cls_arr := object_getClass(subviews)
+				sel_count := sel_registerName("count")
+				sel_obj_at := sel_registerName("objectAtIndex:")
+				imp_count := class_getMethodImplementation(cls_arr, sel_count)
+				imp_obj_at := class_getMethodImplementation(cls_arr, sel_obj_at)
+				if imp_count != nil && imp_obj_at != nil {
+					Get_Count_Proc :: #type proc "c" (target: id, sel: SEL) -> uint
+					Get_Obj_At_Proc :: #type proc "c" (target: id, sel: SEL, idx: uint) -> id
+					cnt := (Get_Count_Proc(imp_count))(subviews, sel_count)
+					for i in 0..<cnt {
+						sub := (Get_Obj_At_Proc(imp_obj_at))(subviews, sel_obj_at, i)
+						_platform_configure_metal_layer(sub, cf_top_left)
 					}
 				}
-				sdl3.RaiseWindow(sdl_window.handle)
 			}
-
-			return response == 1000
 		}
-
-		return true
-	} else {
-		return true
 	}
 }
 
+// platform_setup_metal_layer anchors layer contents to topLeft so Core Animation
+// does not bilinearly stretch stale frames during live window resize.
+platform_setup_metal_layer :: proc(sdl_window: ^sdl3.Window) -> bool {
+	when ODIN_OS == .Darwin {
+		if sdl_window == nil do return false
+		props := sdl3.GetWindowProperties(sdl_window)
+		nswindow := id(sdl3.GetPointerProperty(props, sdl3.PROP_WINDOW_COCOA_WINDOW_POINTER, nil))
+		if nswindow == nil do return false
+		cls_win := object_getClass(nswindow)
+
+		sel_contentView := sel_registerName("contentView")
+		imp_contentView := class_getMethodImplementation(cls_win, sel_contentView)
+		if imp_contentView == nil do return false
+		Get_Obj_Proc :: #type proc "c" (target: id, sel: SEL) -> id
+		contentView := (Get_Obj_Proc(imp_contentView))(nswindow, sel_contentView)
+		if contentView == nil do return false
+
+		cf_top_left := CFStringCreateWithCString(nil, "topLeft", kCFStringEncodingUTF8)
+		if cf_top_left != nil {
+			defer CFRelease(cf_top_left)
+		}
+
+		_platform_configure_metal_layer(contentView, cf_top_left)
+		return true
+	} else {
+		return false
+	}
+}

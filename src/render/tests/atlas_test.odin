@@ -163,6 +163,19 @@ test_atlas_pinned_slot_index_ui :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_atlas_pinned_slot_index_extra_symbols :: proc(t: ^testing.T) {
+	for cp in render.PINNED_EXTRA_CODEPOINTS {
+		index, ok := render.atlas_pinned_slot_index(u32(cp))
+		testing.expect(t, ok, "extra UI codepoint should be pinned")
+		testing.expect(
+			t,
+			index >= render.PINNED_SLOT_EXTRA && index < render.PINNED_SLOT_EXTRA + render.PINNED_EXTRA_COUNT,
+			"extra UI slot should be in [PINNED_SLOT_EXTRA, PINNED_SLOT_EXTRA + PINNED_EXTRA_COUNT)",
+		)
+	}
+}
+
+@(test)
 test_atlas_pinned_slot_index_non_pinned :: proc(t: ^testing.T) {
 	// Test non-pinned codepoints
 	_, ok1 := render.atlas_pinned_slot_index(31)  // Below ASCII range
@@ -178,7 +191,7 @@ test_atlas_pinned_slot_index_non_pinned :: proc(t: ^testing.T) {
 @(test)
 test_atlas_prewarm_set_completeness :: proc(t: ^testing.T) {
 	set := render.atlas_prewarm_set()
-	testing.expect(t, len(set) == 272, "Prewarm set should have 272 codepoints")
+	testing.expect(t, len(set) == render.PINNED_TOTAL, "Prewarm set should have PINNED_TOTAL codepoints")
 
 	// Check no duplicates
 	seen: map[rune]bool

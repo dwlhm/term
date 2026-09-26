@@ -120,6 +120,7 @@ Gpu_Backend_VTable :: struct {
 	destroy_instance:   proc(instance: rawptr),
 	request_device:     proc(instance: rawptr, surface: rawptr) -> (device: Gpu_Device, queue: Gpu_Queue),
 	destroy_device:     proc(device: Gpu_Device),
+	poll_device:        proc(device: Gpu_Device, wait: bool) -> bool,
 
 	// Surface
 	configure_surface:  proc(surface: rawptr, device: Gpu_Device, format: Gpu_Format, width, height: u32),

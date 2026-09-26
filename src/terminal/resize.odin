@@ -48,77 +48,28 @@ _terminal_resize_primary :: proc(t: ^Terminal, new_rows: int, new_cols: int, all
 	// Seam coalescence across scrollback and grid boundary:
 	// If the newest row in scrollback is wrapped, pop all consecutive wrapped rows
 	// belonging to that logical line and prepend them to row 0's logical line.
-	seam_rows := make([dynamic][]Semantic_Cell, allocator)
-	defer {
-		for row in seam_rows {
-			delete(row, allocator)
-		}
-		delete(seam_rows)
-	}
+	seam_rows := make([dynamic][]Semantic_Cell, context.temp_allocator)
 
 	for t.scrollback.count > 0 {
 		newest := scrollback_get(&t.scrollback, t.scrollback.count - 1)
 		if newest == nil || !newest.wrapped {
 			break
 		}
-		row_buf := make([]Semantic_Cell, old_cols, allocator)
+		row_buf := make([]Semantic_Cell, old_cols, context.temp_allocator)
 		row_wrapped := false
 		if scrollback_pop_newest(&t.scrollback, row_buf, &row_wrapped) {
 			append(&seam_rows, row_buf)
 		} else {
-			delete(row_buf, allocator)
 			break
 		}
 	}
 
-	logical_lines := make([dynamic]_Logical_Line, allocator)
-	defer {
-		for &ll in logical_lines {
-			delete(ll.cells)
-		}
-		delete(logical_lines)
-	}
-
-	has_prompt_above := false
-	if !t.has_osc_133 && t.cursor.row > 0 {
-		for r_cand := max(0, t.cursor.row - 2); r_cand < t.cursor.row; r_cand += 1 {
-			cand_phys := _grid_physical_row(&t.grid, r_cand)
-			if !t.grid.rows[cand_phys].wrapped {
-				hl := false
-				gl := 0
-				hr := false
-				has_frame := false
-				for c in 0..<old_cols {
-					cell := t.grid.rows[cand_phys].cells[c]
-					if cell.content == 0x256D || cell.content == 0x2570 { // ╭ or ╰
-						has_frame = true
-					}
-					is_blank := (cell.content == 0 || cell.content == ' ') && cell.style == 0
-					if !is_blank {
-						if !hl {
-							hl = true
-						} else if gl >= 1 {
-							hr = true
-						}
-						gl = 0
-					} else {
-						if hl {
-							gl += 1
-						}
-					}
-				}
-				if has_frame || (hl && hr) {
-					has_prompt_above = true
-					break
-				}
-			}
-		}
-	}
+	logical_lines := make([dynamic]_Logical_Line, context.temp_allocator)
 
 	r := 0
 	for r <= max_active_row {
 		ll: _Logical_Line
-		ll.cells = make([dynamic]Semantic_Cell, allocator)
+		ll.cells = make([dynamic]Semantic_Cell, context.temp_allocator)
 		ll.has_cursor = false
 		ll.cursor_offset = 0
 		ll.wrapped = false
@@ -144,42 +95,10 @@ _terminal_resize_primary :: proc(t: ^Terminal, new_rows: int, new_cols: int, all
 			if t.grid.rows[phys].is_prompt {
 				ll.is_prompt = true
 			}
-			if !t.has_osc_133 {
-				if r == t.cursor.row && !row_wrapped && has_prompt_above {
-					ll.is_prompt = true
-				} else if r < t.cursor.row && !row_wrapped && (t.cursor.row - r) <= 2 && has_prompt_above {
-					hl := false
-					gl := 0
-					hr := false
-					has_frame := false
-					for c in 0..<old_cols {
-						cell := t.grid.rows[phys].cells[c]
-						if cell.content == 0x256D || cell.content == 0x2570 {
-							has_frame = true
-						}
-						is_blank := (cell.content == 0 || cell.content == ' ') && cell.style == 0
-						if !is_blank {
-							if !hl {
-								hl = true
-							} else if gl >= 1 {
-								hr = true
-							}
-							gl = 0
-						} else {
-							if hl {
-								gl += 1
-							}
-						}
-					}
-					if has_frame || (hl && hr) {
-						ll.is_prompt = true
-					}
-				}
-			}
-
 			if r == t.cursor.row {
 				ll.has_cursor = true
-				ll.cursor_offset = len(ll.cells) + t.cursor.col
+				xenl_adj := 1 if t.cursor.pending_wrap else 0
+				ll.cursor_offset = len(ll.cells) + t.cursor.col + xenl_adj
 			}
 
 			if row_wrapped {
@@ -243,52 +162,16 @@ _terminal_resize_primary :: proc(t: ^Terminal, new_rows: int, new_cols: int, all
 
 
 	// d. Reflow extracted logical lines into rows
-	reflowed_rows := make([dynamic]Row, allocator)
-	defer delete(reflowed_rows)
+	reflowed_rows := make([dynamic]Row, context.temp_allocator)
 
 	new_cursor_row := 0
 	new_cursor_col := 0
+	cursor_pending_wrap := false
 	cursor_found := false
 
 	for &ll in logical_lines {
-		if ll.is_prompt {
-			current_row := _reflow_make_row(new_cols, allocator)
-			current_row.is_prompt = true
-			current_row.wrapped = false
-
-			limit := min(len(ll.cells), new_cols)
-			col := 0
-			ci := 0
-			for ci < limit {
-				cell := ll.cells[ci]
-				is_lead := _cell_is_lead(cell)
-				if is_lead && col == new_cols - 1 {
-					current_row.cells[col] = CELL_DEFAULT
-					break
-				}
-				if is_lead && ci + 1 < limit && _cell_is_continuation(ll.cells[ci + 1]) {
-					current_row.cells[col] = cell
-					current_row.cells[col + 1] = ll.cells[ci + 1]
-					col += 2
-					ci += 2
-				} else {
-					current_row.cells[col] = cell
-					col += 1
-					ci += 1
-				}
-			}
-
-			if ll.has_cursor && !cursor_found {
-				new_cursor_row = len(reflowed_rows)
-				new_cursor_col = clamp(ll.cursor_offset, 0, new_cols - 1)
-				cursor_found = true
-			}
-
-			append(&reflowed_rows, current_row)
-			continue
-		}
-
-		current_row := _reflow_make_row(new_cols, allocator)
+		current_row := _reflow_make_row(new_cols, context.temp_allocator)
+		current_row.is_prompt = ll.is_prompt
 		col := 0
 		ci := 0
 		n_cells := len(ll.cells)
@@ -304,7 +187,8 @@ _terminal_resize_primary :: proc(t: ^Terminal, new_rows: int, new_cols: int, all
 				current_row.cells[col] = CELL_DEFAULT
 				current_row.wrapped = true
 				append(&reflowed_rows, current_row)
-				current_row = _reflow_make_row(new_cols, allocator)
+				current_row = _reflow_make_row(new_cols, context.temp_allocator)
+				current_row.is_prompt = ll.is_prompt
 				col = 0
 				if ll.has_cursor && !cursor_found && ll.cursor_offset == ci {
 					new_cursor_row = len(reflowed_rows)
@@ -347,7 +231,8 @@ _terminal_resize_primary :: proc(t: ^Terminal, new_rows: int, new_cols: int, all
 				if ci < n_cells {
 					current_row.wrapped = true
 					append(&reflowed_rows, current_row)
-					current_row = _reflow_make_row(new_cols, allocator)
+					current_row = _reflow_make_row(new_cols, context.temp_allocator)
+					current_row.is_prompt = ll.is_prompt
 					col = 0
 				}
 			}
@@ -355,16 +240,25 @@ _terminal_resize_primary :: proc(t: ^Terminal, new_rows: int, new_cols: int, all
 
 		if ll.has_cursor && !cursor_found {
 			extra := ll.cursor_offset - n_cells
-			for col + extra >= new_cols {
+			for col + extra > new_cols {
 				current_row.wrapped = true
 				append(&reflowed_rows, current_row)
-				current_row = _reflow_make_row(new_cols, allocator)
+				current_row = _reflow_make_row(new_cols, context.temp_allocator)
+				current_row.is_prompt = ll.is_prompt
 				extra -= (new_cols - col)
 				col = 0
 			}
-			new_cursor_row = len(reflowed_rows)
-			new_cursor_col = col + extra
-			cursor_found = true
+			if col + extra == new_cols {
+				new_cursor_row = len(reflowed_rows)
+				new_cursor_col = new_cols - 1
+				cursor_pending_wrap = true
+				cursor_found = true
+			} else {
+				new_cursor_row = len(reflowed_rows)
+				new_cursor_col = col + extra
+				cursor_pending_wrap = false
+				cursor_found = true
+			}
 		}
 
 		current_row.wrapped = ll.wrapped
@@ -393,7 +287,6 @@ _terminal_resize_primary :: proc(t: ^Terminal, new_rows: int, new_cols: int, all
 					}
 				}
 			}
-			delete(reflowed_rows[i].cells, allocator)
 		}
 		for i in 0..<new_rows {
 			src_row := &reflowed_rows[overflow + i]
@@ -401,41 +294,45 @@ _terminal_resize_primary :: proc(t: ^Terminal, new_rows: int, new_cols: int, all
 			new_backing[i].generation = src_row.generation
 			new_backing[i].wrapped = src_row.wrapped
 			new_backing[i].is_prompt = src_row.is_prompt
-			delete(src_row.cells, allocator)
 		}
 		new_cursor_row -= overflow
 	} else {
 		is_screen_full := max_active_row >= old_rows - 1
-		pull_count := min(new_rows - total_rows, new_rows - old_rows, t.scrollback.count) if (new_rows > old_rows && is_screen_full) else 0
+		pull_count := min(new_rows - total_rows, t.scrollback.count) if (new_rows > total_rows && is_screen_full) else 0
+		shift_down := 0
+		if pull_count > 0 && is_screen_full && new_rows > (pull_count + total_rows) {
+			shift_down = new_rows - (pull_count + total_rows)
+		}
+		
 		if pull_count > 0 {
-			// Pull pull_count newest rows from scrollback into new_backing[0 ..< pull_count]
+			// Pull pull_count newest rows from scrollback into new_backing[shift_down ..< shift_down + pull_count]
 			for i := pull_count - 1; i >= 0; i -= 1 {
 				row_wrapped := false
-				_ = scrollback_pop_newest(&t.scrollback, new_backing[i].cells, &row_wrapped)
-				new_backing[i].generation = 0
-				new_backing[i].wrapped = row_wrapped
-				new_backing[i].is_prompt = false
+				_ = scrollback_pop_newest(&t.scrollback, new_backing[shift_down + i].cells, &row_wrapped)
+				new_backing[shift_down + i].generation = 0
+				new_backing[shift_down + i].wrapped = row_wrapped
+				new_backing[shift_down + i].is_prompt = false
 			}
-			// Place reflowed_rows at pull_count ..< pull_count + total_rows
+			// Place reflowed_rows at shift_down + pull_count ..< shift_down + pull_count + total_rows
 			for i in 0..<total_rows {
-				dest_row := &new_backing[pull_count + i]
+				dest_row := &new_backing[shift_down + pull_count + i]
 				src_row := &reflowed_rows[i]
 				copy(dest_row.cells, src_row.cells)
 				dest_row.generation = src_row.generation
 				dest_row.wrapped = src_row.wrapped
 				dest_row.is_prompt = src_row.is_prompt
-				delete(src_row.cells, allocator)
 			}
-			new_cursor_row += pull_count
+			new_cursor_row += shift_down + pull_count
 		} else {
 			for i in 0..<total_rows {
+				dest_row := &new_backing[shift_down + i]
 				src_row := &reflowed_rows[i]
-				copy(new_backing[i].cells, src_row.cells)
-				new_backing[i].generation = src_row.generation
-				new_backing[i].wrapped = src_row.wrapped
-				new_backing[i].is_prompt = src_row.is_prompt
-				delete(src_row.cells, allocator)
+				copy(dest_row.cells, src_row.cells)
+				dest_row.generation = src_row.generation
+				dest_row.wrapped = src_row.wrapped
+				dest_row.is_prompt = src_row.is_prompt
 			}
+			new_cursor_row += shift_down
 		}
 	}
 
@@ -455,11 +352,9 @@ _terminal_resize_primary :: proc(t: ^Terminal, new_rows: int, new_cols: int, all
 	t.grid.origin = 0
 
 	// g. Clamp t.cursor.row to [0, new_rows-1] and t.cursor.col to [0, new_cols-1].
-	// pending_wrap is layout-dependent (last-column state of the old width),
-	// so it is cleared: the reflowed cursor position is authoritative.
 	t.cursor.row = clamp(new_cursor_row, 0, new_rows - 1)
 	t.cursor.col = clamp(new_cursor_col, 0, new_cols - 1)
-	t.cursor.pending_wrap = false
+	t.cursor.pending_wrap = cursor_pending_wrap
 
 	// h. Destroy old rows slice and re-init damage with damage_mark_all
 	damage_destroy(&t.damage, allocator)

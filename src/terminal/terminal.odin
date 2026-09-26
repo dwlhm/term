@@ -190,6 +190,9 @@ Terminal :: struct {
 	// Hyperlink store
 	hyperlinks:          Hyperlink_Store,
 
+	// Scrollbar
+	scrollbar:           Scrollbar,
+
 	// DEC alternate character sets (G0/G1)
 	charset_g0:             Terminal_Charset,
 	charset_g1:             Terminal_Charset,
@@ -224,6 +227,7 @@ terminal_init :: proc(
 	t.render_epoch = 1
 	grapheme_store_init(&t.grapheme_store)
 	scrollback_init(&t.scrollback, cols, allocator = allocator)
+	scrollbar_init(&t.scrollbar)
 	t.in_prompt_zone = false
 	t.has_osc_133 = false
 	t.app_cursor_keys = false

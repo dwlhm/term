@@ -410,7 +410,7 @@ _raster_rasterize :: proc(
 		return comp
 	}
 	f := &chain.fonts[group.font_index]
-	if f.font_data == nil {
+	if f.face == nil {
 		return comp
 	}
 	if font_rasterizer_find_glyph_index(f, group.shaped) == 0 {

@@ -51,7 +51,7 @@ INPUT_DEFAULT_CELL_H :: 16
 // KEYDOWN feeds non-printable keys plus Ctrl/Alt combos with Shift/Alt/Ctrl
 // flags from the SDL keymod. Key repeat is treated as a normal press (see
 // input_translate_sdl). Unknown event types are ignored.
-window_poll_input :: proc(w: ^win.Window, out: []Input_Event, max: int) -> int {
+window_poll_input :: proc(w: ^win.Window, out: []Input_Event, max: int, first_ev: ^sdl3.Event = nil) -> int {
 	if w == nil {
 		return 0
 	}
@@ -60,6 +60,16 @@ window_poll_input :: proc(w: ^win.Window, out: []Input_Event, max: int) -> int {
 		return 0
 	}
 	count := 0
+	if first_ev != nil {
+		n, quit, resized := input_translate_sdl(first_ev^, out[count:cap])
+		count += n
+		if quit {
+			w.is_open = false
+		}
+		if resized {
+			win.window_update_pixel_size(w)
+		}
+	}
 	ev: sdl3.Event
 	for sdl3.PollEvent(&ev) {
 		n, quit, resized := input_translate_sdl(ev, out[count:cap])
