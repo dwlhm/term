@@ -1,16 +1,15 @@
 package main
 
 // Frontend module for the terminal emulator.
-// Encapsulates SDL3 window management, WGPU rendering pipeline, font loading,
+// Encapsulates SDL3 window management, Metal rendering pipeline, font loading,
 // and presentation of Render_State frames.
 
 import "base:runtime"
 import "core:fmt"
 import "core:os"
+import "core:path/filepath"
 import "core:strings"
 
-import "vendor:wgpu"
-import wgpu_sdl3_glue "vendor:wgpu/sdl3glue"
 import "vendor:sdl3"
 import CA "vendor:darwin/QuartzCore"
 
@@ -18,7 +17,6 @@ import termgrid "../terminal"
 import render "../render"
 import gpu "../render/gpu"
 import instance "../render/instance"
-import wgpu_backend "../render/gpu/wgpu"
 import metal_backend "../render/gpu/metal"
 import win "../platform/window"
 import pure_ui "../pinnacle_ui"
@@ -68,7 +66,7 @@ FALLBACK_FONT_PATHS :: []string{
 	"/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
 }
 
-// Frontend owns SDL window, WGPU device/queue/surface, and Renderer state.
+// Frontend owns SDL window, Metal device/queue/surface, and Renderer state.
 Frontend :: struct {
 	window:                   win.Window,
 	renderer:                 render.Renderer,
@@ -111,8 +109,48 @@ frontend_update_padding :: proc(f: ^Frontend) {
 	f.renderer.pad_y = (FRONTEND_CONTENT_PADDING + platform_tabs.TAB_BAR_HEIGHT) * scale
 }
 
+// frontend_font_paths expands candidate font paths with application resource locations.
+frontend_font_paths :: proc(executable_path: string, candidates: []string, allocator := context.allocator) -> []string {
+	res := make([dynamic]string, allocator)
+	if len(executable_path) > 0 {
+		dir := filepath.dir(executable_path)
+		parent := filepath.dir(dir)
+
+		// 1. Resources/fonts
+		for c in candidates {
+			if strings.has_prefix(c, "assets/fonts/") {
+				filename := c[len("assets/fonts/"):]
+				p, _ := filepath.join({parent, "Resources/fonts", filename}, allocator)
+				append(&res, p)
+			}
+		}
+
+		// 2. assets/fonts
+		for c in candidates {
+			if strings.has_prefix(c, "assets/fonts/") {
+				filename := c[len("assets/fonts/"):]
+				p, _ := filepath.join({parent, "assets/fonts", filename}, allocator)
+				append(&res, p)
+			}
+		}
+	}
+
+	for c in candidates {
+		append(&res, strings.clone(c, allocator))
+	}
+
+	return res[:]
+}
+
+frontend_font_paths_destroy :: proc(paths: []string, allocator := context.allocator) {
+	for p in paths {
+		delete(p, allocator)
+	}
+	delete(paths, allocator)
+}
+
 // find_font tries to find a usable font file.
-find_font :: proc() -> (path: string, ok: bool) {
+find_font :: proc(allocator := context.allocator) -> (path: string, ok: bool) {
 	for font_path in FONT_PATHS {
 		actual_path := font_path
 		if strings.has_prefix(font_path, "~/") {
@@ -122,13 +160,13 @@ find_font :: proc() -> (path: string, ok: bool) {
 		}
 		if data, err := os.read_entire_file(actual_path, context.allocator); err == nil {
 			delete(data)
-			return actual_path, true
+			return strings.clone(actual_path, allocator), true
 		}
 	}
 	return "", false
 }
 
-// frontend_init initializes window, WGPU backend, device, queue, surface, and renderer.
+// frontend_init initializes window, Metal backend, device, queue, surface, and renderer.
 frontend_init :: proc(
 	f: ^Frontend,
 	title: string,
@@ -196,35 +234,7 @@ frontend_init :: proc(
 			return 0, 0, 0, 0, false
 		}
 	} else {
-		f.gpu_backend = wgpu_backend.wgpu_backend_vtable()
-		f.instance = f.gpu_backend.create_instance()
-		if f.instance == nil {
-			win.window_destroy(&f.window)
-			fmt.eprintf("frontend_init: create_instance failed\n")
-			return 0, 0, 0, 0, false
-		}
-
-		f.surface = gpu.Gpu_Surface(wgpu_sdl3_glue.GetSurface(wgpu.Instance(f.instance), f.window.handle))
-		if rawptr(f.surface) == nil {
-			f.gpu_backend.destroy_instance(f.instance)
-			f.instance = nil
-			win.window_destroy(&f.window)
-			fmt.eprintf("frontend_init: GetSurface failed\n")
-			return 0, 0, 0, 0, false
-		}
-
-		f.device, f.queue = f.gpu_backend.request_device(f.instance, rawptr(f.surface))
-		if rawptr(f.device) == nil || rawptr(f.queue) == nil {
-			f.device = gpu.Gpu_Device(nil)
-			f.queue = gpu.Gpu_Queue(nil)
-			wgpu.SurfaceRelease(wgpu.Surface(rawptr(f.surface)))
-			f.surface = gpu.Gpu_Surface(nil)
-			f.gpu_backend.destroy_instance(f.instance)
-			f.instance = nil
-			win.window_destroy(&f.window)
-			fmt.eprintf("frontend_init: request_device failed\n")
-			return 0, 0, 0, 0, false
-		}
+		#panic("Unsupported platform: Term currently only supports macOS (Metal)")
 	}
 
 	font_path, font_ok := find_font()
@@ -234,8 +244,6 @@ frontend_init :: proc(
 		f.queue = gpu.Gpu_Queue(nil)
 		when ODIN_OS == .Darwin {
 			metal_backend.destroy_surface((^metal_backend.Metal_Surface)(rawptr(f.surface)))
-		} else {
-			wgpu.SurfaceRelease(wgpu.Surface(rawptr(f.surface)))
 		}
 		f.surface = gpu.Gpu_Surface(nil)
 		f.gpu_backend.destroy_instance(f.instance)
@@ -278,8 +286,6 @@ frontend_init :: proc(
 		f.queue = gpu.Gpu_Queue(nil)
 		when ODIN_OS == .Darwin {
 			metal_backend.destroy_surface((^metal_backend.Metal_Surface)(rawptr(f.surface)))
-		} else {
-			wgpu.SurfaceRelease(wgpu.Surface(rawptr(f.surface)))
 		}
 		f.surface = gpu.Gpu_Surface(nil)
 		f.gpu_backend.destroy_instance(f.instance)
@@ -335,8 +341,6 @@ frontend_destroy :: proc(f: ^Frontend) {
 	if rawptr(f.surface) != nil {
 		when ODIN_OS == .Darwin {
 			metal_backend.destroy_surface((^metal_backend.Metal_Surface)(rawptr(f.surface)))
-		} else {
-			wgpu.SurfaceRelease(wgpu.Surface(rawptr(f.surface)))
 		}
 		f.surface = gpu.Gpu_Surface(nil)
 	}
@@ -348,6 +352,10 @@ frontend_destroy :: proc(f: ^Frontend) {
 	if f.instance != nil && f.gpu_backend != nil {
 		f.gpu_backend.destroy_instance(f.instance)
 		f.instance = nil
+	}
+	if len(f.font_path) > 0 {
+		delete(f.font_path)
+		f.font_path = ""
 	}
 	win.window_destroy(&f.window)
 }

@@ -8,7 +8,7 @@ TEST_FLAGS ?= -define:ODIN_TEST_THREADS=1
 DEBUG_FLAGS ?= -debug
 RELEASE_FLAGS ?= -o:speed -no-bounds-check
 
-.PHONY: all build release bundle install dmg run check test test-terminal test-parser test-pty test-input test-ui test-interaction test-render test-app test-bench bench bench-vte setup-wgpu clean help
+.PHONY: all build release bundle install dmg run check test test-terminal test-parser test-pty test-input test-ui test-interaction test-render test-app test-bench bench bench-vte clean help
 
 all: build
 
@@ -94,20 +94,6 @@ bench-vte:
 	@chmod +x scripts/bench_comparative.sh 2>/dev/null || true
 	@./scripts/bench_comparative.sh 2>/dev/null || bash scripts/bench_comparative.sh
 
-setup-wgpu:
-	@ODIN_PATH=$$(odin root); \
-	TARGET_DIR="$$ODIN_PATH/vendor/wgpu/lib/wgpu-macos-aarch64-release"; \
-	if [ ! -f "$$TARGET_DIR/lib/libwgpu_native.a" ]; then \
-		mkdir -p "$$TARGET_DIR"; \
-		if [ ! -f "/tmp/wgpu.zip" ]; then \
-			echo "Downloading wgpu-native v29.0.1.1..."; \
-			curl -sSL "https://github.com/gfx-rs/wgpu-native/releases/download/v29.0.1.1/wgpu-macos-aarch64-release.zip" -o /tmp/wgpu.zip; \
-		fi; \
-		unzip -q -o /tmp/wgpu.zip -d "$$TARGET_DIR"; \
-		echo "wgpu-native installed successfully."; \
-	else \
-		echo "wgpu-native already installed at $$TARGET_DIR."; \
-	fi
 
 clean:
 	rm -rf $(OUT_DIR) $(OUT_DIR)/Term.app $(OUT_DIR)/Term.dmg $(OUT_DIR)/dmg_staging build term-app app.bin *.dSYM
@@ -134,6 +120,5 @@ help:
 	@echo "  test-bench      Run bench unit tests"
 	@echo "  bench           Build benchmark executables to $(OUT_DIR)/bench_*"
 	@echo "  bench-vte       Run comparative VTE benchmark generator and instructions"
-	@echo "  setup-wgpu      Download and setup wgpu-native static library if missing"
 	@echo "  clean           Remove build artifacts and temporary binaries"
 	@echo "  help            Show this help message"
