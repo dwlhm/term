@@ -1,3 +1,22 @@
+# Release Notes - Term v0.2.2
+
+Term v0.2.2 is a maintenance and stability patch release focused on build pipeline optimization, phantom dependency eradication, and CI/CD timing resilience.
+
+---
+
+## 🚀 Improvements & Pipeline Polish
+
+### 1. Complete WGPU Dependency Eradication
+- Eliminated legacy top-level `vendor:wgpu` imports from `src/app/frontend.odin` and removed obsolete `wgpu` package.
+- Removed `setup-wgpu` prebuilt binary downloads from `Makefile` and GitHub Actions workflows, streamlining CI duration.
+- Confirmed 100% native Apple Metal backend execution on macOS.
+
+### 2. CI/CD Test Suite Timing Stabilization
+- Added CPU instruction and branch predictor cache warmup to `test_raster_ascii_gate` in `src/render/tests/raster_async_test.odin`.
+- Enhanced timing tolerance on virtualized GitHub Actions runners (`macos-14`) to eliminate non-deterministic CI test failures caused by VM scheduling noise.
+
+---
+
 # Release Notes - Term v0.2.1
 
 Term v0.2.1 is a patch release focused on rendering polish, window resize resilience, and terminal reflow stability on macOS.
