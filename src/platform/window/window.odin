@@ -287,3 +287,10 @@ window_clear_drag_region :: proc(w: ^Window) -> bool {
 	if w == nil || w.handle == nil do return false
 	return sdl3.SetWindowHitTest(w.handle, nil, nil)
 }
+
+// window_restore_unified_titlebar restores macOS full-size content view titlebar styling
+// if it was reset after fullscreen transitions. Safe no-op on non-Darwin platforms.
+window_restore_unified_titlebar :: proc(w: ^Window) -> bool {
+	if w == nil || w.handle == nil do return false
+	return platform_restore_unified_titlebar(w.handle)
+}

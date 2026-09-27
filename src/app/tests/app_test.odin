@@ -74,6 +74,7 @@ _bare_destroy :: proc(a: ^app.App) {
 	config.config_destroy(&a.config)
 	termgrid.terminal_destroy(&a.terminal)
 	parser.parser_destroy(&a.parser)
+	delete(a.drain_buf, context.allocator)
 }
 
 // _cpu_renderer gives a zero-backend renderer CPU-valid geometry plus a

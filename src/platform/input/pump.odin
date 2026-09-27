@@ -66,6 +66,9 @@ window_poll_input :: proc(w: ^win.Window, out: []Input_Event, max: int, first_ev
 		if quit {
 			w.is_open = false
 		}
+		if first_ev.type == .WINDOW_LEAVE_FULLSCREEN || first_ev.type == .WINDOW_RESTORED {
+			win.window_restore_unified_titlebar(w)
+		}
 		if resized {
 			win.window_update_pixel_size(w)
 		}
@@ -76,6 +79,9 @@ window_poll_input :: proc(w: ^win.Window, out: []Input_Event, max: int, first_ev
 		count += n
 		if quit {
 			w.is_open = false
+		}
+		if ev.type == .WINDOW_LEAVE_FULLSCREEN || ev.type == .WINDOW_RESTORED {
+			win.window_restore_unified_titlebar(w)
 		}
 		if resized {
 			win.window_update_pixel_size(w)
@@ -116,7 +122,7 @@ window_poll_input :: proc(w: ^win.Window, out: []Input_Event, max: int, first_ev
 //   MOUSE_MOTION / MOUSE_BUTTON_DOWN / MOUSE_BUTTON_UP / MOUSE_WHEEL ->
 //     pointer events carrying the verified SDL event fields.
 //   QUIT / WINDOW_CLOSE_REQUESTED -> quit = true.
-//   WINDOW_RESIZED / WINDOW_PIXEL_SIZE_CHANGED -> resized = true.
+//   WINDOW_RESIZED / WINDOW_PIXEL_SIZE_CHANGED / WINDOW_LEAVE_FULLSCREEN / WINDOW_RESTORED -> resized = true.
 //   Anything else -> ignored (0, false, false).
 //
 // Key repeat (ev.key.repeat) is deliberately ignored: repeats are normal
@@ -129,7 +135,7 @@ input_translate_sdl :: proc(ev: sdl3.Event, out: []Input_Event) -> (n: int, quit
 	#partial switch ev.type {
 	case .QUIT, .WINDOW_CLOSE_REQUESTED:
 		return 0, true, false
-	case .WINDOW_RESIZED, .WINDOW_PIXEL_SIZE_CHANGED:
+	case .WINDOW_RESIZED, .WINDOW_PIXEL_SIZE_CHANGED, .WINDOW_LEAVE_FULLSCREEN, .WINDOW_RESTORED:
 		return 0, false, true
 	case .TEXT_INPUT:
 		return _translate_text(ev.text.text, out), false, false

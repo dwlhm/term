@@ -207,6 +207,10 @@ platform_setup_unified_titlebar :: proc(sdl_window: ^sdl3.Window) -> bool {
 			Get_Mask_Proc :: #type proc "c" (target: id, sel: SEL) -> uint
 			Set_Mask_Proc :: #type proc "c" (target: id, sel: SEL, mask: uint)
 			current_mask := (Get_Mask_Proc(imp_style_mask))(nswindow, sel_style_mask)
+			NS_WINDOW_FULLSCREEN: uint : 1 << 14
+			if current_mask & NS_WINDOW_FULLSCREEN != 0 {
+				return false
+			}
 			NSWindowStyleMaskFullSizeContentView: uint : 1 << 15
 			new_mask := current_mask | NSWindowStyleMaskFullSizeContentView
 			(Set_Mask_Proc(imp_set_style_mask))(nswindow, sel_set_style_mask, new_mask)
@@ -230,6 +234,17 @@ platform_setup_unified_titlebar :: proc(sdl_window: ^sdl3.Window) -> bool {
 
 		platform_setup_metal_layer(sdl_window)
 		return true
+	} else {
+		return false
+	}
+}
+
+// platform_restore_unified_titlebar re-applies full-size content view and transparent titlebar
+// whenever the window leaves fullscreen mode or when the styleMask loses its full-size content view bit.
+platform_restore_unified_titlebar :: proc(sdl_window: ^sdl3.Window) -> bool {
+	when ODIN_OS == .Darwin {
+		if sdl_window == nil do return false
+		return platform_setup_unified_titlebar(sdl_window)
 	} else {
 		return false
 	}

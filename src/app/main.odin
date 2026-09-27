@@ -1908,6 +1908,16 @@ _app_event_watch :: proc "c" (userdata: rawptr, event: ^sdl3.Event) -> bool {
 		return true
 	}
 	#partial switch event.type {
+	case .WINDOW_LEAVE_FULLSCREEN, .WINDOW_RESTORED:
+		context = runtime.default_context()
+		defer free_all(context.temp_allocator)
+		a := (^App)(userdata)
+		if a.window.handle != nil && event.window.windowID == sdl3.GetWindowID(a.window.handle) {
+			win.window_restore_unified_titlebar(&a.window)
+			win.window_update_pixel_size(&a.window)
+			app_on_resize(a, a.window.pixel_w, a.window.pixel_h)
+			a.renderer.full_redraw_pending = true
+		}
 	case .WINDOW_RESIZED, .WINDOW_PIXEL_SIZE_CHANGED, .WINDOW_EXPOSED:
 		context = runtime.default_context()
 		defer free_all(context.temp_allocator)

@@ -255,6 +255,14 @@ test_pump_translate_quit_resize_unknown :: proc(t: ^testing.T) {
 	n, quit, resized = input.input_translate_sdl(ev, out[:])
 	testing.expect(t, n == 0 && !quit && resized, "PIXEL_SIZE_CHANGED must report resized only")
 
+	ev.type = .WINDOW_LEAVE_FULLSCREEN
+	n, quit, resized = input.input_translate_sdl(ev, out[:])
+	testing.expect(t, n == 0 && !quit && resized, "WINDOW_LEAVE_FULLSCREEN must report resized only")
+
+	ev.type = .WINDOW_RESTORED
+	n, quit, resized = input.input_translate_sdl(ev, out[:])
+	testing.expect(t, n == 0 && !quit && resized, "WINDOW_RESTORED must report resized only")
+
 	ev.type = cast(sdl3.EventType)0x7FFF
 	n, quit, resized = input.input_translate_sdl(ev, out[:])
 	testing.expect(t, n == 0 && !quit && !resized, "unknown event must be ignored")

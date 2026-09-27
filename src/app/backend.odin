@@ -23,6 +23,7 @@ import input "../platform/input"
 import pty "../platform/pty"
 import config "../config"
 import inter "../interaction"
+import session_core "../session_core"
 
 // UI_EVENT_QUEUE_CAP is the capacity of the thread-safe UI event queue.
 UI_EVENT_QUEUE_CAP :: 1024
@@ -129,11 +130,47 @@ Backend :: struct {
 	event_queue:          UI_Event_Queue,
 	drain_buf:            []u8,
 	resize_generation:    u64,
+
+	// Session core observer port & mode
+	observer:             session_core.Terminal_Observer_Port,
+	session_mode:         session_core.Session_Mode,
+	session_cfg:          session_core.Session_Config,
 }
 
 // backend_global holds the active Backend pointer for C-style callbacks
 // required by the parser.
 backend_global: ^Backend
+
+_backend_observer_on_damage :: proc(user_data: rawptr, min_row, min_col, max_row, max_col: int) {
+	b := (^Backend)(user_data)
+	if b == nil do return
+	g := &b.terminal.grid
+	for r in min_row ..= max_row {
+		if r >= 0 && r < g.row_count {
+			phys := (g.origin + r) & g.mask
+			gen := g.rows[phys].generation
+			termgrid.damage_mark_span(&b.terminal.damage, r, min_col, max_col, gen)
+		}
+	}
+}
+
+_backend_observer_on_title_change :: proc(user_data: rawptr, title: string) {
+	b := (^Backend)(user_data)
+	if b == nil do return
+	termgrid.terminal_osc_set_title(&b.terminal, transmute([]u8)title)
+}
+
+_backend_observer_on_bell :: proc(user_data: rawptr) {
+	b := (^Backend)(user_data)
+	if b == nil do return
+	b.terminal.bell_event = true
+}
+
+_backend_observer_on_exit :: proc(user_data: rawptr, exit_code: int) {
+	b := (^Backend)(user_data)
+	if b == nil do return
+	b.pty.exit_code = exit_code
+}
 
 _backend_response_cb :: proc(data: []u8) {
 	b := backend_global
@@ -294,6 +331,23 @@ backend_init :: proc(
 	spawn_cwd := cfg.working_directory if (cfg != nil && len(cfg.working_directory) > 0) else "~"
 	b.cwd = strings.clone(spawn_cwd)
 
+	b.session_mode = .Interactive_GUI
+	b.observer = session_core.Terminal_Observer_Port{
+		user_data       = b,
+		on_damage       = _backend_observer_on_damage,
+		on_title_change = _backend_observer_on_title_change,
+		on_bell         = _backend_observer_on_bell,
+		on_exit         = _backend_observer_on_exit,
+	}
+	b.session_cfg = session_core.Session_Config{
+		rows     = init_rows,
+		cols     = init_cols,
+		shell    = spawn_prog,
+		cwd      = b.cwd,
+		mode     = .Interactive_GUI,
+		observer = b.observer,
+	}
+
 	if !pty.pty_spawn(&b.pty, init_rows, init_cols, spawn_prog, spawn_argv, b.cwd) {
 		termgrid.terminal_destroy(&b.terminal)
 		termgrid.terminal_destroy(&b.front_terminal)
@@ -327,6 +381,8 @@ backend_destroy :: proc(b: ^Backend) {
 	}
 	delete(b.cwd)
 	b.cwd = ""
+	b.observer = {}
+	b.session_cfg = {}
 	if backend_global == b {
 		backend_global = nil
 	}
@@ -364,6 +420,22 @@ backend_drain_pty :: proc(b: ^Backend) -> int {
 	if n > 0 {
 		backend_global = b
 		parser.parse_chunk(&b.parser, &b.terminal, buf[:n])
+		if b.observer.on_damage != nil {
+			min_r := -1
+			max_r := -1
+			for r in 0 ..< b.terminal.damage.row_count {
+				if r < len(b.terminal.damage.dirty_rows) {
+					dr := &b.terminal.damage.dirty_rows[r]
+					if dr.full || dr.span_count > 0 {
+						if min_r == -1 do min_r = r
+						max_r = r
+					}
+				}
+			}
+			if min_r != -1 {
+				b.observer.on_damage(b.observer.user_data, min_r, 0, max_r, b.terminal.grid.col_count - 1)
+			}
+		}
 		sb_after := termgrid.scrollback_len(&b.terminal.scrollback)
 		lines_added := int(b.terminal.scrollback.total_pushed - pushes_before)
 		history_cleared := b.terminal.scrollback.clear_generation != clear_before
@@ -525,6 +597,9 @@ backend_poll_exit :: proc(b: ^Backend) {
 	was_running := b.pty.state == .Running
 	pty.pty_poll_exit(&b.pty)
 	if was_running && b.pty.state == .Exited {
+		if b.observer.on_exit != nil {
+			b.observer.on_exit(b.observer.user_data, b.pty.exit_code)
+		}
 		backend_show_banner(b)
 	}
 }
