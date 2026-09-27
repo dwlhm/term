@@ -34,8 +34,11 @@ jobs:
       - name: Build macOS app bundle
         run: make bundle
 
-      - name: Build macOS disk image
-        run: make dmg
+      - name: Build macOS disk image and verify bundled fonts
+        run: |
+          make dmg
+          test -f bin/Term.app/Contents/Resources/fonts/MapleMono-NF-Regular.ttf
+          test -f bin/Term.app/Contents/Resources/fonts/SymbolsNerdFontMono-Regular.ttf
 
       - name: Package release archives
         run: |

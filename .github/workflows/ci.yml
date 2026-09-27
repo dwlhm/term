@@ -43,5 +43,8 @@ jobs:
       - name: Build macOS app bundle
         run: make bundle
 
-      - name: Verify DMG creation
-        run: make dmg
+      - name: Verify DMG creation and bundled fonts
+        run: |
+          make dmg
+          test -f bin/Term.app/Contents/Resources/fonts/MapleMono-NF-Regular.ttf
+          test -f bin/Term.app/Contents/Resources/fonts/SymbolsNerdFontMono-Regular.ttf

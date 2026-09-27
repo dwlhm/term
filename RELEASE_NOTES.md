@@ -1,3 +1,22 @@
+# Release Notes - Term v0.3.1
+
+Term v0.3.1 is a targeted bugfix release resolving an issue where Nerd Font icons and prompt symbols were missing when Term was installed and run from the macOS `.dmg` package or application bundle.
+
+---
+
+## 🐛 Bug Fixes & Bundle Hardening
+
+### 1. Application Bundle Font & Fallback Resolution
+- **Executable-Relative Bundle Font Discovery**: `src/app/frontend.odin` now dynamically resolves the running binary's path (`/Applications/Term.app/Contents/MacOS/term`) to locate bundled fonts under `Term.app/Contents/Resources/fonts/`.
+- **Persistent Fallback Font Chain**: Candidate fallback paths (`FALLBACK_FONT_PATHS`) are now properly expanded through `frontend_font_paths` during both startup and runtime zoom re-initialization (`frontend_apply_zoom`), ensuring `SymbolsNerdFontMono-Regular.ttf` is always active in the fallback rasterization chain.
+- **Apple ATS Registration**: Added `<key>ATSApplicationFontsPath</key><string>fonts</string>` in `assets/Info.plist` to register bundled fonts with Apple Type Services.
+
+### 2. Build Pipeline & CI/CD Verification
+- **Bundle Idempotency**: `Makefile` now cleans existing bundled font directories before copying assets to prevent nested duplication.
+- **CI & Release Pipeline Assertions**: Added explicit file assertions in `.github/workflows/ci.yml` and `.github/workflows/release.yml` to guarantee `MapleMono-NF-Regular.ttf` and `SymbolsNerdFontMono-Regular.ttf` exist in `bin/Term.app/Contents/Resources/fonts/` before creating DMG images and release archives.
+
+---
+
 # Release Notes - Term v0.3.0
 
 Term v0.3.0 is a major milestone introducing a unified Hexagonal Core (`src/session_core`), a standalone headless Model Context Protocol (MCP) server (`bin/term-mcp`), direct Apple Metal native rendering integration (`CAMetalLayer`), and a comprehensive 11-suite output-aware benchmark test suite.

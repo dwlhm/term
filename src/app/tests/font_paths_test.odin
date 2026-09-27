@@ -98,3 +98,40 @@ test_frontend_missing_resources_preserve_legacy_font :: proc(t: ^testing.T) {
 	testing.expect(t, loaded, "missing executable-relative resources must retain legacy search")
 	defer render.font_rasterizer_destroy(&font)
 }
+
+@(test)
+test_find_font_with_relocated_executable :: proc(t: ^testing.T) {
+	root, root_err := os.make_directory_temp("", "term find font *", context.allocator)
+	if !testing.expect(t, root_err == nil) do return
+	defer delete(root)
+	defer os.remove_all(root)
+
+	executable_path, _ := filepath.join({root, "Term.app/Contents/MacOS/term"}, context.allocator)
+	defer delete(executable_path)
+
+	font_dir, _ := filepath.join({root, "Term.app/Contents/Resources/fonts"}, context.allocator)
+	defer delete(font_dir)
+	if !testing.expect(t, os.mkdir_all(font_dir) == nil) do return
+
+	font_file, _ := filepath.join({font_dir, "MapleMono-NF-Regular.ttf"}, context.allocator)
+	defer delete(font_file)
+
+	primary_data :: #load("../../../assets/fonts/MapleMono-NF-Regular.ttf")
+	if !testing.expect(t, os.write_entire_file(font_file, transmute([]u8)primary_data) == nil) do return
+
+	symbols_file, _ := filepath.join({font_dir, "SymbolsNerdFontMono-Regular.ttf"}, context.allocator)
+	defer delete(symbols_file)
+	symbols_data :: #load("../../../assets/fonts/SymbolsNerdFontMono-Regular.ttf")
+	if !testing.expect(t, os.write_entire_file(symbols_file, transmute([]u8)symbols_data) == nil) do return
+
+	found_path, ok := app.find_font(executable_path)
+	if !testing.expect(t, ok, "find_font should succeed with relocated executable") do return
+	defer delete(found_path)
+
+	testing.expect_value(t, found_path, font_file)
+
+	fallback_paths := app.frontend_font_paths(executable_path, app.FALLBACK_FONT_PATHS, context.temp_allocator)
+	defer app.frontend_font_paths_destroy(fallback_paths, context.temp_allocator)
+	testing.expect(t, len(fallback_paths) > 0)
+	testing.expect_value(t, fallback_paths[0], symbols_file)
+}

@@ -34,6 +34,7 @@ bundle: release
 	cp $(TARGET) $(OUT_DIR)/Term.app/Contents/MacOS/
 	cp assets/Info.plist $(OUT_DIR)/Term.app/Contents/Info.plist
 	cp assets/term.icns $(OUT_DIR)/Term.app/Contents/Resources/
+	rm -rf $(OUT_DIR)/Term.app/Contents/Resources/fonts
 	cp -R assets/fonts $(OUT_DIR)/Term.app/Contents/Resources/
 
 install: bundle

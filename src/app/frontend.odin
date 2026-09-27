@@ -82,6 +82,7 @@ Frontend :: struct {
 	queue:                    gpu.Gpu_Queue,
 	surface:                  gpu.Gpu_Surface,
 	instance:                 rawptr,
+	executable_path:          string,
 	font_path:                string,
 	logical_font_size:        f32,
 	physical_font_size:       f32,
@@ -150,8 +151,20 @@ frontend_font_paths_destroy :: proc(paths: []string, allocator := context.alloca
 }
 
 // find_font tries to find a usable font file.
-find_font :: proc(allocator := context.allocator) -> (path: string, ok: bool) {
-	for font_path in FONT_PATHS {
+find_font :: proc(executable_path: string = "", allocator := context.allocator) -> (path: string, ok: bool) {
+	exec := executable_path
+	if len(exec) == 0 {
+		if p, err := os.get_executable_path(context.temp_allocator); err == nil && len(p) > 0 {
+			exec = p
+		} else if len(os.args) > 0 && len(os.args[0]) > 0 {
+			exec = os.args[0]
+		}
+	}
+
+	candidates := frontend_font_paths(exec, FONT_PATHS, context.temp_allocator)
+	defer frontend_font_paths_destroy(candidates, context.temp_allocator)
+
+	for font_path in candidates {
 		actual_path := font_path
 		if strings.has_prefix(font_path, "~/") {
 			if home, hok := os.lookup_env("HOME", context.temp_allocator); hok {
@@ -237,7 +250,15 @@ frontend_init :: proc(
 		#panic("Unsupported platform: Term currently only supports macOS (Metal)")
 	}
 
-	font_path, font_ok := find_font()
+	exec_path := ""
+	if p, err := os.get_executable_path(context.temp_allocator); err == nil && len(p) > 0 {
+		exec_path = p
+	} else if len(os.args) > 0 && len(os.args[0]) > 0 {
+		exec_path = os.args[0]
+	}
+	f.executable_path = strings.clone(exec_path, context.allocator)
+
+	font_path, font_ok := find_font(f.executable_path)
 	if !font_ok {
 		f.gpu_backend.destroy_device(f.device)
 		f.device = gpu.Gpu_Device(nil)
@@ -248,6 +269,10 @@ frontend_init :: proc(
 		f.surface = gpu.Gpu_Surface(nil)
 		f.gpu_backend.destroy_instance(f.instance)
 		f.instance = nil
+		if len(f.executable_path) > 0 {
+			delete(f.executable_path)
+			f.executable_path = ""
+		}
 		win.window_destroy(&f.window)
 		fmt.eprintf("frontend_init: no usable font found\n")
 		return 0, 0, 0, 0, false
@@ -264,6 +289,9 @@ frontend_init :: proc(
 	screen_w := f32(f.window.pixel_w) if f.window.pixel_w > 0 else f32(window_w)
 	screen_h := f32(f.window.pixel_h) if f.window.pixel_h > 0 else f32(window_h)
 
+	fallback_candidates := frontend_font_paths(f.executable_path, FALLBACK_FONT_PATHS, context.temp_allocator)
+	defer frontend_font_paths_destroy(fallback_candidates, context.temp_allocator)
+
 	if !render.renderer_init(
 		&f.renderer,
 		font_path,
@@ -278,7 +306,7 @@ frontend_init :: proc(
 		screen_w,
 		screen_h,
 		format,
-		fallback_paths = FALLBACK_FONT_PATHS,
+		fallback_paths = fallback_candidates,
 		theme = theme,
 	) {
 		f.gpu_backend.destroy_device(f.device)
@@ -290,6 +318,14 @@ frontend_init :: proc(
 		f.surface = gpu.Gpu_Surface(nil)
 		f.gpu_backend.destroy_instance(f.instance)
 		f.instance = nil
+		if len(f.font_path) > 0 {
+			delete(f.font_path)
+			f.font_path = ""
+		}
+		if len(f.executable_path) > 0 {
+			delete(f.executable_path)
+			f.executable_path = ""
+		}
 		win.window_destroy(&f.window)
 		fmt.eprintf("frontend_init: renderer_init failed\n")
 		return 0, 0, 0, 0, false
@@ -356,6 +392,10 @@ frontend_destroy :: proc(f: ^Frontend) {
 	if len(f.font_path) > 0 {
 		delete(f.font_path)
 		f.font_path = ""
+	}
+	if len(f.executable_path) > 0 {
+		delete(f.executable_path)
+		f.executable_path = ""
 	}
 	win.window_destroy(&f.window)
 }
@@ -554,11 +594,13 @@ frontend_apply_zoom :: proc(
 	}
 	scale := frontend_content_scale(f)
 	physical := target * scale
+	fallback_candidates := frontend_font_paths(f.executable_path, FALLBACK_FONT_PATHS, context.temp_allocator)
+	defer frontend_font_paths_destroy(fallback_candidates, context.temp_allocator)
 	if !render.renderer_rebuild_font(
 		&f.renderer,
 		f.font_path,
 		physical,
-		FALLBACK_FONT_PATHS,
+		fallback_candidates,
 	) {
 		f.zoom_target_logical_size = 0
 		return false
