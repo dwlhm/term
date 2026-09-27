@@ -41,10 +41,19 @@ install: bundle
 	cp -R $(OUT_DIR)/Term.app /Applications/Term.app
 
 dmg: bundle
+	@rm -rf $(OUT_DIR)/dmg_staging
+	@rm -f $(OUT_DIR)/Term.dmg
+	@hdiutil detach "/Volumes/Term"* -force 2>/dev/null || true
 	@mkdir -p $(OUT_DIR)/dmg_staging
 	cp -R $(OUT_DIR)/Term.app $(OUT_DIR)/dmg_staging/
 	ln -s /Applications $(OUT_DIR)/dmg_staging/Applications
-	hdiutil create -volname "Term" -srcfolder $(OUT_DIR)/dmg_staging -ov -format UDZO $(OUT_DIR)/Term.dmg
+	for i in 1 2 3 4 5; do \
+		hdiutil create -volname "Term" -srcfolder $(OUT_DIR)/dmg_staging -ov -format UDZO -fs HFS+ $(OUT_DIR)/Term.dmg && break || { \
+			echo "hdiutil create failed (attempt $$i), retrying in 2s..."; \
+			hdiutil detach "/Volumes/Term"* -force 2>/dev/null || true; \
+			sleep 2; \
+		}; \
+	done
 	rm -rf $(OUT_DIR)/dmg_staging
 
 run: build
