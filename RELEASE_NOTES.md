@@ -1,3 +1,28 @@
+# Release Notes - Term v0.3.2
+
+Term v0.3.2 introduces true standalone macOS application bundling with dynamic library relocation and comprehensive third-party open-source license compliance.
+
+---
+
+## 📦 Standalone Packaging & Portability
+
+### 1. Dynamic Library Relocation & Framework Bundling
+- **Zero-Dependency macOS App Bundle**: `scripts/bundle_frameworks.sh` automatically resolves, copies, and relocates all 8 non-system dynamic libraries (`libfreetype.6.dylib`, `libharfbuzz.0.dylib`, `libSDL3.0.dylib`, `libpng16.16.dylib`, `libgraphite2.3.dylib`, `libglib-2.0.0.dylib`, `libintl.8.dylib`, `libpcre2-8.0.dylib`) into `Term.app/Contents/Frameworks/`.
+- **RPATH Integration**: The main binary and frameworks are rewritten using `install_name_tool` to reference `@rpath/<dylib>` with `@executable_path/../Frameworks`, allowing `Term.app` and `Term.dmg` to run seamlessly on any macOS system without Homebrew.
+- **Inside-Out Ad-Hoc Codesigning**: Bundled frameworks and the main executable are signed with `assets/Term.entitlements` (Hardened Runtime permissions for library loading and JIT).
+
+## 📜 License Compliance & Third-Party Notices
+
+### 1. SIL Open Font License 1.1 Compliance
+- Added official license files [`assets/fonts/OFL-MapleMono.txt`](assets/fonts/OFL-MapleMono.txt) and [`assets/fonts/OFL-SymbolsNerdFont.txt`](assets/fonts/OFL-SymbolsNerdFont.txt), fulfilling Condition 2 of the SIL Open Font License 1.1 for bundled font distribution.
+- Preserved font license text in `Term.app/Contents/Resources/fonts/`.
+
+### 2. Comprehensive Third-Party Attribution
+- Added [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) documenting copyrights, licenses, and acknowledgments for FreeType (FTL), HarfBuzz (MIT), SDL3 (zlib), libpng, Graphite2, GLib, gettext, PCRE2, and embedded fonts.
+- Updated `README.md` license section and added Gatekeeper guidance for macOS open-source DMG releases.
+
+---
+
 # Release Notes - Term v0.3.1
 
 Term v0.3.1 is a targeted bugfix release resolving an issue where Nerd Font icons and prompt symbols were missing when Term was installed and run from the macOS `.dmg` package or application bundle.

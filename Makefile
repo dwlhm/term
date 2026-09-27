@@ -36,6 +36,9 @@ bundle: release
 	cp assets/term.icns $(OUT_DIR)/Term.app/Contents/Resources/
 	rm -rf $(OUT_DIR)/Term.app/Contents/Resources/fonts
 	cp -R assets/fonts $(OUT_DIR)/Term.app/Contents/Resources/
+	cp THIRD_PARTY_NOTICES.md $(OUT_DIR)/Term.app/Contents/Resources/
+	@chmod +x scripts/bundle_frameworks.sh
+	scripts/bundle_frameworks.sh $(OUT_DIR)/Term.app
 
 install: bundle
 	cp -R $(OUT_DIR)/Term.app /Applications/Term.app

@@ -4,7 +4,7 @@
   <p><strong>A blazingly fast, GPU-accelerated terminal emulator built with Odin, Native Apple Metal and Standalone Headless MCP Server.</strong></p>
 
   [![CI](https://github.com/dwlhm/term/actions/workflows/ci.yml/badge.svg)](https://github.com/dwlhm/term/actions/workflows/ci.yml)
-  [![License: MIT](LICENSE)](LICENSE)
+  [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
   [![Odin Version](https://img.shields.io/badge/Odin-dev--2026--08%2B-blue.svg)](https://odin-lang.org)
   [![Platform](https://img.shields.io/badge/Platform-macOS-brightgreen.svg)]()
 </div>
@@ -136,6 +136,13 @@ make run
 open bin/Term.app
 ```
 
+> [!NOTE]
+> **macOS Gatekeeper & Ad-Hoc Signing**:
+> Standalone open-source bundles on macOS use ad-hoc codesigning. If macOS displays an "unidentified developer" prompt upon opening `Term.app` from an installer or DMG, right-click `Term.app` and choose **Open**, or remove quarantine attributes:
+> ```bash
+> xattr -d com.apple.quarantine /Applications/Term.app
+> ```
+
 ### Running Tests & Quality Checks
 
 ```bash
@@ -171,16 +178,22 @@ make bench-mcp
 
 ```
 term/
-├── assets/                  # Icons (icns, png, ico), Info.plist, fonts, and .desktop
+├── assets/                  # Icons (icns, png, ico), Info.plist, fonts, and entitlements
 │   ├── Info.plist           # macOS bundle metadata
+│   ├── Term.entitlements    # macOS hardened runtime ad-hoc entitlements
 │   ├── term.icns            # Multi-resolution macOS iconset
 │   ├── term.png             # 512x512 application icon
 │   ├── term.ico             # Windows multi-resolution icon
 │   ├── term.desktop         # Linux FreeDesktop entry
-│   └── fonts/               # Embedded Maple Mono and Nerd Font assets
+│   └── fonts/               # Embedded fonts and SIL OFL licenses
+│       ├── MapleMono-NF-Regular.ttf
+│       ├── SymbolsNerdFontMono-Regular.ttf
+│       ├── OFL-MapleMono.txt
+│       └── OFL-SymbolsNerdFont.txt
 ├── bin/                     # Output binaries (term, Term.app, term-mcp, benchmarks)
 ├── docs/                    # Architectural notes, research records, and historical archives
-├── scripts/                 # Comparative benchmark suites and utility scripts
+├── scripts/                 # Packaging, comparative benchmark suites, and utility scripts
+│   └── bundle_frameworks.sh # Standalone dylib relocation and codesigning automation
 ├── src/
 │   ├── app/                 # Main application loop, Cocoa/SDL integration
 │   ├── bench/               # Benchmark harness, trace replay, statistics
@@ -199,6 +212,7 @@ term/
 ├── Makefile                 # Build, test, release, bundle, and benchmark automation
 ├── RELEASE_NOTES.md         # Release history and feature notes (v0.3.0)
 ├── LICENSE                  # MIT License
+├── THIRD_PARTY_NOTICES.md   # Third-party font, library, and dependency licenses
 └── logo.svg                 # Vector source logo
 ```
 
@@ -207,4 +221,6 @@ term/
 ## License
 
 This project is licensed under the [MIT License](LICENSE) — Copyright (c) 2026 dwlhm.
+
+Comprehensive copyright notices and licenses for bundled fonts, third-party libraries (FreeType, HarfBuzz, SDL3, libpng, Graphite2, GLib, gettext/libintl, PCRE2), and dependencies are detailed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
