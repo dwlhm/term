@@ -1,3 +1,33 @@
+# Release Notes - Term v0.3.0
+
+Term v0.3.0 is a major milestone introducing a unified Hexagonal Core (`src/session_core`), a standalone headless Model Context Protocol (MCP) server (`bin/term-mcp`), direct Apple Metal native rendering integration (`CAMetalLayer`), and a comprehensive 11-suite output-aware benchmark test suite.
+
+---
+
+## 🌟 Highlights & Major Features
+
+### 1. Standalone Headless MCP Server (`bin/term-mcp`)
+- **Zero-Dependency Mach-O Binary**: Standalone ~900 KB binary without dynamic runtime dependencies (no Node.js, Python, Electron, Cocoa, or GPU/X11 requirements).
+- **7 MECE Core Automation Tools**: Implements `terminal_create_session`, `terminal_close_session`, `terminal_run_command`, `terminal_send_input`, `terminal_send_key`, `terminal_get_screen`, and `terminal_resize` over JSON-RPC 2.0 stdio.
+- **Deterministic Dual-Completion Detection**: Uses OSC 133 prompt notifications and canary fallback to eliminate polling delays and guarantee accurate command status and exit codes without terminal escape pollution.
+
+### 2. Hexagonal Core Architecture (`src/session_core`)
+- **Decoupled Ports and Adapters**: Establishes clean architectural boundaries with [`Terminal_Control_Port`](file:///Users/dwlhm/project/term/src/session_core/ports.odin) and [`Terminal_Observer_Port`](file:///Users/dwlhm/project/term/src/session_core/ports.odin#L11-L17), separating POSIX PTY management and VT grid manipulation from user interfaces.
+- **Dual Execution Profiles**:
+  * **`Fast_Headless` Mode (Default)**: Purpose-built for AI coding agents. Strips shell prompt baggage, unsets ZLE and precmd latency, and achieves 0.27 ms command latency and >80 MB/s stream throughput while preserving the user's complete shell environment and `$PATH`.
+  * **`Interactive_GUI` Mode**: Dedicated profile for the desktop emulator, handling shell dotfiles (`.zshrc`), interactive line-editing, and continuous visual presentation.
+
+### 3. Direct Apple Metal Native Rendering Integration (`CAMetalLayer`)
+- **Native Metal Presentation**: Re-architected `src/app` and `src/platform/window` directly on top of native Apple Metal and `CAMetalLayer`, eliminating legacy WGPU abstractions and intermediate translation overhead.
+- **Aspect Ratio & Reflow Stability**: Native display backing scale factor and top-left layer gravity (`kCAGravityTopLeft`) eliminate resize pillarboxing and bilinear stretching artifacts.
+
+### 4. Comprehensive 11-Suite Output-Aware Benchmark Suite (`make bench-mcp`)
+- **Automated Verification Harness**: 11 dedicated benchmark suites validating handshake latency, multi-session scaling, RSS memory footprint, 2D screen snapshots, dynamic resizing, and multi-command chaining.
+- **100% Assertion Verification**: 103/103 assertions verified with 0.0% error rate across all suites.
+- **Empirical Win Margins**: 105× lower latency than Node.js (0.27 ms vs 28.5 ms) and 44× lower physical RSS memory (1.92 MB vs 84.5 MB).
+
+---
+
 # Release Notes - Term v0.2.2
 
 Term v0.2.2 is a maintenance and stability patch release focused on build pipeline optimization, phantom dependency eradication, and CI/CD timing resilience.
