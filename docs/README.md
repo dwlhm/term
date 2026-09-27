@@ -10,8 +10,25 @@ Essential high-level architectural overviews, engineering reports, release notes
 
 - **[README.md](../README.md)**: Main project overview, architecture philosophy, core invariants, getting started guide, build instructions, and repository structure.
 - **[LAPORAN.md](../LAPORAN.md)**: Comprehensive 21-phase engineering report containing architectural decision logs, empirical latency/throughput measurements, and GPU pipeline rationale.
-- **[RELEASE_NOTES.md](../RELEASE_NOTES.md)**: Detailed version history and highlights for releases (including v0.2.0 multi-tab sessions, UI chrome, selection, CoreText FFI, and DMG packaging).
+- **[RELEASE_NOTES.md](../RELEASE_NOTES.md)**: Detailed version history and highlights for releases (including v0.3.0 unified hexagonal core, headless MCP server, Metal integration, and DMG packaging).
 - **[COMPARATIVE_BENCHMARKS.md](../COMPARATIVE_BENCHMARKS.md)**: Empirical comparative evaluation measuring throughput, latency, memory usage, and GPU metrics across Term, Alacritty, and Ghostty.
+- **[MCP_BENCHMARKS.md](../MCP_BENCHMARKS.md)**: Performance benchmark report validating `term-mcp` against Node.js and Python agent terminal backends across 11 verification suites.
+
+---
+
+## Architecture: Hexagonal Core (`src/session_core`)
+
+Term decouples terminal lifecycle logic and state handling into a shared hexagonal core package ([`src/session_core`](file:///Users/dwlhm/project/term/src/session_core/)) using Ports and Adapters architecture:
+
+- **Ports (`ports.odin`)**:
+  - **`Terminal_Control_Port`**: High-level interface for creating sessions, dispatching input, executing commands, resizing grids, and terminating subprocesses cleanly.
+  - **`Terminal_Observer_Port`**: Callback contract dispatching state mutations (`on_damage`, `on_title_change`, `on_bell`, `on_exit`) from the background drain thread to frontends.
+- **Execution Profiles (`Session_Mode`)**:
+  - **`Fast_Headless`**: Optimized for automated agent interaction via MCP. Strips interactive prompt decoration, unsets ZLE/precmd latency, preserves user `$PATH`, and achieves 0.27 ms execution latency and >80 MB/s stream throughput.
+  - **`Interactive_GUI`**: Configured for the native desktop Metal frontend (`src/app/`), supporting full dotfiles (`.zshrc`), interactive line-editing, and continuous visual presentation.
+- **Adapters**:
+  - **Headless MCP Adapter (`src/cmd/term_mcp/`)**: Exposes JSON-RPC 2.0 tools over stdio for AI agent workflows.
+  - **Native Metal GUI Adapter (`src/app/`)**: Handles window events, keyboard/mouse input, and `CAMetalLayer` rendering.
 
 ---
 

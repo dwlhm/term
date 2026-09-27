@@ -8,7 +8,7 @@ TEST_FLAGS ?= -define:ODIN_TEST_THREADS=1
 DEBUG_FLAGS ?= -debug
 RELEASE_FLAGS ?= -o:speed -no-bounds-check
 
-.PHONY: all build release bundle install dmg run check test test-terminal test-parser test-pty test-input test-ui test-interaction test-render test-app test-bench bench bench-vte clean help
+.PHONY: all build release build-mcp release-mcp test-mcp bench-mcp bundle install dmg run check test test-terminal test-parser test-pty test-input test-ui test-interaction test-render test-app test-bench bench bench-vte clean help
 
 all: build
 
@@ -19,6 +19,14 @@ build:
 release:
 	@mkdir -p $(OUT_DIR)
 	$(ODIN) build $(MAIN_SRC) -out:$(TARGET) $(RELEASE_FLAGS) $(COMMON_FLAGS)
+
+build-mcp:
+	@mkdir -p $(OUT_DIR)
+	$(ODIN) build src/cmd/term_mcp -out:$(OUT_DIR)/term-mcp $(DEBUG_FLAGS) -strict-style
+
+release-mcp:
+	@mkdir -p $(OUT_DIR)
+	$(ODIN) build src/cmd/term_mcp -out:$(OUT_DIR)/term-mcp $(RELEASE_FLAGS) -strict-style
 
 bundle: release
 	@mkdir -p $(OUT_DIR)/Term.app/Contents/MacOS
@@ -43,6 +51,8 @@ run: build
 
 check:
 	$(ODIN) check src/app $(CHECK_FLAGS)
+	$(ODIN) check src/session_core $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/cmd/term_mcp $(CHECK_FLAGS)
 	$(ODIN) check src/terminal $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/parser $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/render $(CHECK_FLAGS) -no-entry-point
@@ -51,7 +61,7 @@ check:
 	$(ODIN) check src/ui $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/interaction $(CHECK_FLAGS) -no-entry-point
 
-test: test-config test-terminal test-parser test-pty test-input test-ui test-interaction test-render test-app test-bench
+test: test-config test-terminal test-parser test-pty test-input test-ui test-interaction test-render test-app test-bench test-mcp
 
 test-config:
 	$(ODIN) test src/config/tests $(COMMON_FLAGS) $(TEST_FLAGS)
@@ -83,6 +93,12 @@ test-app:
 test-bench:
 	$(ODIN) test src/bench/tests $(COMMON_FLAGS) $(TEST_FLAGS)
 
+test-mcp:
+	$(ODIN) test src/cmd/term_mcp/tests -strict-style $(TEST_FLAGS)
+
+bench-mcp: release-mcp
+	python3 scripts/bench_mcp_comprehensive.py
+
 bench:
 	@mkdir -p $(OUT_DIR)
 	$(ODIN) build src/bench/cmd_parser -out:$(OUT_DIR)/bench_parser -o:speed
@@ -105,6 +121,8 @@ help:
 	@echo "  all             Alias for build"
 	@echo "  build           Build debug executable to $(TARGET)"
 	@echo "  release         Build release executable to $(TARGET)"
+	@echo "  build-mcp       Build standalone headless MCP server to $(OUT_DIR)/term-mcp"
+	@echo "  release-mcp     Build release standalone headless MCP server to $(OUT_DIR)/term-mcp"
 	@echo "  bundle          Create macOS application bundle (Term.app)"
 	@echo "  install         Install Term.app to /Applications"
 	@echo "  dmg             Create macOS disk image (Term.dmg)"
@@ -118,6 +136,7 @@ help:
 	@echo "  test-render     Run render unit tests"
 	@echo "  test-app        Run app unit tests"
 	@echo "  test-bench      Run bench unit tests"
+	@echo "  test-mcp        Run MCP server unit tests"
 	@echo "  bench           Build benchmark executables to $(OUT_DIR)/bench_*"
 	@echo "  bench-vte       Run comparative VTE benchmark generator and instructions"
 	@echo "  clean           Remove build artifacts and temporary binaries"
