@@ -37,6 +37,9 @@ jobs:
       - name: Build release binary
         run: make release
 
+      - name: Build MCP server binary
+        run: make release-mcp
+
       - name: Build macOS app bundle
         run: make bundle
 

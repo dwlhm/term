@@ -28,6 +28,9 @@ jobs:
       - name: Build release binary
         run: make release
 
+      - name: Build MCP server binary
+        run: make release-mcp
+
       - name: Build macOS app bundle
         run: make bundle
 
@@ -37,9 +40,10 @@ jobs:
       - name: Package release archives
         run: |
           tar -czf term-macos-arm64.tar.gz -C bin Term.app
+          tar -czf term-mcp-macos-arm64.tar.gz -C bin term-mcp
           cd bin && zip -ry ../term-macos-arm64.zip Term.app && cd ..
           cp bin/Term.dmg .
-          shasum -a 256 Term.dmg term-macos-arm64.tar.gz term-macos-arm64.zip > SHA256SUMS.txt
+          shasum -a 256 Term.dmg term-macos-arm64.tar.gz term-macos-arm64.zip term-mcp-macos-arm64.tar.gz > SHA256SUMS.txt
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
@@ -48,6 +52,7 @@ jobs:
             Term.dmg
             term-macos-arm64.tar.gz
             term-macos-arm64.zip
+            term-mcp-macos-arm64.tar.gz
             SHA256SUMS.txt
           draft: false
           prerelease: false
