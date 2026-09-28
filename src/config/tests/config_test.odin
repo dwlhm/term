@@ -23,6 +23,7 @@ test_config_default :: proc(t: ^testing.T) {
 	testing.expect_value(t, cfg.background, termgrid.CATPPUCCIN_MOCHA_BASE)
 	testing.expect_value(t, cfg.scrollback_max_lines, 1000)
 	testing.expect_value(t, cfg.alt_screen_wheel_lines, 3)
+	testing.expect_value(t, cfg.scroll_multiplier, f32(1.0))
 	testing.expect_value(t, cfg.padding_x, 6)
 	testing.expect_value(t, cfg.padding_y, 4)
 	testing.expect_value(t, cfg.locale, "")
@@ -73,6 +74,7 @@ cursor_blink = false
 cursor_blink_interval_ms = 450
 scrollback_max_lines = 5000
 alt_screen_wheel_lines = 5
+scroll_multiplier = 1.5
 padding_x = 10
 padding_y = 8
 `
@@ -84,6 +86,7 @@ padding_y = 8
 	testing.expect_value(t, cfg.cursor_blink_interval_ms, u64(450))
 	testing.expect_value(t, cfg.scrollback_max_lines, 5000)
 	testing.expect_value(t, cfg.alt_screen_wheel_lines, 5)
+	testing.expect_value(t, cfg.scroll_multiplier, f32(1.5))
 	testing.expect_value(t, cfg.padding_x, 10)
 	testing.expect_value(t, cfg.padding_y, 8)
 }

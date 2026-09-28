@@ -332,6 +332,14 @@ _apply_key_value :: proc(cfg: ^Config, key: string, val_expr: ^odin_ast.Expr) {
 				cfg.alt_screen_wheel_lines = v
 			}
 		}
+	case "scroll_multiplier":
+		if lit, ok := _expr_to_lit_text(val_expr); ok {
+			if v, vok := _parse_f32(lit); vok && v > 0 {
+				cfg.scroll_multiplier = v
+			} else if vi, viok := _parse_int(lit); viok && vi > 0 {
+				cfg.scroll_multiplier = f32(vi)
+			}
+		}
 	case "padding_x":
 		if lit, ok := _expr_to_lit_text(val_expr); ok {
 			if v, vok := _parse_int(lit); vok && v >= 0 {
