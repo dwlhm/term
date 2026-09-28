@@ -114,6 +114,7 @@ Backend :: struct {
 	banner_shown:         bool,
 	last_mouse_col:       int,
 	last_mouse_row:       int,
+	wheel_accumulator_y:  f32,
 	view_generation:      u64,
 	sync_output_start_ns: u64,
 	clipboard_user_data:  rawptr,
@@ -127,6 +128,7 @@ Backend :: struct {
 	thread:               ^thread.Thread,
 	thread_running:       b32,
 	swap_mutex:           sync.Mutex,
+	render_locked:        bool,
 	event_queue:          UI_Event_Queue,
 	drain_buf:            []u8,
 	resize_generation:    u64,
@@ -697,13 +699,49 @@ backend_paste :: proc(b: ^Backend, text: string) -> bool {
 	return pty.pty_write(&b.pty, transmute([]u8)text)
 }
 
-// backend_pointer_wheel_delta converts pointer event wheel ticks to lines.
+// backend_accumulate_wheel accumulates fractional wheel delta and extracts whole line steps.
+backend_accumulate_wheel :: proc(b: ^Backend, pointer: input.Input_Pointer_Event) -> int {
+	if b == nil {
+		return backend_pointer_wheel_delta(pointer)
+	}
+
+	dy: f32 = 0
+	if pointer.wheel_y != 0 {
+		dy = pointer.wheel_y
+	} else if pointer.wheel_integer_y != 0 {
+		dy = f32(pointer.wheel_integer_y)
+	}
+
+	if pointer.wheel_flipped {
+		dy = -dy
+	}
+
+	if dy == 0 {
+		return 0
+	}
+
+	// Immediate response on direction reversal: drop residual momentum from opposite direction
+	if (b.wheel_accumulator_y < 0 && dy > 0) || (b.wheel_accumulator_y > 0 && dy < 0) {
+		b.wheel_accumulator_y = 0
+	}
+
+	mult := b.config.scroll_multiplier if b.config.scroll_multiplier > 0 else 1.0
+	b.wheel_accumulator_y += dy * mult
+
+	lines := int(b.wheel_accumulator_y)
+	if lines != 0 {
+		b.wheel_accumulator_y -= f32(lines)
+	}
+	return lines
+}
+
+// backend_pointer_wheel_delta converts pointer event wheel ticks to lines (stateless fallback).
 backend_pointer_wheel_delta :: proc(pointer: input.Input_Pointer_Event) -> int {
 	delta := pointer.wheel_integer_y
 	if delta == 0 {
-		if pointer.wheel_y > 0 {
+		if pointer.wheel_y >= 0.5 {
 			delta = 1
-		} else if pointer.wheel_y < 0 {
+		} else if pointer.wheel_y <= -0.5 {
 			delta = -1
 		}
 	}
@@ -761,7 +799,7 @@ backend_apply_theme :: proc(b: ^Backend, theme: termgrid.Theme) {
 }
 
 // _terminal_sync_to_front synchronizes back buffer terminal state to front buffer terminal.
-_terminal_sync_to_front :: proc(dst: ^termgrid.Terminal, src: ^termgrid.Terminal) {
+_terminal_sync_to_front :: proc(dst: ^termgrid.Terminal, src: ^termgrid.Terminal, view: ^termgrid.Terminal_View = nil) {
 	if dst == nil || src == nil {
 		return
 	}
@@ -770,22 +808,33 @@ _terminal_sync_to_front :: proc(dst: ^termgrid.Terminal, src: ^termgrid.Terminal
 		termgrid.terminal_resize(dst, src.grid.row_count, src.grid.col_count)
 	}
 
-	// 2. Copy active grid cells, row generations, and layout
+	// 2. Copy active grid cells (Delta-only: copy only damaged rows)
 	dst.grid.origin = src.grid.origin
 	dst.grid.mask = src.grid.mask
 	dst.grid.style_table = src.grid.style_table
 	if dst.grid.cells != nil && src.grid.cells != nil {
-		copy(dst.grid.cells, src.grid.cells)
-	}
-	for i in 0..<src.grid.capacity {
-		if i < len(dst.grid.rows) && i < len(src.grid.rows) {
-			dst.grid.rows[i].generation = src.grid.rows[i].generation
-			dst.grid.rows[i].wrapped = src.grid.rows[i].wrapped
-			dst.grid.rows[i].is_prompt = src.grid.rows[i].is_prompt
+		if dst.grid.row_count != src.grid.row_count || dst.grid.col_count != src.grid.col_count {
+			copy(dst.grid.cells, src.grid.cells)
+		} else {
+			for r in 0..<src.damage.row_count {
+				if r < len(src.damage.dirty_rows) {
+					dr := src.damage.dirty_rows[r]
+					if dr.full || dr.span_count > 0 {
+						src_phys := (src.grid.origin + r) & src.grid.mask
+						dst_phys := (dst.grid.origin + r) & dst.grid.mask
+						if src_phys < len(src.grid.rows) && dst_phys < len(dst.grid.rows) {
+							copy(dst.grid.rows[dst_phys].cells, src.grid.rows[src_phys].cells)
+							dst.grid.rows[dst_phys].generation = src.grid.rows[src_phys].generation
+							dst.grid.rows[dst_phys].wrapped = src.grid.rows[src_phys].wrapped
+							dst.grid.rows[dst_phys].is_prompt = src.grid.rows[src_phys].is_prompt
+						}
+					}
+				}
+			}
 		}
 	}
 
-	// 3. Alternate grid synchronization
+	// 3. Alternate grid synchronization (only if alt screen is active)
 	if src.is_alt_screen {
 		dst.alt_grid.origin = src.alt_grid.origin
 		dst.alt_grid.mask = src.alt_grid.mask
@@ -808,7 +857,7 @@ _terminal_sync_to_front :: proc(dst: ^termgrid.Terminal, src: ^termgrid.Terminal
 	dst.saved_cursor_valid = src.saved_cursor_valid
 	dst.current_style = src.current_style
 
-	// 4. Sync scrollback deeply via flat array bulk copy
+	// 4. Sync scrollback lazily (0 bytes copied when viewing active screen)
 	if dst.scrollback.max_lines != src.scrollback.max_lines || dst.scrollback.col_count != src.scrollback.col_count {
 		termgrid.scrollback_destroy(&dst.scrollback, nil)
 		termgrid.scrollback_init(&dst.scrollback, src.scrollback.col_count, src.scrollback.max_lines)
@@ -820,7 +869,8 @@ _terminal_sync_to_front :: proc(dst: ^termgrid.Terminal, src: ^termgrid.Terminal
 	dst.scrollback.total_pushed = src.scrollback.total_pushed
 	dst.scrollback.clear_generation = src.scrollback.clear_generation
 	
-	if scrollback_changed {
+	viewing_history := view != nil && view.scrollback_offset > 0
+	if scrollback_changed && viewing_history {
 		if dst.scrollback.cells != nil && src.scrollback.cells != nil {
 			copy(dst.scrollback.cells, src.scrollback.cells)
 		}
@@ -828,7 +878,6 @@ _terminal_sync_to_front :: proc(dst: ^termgrid.Terminal, src: ^termgrid.Terminal
 			dst.scrollback.rows[i].wrapped = src.scrollback.rows[i].wrapped
 		}
 	}
-
 
 	// 5. Transfer damage from src to dst: merge dirty rows and copy scroll ops
 	for r in 0..<src.damage.row_count {
@@ -890,7 +939,12 @@ _terminal_sync_to_front :: proc(dst: ^termgrid.Terminal, src: ^termgrid.Terminal
 			termgrid.terminal_push_notification(dst, notif.title[:notif.title_len], notif.message[:notif.message_len])
 		}
 	}
-	dst.hyperlinks = src.hyperlinks
+
+	// Only copy hyperlinks struct (526 KB) if entries count changed
+	if src.hyperlinks.count != dst.hyperlinks.count {
+		dst.hyperlinks = src.hyperlinks
+	}
+
 	dst.charset_g0 = src.charset_g0
 	dst.charset_g1 = src.charset_g1
 	dst.active_charset_is_g1 = src.active_charset_is_g1
@@ -905,7 +959,7 @@ _backend_swap_buffers :: proc(b: ^Backend) {
 	sync.mutex_lock(&b.swap_mutex)
 	defer sync.mutex_unlock(&b.swap_mutex)
 
-	_terminal_sync_to_front(&b.front_terminal, &b.terminal)
+	_terminal_sync_to_front(&b.front_terminal, &b.terminal, &b.view)
 	b.front_view = b.view
 	b.front_cursor = b.cursor
 	b.front_focused = b.focused
@@ -949,12 +1003,14 @@ backend_is_threaded :: proc(b: ^Backend) -> bool {
 backend_lock_render :: proc(b: ^Backend) {
 	if b != nil {
 		sync.mutex_lock(&b.swap_mutex)
+		b.render_locked = true
 	}
 }
 
 // backend_unlock_render releases the swap mutex after rendering.
 backend_unlock_render :: proc(b: ^Backend) {
-	if b != nil {
+	if b != nil && b.render_locked {
+		b.render_locked = false
 		sync.mutex_unlock(&b.swap_mutex)
 	}
 }
@@ -1142,11 +1198,12 @@ backend_handle_ui_event :: proc(b: ^Backend, ev: UI_Event) {
 			switch p.kind {
 			case .Wheel:
 				if b.terminal.is_alt_screen {
-					delta := backend_pointer_wheel_delta(p)
+					delta := backend_accumulate_wheel(b, p)
 					if delta == 0 {
 						return
 					}
-					steps := abs(delta) * APP_ALT_SCREEN_WHEEL_LINES
+					alt_lines := b.config.alt_screen_wheel_lines if b.config.alt_screen_wheel_lines > 0 else APP_ALT_SCREEN_WHEEL_LINES
+					steps := abs(delta) * alt_lines
 					code: u8 = 'A' if delta > 0 else 'B'
 					seq: [3]u8
 					if b.terminal.app_cursor_keys {
@@ -1159,7 +1216,7 @@ backend_handle_ui_event :: proc(b: ^Backend, ev: UI_Event) {
 					}
 					return
 				}
-				delta := backend_pointer_wheel_delta(p)
+				delta := backend_accumulate_wheel(b, p)
 				old_offset := b.view.scrollback_offset
 				_ = termgrid.terminal_view_scroll(&b.view, &b.terminal, delta)
 				if old_offset != b.view.scrollback_offset {
@@ -1269,7 +1326,7 @@ backend_worker_proc :: proc(t: ^thread.Thread) {
 			}
 			if bytes_read > 0 {
 				if sync.mutex_try_lock(&b.swap_mutex) {
-					_terminal_sync_to_front(&b.front_terminal, &b.terminal)
+					_terminal_sync_to_front(&b.front_terminal, &b.terminal, &b.view)
 					b.front_view = b.view
 					b.front_cursor = b.cursor
 					b.front_focused = b.focused

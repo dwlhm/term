@@ -461,22 +461,11 @@ terminal_resize :: proc(t: ^Terminal, new_rows: int, new_cols: int, allocator :=
 	}
 
 	if t.is_alt_screen {
-		// 1. Swap active grid and alt_grid so t.grid is primary screen
-		t.grid, t.alt_grid = t.alt_grid, t.grid
-		saved_alt_cursor := t.cursor
-		t.cursor = t.saved_cursor
-
-		// 2. Resize primary screen with full reflow & scrollback
-		_terminal_resize_primary(t, new_rows, new_cols, allocator)
-		t.saved_cursor = t.cursor
-
-		// 3. Resize alt screen grid (now in t.alt_grid) without scrollback
-		_grid_resize_alt(&t.alt_grid, new_rows, new_cols, &t.grapheme_store, allocator)
-
-		// 4. Swap back so t.grid is alt screen
-		t.grid, t.alt_grid = t.alt_grid, t.grid
-		t.cursor.row = clamp(saved_alt_cursor.row, 0, new_rows - 1)
-		t.cursor.col = clamp(saved_alt_cursor.col, 0, new_cols - 1)
+		// Delta-only: Only resize active alt screen grid directly.
+		// Bypasses primary grid reflow & scrollback coalescence during alt-screen mode.
+		_grid_resize_alt(&t.grid, new_rows, new_cols, &t.grapheme_store, allocator)
+		t.cursor.row = clamp(t.cursor.row, 0, new_rows - 1)
+		t.cursor.col = clamp(t.cursor.col, 0, new_cols - 1)
 		t.cursor.pending_wrap = false
 		t.scroll_top = 0
 		t.scroll_bottom = new_rows - 1

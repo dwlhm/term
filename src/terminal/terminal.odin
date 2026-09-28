@@ -1261,6 +1261,12 @@ terminal_leave_alt_screen :: proc(t: ^Terminal) {
 	t.scroll_top = 0
 	t.scroll_bottom = t.grid.row_count - 1
 
+	// If window was resized while in alt screen, reflow primary grid now on exit
+	if t.grid.row_count != t.alt_grid.row_count || t.grid.col_count != t.alt_grid.col_count {
+		terminal_resize(t, t.alt_grid.row_count, t.alt_grid.col_count)
+		return
+	}
+
 	gens := make([]u32, t.grid.row_count)
 	for i in 0..<t.grid.row_count {
 		phys := _grid_physical_row(&t.grid, i)

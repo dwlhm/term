@@ -861,4 +861,52 @@ test_app_cmd_r_renames_active_tab :: proc(t: ^testing.T) {
 	testing.expect(t, a.tab_rename.active, "Cmd+R must start inline rename on the active tab")
 }
 
+@(test)
+test_backend_accumulate_wheel :: proc(t: ^testing.T) {
+	b := new(app.Backend)
+	defer free(b)
+	b.config.scroll_multiplier = 1.0
+
+	// 1. Fractional accumulation: 5 events of wheel_y = 0.2 resulting in 0, 0, 0, 0, 1 lines.
+	ev_frac := input.Input_Pointer_Event{
+		kind = .Wheel,
+		wheel_y = 0.2,
+	}
+	testing.expect_value(t, app.backend_accumulate_wheel(b, ev_frac), 0)
+	testing.expect_value(t, app.backend_accumulate_wheel(b, ev_frac), 0)
+	testing.expect_value(t, app.backend_accumulate_wheel(b, ev_frac), 0)
+	testing.expect_value(t, app.backend_accumulate_wheel(b, ev_frac), 0)
+	testing.expect_value(t, app.backend_accumulate_wheel(b, ev_frac), 1)
+
+	// 2. Direction reversal: negative accumulation followed by positive event drops negative momentum immediately.
+	b.wheel_accumulator_y = 0
+	ev_down_frac := input.Input_Pointer_Event{
+		kind = .Wheel,
+		wheel_y = -0.6,
+	}
+	testing.expect_value(t, app.backend_accumulate_wheel(b, ev_down_frac), 0)
+
+	ev_up_frac := input.Input_Pointer_Event{
+		kind = .Wheel,
+		wheel_y = 0.7,
+	}
+	testing.expect_value(t, app.backend_accumulate_wheel(b, ev_up_frac), 0)
+	testing.expect(t, b.wheel_accumulator_y > 0.69 && b.wheel_accumulator_y < 0.71, "reversal dropped negative momentum")
+
+	ev_up_step := input.Input_Pointer_Event{
+		kind = .Wheel,
+		wheel_y = 0.4,
+	}
+	testing.expect_value(t, app.backend_accumulate_wheel(b, ev_up_step), 1)
+
+	// 3. scroll_multiplier: multiplier = 2.0 with wheel_y = 0.5 triggers 1 line immediately.
+	b.wheel_accumulator_y = 0
+	b.config.scroll_multiplier = 2.0
+	ev_half := input.Input_Pointer_Event{
+		kind = .Wheel,
+		wheel_y = 0.5,
+	}
+	testing.expect_value(t, app.backend_accumulate_wheel(b, ev_half), 1)
+}
+
 

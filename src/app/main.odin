@@ -871,6 +871,26 @@ _app_route_pointer :: proc(a: ^App, pointer: input.Input_Pointer_Event) -> bool 
 		col := clamp(pt.col + 1, 1, max(1, b.terminal.grid.col_count))
 		row := clamp(pt.row + 1, 1, max(1, b.terminal.grid.row_count))
 
+		if pointer.kind == .Wheel {
+			delta := backend_accumulate_wheel(b, pointer)
+			if delta == 0 {
+				return true
+			}
+			p_wheel := pointer
+			p_wheel.wheel_y = 1 if delta > 0 else -1
+			p_wheel.wheel_integer_y = 1 if delta > 0 else -1
+			buf: [32]u8
+			n := input.mouse_encode_sgr(p_wheel, col, row, pointer.shift, buf[:])
+			if n > 0 {
+				for _ in 0 ..< abs(delta) {
+					_ = pty.pty_write(&b.pty, buf[:n])
+				}
+			}
+			b.last_mouse_col = col
+			b.last_mouse_row = row
+			return true
+		}
+
 		if pointer.kind == .Motion {
 			if b.terminal.mouse_tracking == .Normal {
 				return true
@@ -997,11 +1017,12 @@ _app_route_pointer :: proc(a: ^App, pointer: input.Input_Pointer_Event) -> bool 
 	switch pointer.kind {
 	case .Wheel:
 		if b.terminal.is_alt_screen {
-			delta := _app_pointer_wheel_delta(pointer)
+			delta := backend_accumulate_wheel(b, pointer)
 			if delta == 0 {
 				return true
 			}
-			steps := abs(delta) * APP_ALT_SCREEN_WHEEL_LINES
+			alt_lines := b.config.alt_screen_wheel_lines if b.config.alt_screen_wheel_lines > 0 else APP_ALT_SCREEN_WHEEL_LINES
+			steps := abs(delta) * alt_lines
 			code: u8 = 'A' if delta > 0 else 'B'
 			seq: [3]u8
 			if b.terminal.app_cursor_keys {
@@ -1014,7 +1035,7 @@ _app_route_pointer :: proc(a: ^App, pointer: input.Input_Pointer_Event) -> bool 
 			}
 			return true
 		}
-		delta := _app_pointer_wheel_delta(pointer)
+		delta := backend_accumulate_wheel(b, pointer)
 		old_offset := b.view.scrollback_offset
 		_ = termgrid.terminal_view_scroll(&b.view, &b.terminal, delta)
 		if old_offset != b.view.scrollback_offset {
@@ -2130,6 +2151,13 @@ _app_frame_dt_ms :: proc() -> f32 {
 	return clamp(dt_ms, 0, platform_tabs.TAB_BAR_ANIM_DT_MAX_MS)
 }
 
+_app_render_unlock :: proc(data: rawptr) {
+	b := (^Backend)(data)
+	if b != nil {
+		backend_unlock_render(b)
+	}
+}
+
 app_frame :: proc(a: ^App) -> bool {
 	if a == nil {
 		return false
@@ -2271,12 +2299,16 @@ app_frame :: proc(a: ^App) -> bool {
 	if is_dirty {
 		if threaded {
 			backend_lock_render(active_b)
+			a.frontend.renderer.unlock_cb = _app_render_unlock
+			a.frontend.renderer.unlock_data = rawptr(active_b)
 		}
 		state := backend_get_render_state(active_b)
 		state.debug_frames = a.debug_frames
 		_app_stage_ui(a)
 		_ = frontend_render(&a.frontend, &state)
 		if threaded {
+			a.frontend.renderer.unlock_cb = nil
+			a.frontend.renderer.unlock_data = nil
 			backend_unlock_render(active_b)
 		}
 	}

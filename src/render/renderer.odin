@@ -1201,7 +1201,7 @@ _renderer_frame_v2_journal :: proc(
 	when ODIN_OS == .Darwin {
 		has_emojis = len(r.emoji_atlas.glyphs) > 0
 	}
-	if !force_full && !has_emojis && len(journal.scroll_ops) == 0 && r.dirty.mirror != nil && !r.cursor_staged && !r.ui_staged && !r.interaction_staged {
+	if !force_full && !has_emojis && len(journal.scroll_ops) == 0 && r.dirty.mirror != nil && !r.ui_staged && !r.interaction_staged {
 		if !r.dirty.armed {
 			render_compile_full_v2(&r.compiled_v2, terminal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster, view)
 			dirty_upload_rebase(&r.dirty, r, lut)
@@ -1209,16 +1209,22 @@ _renderer_frame_v2_journal :: proc(
 		ranges: [DIRTY_UPLOAD_MAX_RANGES]Dirty_Upload_Range
 		_, _, fell_back := dirty_upload_frame(&r.dirty, r, terminal, journal, lut, &ranges)
 		if !fell_back {
+			if r.unlock_cb != nil {
+				r.unlock_cb(r.unlock_data)
+			}
 			n := u32(int(r.rows) * int(r.cols))
 			frame, ok := _renderer_surface_begin(r)
 			if !ok { return _renderer_frame_failed(r, terminal, journal, &frame, .Instance) }
+			if r.cursor_staged && !_renderer_upload_instances(r, 0, &frame) {
+				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+			}
 			if !_draw_instance_buffer(r, &frame, r.dirty.buffer, n, n, u64(n) * instance.INSTANCE_STRIDE) {
 				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
 			}
 			if !_renderer_surface_commit(r, &frame) {
 				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
 			}
-			_renderer_frame_published(r)
+			_renderer_frame_published(r, view)
 			return true
 		}
 	}
@@ -1226,6 +1232,9 @@ _renderer_frame_v2_journal :: proc(
 	r.dirty.armed = false
 	render_compile_full_v2(&r.compiled_v2, terminal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster, view)
 	bg_count, glyph_count, emoji_count, decor_count := _prepare_instances_v2(r, lut, &terminal.grapheme_store)
+	if r.unlock_cb != nil {
+		r.unlock_cb(r.unlock_data)
+	}
 	when ODIN_OS == .Darwin {
 		if r.emoji_atlas.gpu_dirty {
 			emoji_atlas_upload_gpu(&r.emoji_atlas, r.backend, r.device, r.queue)
