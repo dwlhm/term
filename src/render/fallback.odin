@@ -11,7 +11,7 @@ import "base:runtime"
 import "core:sync"
 
 // FALLBACK_MAX_FONTS caps the chain; slot 0 is the primary.
-FALLBACK_MAX_FONTS :: 4
+FALLBACK_MAX_FONTS :: 8
 
 // Fallback_Chain is an ordered font probe chain (slot 0 = primary).
 Fallback_Chain :: struct {

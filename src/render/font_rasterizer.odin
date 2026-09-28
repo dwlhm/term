@@ -230,8 +230,10 @@ font_shape_cluster :: proc(
 is_symbol_or_pua :: proc(cp: u32) -> bool {
 	return (cp >= 0xE000 && cp <= 0xF8FF) ||
 	       (cp >= 0xF0000 && cp <= 0x10FFFD) ||
-	       (cp >= 0x2500 && cp <= 0x27BF) ||
-	       (cp >= 0x2B00 && cp <= 0x2BFF)
+	       (cp >= 0x2190 && cp <= 0x21FF) || // Arrows
+	       (cp >= 0x2500 && cp <= 0x27BF) || // Box, blocks, geometric shapes, misc symbols
+	       (cp >= 0x2800 && cp <= 0x28FF) || // Braille patterns
+	       (cp >= 0x2B00 && cp <= 0x2BFF)    // Misc symbols and arrows
 }
 
 // font_rasterize_glyph_fitted rasterizes a glyph proportionally scaled to fit within max_w and max_h.

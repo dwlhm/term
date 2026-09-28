@@ -62,8 +62,10 @@ FALLBACK_FONT_PATHS :: []string{
 	"~/Library/Fonts/MesloLGS NF Regular.ttf",
 	"/Library/Fonts/MesloLGS NF Regular.ttf",
 	"/System/Library/Fonts/Apple Symbols.ttf",
-	"/System/Library/Fonts/SFNSMono.ttf",
+	"/System/Library/Fonts/Supplemental/STIXGeneral.otf",
 	"/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+	"/System/Library/Fonts/Menlo.ttc",
+	"/System/Library/Fonts/SFNSMono.ttf",
 }
 
 // Frontend owns SDL window, Metal device/queue/surface, and Renderer state.
