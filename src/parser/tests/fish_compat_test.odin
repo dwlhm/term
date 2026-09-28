@@ -136,8 +136,35 @@ test_fx_xtversion :: proc(t: ^testing.T) {
 	_fx_bytes_eq(
 		t,
 		_fx_response(),
-		[]u8{0x1B, 'P', '>', '|', 'T', 'e', 'r', 'm', 0x1B, '\\'},
-		"CSI > q must answer DCS > | Term ST",
+		[]u8{0x1B, 'P', '>', '|', 'g', 'h', 'o', 's', 't', 't', 'y', '(', '1', '.', '3', '.', '1', ')', 0x1B, '\\'},
+		"CSI > q must answer DCS > | ghostty(1.3.1) ST",
+	)
+
+	_fx_reset()
+	p.parse_chunk(&parser, &term, []u8{0x1B, '[', '>', '0', 'q'})
+	_fx_bytes_eq(
+		t,
+		_fx_response(),
+		[]u8{0x1B, 'P', '>', '|', 'g', 'h', 'o', 's', 't', 't', 'y', '(', '1', '.', '3', '.', '1', ')', 0x1B, '\\'},
+		"CSI > 0 q must answer DCS > | ghostty(1.3.1) ST",
+	)
+}
+
+// --- DECRQM ---
+
+@(test)
+test_fx_decrqm :: proc(t: ^testing.T) {
+	_fx_reset()
+	term := _fx_term(24, 80)
+	defer tg.terminal_destroy(&term)
+	parser := _fx_parser()
+
+	p.parse_chunk(&parser, &term, []u8{0x1B, '[', '?', '2', '0', '2', '6', '$', 'p'})
+	_fx_bytes_eq(
+		t,
+		_fx_response(),
+		[]u8{0x1B, '[', '?', '2', '0', '2', '6', ';', '2', '$', 'y'},
+		"CSI ? 2026 $ p responds with \\x1b[?2026;2$y",
 	)
 }
 

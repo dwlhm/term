@@ -79,7 +79,7 @@ csi_dispatch :: proc(p: ^Parser, t: ^termgrid.Terminal, final_byte: u8) {
 		subparam_mask = p.csi_subparam_mask,
 		count         = p.csi_count + 1, // count is 0-indexed, so add 1
 	}
-	private := p.intermediate == '?'
+	private := p.leader == '?' || p.intermediate == '?'
 	
 	// Dispatch based on final byte
 	switch final_byte {
@@ -128,11 +128,15 @@ csi_dispatch :: proc(p: ^Parser, t: ^termgrid.Terminal, final_byte: u8) {
 	case 'q': // DECSCUSR (intermediate space) / XTVERSION (intermediate '>')
 		if p.intermediate == ' ' {
 			_csi_execute_decscusr(t, params)
-		} else if p.intermediate == '>' {
+		} else if p.leader == '>' || p.intermediate == '>' {
 			_csi_execute_xtversion(t, params, p)
 		}
 		// Plain CSI q (DECSCA, character protection) is unimplemented
 		// and safely ignored.
+	case 'p': // DECRQM - Request Mode (ANSI or DEC private)
+		if p.intermediate == '$' {
+			_csi_execute_decrqm(t, params, p)
+		}
 	case 'u': // Kitty keyboard protocol (= set, ? query/set, > push, < pop)
 		_csi_execute_kitty_keyboard(t, params, p)
 	case 'h': // SM - Set Mode (private: DECTCEM show, alt screen enter, bracketed paste, focus reporting)
@@ -151,6 +155,7 @@ csi_dispatch :: proc(p: ^Parser, t: ^termgrid.Terminal, final_byte: u8) {
 	
 	// Reset CSI state
 	p.intermediate = 0
+	p.leader = 0
 	csi_reset(p)
 }
 
@@ -544,9 +549,67 @@ _csi_execute_xtversion :: proc(t: ^termgrid.Terminal, params: CSI_Params, p: ^Pa
 	if p.response_cb == nil {
 		return
 	}
-	// DCS > | Term ST
-	response := [10]u8{0x1B, 'P', '>', '|', 'T', 'e', 'r', 'm', 0x1B, '\\'}
+	// DCS > | ghostty(1.3.1) ST
+	response := [20]u8{0x1B, 'P', '>', '|', 'g', 'h', 'o', 's', 't', 't', 'y', '(', '1', '.', '3', '.', '1', ')', 0x1B, '\\'}
 	p.response_cb(response[:])
+}
+
+// _csi_execute_decrqm handles Request Mode (DECRQM: CSI ? Ps $ p or CSI Ps $ p).
+// Responds with DECRPM (CSI ? Ps ; Pm $ y or CSI Ps ; Pm $ y).
+_csi_execute_decrqm :: proc(t: ^termgrid.Terminal, params: CSI_Params, p: ^Parser) {
+	if p.response_cb == nil || params.count == 0 {
+		return
+	}
+	is_private := p.leader == '?' || p.intermediate == '?'
+	mode := params.values[0]
+	status: u8 = 0 // 0 = not recognized, 1 = set, 2 = reset
+	if is_private {
+		switch mode {
+		case 2026, 2027:
+			status = 2 // Synchronized output / Unicode clustering supported, currently reset
+		case 25:
+			status = 1 if t.cursor.visible else 2
+		case 1004:
+			status = 1 if t.focus_reporting else 2
+		case 2004:
+			status = 1 if t.bracketed_paste else 2
+		case 1049, 47:
+			status = 1 if t.is_alt_screen else 2
+		case:
+			status = 0
+		}
+	}
+
+	// Format response: ESC [ [?] mode ; status $ y
+	buf: [32]u8
+	n := 0
+	buf[n] = 0x1B; n += 1
+	buf[n] = '['; n += 1
+	if is_private {
+		buf[n] = '?'; n += 1
+	}
+	// Write mode as decimal
+	mode_temp := mode
+	digits: [10]u8
+	dn := 0
+	if mode_temp == 0 {
+		digits[0] = '0'
+		dn = 1
+	} else {
+		for mode_temp > 0 {
+			digits[dn] = '0' + u8(mode_temp % 10)
+			dn += 1
+			mode_temp /= 10
+		}
+	}
+	for i := dn - 1; i >= 0; i -= 1 {
+		buf[n] = digits[i]; n += 1
+	}
+	buf[n] = ';'; n += 1
+	buf[n] = '0' + status; n += 1
+	buf[n] = '$'; n += 1
+	buf[n] = 'y'; n += 1
+	p.response_cb(buf[:n])
 }
 
 // _csi_execute_kitty_keyboard handles the kitty keyboard protocol's CSI u

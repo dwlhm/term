@@ -40,7 +40,9 @@ PTY_CHILD_FAIL_EXIT :: 127
 // PTY environment overrides and defaults.
 PTY_ENV_TERM :: "TERM=xterm-256color"
 PTY_ENV_COLORTERM :: "COLORTERM=truecolor"
-PTY_ENV_TERM_PROGRAM :: "TERM_PROGRAM=Term"
+PTY_ENV_TERM_PROGRAM :: "TERM_PROGRAM=ghostty"
+PTY_ENV_TERM_PROGRAM_VERSION :: "TERM_PROGRAM_VERSION=1.3.1"
+PTY_ENV_OPENTUI_FORCE_UNICODE :: "OPENTUI_FORCE_UNICODE=true"
 PTY_ENV_PROMPT_EOL_MARK :: "PROMPT_EOL_MARK="
 PTY_ENV_P10K_INTEGRATION   :: "POWERLEVEL9K_TERM_SHELL_INTEGRATION=true"
 PTY_ENV_KITTY_INTEGRATION  :: "KITTY_SHELL_INTEGRATION=enabled"
@@ -248,7 +250,9 @@ pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string, c
 		if strings.has_prefix(entry, "TERM=") ||
 		   strings.has_prefix(entry, "COLORTERM=") ||
 		   strings.has_prefix(entry, "PROMPT_EOL_MARK=") ||
-		   strings.has_prefix(entry, "TERM_PROGRAM=") {
+		   strings.has_prefix(entry, "TERM_PROGRAM=") ||
+		   strings.has_prefix(entry, "TERM_PROGRAM_VERSION=") ||
+		   strings.has_prefix(entry, "OPENTUI_FORCE_UNICODE=") {
 			continue
 		}
 		if has_cwd && strings.has_prefix(entry, "PWD=") {
@@ -273,6 +277,8 @@ pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string, c
 		PTY_ENV_TERM,
 		PTY_ENV_COLORTERM,
 		PTY_ENV_TERM_PROGRAM,
+		PTY_ENV_TERM_PROGRAM_VERSION,
+		PTY_ENV_OPENTUI_FORCE_UNICODE,
 		PTY_ENV_PROMPT_EOL_MARK,
 		PTY_ENV_P10K_INTEGRATION,
 		PTY_ENV_KITTY_INTEGRATION,

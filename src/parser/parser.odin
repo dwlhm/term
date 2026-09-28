@@ -30,6 +30,7 @@ Parser :: struct {
 	string_esc_pending:   bool,
 	osc_truncated:        bool, // true when the OSC payload exceeded osc_buffer
 	allow_clipboard_read: bool,
+	leader:               u8,
 
 	// String buffers (OSC / DCS)
 	osc_len:    int,
@@ -203,6 +204,9 @@ parse_chunk :: proc(p: ^Parser, t: ^termgrid.Terminal, input: []u8) {
 		case .Clear:
 			clear_parser_state(p)
 		case .Collect:
+			if byte >= 0x3C && byte <= 0x3F {
+				p.leader = byte
+			}
 			p.intermediate = byte
 		case .Param:
 			csi_collect_param(p, byte)
@@ -269,6 +273,7 @@ parser_reset :: proc(p: ^Parser) {
 	csi_reset(p)
 	utf8_reset(p)
 	p.intermediate = 0
+	p.leader = 0
 	p.string_esc_pending = false
 	p.print_run_start = 0
 	p.print_run_len = 0
@@ -289,6 +294,7 @@ accumulate_print_run :: proc(p: ^Parser, b: u8) {
 clear_parser_state :: proc(p: ^Parser) {
 	csi_reset(p)
 	p.intermediate = 0
+	p.leader = 0
 }
 
 // terminal_print_run writes a run of bytes to the terminal.

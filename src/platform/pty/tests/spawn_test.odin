@@ -188,7 +188,7 @@ test_spawn_env_term_program_and_path :: proc(t: ^testing.T) {
 		time.sleep(1 * time.Millisecond)
 	}
 	output := string(buf[:total])
-	testing.expect(t, strings.has_prefix(output, "Term|"), "TERM_PROGRAM must be Term")
+	testing.expect(t, strings.has_prefix(output, "ghostty|"), "TERM_PROGRAM must be ghostty")
 	testing.expect(t, strings.contains(output, "/opt/homebrew/bin"), "PATH must contain /opt/homebrew/bin")
 }
 
