@@ -61,7 +61,16 @@ session_create :: proc(id: string, cfg: Session_Config) -> (^Core_Session, bool)
 		}
 	}
 
-	argv := []string{"-l"}
+	argv: []string
+	if cfg.mode == .Fast_Headless {
+		if strings.contains(prog, "zsh") {
+			argv = []string{"--no-rcs"}
+		} else if strings.contains(prog, "bash") {
+			argv = []string{"--norc", "--noprofile"}
+		}
+	} else {
+		argv = []string{"-l"}
+	}
 	s := new(Core_Session)
 	s.id = strings.clone(id)
 	s.mode = cfg.mode
@@ -205,24 +214,31 @@ session_drain_worker :: proc(t: ^thread.Thread) {
 @(private="file")
 _extract_canary_exit_code :: proc(s: string, tag: string) -> (exit_code: int, ok: bool) {
 	if len(tag) == 0 do return 0, false
-	idx := strings.index(s, tag)
-	if idx == -1 do return 0, false
-	tail := s[idx + len(tag):]
-	if len(tail) == 0 do return 0, false
-	if tail[0] < '0' || tail[0] > '9' {
-		// Not a digit (e.g. '$?' from command echo), ignore!
-		return 0, false
-	}
-	end_idx := strings.index(tail, CANARY_SUFFIX)
-	if end_idx == -1 do return 0, false
-	for i in 0 ..< end_idx {
-		if tail[i] < '0' || tail[i] > '9' {
-			return 0, false
+	rem := s
+	for {
+		idx := strings.index(rem, tag)
+		if idx == -1 do return 0, false
+		tail := rem[idx + len(tag):]
+		if len(tail) > 0 && tail[0] >= '0' && tail[0] <= '9' {
+			end_idx := strings.index(tail, CANARY_SUFFIX)
+			if end_idx != -1 {
+				all_digits := true
+				for i in 0 ..< end_idx {
+					if tail[i] < '0' || tail[i] > '9' {
+						all_digits = false
+						break
+					}
+				}
+				if all_digits {
+					if v, parse_ok := strconv.parse_int(tail[:end_idx]); parse_ok {
+						return int(v), true
+					}
+				}
+			}
 		}
+		rem = tail
 	}
-	v, parse_ok := strconv.parse_int(tail[:end_idx])
-	if !parse_ok do return 0, false
-	return int(v), true
+	return 0, false
 }
 
 // _check_command_completion checks chunk bytes and grid cells for OSC 133 or canary sentinel.
@@ -246,7 +262,7 @@ _check_command_completion :: proc(s: ^Core_Session, chunk: []u8) {
 	// 2. Check canary token in current / recent grid rows
 	cols := s.term.grid.col_count
 	cur_row := s.term.cursor.row
-	min_check_row := max(0, cur_row - 2)
+	min_check_row := max(0, cur_row - 4)
 
 	row_buf: [256]u8
 	for r := min_check_row; r <= cur_row; r += 1 {
@@ -304,7 +320,8 @@ session_stop :: proc(s: ^Core_Session) {
 	if s.pty_handle.pid > 1 {
 		posix.kill(posix.pid_t(-s.pty_handle.pid), .SIGKILL)
 		status: c.int
-		posix.waitpid(posix.pid_t(s.pty_handle.pid), &status, posix.Wait_Flags{.NOHANG})
+		posix.waitpid(posix.pid_t(s.pty_handle.pid), &status, posix.Wait_Flags{})
+		s.pty_handle.state = .Exited
 	}
 }
 
