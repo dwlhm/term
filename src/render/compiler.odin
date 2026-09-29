@@ -286,19 +286,9 @@ _is_emoji_cell :: proc(cell: termgrid.Semantic_Cell, store: ^termgrid.Grapheme_S
 		if idx >= 0 && idx < termgrid.GRAPHEME_STORE_CAP {
 			e := &store.entries[idx]
 			for i in 0..<int(e.rune_count) {
-				r := e.runes[i]
-				if termgrid.is_emoji_codepoint(r) {
-					return true
-				}
-				if r >= 0x1F3FB && r <= 0x1F3FF {
-					return true
-				}
-				if r == 0x20E3 {
-					return true
-				}
-				if r == 0xFE0F {
+				if e.runes[i] == 0xFE0F {
 					b := e.runes[0]
-					if termgrid.is_emoji_codepoint(b) || (b >= '0' && b <= '9') || b == '#' || b == '*' {
+					if termgrid.is_emoji_vs16_eligible(b) || (b >= '0' && b <= '9') || b == '#' || b == '*' {
 						return true
 					}
 				}
@@ -504,15 +494,7 @@ shaped_cell_from_cluster :: proc(
 	// glyph is covered, else bg-only skip counted as tofu_missing.
 	marks: []rune
 	if !covered {
-		is_emoji_range := (base >= 0x1F000 && base <= 0x1FAFF) ||
-			(base >= 0x2600 && base <= 0x27BF) ||
-			(base >= 0x2300 && base <= 0x23FF) ||
-			(base >= 0x2B05 && base <= 0x2B07) ||
-			(base >= 0x2B1B && base <= 0x2B1C) ||
-			base == 0x2B50 || base == 0x2B55 ||
-			base == 0x203C || base == 0x2049 || base == 0x2122 || base == 0x2139 ||
-			(base >= 0x2194 && base <= 0x2199) || (base >= 0x21A9 && base <= 0x21AA) ||
-			base == 0x3030 || base == 0x303D || base == 0x3297 || base == 0x3299
+		is_emoji_range := termgrid.is_emoji_codepoint(base)
 		if is_emoji_range {
 			ec := cf | RENDER_CELL_V2_CFLAG_EMOJI
 			return render_cell_pack_v2(cell.content, style, w, ec, RENDER_CELL_V2_SLOT_UNRESOLVED)

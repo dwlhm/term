@@ -27,7 +27,7 @@ uax29_classify :: proc(r: rune) -> Grapheme_Break_Category {
 	if is_zero_width_extend(r) {
 		return .Extend
 	}
-	if is_emoji_codepoint(r) {
+	if is_emoji_vs16_eligible(r) {
 		return .Extended_Pictographic
 	}
 	return .Other

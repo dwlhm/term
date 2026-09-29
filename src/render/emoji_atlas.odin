@@ -173,7 +173,7 @@ emoji_atlas_get_cluster :: proc(a: ^Emoji_Atlas, cluster: string, target_h: f32 
 	infos := hb_buffer_get_glyph_infos(buf, &glyph_count)
 	positions := hb_buffer_get_glyph_positions(buf, &glyph_count)
 
-	if glyph_count == 0 {
+	if glyph_count == 0 || infos[0].codepoint == 0 {
 		return {}, false
 	}
 

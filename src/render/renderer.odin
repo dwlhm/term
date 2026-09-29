@@ -161,6 +161,7 @@ Renderer :: struct {
 	last_view:           ^termgrid.Terminal_View,
 	last_view_fingerprint: u64,
 	last_view_valid:     bool,
+	last_is_alt_screen:  bool,
 }
 
 // RENDER_MAX_INSTANCES is the maximum number of instances per draw call.
@@ -1173,6 +1174,12 @@ _renderer_frame_v2_journal :: proc(
 ) -> bool {
 	has_damage := _renderer_journal_has_damage(journal)
 	force_full := r.full_redraw_pending || view_changed || (view != nil && (view.scrollback_offset != 0 || view.selection.active)) || len(journal.scroll_ops) > 0
+	alt_screen_changed := r.last_is_alt_screen != terminal.is_alt_screen
+	if alt_screen_changed {
+		r.last_is_alt_screen = terminal.is_alt_screen
+		r.dirty.armed = false
+		force_full = true
+	}
 	if !has_damage && force_full {
 		r.last_dirty = true
 	} else if !has_damage && r.last_dirty {
@@ -1197,14 +1204,10 @@ _renderer_frame_v2_journal :: proc(
 		lut.bg_r5g6b5[0] = color_to_r5g6b5(terminal.grid.style_table.theme.background)
 	}
 
-	has_emojis := false
-	when ODIN_OS == .Darwin {
-		has_emojis = len(r.emoji_atlas.glyphs) > 0
-	}
-	if !force_full && !has_emojis && len(journal.scroll_ops) == 0 && r.dirty.mirror != nil && !r.ui_staged && !r.interaction_staged {
+	if !force_full && len(journal.scroll_ops) == 0 && r.dirty.mirror != nil && !r.ui_staged && !r.interaction_staged {
 		if !r.dirty.armed {
 			render_compile_full_v2(&r.compiled_v2, terminal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster, view)
-			dirty_upload_rebase(&r.dirty, r, lut)
+			dirty_upload_rebase(&r.dirty, r, lut, &terminal.grapheme_store)
 		}
 		ranges: [DIRTY_UPLOAD_MAX_RANGES]Dirty_Upload_Range
 		_, _, fell_back := dirty_upload_frame(&r.dirty, r, terminal, journal, lut, &ranges)
@@ -1212,13 +1215,21 @@ _renderer_frame_v2_journal :: proc(
 			if r.unlock_cb != nil {
 				r.unlock_cb(r.unlock_data)
 			}
+			when ODIN_OS == .Darwin {
+				if r.emoji_atlas.gpu_dirty {
+					emoji_atlas_upload_gpu(&r.emoji_atlas, r.backend, r.device, r.queue)
+				}
+			}
+			if r.atlas.gpu_dirty {
+				atlas_upload_gpu(&r.atlas, r.backend, r.device, r.queue)
+			}
 			n := u32(int(r.rows) * int(r.cols))
 			frame, ok := _renderer_surface_begin(r)
 			if !ok { return _renderer_frame_failed(r, terminal, journal, &frame, .Instance) }
 			if r.cursor_staged && !_renderer_upload_instances(r, 0, &frame) {
 				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
 			}
-			if !_draw_instance_buffer(r, &frame, r.dirty.buffer, n, n, u64(n) * instance.INSTANCE_STRIDE) {
+			if !_draw_instance_buffer(r, &frame, r.dirty.buffer, n, n, u64(n) * instance.INSTANCE_STRIDE, emoji_count = n) {
 				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
 			}
 			if !_renderer_surface_commit(r, &frame) {
@@ -1242,6 +1253,9 @@ _renderer_frame_v2_journal :: proc(
 		if emoji_count > 0 && rawptr(r.instances.emoji_buffer) != nil && r.instances.emoji_data != nil {
 			r.backend.write_buffer(r.queue, r.instances.emoji_buffer, 0, raw_data(r.instances.emoji_data), u64(emoji_count) * instance.INSTANCE_STRIDE)
 		}
+	}
+	if r.atlas.gpu_dirty {
+		atlas_upload_gpu(&r.atlas, r.backend, r.device, r.queue)
 	}
 	frame, ok := _renderer_surface_begin(r)
 	if !ok { return _renderer_frame_failed(r, terminal, journal, &frame, .Instance) }

@@ -39,6 +39,9 @@ test_is_emoji_codepoint :: proc(t: ^testing.T) {
 	testing.expect(t, tg.is_emoji_codepoint(0x2728), "0x2728 (sparkles) is emoji")
 	testing.expect(t, !tg.is_emoji_codepoint('A'), "'A' is not emoji")
 	testing.expect(t, !tg.is_emoji_codepoint('1'), "'1' is not emoji codepoint by itself")
+	testing.expect(t, !tg.is_emoji_codepoint(0x276F), "0x276F (❯ p10k arrow) is not emoji")
+	testing.expect(t, !tg.is_emoji_codepoint(0x276E), "0x276E (❮) is not emoji")
+	testing.expect(t, !tg.is_emoji_codepoint(0x2192), "0x2192 (→) is not emoji")
 }
 
 @(test)

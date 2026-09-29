@@ -420,7 +420,6 @@ render_cell_expand_instance :: proc(
 				return true, false, true, emit_decor
 			}
 		}
-		return true, false, false, emit_decor
 	}
 
 	// Resolve the glyph slot: pinned slot when unresolved, stored slot otherwise.

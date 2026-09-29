@@ -99,7 +99,7 @@ dirty_upload_validate_mirror :: proc(d: ^Dirty_Upload, r: ^Renderer) -> bool {
 // dirty_upload_rebase fully expands r.compiled_v2 into the mirror and
 // performs ONE full write_buffer at offset 0, then arms the upload.
 // Skipped cells (empty/continuation) are zeroed so no stale data survives.
-dirty_upload_rebase :: proc(d: ^Dirty_Upload, r: ^Renderer, lut: ^Style_LUT) {
+dirty_upload_rebase :: proc(d: ^Dirty_Upload, r: ^Renderer, lut: ^Style_LUT, store: ^termgrid.Grapheme_Store = nil) {
 	if d.mirror == nil || d.cells <= 0 {
 		return
 	}
@@ -115,9 +115,18 @@ dirty_upload_rebase :: proc(d: ^Dirty_Upload, r: ^Renderer, lut: ^Style_LUT) {
 		col := idx % cols
 		x := r.pad_x + f32(col) * cw
 		y := r.pad_y + f32(row) * ch
-		emit_bg, emit_glyph, _, _ := render_cell_expand_instance(
+
+		emoji_inst_ptr: ^instance.Instance_Data = nil
+		emoji_atlas_ptr: ^Emoji_Atlas = nil
+		if r.emoji_atlas.has_font && r.instances.emoji_data != nil && idx < len(r.instances.emoji_data) {
+			emoji_inst_ptr = &r.instances.emoji_data[idx]
+			emoji_atlas_ptr = &r.emoji_atlas
+		}
+
+		emit_bg, emit_glyph, emit_emoji, _ := render_cell_expand_instance(
 			r.compiled_v2.cells[idx], lut, &r.atlas, x, y, cw, ch,
 			&d.mirror[idx], &d.mirror[n+idx],
+			emoji_inst_ptr, emoji_atlas_ptr, store,
 		)
 		if !emit_bg {
 			d.mirror[idx] = instance.Instance_Data{}
@@ -125,10 +134,17 @@ dirty_upload_rebase :: proc(d: ^Dirty_Upload, r: ^Renderer, lut: ^Style_LUT) {
 		if !emit_glyph {
 			d.mirror[n+idx] = instance.Instance_Data{}
 		}
+		if !emit_emoji && emoji_inst_ptr != nil {
+			emoji_inst_ptr^ = instance.Instance_Data{}
+		}
 	}
 	if r.backend != nil && rawptr(r.queue) != nil && rawptr(d.buffer) != nil && len(d.mirror) > 0 {
 		total := u64(len(d.mirror)) * instance.INSTANCE_STRIDE
 		r.backend.write_buffer(r.queue, d.buffer, 0, raw_data(d.mirror), total)
+	}
+	if r.backend != nil && rawptr(r.queue) != nil && rawptr(r.instances.emoji_buffer) != nil && r.instances.emoji_data != nil && n <= len(r.instances.emoji_data) {
+		total_emoji := u64(n) * instance.INSTANCE_STRIDE
+		r.backend.write_buffer(r.queue, r.instances.emoji_buffer, 0, raw_data(r.instances.emoji_data), total_emoji)
 	}
 	d.armed = true
 }
@@ -278,19 +294,32 @@ _dirty_expand_row :: proc(
 	n := d.cells
 	cw := r.cell_width
 	ch := r.cell_height
+	store := terminal != nil ? &terminal.grapheme_store : nil
 	for col in cs..<ce {
 		idx := row * cols + col
 		x := r.pad_x + f32(col) * cw
 		y := r.pad_y + f32(row) * ch
-		emit_bg, emit_glyph, _, _ := render_cell_expand_instance(
+
+		emoji_inst_ptr: ^instance.Instance_Data = nil
+		emoji_atlas_ptr: ^Emoji_Atlas = nil
+		if r.emoji_atlas.has_font && r.instances.emoji_data != nil && idx < len(r.instances.emoji_data) {
+			emoji_inst_ptr = &r.instances.emoji_data[idx]
+			emoji_atlas_ptr = &r.emoji_atlas
+		}
+
+		emit_bg, emit_glyph, emit_emoji, _ := render_cell_expand_instance(
 			r.compiled_v2.cells[idx], lut, &r.atlas, x, y, cw, ch,
 			&d.mirror[idx], &d.mirror[n+idx],
+			emoji_inst_ptr, emoji_atlas_ptr, store,
 		)
 		if !emit_bg {
 			d.mirror[idx] = instance.Instance_Data{}
 		}
 		if !emit_glyph {
 			d.mirror[n+idx] = instance.Instance_Data{}
+		}
+		if !emit_emoji && emoji_inst_ptr != nil {
+			emoji_inst_ptr^ = instance.Instance_Data{}
 		}
 	}
 	rs := row * cols + cs
@@ -305,5 +334,15 @@ _dirty_expand_row :: proc(
 		size   = u64(count) * instance.INSTANCE_STRIDE,
 	}
 	range_count^ += 1
+
+	if r.backend != nil && rawptr(r.queue) != nil && rawptr(r.instances.emoji_buffer) != nil && r.instances.emoji_data != nil && rs + count <= len(r.instances.emoji_data) {
+		r.backend.write_buffer(
+			r.queue,
+			r.instances.emoji_buffer,
+			u64(rs) * instance.INSTANCE_STRIDE,
+			raw_data(r.instances.emoji_data[rs:]),
+			u64(count) * instance.INSTANCE_STRIDE,
+		)
+	}
 	return true
 }

@@ -115,9 +115,76 @@ is_zero_width_extend :: proc(r: rune) -> bool {
 	return _in_ranges(r, _EXTEND_RANGES[:])
 }
 
+// _EMOJI_BMP_RANGES lists inclusive [lo, hi] BMP rune ranges with Emoji_Presentation=Yes.
+_EMOJI_BMP_RANGES := [?][2]rune{
+	{0x231A, 0x231B},
+	{0x23E9, 0x23F3},
+	{0x23F8, 0x23FA},
+	{0x25AA, 0x25AB},
+	{0x25B6, 0x25B6},
+	{0x25C0, 0x25C0},
+	{0x25FB, 0x25FE},
+	{0x2614, 0x2615},
+	{0x2648, 0x2653},
+	{0x267F, 0x267F},
+	{0x2693, 0x2693},
+	{0x26A1, 0x26A1},
+	{0x26AA, 0x26AB},
+	{0x26BD, 0x26BE},
+	{0x26C4, 0x26C5},
+	{0x26CE, 0x26CE},
+	{0x26D4, 0x26D4},
+	{0x26EA, 0x26EA},
+	{0x26F2, 0x26F3},
+	{0x26F5, 0x26F5},
+	{0x26FA, 0x26FA},
+	{0x26FD, 0x26FD},
+	{0x2702, 0x2702},
+	{0x2705, 0x2705},
+	{0x2708, 0x2708},
+	{0x270A, 0x270D},
+	{0x270F, 0x270F},
+	{0x2712, 0x2712},
+	{0x2714, 0x2714},
+	{0x2716, 0x2716},
+	{0x271D, 0x271D},
+	{0x2721, 0x2721},
+	{0x2728, 0x2728},
+	{0x2733, 0x2734},
+	{0x2744, 0x2744},
+	{0x2747, 0x2747},
+	{0x274C, 0x274C},
+	{0x274E, 0x274E},
+	{0x2753, 0x2755},
+	{0x2757, 0x2757},
+	{0x2763, 0x2764},
+	{0x2795, 0x2797},
+	{0x27A1, 0x27A1},
+	{0x27B0, 0x27B0},
+	{0x27BF, 0x27BF},
+	{0x2934, 0x2935},
+	{0x2B05, 0x2B07},
+	{0x2B1B, 0x2B1C},
+	{0x2B50, 0x2B50},
+	{0x2B55, 0x2B55},
+}
+
 // is_emoji_codepoint reports whether r is a standard emoji presentation or pictograph codepoint.
 is_emoji_codepoint :: proc(r: rune) -> bool {
 	if (r >= 0x1F000 && r <= 0x1FAFF) || (r >= 0x1FB00 && r <= 0x1FBFF) {
+		return true
+	}
+	return _in_ranges(r, _EMOJI_BMP_RANGES[:])
+}
+
+// is_emoji_presentation is an alias for is_emoji_codepoint.
+is_emoji_presentation :: proc(r: rune) -> bool {
+	return is_emoji_codepoint(r)
+}
+
+// is_emoji_vs16_eligible reports whether r is a symbol/pictograph that becomes an emoji when followed by VS16 (U+FE0F).
+is_emoji_vs16_eligible :: proc(r: rune) -> bool {
+	if is_emoji_codepoint(r) {
 		return true
 	}
 	if (r >= 0x2600 && r <= 0x27BF) || (r >= 0x2300 && r <= 0x23FF) {
@@ -134,11 +201,6 @@ is_emoji_codepoint :: proc(r: rune) -> bool {
 		return true
 	}
 	return false
-}
-
-// is_emoji_presentation is an alias for is_emoji_codepoint.
-is_emoji_presentation :: proc(r: rune) -> bool {
-	return is_emoji_codepoint(r)
 }
 
 // wcwidth returns the terminal cell width of r: 0 (extend), 2 (wide), else 1.
