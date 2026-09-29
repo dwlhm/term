@@ -1046,6 +1046,9 @@ _app_route_pointer :: proc(a: ^App, pointer: input.Input_Pointer_Event) -> bool 
 			}
 			b.view_generation += 1
 			a.renderer.full_redraw_pending = true
+			if backend_is_threaded(b) {
+				b.front_view = b.view
+			}
 		}
 	case .Button_Down:
 		if pointer.button != 1 {

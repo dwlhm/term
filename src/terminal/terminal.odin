@@ -617,7 +617,7 @@ terminal_put_combining :: proc(t: ^Terminal, c: rune) {
 	if base_cell.width == 1 {
 		if c == 0x20E3 && ((base_rune >= '0' && base_rune <= '9') || base_rune == '#' || base_rune == '*') {
 			should_widen = true
-		} else if c == 0xFE0F && (is_emoji_codepoint(base_rune) || (base_rune >= '0' && base_rune <= '9') || base_rune == '#' || base_rune == '*') {
+		} else if c == 0xFE0F && (is_emoji_vs16_eligible(base_rune) || (base_rune >= '0' && base_rune <= '9') || base_rune == '#' || base_rune == '*') {
 			should_widen = true
 		}
 	}
@@ -1257,15 +1257,13 @@ terminal_leave_alt_screen :: proc(t: ^Terminal) {
 	}
 	t.grid, t.alt_grid = t.alt_grid, t.grid
 	t.is_alt_screen = false
-	terminal_restore_cursor(t)
-	t.scroll_top = 0
-	t.scroll_bottom = t.grid.row_count - 1
-
 	// If window was resized while in alt screen, reflow primary grid now on exit
 	if t.grid.row_count != t.alt_grid.row_count || t.grid.col_count != t.alt_grid.col_count {
 		terminal_resize(t, t.alt_grid.row_count, t.alt_grid.col_count)
-		return
 	}
+	terminal_restore_cursor(t)
+	t.scroll_top = 0
+	t.scroll_bottom = t.grid.row_count - 1
 
 	gens := make([]u32, t.grid.row_count)
 	for i in 0..<t.grid.row_count {

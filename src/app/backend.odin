@@ -137,6 +137,15 @@ Backend :: struct {
 	observer:             session_core.Terminal_Observer_Port,
 	session_mode:         session_core.Session_Mode,
 	session_cfg:          session_core.Session_Config,
+
+	// Scrollback cell-sync generation tracking.
+	// Tracks whether front_terminal.scrollback.cells was copied from the back
+	// buffer at least once for the current total_pushed / clear_generation pair.
+	// Separate from total_pushed on front_terminal because metadata and cell
+	// data are synced independently: metadata is always updated, cells only
+	// when viewing history AND a newer pushed/clear_gen is seen here.
+	front_scrollback_synced_pushed:    u64,
+	front_scrollback_synced_clear_gen: u64,
 }
 
 // backend_global holds the active Backend pointer for C-style callbacks
@@ -799,12 +808,22 @@ backend_apply_theme :: proc(b: ^Backend, theme: termgrid.Theme) {
 }
 
 // _terminal_sync_to_front synchronizes back buffer terminal state to front buffer terminal.
-_terminal_sync_to_front :: proc(dst: ^termgrid.Terminal, src: ^termgrid.Terminal, view: ^termgrid.Terminal_View = nil) {
+_terminal_sync_to_front :: proc(b: ^Backend) {
+	if b == nil {
+		return
+	}
+	dst := &b.front_terminal
+	src := &b.terminal
+	view := &b.view
 	if dst == nil || src == nil {
 		return
 	}
 	// 1. Grid resize if dimensions changed
-	if dst.grid.row_count != src.grid.row_count || dst.grid.col_count != src.grid.col_count {
+	dims_changed := dst.grid.row_count != src.grid.row_count || dst.grid.col_count != src.grid.col_count
+	alt_screen_switched := dst.is_alt_screen != src.is_alt_screen
+	origin_changed := dst.grid.origin != src.grid.origin
+
+	if dims_changed {
 		termgrid.terminal_resize(dst, src.grid.row_count, src.grid.col_count)
 	}
 
@@ -813,8 +832,20 @@ _terminal_sync_to_front :: proc(dst: ^termgrid.Terminal, src: ^termgrid.Terminal
 	dst.grid.mask = src.grid.mask
 	dst.grid.style_table = src.grid.style_table
 	if dst.grid.cells != nil && src.grid.cells != nil {
-		if dst.grid.row_count != src.grid.row_count || dst.grid.col_count != src.grid.col_count {
+		if dims_changed || alt_screen_switched || origin_changed {
 			copy(dst.grid.cells, src.grid.cells)
+			for i in 0..<src.grid.capacity {
+				if i < len(dst.grid.rows) && i < len(src.grid.rows) {
+					dst.grid.rows[i].generation = src.grid.rows[i].generation
+					dst.grid.rows[i].wrapped = src.grid.rows[i].wrapped
+					dst.grid.rows[i].is_prompt = src.grid.rows[i].is_prompt
+				}
+			}
+			for r in 0..<dst.damage.row_count {
+				if r < len(dst.damage.dirty_rows) {
+					dst.damage.dirty_rows[r].full = true
+				}
+			}
 		} else {
 			for r in 0..<src.damage.row_count {
 				if r < len(src.damage.dirty_rows) {
@@ -858,25 +889,37 @@ _terminal_sync_to_front :: proc(dst: ^termgrid.Terminal, src: ^termgrid.Terminal
 	dst.current_style = src.current_style
 
 	// 4. Sync scrollback lazily (0 bytes copied when viewing active screen)
+	// Resize if scrollback dimensions changed; reset synced markers so cells
+	// are re-copied on the next viewing_history frame.
 	if dst.scrollback.max_lines != src.scrollback.max_lines || dst.scrollback.col_count != src.scrollback.col_count {
 		termgrid.scrollback_destroy(&dst.scrollback, nil)
 		termgrid.scrollback_init(&dst.scrollback, src.scrollback.col_count, src.scrollback.max_lines)
+		b.front_scrollback_synced_pushed = 0
+		b.front_scrollback_synced_clear_gen = 0
 	}
-	
-	scrollback_changed := dst.scrollback.total_pushed != src.scrollback.total_pushed || dst.scrollback.clear_generation != src.scrollback.clear_generation || dst.scrollback.count != src.scrollback.count
+
+	// Always update metadata so head/count are correct for index calculations.
 	dst.scrollback.head = src.scrollback.head
 	dst.scrollback.count = src.scrollback.count
 	dst.scrollback.total_pushed = src.scrollback.total_pushed
 	dst.scrollback.clear_generation = src.scrollback.clear_generation
-	
+
+	// Copy cells only when the user is viewing history AND cells have not yet
+	// been copied for this pushed/clear_gen pair. Using dedicated synced markers
+	// (not dst.scrollback.total_pushed) avoids the race where metadata is
+	// updated every frame but cells are only needed while viewing history.
 	viewing_history := view != nil && view.scrollback_offset > 0
-	if scrollback_changed && viewing_history {
+	needs_cell_sync := b.front_scrollback_synced_pushed != src.scrollback.total_pushed ||
+	                   b.front_scrollback_synced_clear_gen != src.scrollback.clear_generation
+	if viewing_history && needs_cell_sync {
 		if dst.scrollback.cells != nil && src.scrollback.cells != nil {
 			copy(dst.scrollback.cells, src.scrollback.cells)
 		}
 		for i in 0..<src.scrollback.max_lines {
 			dst.scrollback.rows[i].wrapped = src.scrollback.rows[i].wrapped
 		}
+		b.front_scrollback_synced_pushed = src.scrollback.total_pushed
+		b.front_scrollback_synced_clear_gen = src.scrollback.clear_generation
 	}
 
 	// 5. Transfer damage from src to dst: merge dirty rows and copy scroll ops
@@ -959,7 +1002,7 @@ _backend_swap_buffers :: proc(b: ^Backend) {
 	sync.mutex_lock(&b.swap_mutex)
 	defer sync.mutex_unlock(&b.swap_mutex)
 
-	_terminal_sync_to_front(&b.front_terminal, &b.terminal, &b.view)
+	_terminal_sync_to_front(b)
 	b.front_view = b.view
 	b.front_cursor = b.cursor
 	b.front_focused = b.focused
@@ -1326,7 +1369,7 @@ backend_worker_proc :: proc(t: ^thread.Thread) {
 			}
 			if bytes_read > 0 {
 				if sync.mutex_try_lock(&b.swap_mutex) {
-					_terminal_sync_to_front(&b.front_terminal, &b.terminal, &b.view)
+					_terminal_sync_to_front(b)
 					b.front_view = b.view
 					b.front_cursor = b.cursor
 					b.front_focused = b.focused

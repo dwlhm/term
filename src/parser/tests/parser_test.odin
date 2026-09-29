@@ -552,3 +552,54 @@ test_osc_aborted_by_csi :: proc(t: ^testing.T) {
 	style := tg.style_table_get(&term.grid.style_table, cell.style)
 	testing.expect(t, style.fg == tg.theme_palette_256(term.grid.style_table.theme, 2), "Color must be green (SGR 32)")
 }
+
+@(test)
+test_csi_save_restore_cursor :: proc(t: ^testing.T) {
+	parser: p.Parser
+	p.parser_init(&parser)
+	term: tg.Terminal
+	tg.terminal_init(&term, 24, 80)
+	defer tg.terminal_destroy(&term)
+
+	// Move cursor to (5, 10): \x1b[6;11H
+	p.parse_chunk(&parser, &term, []u8{0x1B, '[', '6', ';', '1', '1', 'H'})
+	testing.expect_value(t, term.cursor.row, 5)
+	testing.expect_value(t, term.cursor.col, 10)
+
+	// Save cursor with CSI s: \x1b[s
+	p.parse_chunk(&parser, &term, []u8{0x1B, '[', 's'})
+
+	// Move cursor to (0, 0): \x1b[H
+	p.parse_chunk(&parser, &term, []u8{0x1B, '[', 'H'})
+	testing.expect_value(t, term.cursor.row, 0)
+	testing.expect_value(t, term.cursor.col, 0)
+
+	// Restore cursor with CSI u: \x1b[u
+	p.parse_chunk(&parser, &term, []u8{0x1B, '[', 'u'})
+	testing.expect_value(t, term.cursor.row, 5)
+	testing.expect_value(t, term.cursor.col, 10)
+}
+
+@(test)
+test_csi_cursor_next_previous_line :: proc(t: ^testing.T) {
+	parser: p.Parser
+	p.parser_init(&parser)
+	term: tg.Terminal
+	tg.terminal_init(&term, 24, 80)
+	defer tg.terminal_destroy(&term)
+
+	// Position at (2, 5)
+	p.parse_chunk(&parser, &term, []u8{0x1B, '[', '3', ';', '6', 'H'})
+	testing.expect_value(t, term.cursor.row, 2)
+	testing.expect_value(t, term.cursor.col, 5)
+
+	// CSI 2 E -> Next line 2 times, col reset to 0 -> (4, 0)
+	p.parse_chunk(&parser, &term, []u8{0x1B, '[', '2', 'E'})
+	testing.expect_value(t, term.cursor.row, 4)
+	testing.expect_value(t, term.cursor.col, 0)
+
+	// CSI 1 F -> Previous line 1 time, col reset to 0 -> (3, 0)
+	p.parse_chunk(&parser, &term, []u8{0x1B, '[', '1', 'F'})
+	testing.expect_value(t, term.cursor.row, 3)
+	testing.expect_value(t, term.cursor.col, 0)
+}

@@ -137,8 +137,17 @@ csi_dispatch :: proc(p: ^Parser, t: ^termgrid.Terminal, final_byte: u8) {
 		if p.intermediate == '$' {
 			_csi_execute_decrqm(t, params, p)
 		}
-	case 'u': // Kitty keyboard protocol (= set, ? query/set, > push, < pop)
-		_csi_execute_kitty_keyboard(t, params, p)
+	case 'u': // SCORC (bare ESC[u) or Kitty keyboard protocol
+		// Plain ESC[u with no intermediate, no leader, and no meaningful params
+		// is SCORC - Restore Cursor Position (SCO/ANSI extension).
+		// Kitty uses intermediate '=' '?' '>' '<' or specific param values.
+		is_scorc := p.intermediate == 0 && p.leader == 0 &&
+		            (params.count == 0 || (params.count == 1 && params.values[0] == 0))
+		if is_scorc {
+			termgrid.terminal_restore_cursor(t)
+		} else {
+			_csi_execute_kitty_keyboard(t, params, p)
+		}
 	case 'h': // SM - Set Mode (private: DECTCEM show, alt screen enter, bracketed paste, focus reporting)
 		if private {
 			_csi_execute_dectcem(t, params, true)
@@ -150,6 +159,20 @@ csi_dispatch :: proc(p: ^Parser, t: ^termgrid.Terminal, final_byte: u8) {
 			_csi_execute_dectcem(t, params, false)
 			_csi_execute_alt_screen(t, params, false)
 			_csi_execute_private_mode(t, params, false)
+		}
+	case 'E': // CNL - Cursor Next Line: cursor down N rows, column reset to 0
+		n := int(params.values[0]) if params.count > 0 && params.values[0] > 0 else 1
+		termgrid.terminal_cursor_down(t, n)
+		t.cursor.col = 0
+		t.cursor.pending_wrap = false
+	case 'F': // CPL - Cursor Previous Line: cursor up N rows, column reset to 0
+		n := int(params.values[0]) if params.count > 0 && params.values[0] > 0 else 1
+		termgrid.terminal_cursor_up(t, n)
+		t.cursor.col = 0
+		t.cursor.pending_wrap = false
+	case 's': // SCOSC - Save Cursor Position (no intermediate, no leader)
+		if p.intermediate == 0 && p.leader == 0 {
+			termgrid.terminal_save_cursor(t)
 		}
 	}
 	
