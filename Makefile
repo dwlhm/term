@@ -2,7 +2,8 @@ ODIN ?= odin
 OUT_DIR ?= bin
 MAIN_SRC ?= src/app
 TARGET ?= $(OUT_DIR)/term
-COMMON_FLAGS ?= -strict-style -extra-linker-flags:"-L/opt/homebrew/lib -L/usr/local/lib -framework Metal -framework MetalKit -framework QuartzCore -framework Cocoa"
+MIN_OS_VERSION ?= 26.0
+COMMON_FLAGS ?= -minimum-os-version:$(MIN_OS_VERSION) -strict-style -extra-linker-flags:"-L/opt/homebrew/lib -L/usr/local/lib -framework Metal -framework MetalKit -framework QuartzCore -framework Cocoa"
 CHECK_FLAGS ?= -strict-style
 TEST_FLAGS ?= -define:ODIN_TEST_THREADS=1
 DEBUG_FLAGS ?= -debug
