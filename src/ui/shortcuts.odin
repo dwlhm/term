@@ -29,9 +29,9 @@ Shortcut_Action :: enum u8 {
 ui_shortcut_label :: proc(a: Shortcut_Action) -> string {
 	switch a {
 	case .New_Tab:        return "\u2318T"
-	case .Close_Tab:      return "\u2318W"
-	case .Close_Others:   return "\u2325\u2318W"
-	case .Close_To_Right: return "\u2325\u21E7\u2318W"
+	case .Close_Tab:      return "\u2318D"
+	case .Close_Others:   return "\u2325\u2318D"
+	case .Close_To_Right: return "\u2325\u21E7\u2318D"
 	case .Rename_Tab:     return "\u2318R"
 	case .Next_Tab:       return "\u2303\u21E5"
 	case .Prev_Tab:       return "\u2303\u21E7\u21E5"

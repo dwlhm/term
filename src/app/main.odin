@@ -1323,7 +1323,7 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 			}
 
 			if ev.gui {
-				if ev.alt && (ev.rune == 'w' || ev.rune == 'W') {
+				if ev.alt && (ev.rune == 'd' || ev.rune == 'D') {
 					if ev.shift {
 						_ = session_close_to_right(&a.session_mgr, a.session_mgr.active_idx)
 					} else {
@@ -1363,7 +1363,7 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 					}
 					a.renderer.full_redraw_pending = true
 					continue
-				} else if ev.rune == 'w' || ev.rune == 'W' {
+				} else if ev.rune == 'd' || ev.rune == 'D' {
 					_app_request_close_tab(a, a.session_mgr.active_idx)
 					continue
 				} else if ev.shift && (ev.rune == '[' || ev.rune == '{') {
@@ -1589,10 +1589,10 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 					if ev.drop.kind == .File {
 						// Shell-quote path: wrap in single quotes, escape embedded single quotes
 						quoted := _app_shell_quote_path(ev.drop.text)
-						_ = pty.pty_write(&active_b.pty, transmute([]u8)quoted)
+						_ = backend_paste(active_b, quoted)
 						delete(quoted)
 					} else {
-						_ = pty.pty_write(&active_b.pty, transmute([]u8)ev.drop.text)
+						_ = backend_paste(active_b, ev.drop.text)
 					}
 					delete(ev.drop.text)
 				} else if len(ev.drop.text) > 0 {
