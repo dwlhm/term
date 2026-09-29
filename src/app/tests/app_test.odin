@@ -909,4 +909,83 @@ test_backend_accumulate_wheel :: proc(t: ^testing.T) {
 	testing.expect_value(t, app.backend_accumulate_wheel(b, ev_half), 1)
 }
 
+@(test)
+test_app_shell_quote_path :: proc(t: ^testing.T) {
+	p0 := app._app_shell_quote_path("")
+	testing.expect_value(t, p0, "")
+	delete(p0)
 
+	p1 := app._app_shell_quote_path("file.odin")
+	testing.expect_value(t, p1, "'file.odin'")
+	delete(p1)
+
+	p2 := app._app_shell_quote_path("my file.odin")
+	testing.expect_value(t, p2, "'my file.odin'")
+	delete(p2)
+
+	p3 := app._app_shell_quote_path("it's a path")
+	testing.expect_value(t, p3, "'it'\\''s a path'")
+	delete(p3)
+}
+
+@(test)
+test_app_drop_fx_state_flow :: proc(t: ^testing.T) {
+	a: app.App
+	// 1. Drop Begin sets hovering and coordinates
+	ev_begin := input.Input_Event{
+		event_type = .Drop,
+		drop = input.Input_Drop_Event{
+			kind = .Begin,
+			x = 100,
+			y = 150,
+		},
+	}
+	_, _ = app.app_dispatch_input_events(&a, {ev_begin})
+	testing.expect(t, a.drop_fx.hovering, "drop begin must start hovering")
+	testing.expect_value(t, a.drop_fx.hover_x, f32(100))
+	testing.expect_value(t, a.drop_fx.hover_y, f32(150))
+
+	// 2. Drop Position updates hover coordinates
+	ev_pos := input.Input_Event{
+		event_type = .Drop,
+		drop = input.Input_Drop_Event{
+			kind = .Position,
+			x = 200,
+			y = 250,
+		},
+	}
+	_, _ = app.app_dispatch_input_events(&a, {ev_pos})
+	testing.expect(t, a.drop_fx.hovering, "drop position must maintain hovering")
+	testing.expect_value(t, a.drop_fx.hover_x, f32(200))
+	testing.expect_value(t, a.drop_fx.hover_y, f32(250))
+
+	// 3. Drop Complete ends hovering
+	ev_complete := input.Input_Event{
+		event_type = .Drop,
+		drop = input.Input_Drop_Event{
+			kind = .Complete,
+		},
+	}
+	_, _ = app.app_dispatch_input_events(&a, {ev_complete})
+	testing.expect(t, !a.drop_fx.hovering, "drop complete must stop hovering")
+
+	// 4. Dropping a file spawns splash at drop position
+	ev_file := input.Input_Event{
+		event_type = .Drop,
+		drop = input.Input_Drop_Event{
+			kind = .File,
+			x = 300,
+			y = 350,
+		},
+	}
+	_, _ = app.app_dispatch_input_events(&a, {ev_file})
+	testing.expect(t, !a.drop_fx.hovering, "drop file must ensure hovering is stopped")
+	splash_found := false
+	for &sp in a.drop_fx.splashes {
+		if sp.active && sp.x == 300 && sp.y == 350 {
+			splash_found = true
+			break
+		}
+	}
+	testing.expect(t, splash_found, "drop file must spawn active splash at release position")
+}

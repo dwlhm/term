@@ -328,6 +328,7 @@ import config "../config"
 import i18n "../i18n"
 import inter "../interaction"
 import ui "../ui"
+import instance "../render/instance"
 
 // App composes Multi-Session Manager, UI Chrome, and Frontend subsystems.
 App :: struct {
@@ -346,6 +347,7 @@ App :: struct {
 	hud_active:          bool,
 	confirm_dialog:      platform_dialogs.Confirm_Dialog_State,
 	drag_region:         win.Drag_Region,
+	drop_fx:             Drop_Fx_State,
 	pty_monitor_thread:  ^odin_thread.Thread,
 	pty_monitor_running: b32,
 	pty_event_pending:   b32,
@@ -1122,6 +1124,28 @@ _app_paste_clipboard :: proc(a: ^App) -> bool {
 	return backend_paste(b, text)
 }
 
+// _app_shell_quote_path wraps a file path in single quotes for shell safety.
+// Embedded single quotes are escaped as '\''.
+// Caller must delete the returned string.
+_app_shell_quote_path :: proc(path: string) -> string {
+	if len(path) == 0 {
+		return strings.clone("")
+	}
+	b: strings.Builder
+	strings.builder_init(&b)
+	defer strings.builder_destroy(&b)
+	strings.write_byte(&b, '\'')
+	for ch in path {
+		if ch == '\'' {
+			strings.write_string(&b, "'\\''")
+		} else {
+			strings.write_rune(&b, ch)
+		}
+	}
+	strings.write_byte(&b, '\'')
+	return strings.clone(strings.to_string(b))
+}
+
 _app_request_zoom :: proc(a: ^App, direction: int) -> bool {
 	if a == nil {
 		return false
@@ -1200,6 +1224,10 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 		active_b = app_active_backend(a)
 		if active_b == nil || a.should_quit do break
 
+		if ev.event_type == .Drop {
+			drop_fx_handle(&a.drop_fx, ev.drop)
+		}
+
 		// (0) Confirm dialog modal gate: while visible it owns every event so
 		// nothing leaks to the terminal, the menu, or the hotkey router.
 		if a.confirm_dialog.visible {
@@ -1218,6 +1246,11 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 				_app_apply_confirm_action(a, c_action)
 				continue
 			case .Local:
+				continue
+			case .Drop:
+				if len(ev.drop.text) > 0 {
+					delete(ev.drop.text)
+				}
 				continue
 			}
 		}
@@ -1549,6 +1582,22 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 			case .Reload_Config:
 				_ = app_reload_config(a)
 			case .None:
+			}
+		case .Drop:
+			if ev.drop.kind == .File || ev.drop.kind == .Text {
+				if len(ev.drop.text) > 0 && active_b.pty.state != .Exited {
+					if ev.drop.kind == .File {
+						// Shell-quote path: wrap in single quotes, escape embedded single quotes
+						quoted := _app_shell_quote_path(ev.drop.text)
+						_ = pty.pty_write(&active_b.pty, transmute([]u8)quoted)
+						delete(quoted)
+					} else {
+						_ = pty.pty_write(&active_b.pty, transmute([]u8)ev.drop.text)
+					}
+					delete(ev.drop.text)
+				} else if len(ev.drop.text) > 0 {
+					delete(ev.drop.text)
+				}
 			}
 		case .Pointer:
 			// Refresh logical rectangles before hit testing, including resize events.
@@ -2133,6 +2182,20 @@ _app_stage_ui :: proc(a: ^App) {
 		&a.confirm_dialog,
 		&a.tab_overflow,
 	)
+
+	// One shared logical-space surface; the shader applies the Retina scale once.
+	waves: [instance.WATER_MAX_WAVES]instance.Water_Wave
+	count := 0
+	for sp in a.drop_fx.splashes {
+		if sp.active {
+			waves[count] = instance.Water_Wave{
+				origin_age_strength = {sp.x, sp.y, sp.time, sp.strength},
+				lifetime_params = {sp.max_t, 0, 0, 0},
+			}
+			count += 1
+		}
+	}
+	ui.ui_stage_water_surface(&a.renderer, a.renderer.screen_w, a.renderer.screen_h, frontend_content_scale(&a.frontend), waves[:count], ui.Color{0.53, 0.61, 0.65, 0.68})
 }
 
 _e2e_resize_frame: int = 0
@@ -2292,8 +2355,20 @@ app_frame :: proc(a: ^App) -> bool {
 		_app_mark_cursor_dirty(a, cur.row, cur.col)
 	}
 
+	dt_ms := _app_frame_dt_ms()
+	dt_sec := dt_ms / 1000.0
+
+	drop_fx_anim_active, drop_fx_changed := drop_fx_tick(&a.drop_fx, dt_sec)
+	if drop_fx_changed {
+		a.renderer.full_redraw_pending = true
+	}
+
 	anim_active := a.tab_bar.anim.anim_active
-	if platform_tabs.tabs_anim_update(&a.tab_bar, a.session_mgr.active_idx, _app_frame_dt_ms(), a.ui_theme.motion.hover_ms, a.ui_theme.motion.active_ms) {
+	if platform_tabs.tabs_anim_update(&a.tab_bar, a.session_mgr.active_idx, dt_ms, a.ui_theme.motion.hover_ms, a.ui_theme.motion.active_ms) {
+		a.renderer.full_redraw_pending = true
+		anim_active = true
+	}
+	if drop_fx_anim_active {
 		a.renderer.full_redraw_pending = true
 		anim_active = true
 	}
@@ -2346,7 +2421,8 @@ main :: proc() {
 			break
 		}
 
-		anim_active := app.tab_bar.anim.anim_active
+		drop_fx_anim_active := drop_fx_active(&app.drop_fx)
+		anim_active := app.tab_bar.anim.anim_active || drop_fx_anim_active
 		ev: sdl3.Event
 		has_ev := false
 		if anim_active || profile_scenario_enabled() {

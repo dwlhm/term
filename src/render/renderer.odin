@@ -1041,6 +1041,7 @@ _draw_instance_buffer :: proc(
 	if r == nil || frame == nil || frame.state != .Acquired || rawptr(frame.encoder) == nil {
 		return false
 	}
+	instance.instance_renderer_upload_uniforms(&r.instances)
 	pass := r.backend.begin_render_pass(frame.encoder, frame.view, _renderer_theme_clear_color(r.theme, visual_mode), .Clear)
 	if rawptr(pass) == nil { return false }
 	frame.pass = pass

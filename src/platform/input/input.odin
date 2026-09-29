@@ -20,6 +20,7 @@ Input_Event_Type :: enum u8 {
 	Key,
 	Pointer,
 	Local,
+	Drop,
 }
 
 // Input_Pointer_Kind identifies one terminal-local pointer transition.
@@ -38,6 +39,24 @@ Input_Local_Action :: enum u8 {
 	Zoom_In,
 	Zoom_Out,
 	Reload_Config,
+}
+
+// Input_Drop_Kind distinguishes file path drops, text drops, and hover/completion states.
+Input_Drop_Kind :: enum u8 {
+	File,
+	Text,
+	Position,
+	Begin,
+	Complete,
+}
+
+// Input_Drop_Event carries drag-and-drop data from the OS.
+// text holds a heap-allocated copy of the dropped content; callers must delete it for File/Text.
+Input_Drop_Event :: struct {
+	kind: Input_Drop_Kind,
+	text: string, // heap-allocated; caller must delete after use for File/Text
+	x:    f32,
+	y:    f32,
 }
 
 // Input_Pointer_Event carries SDL mouse data without terminal mouse-reporting
@@ -94,6 +113,7 @@ Input_Event :: struct {
 	is_release: bool,
 	pointer:    Input_Pointer_Event,
 	action:     Input_Local_Action,
+	drop:       Input_Drop_Event,
 }
 
 // _MOD_SHIFT/_MOD_ALT/_MOD_CTRL are the xterm modifier bit weights.

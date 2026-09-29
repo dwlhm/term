@@ -1,5 +1,6 @@
 package input
 
+import "core:strings"
 import "core:unicode/utf8"
 import "vendor:sdl3"
 
@@ -209,6 +210,75 @@ input_translate_sdl :: proc(ev: sdl3.Event, out: []Input_Event) -> (n: int, quit
 				wheel_flipped = ev.wheel.direction == .FLIPPED,
 				shift = shift,
 				gui = gui,
+			},
+		}
+		return 1, false, false
+	case .DROP_BEGIN:
+		if len(out) == 0 do return 0, false, false
+		out[0] = Input_Event{
+			event_type = .Drop,
+			drop = Input_Drop_Event{
+				kind = .Begin,
+				x = ev.drop.x,
+				y = ev.drop.y,
+			},
+		}
+		return 1, false, false
+	case .DROP_POSITION:
+		if len(out) == 0 do return 0, false, false
+		out[0] = Input_Event{
+			event_type = .Drop,
+			drop = Input_Drop_Event{
+				kind = .Position,
+				x = ev.drop.x,
+				y = ev.drop.y,
+			},
+		}
+		return 1, false, false
+	case .DROP_COMPLETE:
+		if len(out) == 0 do return 0, false, false
+		out[0] = Input_Event{
+			event_type = .Drop,
+			drop = Input_Drop_Event{
+				kind = .Complete,
+				x = ev.drop.x,
+				y = ev.drop.y,
+			},
+		}
+		return 1, false, false
+	case .DROP_FILE:
+		if len(out) == 0 {
+			return 0, false, false
+		}
+		if ev.drop.data == nil {
+			return 0, false, false
+		}
+		text := strings.clone(string(ev.drop.data))
+		out[0] = Input_Event{
+			event_type = .Drop,
+			drop = Input_Drop_Event{
+				kind = .File,
+				text = text,
+				x = ev.drop.x,
+				y = ev.drop.y,
+			},
+		}
+		return 1, false, false
+	case .DROP_TEXT:
+		if len(out) == 0 {
+			return 0, false, false
+		}
+		if ev.drop.data == nil {
+			return 0, false, false
+		}
+		text := strings.clone(string(ev.drop.data))
+		out[0] = Input_Event{
+			event_type = .Drop,
+			drop = Input_Drop_Event{
+				kind = .Text,
+				text = text,
+				x = ev.drop.x,
+				y = ev.drop.y,
 			},
 		}
 		return 1, false, false

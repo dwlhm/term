@@ -734,9 +734,9 @@ test_tab_overflow_dropdown_pointer_and_autoclose :: proc(t: ^testing.T) {
 @test
 test_shortcut_registry_labels :: proc(t: ^testing.T) {
 	testing.expect_value(t, ui.ui_shortcut_label(.New_Tab), "\u2318T")
-	testing.expect_value(t, ui.ui_shortcut_label(.Close_Tab), "\u2318W")
-	testing.expect_value(t, ui.ui_shortcut_label(.Close_Others), "\u2325\u2318W")
-	testing.expect_value(t, ui.ui_shortcut_label(.Close_To_Right), "\u2325\u21E7\u2318W")
+	testing.expect_value(t, ui.ui_shortcut_label(.Close_Tab), "\u2318D")
+	testing.expect_value(t, ui.ui_shortcut_label(.Close_Others), "\u2325\u2318D")
+	testing.expect_value(t, ui.ui_shortcut_label(.Close_To_Right), "\u2325\u21E7\u2318D")
 	testing.expect_value(t, ui.ui_shortcut_label(.Overflow), "\u21E7\u2318\\")
 	testing.expect_value(t, ui.ui_shortcut_label(.Window_Zoom), "\u2303\u2318Z")
 	testing.expect_value(t, ui.ui_shortcut_label(.Cancel), "esc")
@@ -776,4 +776,135 @@ test_ui_render_overflow_hints_stage :: proc(t: ^testing.T) {
 	ui.tab_overflow_refresh(&overflow, tabs[:], &state, 800, 600)
 	shown := ui.ui_render_stage(r, &theme, i18n.i18n_get(), &state, tabs[:], rects[:], nil, 800, 600, 1, "", nil, nil, nil, nil, &overflow)
 	testing.expect(t, shown > hidden, "visible overflow dropdown must stage extra rows and shortcut badges")
+}
+
+@test
+test_ui_draw_water_ring_and_alpha :: proc(t: ^testing.T) {
+	r := new(render.Renderer)
+	defer free(r)
+	r.ui_bg_count = 0
+
+	col := ui.Color{0.2, 0.4, 0.8, 0.5}
+	ui.ui_draw_water_ring(r, 100, 100, 30, 2, col)
+	testing.expect(t, r.ui_bg_count > 0, "water ring must stage background quads")
+	// Verify that emit_bg preserved the alpha channel!
+	testing.expect_value(t, r.ui_bg_data[0].a, f32(0.5))
+}
+
+@test
+test_ui_draw_hover_ripple :: proc(t: ^testing.T) {
+	r := new(render.Renderer)
+	defer free(r)
+	r.ui_bg_count = 0
+
+	col := ui.Color{0.35, 0.75, 1.0, 0.8}
+	ui.ui_draw_hover_ripple(r, 150, 150, 0.5, col)
+	testing.expect(t, r.ui_bg_count >= 32, "hover ripple must stage multiple concentric rings")
+}
+
+@test
+test_ui_draw_splash_ripple :: proc(t: ^testing.T) {
+	r := new(render.Renderer)
+	defer free(r)
+	r.ui_bg_count = 0
+
+	col := ui.Color{0.35, 0.75, 1.0, 0.8}
+	ui.ui_draw_splash_ripple(r, 200, 200, 0.3, 0.8, col)
+	testing.expect(t, r.ui_bg_count >= 32, "splash ripple must stage expanding waves")
+}
+
+@test
+test_ui_stage_water_3d_hover :: proc(t: ^testing.T) {
+	r := new(render.Renderer)
+	defer free(r)
+	r.ui_bg_count = 0
+
+	col := ui.Color{0.35, 0.75, 1.0, 0.85}
+	ui.ui_stage_water_3d_hover(r, 800, 600, 150, 150, 0.5, col)
+	testing.expect_value(t, r.ui_bg_count, 1)
+	testing.expect_value(t, r.ui_bg_data[0].cw, f32(800))
+	testing.expect_value(t, r.ui_bg_data[0].ch, f32(600))
+	testing.expect_value(t, r.ui_bg_data[0].u0, f32(150)) // cx
+	testing.expect_value(t, r.ui_bg_data[0].v0, f32(150)) // cy
+	testing.expect_value(t, r.ui_bg_data[0].u1, f32(0.5)) // hover_time
+	testing.expect_value(t, r.ui_bg_data[0].v1, f32(-1.0)) // reserved hover effect marker
+}
+
+@test
+test_ui_stage_water_3d_splash :: proc(t: ^testing.T) {
+	r := new(render.Renderer)
+	defer free(r)
+	r.ui_bg_count = 0
+
+	col := ui.Color{0.35, 0.75, 1.0, 0.85}
+	ui.ui_stage_water_3d_splash(r, 1024, 768, 200, 300, 0.4, 1.6, col)
+	testing.expect_value(t, r.ui_bg_count, 1)
+	testing.expect_value(t, r.ui_bg_data[0].cw, f32(1024))
+	testing.expect_value(t, r.ui_bg_data[0].ch, f32(768))
+	testing.expect_value(t, r.ui_bg_data[0].u0, f32(200)) // cx
+	testing.expect_value(t, r.ui_bg_data[0].v0, f32(300)) // cy
+	testing.expect_value(t, r.ui_bg_data[0].u1, f32(0.4 / 1.6)) // normalized progress
+	testing.expect_value(t, r.ui_bg_data[0].v1, f32(-2.0)) // reserved splash effect marker
+}
+
+
+@test
+test_ui_stage_water_3d_splash_duration_boundaries :: proc(t: ^testing.T) {
+	r := new(render.Renderer)
+	defer free(r)
+	col := ui.Color{0.35, 0.75, 1.0, 0.85}
+	duration: f32 = 2.4
+	progress: f32 = 0.25
+	ui.ui_stage_water_3d_splash(r, 800, 600, 100, 150, duration * progress, duration, col)
+	testing.expect_value(t, r.ui_bg_count, 1)
+	testing.expect_value(t, r.ui_bg_data[0].u1, progress)
+
+	r.ui_bg_count = 0
+	ui.ui_stage_water_3d_splash(r, 800, 600, 100, 150, 0, duration, col)
+	testing.expect_value(t, r.ui_bg_count, 1)
+	testing.expect_value(t, r.ui_bg_data[0].u1, f32(0))
+
+	r.ui_bg_count = 0
+	ui.ui_stage_water_3d_splash(r, 800, 600, 100, 150, duration, duration, col)
+	ui.ui_stage_water_3d_splash(r, 800, 600, 100, 150, duration * 2, duration, col)
+	ui.ui_stage_water_3d_splash(r, 800, 600, 100, 150, 0, 0, col)
+	ui.ui_stage_water_3d_splash(r, 800, 600, 100, 150, 0, -duration, col)
+	ui.ui_stage_water_3d_splash(r, 800, 600, 100, 150, -duration, duration, col)
+	testing.expect_value(t, r.ui_bg_count, 0)
+}
+
+@test
+test_water_surface_filters_bounds_and_resets :: proc(t: ^testing.T) {
+	r := new(render.Renderer)
+	defer free(r)
+	col := ui.Color{0.5, 0.6, 0.65, 0.7}
+	waves: [instance.WATER_MAX_WAVES + 1]instance.Water_Wave
+	for &w in waves {
+		w = instance.Water_Wave{origin_age_strength = {100, 150, 0.3, 0.4}, lifetime_params = {2, 0, 0, 0}}
+	}
+	ui.ui_stage_water_surface(r, 800, 600, 2, waves[:], col)
+	testing.expect_value(t, r.ui_bg_count, 1)
+	testing.expect_value(t, r.ui_bg_data[0].v1, f32(-3))
+	testing.expect_value(t, r.instances.uniform_data.water_meta[0], f32(instance.WATER_MAX_WAVES))
+	testing.expect_value(t, r.instances.uniform_data.water_meta[1], f32(2))
+	testing.expect_value(t, r.instances.uniform_data.waves[0].origin_age_strength[0], f32(100))
+
+	r.ui_bg_count = 0
+	bad := transmute(f32)u32(0x7fc00000)
+	waves[0].origin_age_strength[0] = bad
+	waves[1].origin_age_strength[2] = waves[1].lifetime_params[0]
+	ui.ui_stage_water_surface(r, 800, 600, 2, waves[:3], col)
+	testing.expect_value(t, r.instances.uniform_data.water_meta[0], f32(1))
+	testing.expect_value(t, r.instances.uniform_data.waves[1].lifetime_params[0], f32(0))
+
+	r.ui_bg_count = 0
+	ui.ui_stage_water_surface(r, 800, 600, 2, nil, col)
+	testing.expect_value(t, r.ui_bg_count, 0)
+	testing.expect_value(t, r.instances.uniform_data.water_meta[0], f32(0))
+	ui.ui_stage_water_surface(r, 800, 600, bad, waves[2:], col)
+	testing.expect_value(t, r.ui_bg_count, 0)
+	r.ui_bg_count = render.RENDER_MAX_UI_INSTANCES
+	ui.ui_stage_water_surface(r, 800, 600, 2, waves[2:], col)
+	testing.expect_value(t, r.ui_bg_count, render.RENDER_MAX_UI_INSTANCES)
+	testing.expect_value(t, r.instances.uniform_data.water_meta[0], f32(0))
 }

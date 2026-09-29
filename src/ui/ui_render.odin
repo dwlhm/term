@@ -1,6 +1,7 @@
 package ui
 
 import "core:fmt"
+import "core:math"
 import render "../render"
 import instance "../render/instance"
 import i18n "../i18n"
@@ -9,14 +10,146 @@ UI_MAX_INSTANCES :: 512
 UI_CHROME_CELL_WIDTH: f32 : 8
 UI_CHROME_CELL_HEIGHT: f32 : 16
 
+UI_Render :: render.Renderer
+Color :: [4]f32
+
 emit_bg :: proc(r: ^render.Renderer, x, y, w, h: f32, col: [4]f32) {
 	if w > 0 && h > 0 && r.ui_bg_count < render.RENDER_MAX_UI_INSTANCES {
 		r.ui_bg_data[r.ui_bg_count] = instance.Instance_Data{
 			x = x, y = y, cw = w, ch = h,
 			u0 = 0, v0 = 0, u1 = 0, v1 = 0,
-			r = col.r, g = col.g, b = col.b, a = 1.0,
+			r = col.r, g = col.g, b = col.b, a = col.a,
 		}
 		r.ui_bg_count += 1
+	}
+}
+
+emit_bg_params :: proc(r: ^render.Renderer, x, y, w, h: f32, col: [4]f32, params: [4]f32) {
+	if w > 0 && h > 0 && r.ui_bg_count < render.RENDER_MAX_UI_INSTANCES {
+		r.ui_bg_data[r.ui_bg_count] = instance.Instance_Data{
+			x = x, y = y, cw = w, ch = h,
+			u0 = params[0], v0 = params[1], u1 = params[2], v1 = params[3],
+			r = col.r, g = col.g, b = col.b, a = col.a,
+		}
+		r.ui_bg_count += 1
+	}
+}
+
+// One shared surface consumes immutable logical-space wave origins.
+ui_stage_water_surface :: proc(r: ^UI_Render, screen_w, screen_h, scale: f32, waves: []instance.Water_Wave, base_col: Color) {
+	if r == nil do return
+	r.instances.uniform_data.water_meta = {}
+	r.instances.uniform_data.waves = {}
+	for value in ([4]f32{screen_w, screen_h, scale, base_col.a}) {
+		if math.is_nan(value) || math.is_inf(value) || value <= 0 do return
+	}
+	for value in base_col {
+		if math.is_nan(value) || math.is_inf(value) do return
+	}
+	if r.ui_bg_count >= render.RENDER_MAX_UI_INSTANCES do return
+	count := 0
+	for wave in waves {
+		valid := true
+		for value in wave.origin_age_strength {
+			if math.is_nan(value) || math.is_inf(value) { valid = false }
+		}
+		for value in wave.lifetime_params {
+			if math.is_nan(value) || math.is_inf(value) { valid = false }
+		}
+		if !valid || wave.origin_age_strength[2] < 0 || wave.lifetime_params[0] <= 0 || wave.origin_age_strength[2] >= wave.lifetime_params[0] || wave.origin_age_strength[3] <= 0 do continue
+		r.instances.uniform_data.waves[count] = wave
+		count += 1
+		if count == instance.WATER_MAX_WAVES do break
+	}
+	if count == 0 do return
+	r.instances.uniform_data.water_meta = {f32(count), scale, 0, 0}
+	emit_bg_params(r, 0, 0, screen_w, screen_h, base_col, {0, 0, 0, -3})
+}
+
+// ui_stage_water_3d_hover emits a full-window quad for the 3D calm water breathing effect.
+ui_stage_water_3d_hover :: proc(r: ^UI_Render, screen_w, screen_h, cx, cy, hover_time: f32, base_col: Color) {
+	if r == nil || screen_w <= 0 || screen_h <= 0 || base_col.a <= 0.005 do return
+	params := [4]f32{cx, cy, hover_time, -1.0}
+	emit_bg_params(r, 0, 0, screen_w, screen_h, base_col, params)
+}
+
+// ui_stage_water_3d_splash emits a full-window quad for the 3D water impact wave propagating across the whole window.
+ui_stage_water_3d_splash :: proc(r: ^UI_Render, screen_w, screen_h, cx, cy, time, max_t: f32, base_col: Color) {
+	if r == nil || screen_w <= 0 || screen_h <= 0 || max_t <= 0 || time < 0 || time >= max_t || base_col.a <= 0.005 do return
+	params := [4]f32{cx, cy, time / max_t, -2.0}
+	emit_bg_params(r, 0, 0, screen_w, screen_h, base_col, params)
+}
+
+// ui_draw_water_ring draws a circular ring with given center (cx, cy), radius, thickness, and color.
+ui_draw_water_ring :: proc(r: ^UI_Render, cx, cy, radius, thickness: f32, col: Color) {
+	if r == nil || radius < 1 || thickness <= 0 || col.a <= 0.005 do return
+	// Scale number of segments with radius to keep ring smooth and continuous
+	segments := int(math.clamp(radius * 1.5, 32, 72))
+	step := (2.0 * math.PI) / f32(segments)
+	dot_size := math.max(thickness, (2.0 * math.PI * radius / f32(segments)) * 1.2)
+	for i in 0..<segments {
+		ang := f32(i) * step
+		x := cx + radius * math.cos(ang) - dot_size * 0.5
+		y := cy + radius * math.sin(ang) - dot_size * 0.5
+		emit_bg(r, x, y, dot_size, dot_size, col)
+	}
+}
+
+// ui_draw_ripple_fx draws concentric circular water rings.
+ui_draw_ripple_fx :: proc(
+	r: ^UI_Render,
+	cx, cy: f32,
+	radius: f32,
+	ring_count: int,
+	spacing: f32,
+	base_color: Color,
+) {
+	if r == nil || ring_count <= 0 || base_color.a <= 0.005 do return
+	for i in 0..<ring_count {
+		r_i := radius - f32(i) * spacing
+		if r_i <= 0 do continue
+		fade := 1.0 - (f32(i) / f32(ring_count)) * 0.5
+		col := Color{base_color.r, base_color.g, base_color.b, base_color.a * fade}
+		ui_draw_water_ring(r, cx, cy, r_i, 1.5, col)
+	}
+}
+
+// ui_draw_hover_ripple renders subtle, calm breathing concentric water ripples centered at (cx, cy).
+ui_draw_hover_ripple :: proc(r: ^UI_Render, cx, cy, hover_time: f32, base_col: Color) {
+	if r == nil || base_col.a <= 0.005 do return
+	// Calm breathing water effect: 2-3 gentle concentric rings pulsating softly around the cursor.
+	// Radius breathing between ~20px and ~50px using sine wave over hover_time.
+	// Alpha gentle (e.g. 0.25 to 0.45).
+	for i in 0..<3 {
+		pulse := 0.5 + 0.5 * math.sin(hover_time * 2.5 - f32(i) * 1.0)
+		radius := 18.0 + f32(i) * 14.0 + pulse * 8.0
+		alpha := base_col.a * (0.25 + 0.2 * (0.5 + 0.5 * math.cos(hover_time * 2.5 - f32(i) * 1.0)))
+		ring_col := Color{base_col.r, base_col.g, base_col.b, alpha}
+		ui_draw_water_ring(r, cx, cy, radius, 1.8, ring_col)
+	}
+	// Soft glowing center point
+	emit_bg(r, cx - 2, cy - 2, 4, 4, Color{base_col.r, base_col.g, base_col.b, base_col.a * 0.35})
+}
+
+// ui_draw_splash_ripple renders an expanding shockwave ripple effect emanating from (cx, cy).
+ui_draw_splash_ripple :: proc(r: ^UI_Render, cx, cy, time, max_t: f32, base_col: Color) {
+	if r == nil || time >= max_t || max_t <= 0 || base_col.a <= 0.005 do return
+	// Expands rapidly outward from 0 to ~200px with ease-out curve.
+	// Features 2-3 concentric waves spreading out, with alpha fading to 0 as time reaches max_t.
+	MAX_RADIUS: f32 : 200.0
+	for wave in 0..<3 {
+		delay := f32(wave) * 0.12
+		if time < delay do continue
+		wave_t := (time - delay) / (max_t - delay)
+		if wave_t < 0 || wave_t > 1.0 do continue
+		inv := 1.0 - wave_t
+		ease_out := 1.0 - (inv * inv * inv) // ease-out cubic
+		radius := ease_out * MAX_RADIUS
+		fade := 1.0 - wave_t
+		alpha := base_col.a * fade * (0.65 - f32(wave) * 0.15)
+		thickness := math.max(1.2, 2.8 * fade)
+		ring_col := Color{base_col.r, base_col.g, base_col.b, alpha}
+		ui_draw_water_ring(r, cx, cy, radius, thickness, ring_col)
 	}
 }
 

@@ -1290,6 +1290,10 @@ backend_handle_ui_event :: proc(b: ^Backend, ev: UI_Event) {
 				}
 			}
 		case .Local:
+		case .Drop:
+			if len(ev.input.drop.text) > 0 {
+				delete(ev.input.drop.text)
+			}
 		}
 	case .Resize:
 		if ev.rows > 0 && ev.cols > 0 {

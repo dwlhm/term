@@ -1,23 +1,19 @@
-// msl_spike/bg.msl — HAND-DERIVED reference translation of bg.wgsl.
-//
-// STATUS: BLOCKED-EXPLICIT — no WGSL→MSL translator available in this
-// environment (naga: not installed, tint: not installed). This file is a
-// minimal hand translation of the background instanced-quad shader for spike
-// reference ONLY. It is not translator output and is not compiled by the
-// build. The sdl3 spike embeds its own minimal inline MSL quad; see
-// src/render/gpu/bench/sdl3_spike.odin.
-//
-// Source: src/render/shaders/bg.wgsl (vs_main + fs_main).
-// Maps: Uniforms(screen_size, cell_size) -> BenchUniforms buffer(0);
-//       per-instance position/cell_size/uv_rect/bg_color -> stage-in attrs;
-//       clip-space flip (WGSL origin top-left) preserved.
+// Production Metal background shader. Keep ripple math aligned with ../bg.wgsl.
+// Instance attributes use buffer(0); uniforms use buffer(1).
 
 #include <metal_stdlib>
 using namespace metal;
 
+struct WaterWave {
+    float4 origin_age_strength;
+    float4 lifetime_params;
+};
+
 struct BenchUniforms {
     float2 screen_size;
     float2 cell_size;
+    float4 water_meta;
+    WaterWave waves[16];
 };
 
 struct BenchBgVertexIn {
@@ -30,6 +26,8 @@ struct BenchBgVertexIn {
 struct BenchBgVertexOut {
     float4 clip_position [[position]];
     float4 color;
+    float2 world_pos;
+    float4 params;
 };
 
 vertex BenchBgVertexOut vs_main(
@@ -49,9 +47,176 @@ vertex BenchBgVertexOut vs_main(
     BenchBgVertexOut out;
     out.clip_position = float4(clip_x, clip_y, 0.0, 1.0);
     out.color = in.bg_color;
+    out.world_pos = world_pos;
+    out.params = in.uv_rect;
     return out;
 }
 
-fragment float4 fs_main(BenchBgVertexOut in [[stage_in]]) {
-    return in.color;
+// Immutable disturbances interfere as one height field in logical pixels.
+float2 water_height(float2 pos, constant BenchUniforms &surface) {
+    constexpr float WAVE_SPEED = 100.0;
+    constexpr float PACKET_WIDTH = 85.0;
+    constexpr float WAVELENGTH = 50.0;
+    constexpr float DETAIL_WAVELENGTH = 22.0;
+    constexpr float DETAIL_GAIN = 0.28;
+    constexpr float BIRTH_TIME = 0.12;
+    constexpr float TAU = 6.2831853;
+    auto height = 0.0;
+    auto coverage = 0.0;
+    for (auto i = 0u; i < 16u; i += 1u) {
+        if (float(i) >= surface.water_meta.x) { break; }
+        const auto wave = surface.waves[i];
+        const auto age = wave.origin_age_strength.z;
+        const auto lifetime = wave.lifetime_params.x;
+        if (age < 0.0 || age >= lifetime || lifetime <= 0.0) { continue; }
+        const auto radial = pos - wave.origin_age_strength.xy;
+        const auto distance = length(radial);
+        const auto delta = distance - age * WAVE_SPEED;
+        const auto q = delta / PACKET_WIDTH;
+        if (abs(q) >= 1.0) { continue; }
+        const auto support = 1.0 - q * q;
+        const auto fade = 1.0 - smoothstep(0.15, 1.0, age / lifetime);
+        const auto envelope = support * support * smoothstep(0.0, BIRTH_TIME, age)
+            * fade * wave.origin_age_strength.w;
+        // World-anchored variation bends crests without jittering with the pointer.
+        const auto phase_warp = sin(dot(pos, float2(0.021, 0.013))) * 0.85
+            + sin(dot(pos, float2(-0.011, 0.027))) * 0.45;
+        const auto phase = delta * TAU / WAVELENGTH + phase_warp;
+        const auto detail = sin(delta * TAU / DETAIL_WAVELENGTH - phase_warp * 1.4)
+            * DETAIL_GAIN * exp(-age * 1.6);
+        height += (sin(phase) + detail) * envelope;
+        coverage += envelope * 0.85;
+    }
+    return float2(height, clamp(coverage, 0.0, 1.0));
+}
+
+float4 water_surface(float2 pos, float4 color, constant BenchUniforms &surface) {
+    constexpr float GRADIENT_STEP = 1.0;
+    constexpr float HEIGHT_SCALE = 15.0;
+    constexpr float REFLECTION_POWER = 18.0;
+    constexpr float REFLECTION_GAIN = 0.46;
+    const auto field = water_height(pos, surface);
+    if (field.y <= 0.0) { return float4(0.0); }
+    const auto dx = (water_height(pos + float2(GRADIENT_STEP, 0.0), surface).x - field.x) / GRADIENT_STEP;
+    const auto dy = (water_height(pos + float2(0.0, GRADIENT_STEP), surface).x - field.x) / GRADIENT_STEP;
+    const auto normal = normalize(float3(-dx * HEIGHT_SCALE, -dy * HEIGHT_SCALE, 1.0));
+    const auto light = normalize(float3(-0.4, -0.6, 0.7));
+    const auto half_vector = normalize(light + float3(0.0, 0.0, 1.0));
+    const auto diffuse = max(dot(normal, light), 0.0);
+    const auto reflection = pow(max(dot(normal, half_vector), 0.0), REFLECTION_POWER) * REFLECTION_GAIN;
+    const auto shade = 0.07 + diffuse * 0.23;
+    const auto tint = mix(float3(0.48), color.rgb, 0.3);
+    const auto rgb = clamp(tint * shade + float3(reflection), float3(0.0), float3(1.0));
+    return float4(rgb, clamp(field.y * color.a, 0.0, 1.0));
+}
+
+// Compact cubic height and its analytic radial derivative.
+float2 ripple_profile(float offset, float width) {
+    const auto q = offset / width;
+    if (abs(q) >= 1.0) { return float2(0.0); }
+    const auto support = 1.0 - q * q;
+    return float2(support * support * support, -6.0 * q * support * support / width);
+}
+
+fragment float4 fs_main(BenchBgVertexOut in [[stage_in]], constant BenchUniforms &uniforms [[buffer(1)]]) {
+    // Fast path: ordinary background cell or standard UI quad
+    if (in.params.w == 0.0) {
+        return in.color;
+    }
+
+    if (in.params.w == -3.0) {
+        return water_surface(in.world_pos / max(uniforms.water_meta.y, 0.001), in.color, uniforms);
+    }
+
+    // Compact wave packets leave the terminal untouched between rings.
+    constexpr float HOVER_SPEED = 145.0;
+    constexpr float HOVER_PERIOD = 0.85;
+    constexpr uint HOVER_RING_COUNT = 4u;
+    constexpr float HOVER_FADE_IN = 0.28;
+    constexpr float HOVER_GAIN = 0.62;
+    constexpr float SPLASH_TRAVEL = 1520.0;
+    constexpr float SPLASH_SPACING = 46.0;
+    constexpr uint SPLASH_RING_COUNT = 4u;
+    constexpr float SPLASH_GAIN = 0.92;
+    constexpr float CREST_WIDTH = 20.0;
+    constexpr float TROUGH_WIDTH = 24.0;
+    constexpr float TROUGH_OFFSET = 20.0;
+    constexpr float SPLASH_BIRTH_RADIUS = 10.0;
+    constexpr float TROUGH_GAIN = 0.42;
+    constexpr float HEIGHT_SCALE = 24.0;
+    const float3 LIGHT_DIRECTION = float3(-0.4, -0.6, 0.7);
+    constexpr float SPECULAR_SHARPNESS = 72.0;
+    constexpr float SPECULAR_GAIN = 1.35;
+    constexpr float BROAD_SHARPNESS = 12.0;
+    constexpr float BROAD_GAIN = 0.38;
+    constexpr float TROUGH_SHADOW = 0.78;
+
+    const auto center = in.params.xy;
+    const auto time = in.params.z;
+    const auto fx_type = in.params.w;
+    const auto radial = in.world_pos - center;
+    const auto dist = length(radial);
+    const auto dir = radial / max(dist, 0.001);
+    auto height = 0.0;
+    auto radial_slope = 0.0;
+    auto crest = 0.0;
+    auto trough = 0.0;
+
+    if (fx_type == -1.0) {
+        const auto fade_in = smoothstep(0.0, HOVER_FADE_IN, time);
+        const auto lifetime = HOVER_PERIOD * float(HOVER_RING_COUNT);
+        for (auto i = 0u; i < HOVER_RING_COUNT; i += 1u) {
+            const auto elapsed = time - float(i) * HOVER_PERIOD;
+            if (elapsed >= 0.0) {
+                const auto age = elapsed - floor(elapsed / lifetime) * lifetime;
+                const auto radius = age * HOVER_SPEED;
+                const auto envelope = smoothstep(0.0, HOVER_FADE_IN, age)
+                    * (1.0 - smoothstep(lifetime * 0.45, lifetime, age))
+                    * fade_in * HOVER_GAIN;
+                const auto delta = dist - radius;
+                const auto ridge_profile = ripple_profile(delta, CREST_WIDTH);
+                const auto trough_profile = ripple_profile(delta + TROUGH_OFFSET, TROUGH_WIDTH);
+                crest += ridge_profile.x * envelope;
+                trough += trough_profile.x * envelope;
+                height += (ridge_profile.x - TROUGH_GAIN * trough_profile.x) * envelope;
+                radial_slope += (ridge_profile.y - TROUGH_GAIN * trough_profile.y) * envelope;
+            }
+        }
+    } else if (fx_type == -2.0) {
+        // Staging supplies normalized progress, independent of splash duration.
+        if (time < 0.0 || time >= 1.0) {
+            return float4(0.0);
+        }
+        const auto fade = (1.0 - time) * (1.0 - time);
+        for (auto i = 0u; i < SPLASH_RING_COUNT; i += 1u) {
+            const auto radius = time * SPLASH_TRAVEL - float(i) * SPLASH_SPACING;
+            if (radius >= 0.0) {
+                const auto envelope = smoothstep(0.0, SPLASH_BIRTH_RADIUS, radius)
+                    * fade * SPLASH_GAIN / (1.0 + float(i) * 0.3);
+                const auto delta = dist - radius;
+                const auto ridge_profile = ripple_profile(delta, CREST_WIDTH);
+                const auto trough_profile = ripple_profile(delta + TROUGH_OFFSET, TROUGH_WIDTH);
+                crest += ridge_profile.x * envelope;
+                trough += trough_profile.x * envelope;
+                height += (ridge_profile.x - TROUGH_GAIN * trough_profile.x) * envelope;
+                radial_slope += (ridge_profile.y - TROUGH_GAIN * trough_profile.y) * envelope;
+            }
+        }
+    } else {
+        return in.color;
+    }
+
+    const auto coverage = clamp(crest + trough * TROUGH_GAIN, 0.0, 1.0);
+    const auto normal = normalize(float3(-dir * radial_slope * HEIGHT_SCALE, 1.0));
+    const auto light = normalize(LIGHT_DIRECTION);
+    const auto half_vector = normalize(light + float3(0.0, 0.0, 1.0));
+    const auto diffuse = max(dot(normal, light), 0.0);
+    const auto reflection = max(dot(normal, half_vector), 0.0);
+    const auto specular = pow(reflection, SPECULAR_SHARPNESS) * SPECULAR_GAIN
+        + pow(reflection, BROAD_SHARPNESS) * BROAD_GAIN;
+    const auto shadow = clamp(-height / max(coverage, 0.001), 0.0, 1.0) * TROUGH_SHADOW;
+    const auto body = in.color.rgb * (0.12 + 0.55 * diffuse) * (1.0 - shadow);
+    const auto rgb = clamp(body + float3(specular) * (1.0 - shadow), float3(0.0), float3(1.0));
+    // All reflection and shadow coverage vanish exactly outside the height packet.
+    return float4(rgb, clamp(coverage * in.color.a, 0.0, 1.0));
 }

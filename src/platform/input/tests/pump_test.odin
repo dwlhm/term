@@ -42,6 +42,18 @@ _pump_text :: proc(text: cstring) -> sdl3.Event {
 	return ev
 }
 
+// _pump_drop builds a synthetic DROP event.
+_pump_drop :: proc(type: sdl3.EventType, text: cstring = nil, x: f32 = 0, y: f32 = 0) -> sdl3.Event {
+	de := sdl3.DropEvent{}
+	de.type = type
+	de.data = text
+	de.x = x
+	de.y = y
+	ev: sdl3.Event
+	ev.drop = de
+	return ev
+}
+
 // _pump_teardown mirrors the pty suite teardown: SIGKILL, reap, close.
 _pump_teardown :: proc(p: ^pty.Pty) {
 	if p.pid > 0 {
@@ -151,6 +163,88 @@ test_pump_translate_arrows_mods :: proc(t: ^testing.T) {
 	alt := sdl3.Keymod{.LALT}
 	n, _, _ = input.input_translate_sdl(_pump_key(sdl3.K_RIGHT, alt), out[:])
 	testing.expect(t, n == 1 && out[0].kind == .Arrow_Right && out[0].alt, "Alt+Right must map with alt flag")
+}
+
+@(test)
+test_pump_translate_drop_file :: proc(t: ^testing.T) {
+	raw := [14]u8{'/', 't', 'm', 'p', '/', 't', 'e', 's', 't', '.', 't', 'x', 't', 0x00}
+	ev := _pump_drop(.DROP_FILE, cstring(&raw[0]))
+	out: [4]input.Input_Event
+	n, quit, resized := input.input_translate_sdl(ev, out[:])
+	testing.expect_value(t, n, 1)
+	testing.expect_value(t, quit, false)
+	testing.expect_value(t, resized, false)
+	testing.expect_value(t, out[0].event_type, input.Input_Event_Type.Drop)
+	testing.expect_value(t, out[0].drop.kind, input.Input_Drop_Kind.File)
+	testing.expect_value(t, out[0].drop.text, "/tmp/test.txt")
+	delete(out[0].drop.text)
+}
+
+@(test)
+test_pump_translate_drop_text :: proc(t: ^testing.T) {
+	raw := [12]u8{'h', 'e', 'l', 'l', 'o', ' ', 'w', 'o', 'r', 'l', 'd', 0x00}
+	ev := _pump_drop(.DROP_TEXT, cstring(&raw[0]))
+	out: [4]input.Input_Event
+	n, quit, resized := input.input_translate_sdl(ev, out[:])
+	testing.expect_value(t, n, 1)
+	testing.expect_value(t, quit, false)
+	testing.expect_value(t, resized, false)
+	testing.expect_value(t, out[0].event_type, input.Input_Event_Type.Drop)
+	testing.expect_value(t, out[0].drop.kind, input.Input_Drop_Kind.Text)
+	testing.expect_value(t, out[0].drop.text, "hello world")
+	delete(out[0].drop.text)
+}
+
+@(test)
+test_pump_translate_drop_nil_data :: proc(t: ^testing.T) {
+	ev := _pump_drop(.DROP_FILE, nil)
+	out: [4]input.Input_Event
+	n, quit, resized := input.input_translate_sdl(ev, out[:])
+	testing.expect_value(t, n, 0)
+	testing.expect_value(t, quit, false)
+	testing.expect_value(t, resized, false)
+}
+
+@(test)
+test_pump_translate_drop_begin :: proc(t: ^testing.T) {
+	ev := _pump_drop(.DROP_BEGIN, nil, 120.5, 230.5)
+	out: [4]input.Input_Event
+	n, quit, resized := input.input_translate_sdl(ev, out[:])
+	testing.expect_value(t, n, 1)
+	testing.expect_value(t, quit, false)
+	testing.expect_value(t, resized, false)
+	testing.expect_value(t, out[0].event_type, input.Input_Event_Type.Drop)
+	testing.expect_value(t, out[0].drop.kind, input.Input_Drop_Kind.Begin)
+	testing.expect_value(t, out[0].drop.x, 120.5)
+	testing.expect_value(t, out[0].drop.y, 230.5)
+}
+
+@(test)
+test_pump_translate_drop_position :: proc(t: ^testing.T) {
+	ev := _pump_drop(.DROP_POSITION, nil, 340.0, 450.0)
+	out: [4]input.Input_Event
+	n, quit, resized := input.input_translate_sdl(ev, out[:])
+	testing.expect_value(t, n, 1)
+	testing.expect_value(t, quit, false)
+	testing.expect_value(t, resized, false)
+	testing.expect_value(t, out[0].event_type, input.Input_Event_Type.Drop)
+	testing.expect_value(t, out[0].drop.kind, input.Input_Drop_Kind.Position)
+	testing.expect_value(t, out[0].drop.x, 340.0)
+	testing.expect_value(t, out[0].drop.y, 450.0)
+}
+
+@(test)
+test_pump_translate_drop_complete :: proc(t: ^testing.T) {
+	ev := _pump_drop(.DROP_COMPLETE, nil, 10.0, 20.0)
+	out: [4]input.Input_Event
+	n, quit, resized := input.input_translate_sdl(ev, out[:])
+	testing.expect_value(t, n, 1)
+	testing.expect_value(t, quit, false)
+	testing.expect_value(t, resized, false)
+	testing.expect_value(t, out[0].event_type, input.Input_Event_Type.Drop)
+	testing.expect_value(t, out[0].drop.kind, input.Input_Drop_Kind.Complete)
+	testing.expect_value(t, out[0].drop.x, 10.0)
+	testing.expect_value(t, out[0].drop.y, 20.0)
 }
 
 @(test)

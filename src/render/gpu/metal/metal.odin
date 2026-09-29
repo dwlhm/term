@@ -20,6 +20,7 @@ Metal_Queue :: struct {
 Metal_Buffer :: struct {
 	handle: ^MTL.Buffer,
 	size:   u64,
+	usage:  gpu.Gpu_Buffer_Usage,
 }
 
 Metal_Texture :: struct {
@@ -322,6 +323,7 @@ _metal_create_buffer :: proc(device: gpu.Gpu_Device, size: u64, usage: gpu.Gpu_B
 	buf := new(Metal_Buffer)
 	buf.handle = mtl_buf
 	buf.size = size
+	buf.usage = usage
 	return gpu.Gpu_Buffer(buf)
 }
 
@@ -826,8 +828,19 @@ _metal_render_set_bind_group :: proc(pass: gpu.Gpu_RenderPassEncoder, index: u32
 		case .Buffer:
 			buf := (^Metal_Buffer)(rawptr(entry.buffer))
 			if buf != nil && buf.handle != nil {
-				p.encoder->setVertexBuffer(buf.handle, NS.UInteger(entry.offset), idx + 1)
-				p.encoder->setFragmentBuffer(buf.handle, NS.UInteger(entry.offset), idx + 1)
+				// Uniform bytes are copied into this encoder, not shared with later frames.
+				MAX_INLINE_UNIFORM_BYTES :: 4096
+				uniform_only := (buf.usage & .Uniform) != .None && (buf.usage & .Storage) == .None
+				valid_range := entry.offset <= buf.size && entry.size <= buf.size - entry.offset
+				if uniform_only && valid_range && entry.size > 0 && entry.size <= MAX_INLINE_UNIFORM_BYTES {
+					contents := buf.handle->contents()
+					bytes := contents[int(entry.offset):int(entry.offset + entry.size)]
+					p.encoder->setVertexBytes(bytes, idx + 1)
+					p.encoder->setFragmentBytes(bytes, idx + 1)
+				} else {
+					p.encoder->setVertexBuffer(buf.handle, NS.UInteger(entry.offset), idx + 1)
+					p.encoder->setFragmentBuffer(buf.handle, NS.UInteger(entry.offset), idx + 1)
+				}
 			}
 		case .Texture_View:
 			tv := (^Metal_TextureView)(rawptr(entry.view))

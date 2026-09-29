@@ -36,6 +36,7 @@ Instance_Renderer :: struct {
 	glyph_pipeline:   gpu.Gpu_RenderPipeline,
 	instance_buffer:  gpu.Gpu_Buffer,
 	uniform_buffer:   gpu.Gpu_Buffer,
+	uniform_data:     Uniform_Data,
 	bind_group_layout_bg: gpu.Gpu_BindGroupLayout,
 	bind_group_layout_glyph: gpu.Gpu_BindGroupLayout,
 	bind_group_bg:    gpu.Gpu_BindGroup,
@@ -59,10 +60,27 @@ Instance_Renderer :: struct {
 	backend:       ^gpu.Gpu_Backend_VTable,
 }
 
-// Uniform_Data is the uniform buffer layout shared by both shaders.
+WATER_MAX_WAVES :: 16
+Water_Wave :: struct {
+	origin_age_strength: [4]f32,
+	lifetime_params: [4]f32,
+}
+
+// Keep the glyph shader's 16-byte prefix unchanged; wave records match two float4s.
 Uniform_Data :: struct {
 	screen_w: f32, screen_h: f32,
-	cell_w:   f32, cell_h:   f32,
+	cell_w: f32, cell_h: f32,
+	water_meta: [4]f32,
+	waves: [WATER_MAX_WAVES]Water_Wave,
+}
+#assert(size_of(Water_Wave) == 32)
+#assert(offset_of(Uniform_Data, water_meta) == 16)
+#assert(offset_of(Uniform_Data, waves) == 32)
+#assert(size_of(Uniform_Data) == 32 + WATER_MAX_WAVES * 32)
+
+instance_renderer_upload_uniforms :: proc(r: ^Instance_Renderer) {
+	if r == nil || r.backend == nil || r.backend.write_buffer == nil || rawptr(r.uniform_buffer) == nil || rawptr(r.queue) == nil do return
+	r.backend.write_buffer(r.queue, r.uniform_buffer, 0, &r.uniform_data, size_of(Uniform_Data))
 }
 
 // instance_renderer_init creates the instance renderer with GPU resources.
@@ -111,8 +129,8 @@ instance_renderer_init :: proc(
 	)
 
 	// Write initial uniforms
-	ud := Uniform_Data{screen_w = screen_w, screen_h = screen_h}
-	backend.write_buffer(queue, r.uniform_buffer, 0, &ud, size_of(Uniform_Data))
+	r.uniform_data = Uniform_Data{screen_w = screen_w, screen_h = screen_h}
+	instance_renderer_upload_uniforms(r)
 
 	// Create sampler (nearest filtering for pixel-perfect glyphs)
 	r.sampler = backend.create_sampler(device)
@@ -133,7 +151,7 @@ instance_renderer_init :: proc(
 	glyph_module := backend.create_shader_module(device, glyph_wgsl)
 	r.bg_pipeline = backend.create_render_pipeline(
 		device, bg_module, "vs_main", bg_module, "fs_main",
-		layouts, format, .Opaque, .Triangle_List,
+		layouts, format, .Alpha_Blend, .Triangle_List,
 	)
 	r.glyph_pipeline = backend.create_render_pipeline(
 		device, glyph_module, "vs_main", glyph_module, "fs_main",
@@ -234,11 +252,10 @@ instance_renderer_destroy :: proc(r: ^Instance_Renderer, allocator: runtime.Allo
 
 // instance_renderer_set_screen_size rewrites the uniform buffer with a new screen size.
 instance_renderer_set_screen_size :: proc(r: ^Instance_Renderer, backend: ^gpu.Gpu_Backend_VTable, screen_w: f32, screen_h: f32) {
-	if backend == nil || rawptr(r.uniform_buffer) == nil || rawptr(r.queue) == nil {
-		return
-	}
-	ud := Uniform_Data{screen_w = screen_w, screen_h = screen_h}
-	backend.write_buffer(r.queue, r.uniform_buffer, 0, &ud, size_of(Uniform_Data))
+	if r == nil do return
+	r.uniform_data.screen_w = screen_w
+	r.uniform_data.screen_h = screen_h
+	instance_renderer_upload_uniforms(r)
 }
 
 // instance_renderer_fill_bg fills a background instance into the staging buffer.
