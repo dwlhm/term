@@ -62,7 +62,7 @@ window_poll_input :: proc(w: ^win.Window, out: []Input_Event, max: int, first_ev
 	}
 	count := 0
 	if first_ev != nil {
-		n, quit, resized := input_translate_sdl(first_ev^, out[count:cap])
+		n, quit, resized := _window_translate_input_event(w, first_ev^, out[count:cap])
 		count += n
 		if quit {
 			w.is_open = false
@@ -76,7 +76,7 @@ window_poll_input :: proc(w: ^win.Window, out: []Input_Event, max: int, first_ev
 	}
 	ev: sdl3.Event
 	for sdl3.PollEvent(&ev) {
-		n, quit, resized := input_translate_sdl(ev, out[count:cap])
+		n, quit, resized := _window_translate_input_event(w, ev, out[count:cap])
 		count += n
 		if quit {
 			w.is_open = false
@@ -89,6 +89,57 @@ window_poll_input :: proc(w: ^win.Window, out: []Input_Event, max: int, first_ev
 		}
 	}
 	return count
+}
+
+// _window_translate_input_event marks duplicate TEXT_INPUT for app dispatch,
+// which decides whether the active text editor needs it.
+_window_translate_input_event :: proc(w: ^win.Window, ev: sdl3.Event, out: []Input_Event) -> (n: int, quit: bool, resized: bool) {
+	n, quit, resized = input_translate_sdl(ev, out)
+	clipboard_text := ""
+	if ev.type == .KEY_DOWN && n > 0 && out[0].event_type == .Local && out[0].action == .Paste {
+		clipboard_text = win.window_get_clipboard_text(w)
+	}
+	if input_filter_paste_shadow(&w.paste_shadow_text, ev, out, n, clipboard_text) {
+		for i in 0..<n {
+			out[i].paste_shadow = true
+		}
+	}
+	if len(clipboard_text) > 0 {
+		delete(clipboard_text)
+	}
+	return
+}
+
+// input_filter_paste_shadow owns the remaining clipboard text until matching
+// TEXT_INPUT fragments consume it or another key press invalidates it.
+input_filter_paste_shadow :: proc(pending: ^string, ev: sdl3.Event, translated: []Input_Event, n: int, clipboard_text: string) -> bool {
+	if ev.type == .KEY_DOWN {
+		if len(pending^) > 0 {
+			delete(pending^)
+			pending^ = ""
+		}
+		if n > 0 && translated[0].event_type == .Local && translated[0].action == .Paste && len(clipboard_text) > 0 {
+			pending^ = strings.clone(clipboard_text)
+		}
+		return false
+	}
+	if ev.type == .TEXT_INPUT && len(pending^) > 0 {
+		candidate := string(ev.text.text)
+		if len(candidate) == 0 {
+			return false
+		}
+		match := strings.has_prefix(pending^, candidate)
+		if match && len(candidate) < len(pending^) {
+			remainder := strings.clone(pending^[len(candidate):])
+			delete(pending^)
+			pending^ = remainder
+			return true
+		}
+		delete(pending^)
+		pending^ = ""
+		return match
+	}
+	return false
 }
 
 // input_translate_sdl converts ONE SDL event into Input_Events, returning

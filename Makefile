@@ -42,7 +42,7 @@ bundle: release
 	scripts/bundle_frameworks.sh $(OUT_DIR)/Term.app
 
 install: bundle
-	cp -R $(OUT_DIR)/Term.app /Applications/Term.app
+	ditto $(OUT_DIR)/Term.app /Applications/Term.app
 
 dmg: bundle
 	@rm -rf $(OUT_DIR)/dmg_staging

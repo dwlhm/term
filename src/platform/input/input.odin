@@ -101,7 +101,8 @@ Input_Key_Kind :: enum u8 {
 // Input_Event is one translated SDL event. Key events retain the original
 // key-oriented fields; pointer and local events use pointer/action instead.
 // Non-key events are local to the terminal application and encode to zero
-// PTY bytes.
+// PTY bytes. paste_shadow marks SDL text matching a local paste so app
+// dispatch can keep it for an active text editor or skip it for the PTY.
 Input_Event :: struct {
 	event_type: Input_Event_Type,
 	kind:       Input_Key_Kind,
@@ -111,6 +112,7 @@ Input_Event :: struct {
 	shift:      bool,
 	gui:        bool,
 	is_release: bool,
+	paste_shadow: bool,
 	pointer:    Input_Pointer_Event,
 	action:     Input_Local_Action,
 	drop:       Input_Drop_Event,
@@ -717,4 +719,3 @@ mouse_encode_sgr_short :: proc(pointer: Input_Pointer_Event, col, row: int, out:
 
 // mouse_encode_sgr supports both full and short call forms.
 mouse_encode_sgr :: proc{mouse_encode_sgr_full, mouse_encode_sgr_short}
-

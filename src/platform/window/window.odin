@@ -23,6 +23,7 @@ Window :: struct {
 	pixel_h: i32,
 	title:   string,
 	is_open: bool,
+	paste_shadow_text: string, // owned clipboard text awaiting SDL's TEXT_INPUT shadow
 	_title_buf: [256]u8, // buffer for C string title
 }
 
@@ -81,6 +82,10 @@ window_init :: proc(w: ^Window, title: string, width, height: i32) -> bool {
 
 // window_destroy closes the window and shuts down SDL3.
 window_destroy :: proc(w: ^Window) {
+	if len(w.paste_shadow_text) > 0 {
+		delete(w.paste_shadow_text)
+		w.paste_shadow_text = ""
+	}
 	if w.handle != nil {
 		window_capture_mouse(w, false)
 		sdl3.DestroyWindow(w.handle)

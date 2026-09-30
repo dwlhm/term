@@ -31,6 +31,13 @@ _pump_key :: proc(key: sdl3.Keycode, mod: sdl3.Keymod, repeat: bool = false) -> 
 	return ev
 }
 
+_pump_key_up :: proc(key: sdl3.Keycode) -> sdl3.Event {
+	ev := _pump_key(key, sdl3.KMOD_NONE)
+	ev.key.type = .KEY_UP
+	ev.key.down = false
+	return ev
+}
+
 // _pump_text builds a synthetic TEXTINPUT event over a NUL-terminated
 // buffer the caller keeps alive for the call.
 _pump_text :: proc(text: cstring) -> sdl3.Event {
@@ -40,6 +47,98 @@ _pump_text :: proc(text: cstring) -> sdl3.Event {
 	ev: sdl3.Event
 	ev.text = te
 	return ev
+}
+
+_pump_filtered :: proc(pending: ^string, ev: sdl3.Event, clipboard_text: string, out: []input.Input_Event) -> int {
+	n, _, _ := input.input_translate_sdl(ev, out)
+	if input.input_filter_paste_shadow(pending, ev, out, n, clipboard_text) {
+		for i in 0..<n {
+			out[i].paste_shadow = true
+		}
+	}
+	return n
+}
+
+@(test)
+test_pump_paste_shadow_matches_once :: proc(t: ^testing.T) {
+	payload := [5]u8{'q', 'u', 'u', 'x', 0}
+	text := string(payload[:4])
+	pending := ""
+	defer if len(pending) > 0 {delete(pending)}
+	out: [8]input.Input_Event
+	n := _pump_filtered(&pending, _pump_key(sdl3.K_V, sdl3.KMOD_GUI), text, out[:])
+	testing.expect(t, n == 1 && out[0].event_type == .Local && out[0].action == .Paste, "paste shortcut must remain one local action")
+	testing.expect_value(t, pending, text)
+	n = _pump_filtered(&pending, _pump_text(cstring(&payload[0])), "", out[:])
+	testing.expect(t, n == 4 && len(pending) == 0, "matching text shadow must remain for dispatch")
+	for i in 0..<n {
+		testing.expect(t, out[i].paste_shadow, "each matching rune must be marked")
+	}
+	n = _pump_filtered(&pending, _pump_text(cstring(&payload[0])), "", out[:])
+	testing.expect(t, n == 4 && out[0].kind == .Printable && !out[0].paste_shadow, "later independent text must remain printable")
+}
+
+@(test)
+test_pump_paste_shadow_utf8_and_unrelated_text :: proc(t: ^testing.T) {
+	utf8_text := [9]u8{0xC3, 0xA9, 'l', 'a', 'n', 0xE2, 0x82, 0xAC, 0}
+	utf8_first := [5]u8{0xC3, 0xA9, 'l', 'a', 0}
+	utf8_second := [5]u8{'n', 0xE2, 0x82, 0xAC, 0}
+	other := [5]u8{'k', 'i', 't', 'e', 0}
+	pending := ""
+	defer if len(pending) > 0 {delete(pending)}
+	out: [8]input.Input_Event
+	text := string(utf8_text[:8])
+	n := _pump_filtered(&pending, _pump_key(sdl3.K_V, sdl3.KMOD_CTRL|sdl3.KMOD_SHIFT), text, out[:])
+	testing.expect(t, n == 1 && out[0].action == .Paste, "modified paste shortcut must remain local")
+	n = _pump_filtered(&pending, _pump_key_up(sdl3.K_V), "", out[:])
+	testing.expect(t, pending == text, "release before text must retain pending paste")
+	n = _pump_filtered(&pending, _pump_text(cstring(&utf8_first[0])), "", out[:])
+	testing.expect(t, n == 3 && pending == string(utf8_second[:4]), "first UTF-8 fragment must retain only the suffix")
+	for i in 0..<n {
+		testing.expect(t, out[i].paste_shadow, "first UTF-8 fragment must be marked")
+	}
+	n = _pump_filtered(&pending, _pump_text(cstring(&utf8_second[0])), "", out[:])
+	testing.expect(t, n == 2 && len(pending) == 0, "last UTF-8 fragment must consume the suffix")
+	for i in 0..<n {
+		testing.expect(t, out[i].paste_shadow, "last UTF-8 fragment must be marked")
+	}
+	n = _pump_filtered(&pending, _pump_key(sdl3.K_PASTE, sdl3.KMOD_NONE), text, out[:])
+	testing.expect(t, n == 1 && out[0].action == .Paste, "paste key must remain local")
+	n = _pump_filtered(&pending, _pump_text(cstring(&other[0])), "", out[:])
+	testing.expect(t, n == 4 && out[0].rune == 'k' && !out[0].paste_shadow && len(pending) == 0, "unrelated text must pass through and clear shadow")
+	n = _pump_filtered(&pending, _pump_key(sdl3.K_A, sdl3.KMOD_NONE), "", out[:])
+	testing.expect(t, n == 0 && len(pending) == 0, "unrelated key press leaves no shadow")
+	n = _pump_filtered(&pending, _pump_text(cstring(&other[0])), "", out[:])
+	testing.expect(t, n == 4 && !out[0].paste_shadow, "later ordinary text must pass through")
+}
+
+@(test)
+test_pump_paste_shadow_stale_and_normal_input :: proc(t: ^testing.T) {
+	payload := [5]u8{'q', 'u', 'u', 'x', 0}
+	pending := ""
+	defer if len(pending) > 0 {delete(pending)}
+	out: [8]input.Input_Event
+	text := string(payload[:4])
+	n := _pump_filtered(&pending, _pump_text(cstring(&payload[0])), "", out[:])
+	testing.expect(t, n == 4 && !out[0].paste_shadow, "normal text input must pass through")
+	n = _pump_filtered(&pending, _pump_key(sdl3.K_V, sdl3.KMOD_GUI), text, out[:])
+	testing.expect(t, n == 1, "paste must arm shadow")
+	n = _pump_filtered(&pending, _pump_key_up(sdl3.K_LSHIFT), "", out[:])
+	testing.expect(t, n == 0 && pending == text, "unrelated key release must keep shadow")
+	n = _pump_filtered(&pending, _pump_key(sdl3.K_A, sdl3.KMOD_NONE), "", out[:])
+	testing.expect(t, n == 0 && len(pending) == 0, "unrelated key press must clear shadow")
+	n = _pump_filtered(&pending, _pump_text(cstring(&payload[0])), "", out[:])
+	testing.expect(t, n == 4 && !out[0].paste_shadow, "text after another key press must pass through")
+	_ = _pump_filtered(&pending, _pump_key(sdl3.K_PASTE, sdl3.KMOD_NONE), text, out[:])
+	_ = _pump_filtered(&pending, _pump_key_up(sdl3.K_PASTE), "", out[:])
+	testing.expect(t, pending == text, "paste key release must retain shadow")
+	_ = _pump_filtered(&pending, _pump_key(sdl3.K_V, sdl3.KMOD_GUI), text, out[:])
+	_ = _pump_filtered(&pending, _pump_key_up(sdl3.K_V), "", out[:])
+	testing.expect(t, pending == text, "shortcut key release must retain shadow")
+	_ = _pump_filtered(&pending, _pump_key(sdl3.K_V, sdl3.KMOD_GUI), "", out[:])
+	testing.expect(t, len(pending) == 0, "empty clipboard must leave no shadow")
+	n = _pump_filtered(&pending, _pump_key(sdl3.K_V, sdl3.KMOD_CTRL), "", out[:])
+	testing.expect(t, n == 1 && out[0].kind == .Ctrl && len(pending) == 0, "bare Ctrl+V must retain PTY mapping")
 }
 
 // _pump_drop builds a synthetic DROP event.

@@ -1078,6 +1078,9 @@ backend_handle_ui_event :: proc(b: ^Backend, ev: UI_Event) {
 	case .Input:
 		switch ev.input.event_type {
 		case .Key:
+			if ev.input.paste_shadow && b.interaction.mode != .Search {
+				return
+			}
 			state_before := b.interaction
 			consumed, action := inter.interaction_dispatch_key(&b.interaction, ev.input, b.terminal.is_alt_screen)
 			if consumed {

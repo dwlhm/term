@@ -10,6 +10,7 @@ import termgrid "../terminal"
 // Visual and Search modes consume all relevant keystrokes for modal interaction.
 interaction_dispatch_key :: proc(s: ^Interaction_State, ev: input.Input_Event, is_alt_screen: bool) -> (consumed: bool, action: Interaction_Action) {
 	if s == nil do return false, .None
+	if ev.is_release do return s.mode != .Passthrough, .None
 
 	switch s.mode {
 	case .Passthrough:

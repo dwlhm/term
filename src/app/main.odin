@@ -1223,6 +1223,7 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 	for ev in evs {
 		active_b = app_active_backend(a)
 		if active_b == nil || a.should_quit do break
+		if ev.paste_shadow && !a.tab_rename.active && !a.search_bar.visible do continue
 
 		if ev.event_type == .Drop {
 			drop_fx_handle(&a.drop_fx, ev.drop)
@@ -1572,6 +1573,7 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 					ok = false
 				}
 			case .Paste:
+				if a.tab_rename.active || a.search_bar.visible || a.tab_menu.visible || a.tab_overflow.visible do continue
 				if !_app_paste_clipboard(a) {
 					ok = false
 				}

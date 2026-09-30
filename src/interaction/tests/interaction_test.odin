@@ -224,6 +224,30 @@ test_zero_conflict_key_dispatcher :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_key_releases_do_not_trigger_interaction_actions :: proc(t: ^testing.T) {
+	s: inter.Interaction_State
+	inter.interaction_init(&s)
+
+	paste_release := input.Input_Event{event_type = .Key, kind = .Printable, rune = 'v', gui = true, is_release = true}
+	consumed, action := inter.interaction_dispatch_key(&s, paste_release, false)
+	testing.expect(t, !consumed && action == .None && s.mode == .Passthrough, "GUI paste release must reach passthrough without repeating paste")
+
+	inter.interaction_enter_visual(&s, .Char, tg.Terminal_Point{row = 2, col = 3})
+	visual_before := s
+	nav_release := input.Input_Event{event_type = .Key, kind = .Arrow_Right, is_release = true}
+	consumed, action = inter.interaction_dispatch_key(&s, nav_release, false)
+	testing.expect(t, consumed && action == .None, "visual release must be consumed without action")
+	testing.expect(t, s.mode == visual_before.mode && s.visual_cursor == visual_before.visual_cursor && s.visual_kind == visual_before.visual_kind, "visual release must not move or change mode")
+
+	inter.interaction_enter_search(&s)
+	search_before := s
+	text_release := input.Input_Event{event_type = .Key, kind = .Printable, rune = 'x', is_release = true}
+	consumed, action = inter.interaction_dispatch_key(&s, text_release, false)
+	testing.expect(t, consumed && action == .None, "search release must be consumed without action")
+	testing.expect(t, s.mode == search_before.mode && s.search_len == search_before.search_len && s.search_active == search_before.search_active, "search release must not edit query")
+}
+
+@(test)
 test_pointer_dispatcher_and_alt_screen :: proc(t: ^testing.T) {
 	s: inter.Interaction_State
 	inter.interaction_init(&s)

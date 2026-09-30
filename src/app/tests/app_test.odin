@@ -22,6 +22,7 @@ import "core:testing"
 import "core:time"
 import "core:os"
 import posix "core:sys/posix"
+import "core:strings"
 import "vendor:sdl3"
 
 import app "../"
@@ -32,6 +33,7 @@ import instance "../../render/instance"
 import win "../../platform/window"
 import pty "../../platform/pty"
 import input "../../platform/input"
+import platform_tabs "../../platform/tabs"
 import config "../../config"
 import interaction "../../interaction"
 
@@ -75,6 +77,17 @@ _bare_destroy :: proc(a: ^app.App) {
 	termgrid.terminal_destroy(&a.terminal)
 	parser.parser_destroy(&a.parser)
 	delete(a.drain_buf, context.allocator)
+}
+
+_app_test_clipboard_read_cb :: proc(user_data: rawptr, out: []u8) -> int {
+	if user_data == nil {
+		return 0
+	}
+	text := (^string)(user_data)^
+	n := min(len(text), len(out))
+	data := transmute([]u8)text
+	copy(out[:n], data[:n])
+	return n
 }
 
 // _cpu_renderer gives a zero-backend renderer CPU-valid geometry plus a
@@ -634,6 +647,75 @@ test_ui_event_queue_resize_coalescing :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_backend_paste_shadow_worker_routing :: proc(t: ^testing.T) {
+	clipboard := "quux"
+	b := new(app.Backend)
+	defer free(b)
+	termgrid.terminal_init(&b.terminal, APP_TEST_ROWS, APP_TEST_COLS)
+	defer termgrid.terminal_destroy(&b.terminal)
+	parser.parser_init(&b.parser)
+	defer parser.parser_destroy(&b.parser)
+	interaction.interaction_init(&b.interaction)
+
+	paste_pipe: [2]posix.FD
+	if posix.pipe(&paste_pipe) != .OK {
+		testing.expect(t, false, "posix.pipe must succeed")
+		return
+	}
+	b.pty.master = int(paste_pipe[1])
+	b.pty.state = .Running
+	app.backend_handle_ui_event(b, app.UI_Event{type = .Paste, text = strings.clone(clipboard)})
+	for ch in clipboard {
+		app.backend_handle_ui_event(b, app.UI_Event{
+			type = .Input,
+			input = input.Input_Event{
+				event_type   = .Key,
+				kind         = .Printable,
+				rune         = ch,
+				paste_shadow = true,
+			},
+		})
+	}
+	posix.close(paste_pipe[1])
+	b.pty.master = -1
+	paste_buf: [32]u8
+	paste_n := posix.read(paste_pipe[0], raw_data(paste_buf[:]), len(paste_buf))
+	posix.close(paste_pipe[0])
+	testing.expect_value(t, paste_n, len(clipboard))
+	if paste_n > 0 {
+		testing.expect_value(t, string(paste_buf[:paste_n]), clipboard)
+	}
+	testing.expect_value(t, b.interaction.mode, interaction.Interaction_Mode.Passthrough)
+
+	search_pipe: [2]posix.FD
+	if posix.pipe(&search_pipe) != .OK {
+		testing.expect(t, false, "posix.pipe must succeed")
+		return
+	}
+	b.pty.master = int(search_pipe[1])
+	b.interaction.mode = .Search
+	b.interaction.search_active = true
+	for ch in clipboard {
+		app.backend_handle_ui_event(b, app.UI_Event{
+			type = .Input,
+			input = input.Input_Event{
+				event_type   = .Key,
+				kind         = .Printable,
+				rune         = ch,
+				paste_shadow = true,
+			},
+		})
+	}
+	posix.close(search_pipe[1])
+	b.pty.master = -1
+	search_buf: [32]u8
+	search_n := posix.read(search_pipe[0], raw_data(search_buf[:]), len(search_buf))
+	posix.close(search_pipe[0])
+	testing.expect_value(t, search_n, 0)
+	testing.expect_value(t, string(b.interaction.search_query[:b.interaction.search_len]), clipboard)
+}
+
+@(test)
 test_app_interaction_dispatch_integration :: proc(t: ^testing.T) {
 	b: app.Backend
 	termgrid.terminal_init(&b.terminal, APP_TEST_ROWS, APP_TEST_COLS)
@@ -859,6 +941,224 @@ test_app_cmd_r_renames_active_tab :: proc(t: ^testing.T) {
 	evs := [1]input.Input_Event{ev}
 	_, _ = app.app_dispatch_input_events(&a, evs[:])
 	testing.expect(t, a.tab_rename.active, "Cmd+R must start inline rename on the active tab")
+}
+
+@(test)
+test_app_paste_shadow_search_dispatch :: proc(t: ^testing.T) {
+	a := new(app.App)
+	defer free(a)
+	_bare_app(a)
+	defer _bare_destroy(a)
+	if !_dummy_window(t, &a.window, "paste-shadow-search", 640, 480) {
+		return
+	}
+	defer win.window_destroy(&a.window)
+	clipboard := "quux"
+	testing.expect(t, win.window_set_clipboard_text(&a.window, clipboard), "clipboard setup must succeed")
+
+	pipefd: [2]posix.FD
+	if posix.pipe(&pipefd) != .OK {
+		testing.expect(t, false, "posix.pipe must succeed")
+		return
+	}
+	defer posix.close(pipefd[0])
+	a.pty.master = int(pipefd[1])
+	a.pty.state = .Running
+	defer if a.pty.master >= 0 {posix.close(posix.FD(a.pty.master))}
+
+	local_paste := input.Input_Event{event_type = .Local, action = .Paste}
+	marked := [?]input.Input_Event{
+		{kind = .Printable, rune = 'q', paste_shadow = true},
+		{kind = .Printable, rune = 'u', paste_shadow = true},
+		{kind = .Printable, rune = 'u', paste_shadow = true},
+		{kind = .Printable, rune = 'x', paste_shadow = true},
+	}
+	_, ok := app.app_dispatch_input_events(a, {local_paste, marked[0], marked[1], marked[2], marked[3]})
+	testing.expect(t, ok, "normal paste dispatch must succeed")
+	cmd_f := input.Input_Event{kind = .Printable, rune = 'f', gui = true}
+	_, ok = app.app_dispatch_input_events(a, {cmd_f, local_paste, marked[0], marked[1], marked[2], marked[3]})
+	testing.expect(t, ok && a.search_bar.visible, "same-batch search opening must stay active")
+	testing.expect_value(t, string(a.search_bar.query[:a.search_bar.query_len]), clipboard)
+
+	posix.close(pipefd[1])
+	a.pty.master = -1
+	buf: [32]u8
+	n := posix.read(pipefd[0], raw_data(buf[:]), len(buf))
+	testing.expect_value(t, n, len(clipboard))
+	if n > 0 {
+		testing.expect_value(t, string(buf[:n]), clipboard)
+	}
+}
+
+@(test)
+test_app_paste_shadow_raw_events_write_once :: proc(t: ^testing.T) {
+	clipboard := "quux"
+	first := [3]u8{'q', 'u', 0}
+	second := [3]u8{'u', 'x', 0}
+	whole := [5]u8{'q', 'u', 'u', 'x', 0}
+	ordinary := [2]u8{'z', 0}
+	for scenario in 0..<3 {
+		a := new(app.App)
+		_bare_app(a)
+		if !_dummy_window(t, &a.window, "paste-shadow-raw", 640, 480) {
+			_bare_destroy(a)
+			free(a)
+			return
+		}
+		testing.expect(t, win.window_set_clipboard_text(&a.window, clipboard), "clipboard setup must succeed")
+		pipefd: [2]posix.FD
+		if posix.pipe(&pipefd) != .OK {
+			testing.expect(t, false, "posix.pipe must succeed")
+			win.window_destroy(&a.window)
+			_bare_destroy(a)
+			free(a)
+			return
+		}
+		a.pty.master = int(pipefd[1])
+		a.pty.state = .Running
+		app.backend_set_clipboard_callbacks(&a.backend, &clipboard, nil, _app_test_clipboard_read_cb)
+
+		key_down: sdl3.Event
+		key_down.key = sdl3.KeyboardEvent{type = .KEY_DOWN, key = sdl3.K_V, mod = sdl3.KMOD_GUI, down = true}
+		key_up: sdl3.Event
+		key_up.key = sdl3.KeyboardEvent{type = .KEY_UP, key = sdl3.K_V, mod = sdl3.KMOD_GUI, down = false}
+		text_first: sdl3.Event
+		text_first.text = sdl3.TextInputEvent{type = .TEXT_INPUT, text = scenario == 2 ? cstring(&first[0]) : cstring(&whole[0])}
+		text_second: sdl3.Event
+		text_second.text = sdl3.TextInputEvent{type = .TEXT_INPUT, text = cstring(&second[0])}
+		ordinary_key: sdl3.Event
+		ordinary_key.key = sdl3.KeyboardEvent{type = .KEY_DOWN, key = sdl3.K_Z, down = true}
+		ordinary_text: sdl3.Event
+		ordinary_text.text = sdl3.TextInputEvent{type = .TEXT_INPUT, text = cstring(&ordinary[0])}
+		events := [6]sdl3.Event{key_down, key_up, text_first, text_second, ordinary_key, ordinary_text}
+		pending := ""
+		for raw, i in events {
+			if (scenario == 0 && i >= 2) || (scenario == 1 && i == 3) {
+				continue
+			}
+			out: [8]input.Input_Event
+			n, _, _ := input.input_translate_sdl(raw, out[:])
+			clip := raw.type == .KEY_DOWN && i == 0 ? clipboard : ""
+			if input.input_filter_paste_shadow(&pending, raw, out[:], n, clip) {
+				for j in 0..<n {
+					out[j].paste_shadow = true
+				}
+			}
+			_, ok := app.app_dispatch_input_events(a, out[:n])
+			testing.expect(t, ok, "translated event dispatch must succeed")
+		}
+		if scenario == 0 {
+			testing.expect_value(t, pending, clipboard)
+			delete(pending)
+		} else {
+			testing.expect_value(t, len(pending), 0)
+		}
+		posix.close(pipefd[1])
+		a.pty.master = -1
+		buf: [32]u8
+		n := posix.read(pipefd[0], raw_data(buf[:]), len(buf))
+		expected_len := len(clipboard)
+		if scenario != 0 {
+			expected_len += len(ordinary) - 1
+		}
+		testing.expect_value(t, n, expected_len)
+		if n > 0 {
+			testing.expect_value(t, string(buf[:len(clipboard)]), clipboard)
+			if scenario != 0 {
+				testing.expect_value(t, string(buf[len(clipboard):n]), string(ordinary[:1]))
+			}
+		}
+		posix.close(pipefd[0])
+		win.window_destroy(&a.window)
+		_bare_destroy(a)
+		free(a)
+	}
+}
+
+@(test)
+test_app_paste_shadow_rename_dispatch :: proc(t: ^testing.T) {
+	a := new(app.App)
+	defer free(a)
+	_bare_app(a)
+	defer _bare_destroy(a)
+	if !_dummy_window(t, &a.window, "paste-shadow-rename", 640, 480) {
+		return
+	}
+	defer win.window_destroy(&a.window)
+	clipboard := "quux"
+	testing.expect(t, win.window_set_clipboard_text(&a.window, clipboard), "clipboard setup must succeed")
+
+	pipefd: [2]posix.FD
+	if posix.pipe(&pipefd) != .OK {
+		testing.expect(t, false, "posix.pipe must succeed")
+		return
+	}
+	defer posix.close(pipefd[0])
+	app.session_manager_init(&a.session_mgr, 4)
+	defer app.session_manager_destroy(&a.session_mgr)
+	tab: app.Tab_Session
+	tab.id = 1
+	tab.backend.pty.master = int(pipefd[1])
+	tab.backend.pty.state = .Running
+	append(&a.session_mgr.tabs, tab)
+	a.session_mgr.active_idx = 0
+
+	cmd_r := input.Input_Event{kind = .Printable, rune = 'r', gui = true}
+	local_paste := input.Input_Event{event_type = .Local, action = .Paste}
+	marked := [?]input.Input_Event{
+		{kind = .Printable, rune = 'q', paste_shadow = true},
+		{kind = .Printable, rune = 'u', paste_shadow = true},
+		{kind = .Printable, rune = 'u', paste_shadow = true},
+		{kind = .Printable, rune = 'x', paste_shadow = true},
+	}
+	_, ok := app.app_dispatch_input_events(a, {cmd_r, local_paste, marked[0], marked[1], marked[2], marked[3]})
+	testing.expect(t, ok && a.tab_rename.active, "same-batch rename opening must stay active")
+	name := platform_tabs.tab_rename_text(&a.tab_rename)
+	testing.expect(t, len(name) >= len(clipboard) && name[len(name) - len(clipboard):] == clipboard, "marked text must reach rename editor")
+
+	posix.close(pipefd[1])
+	a.session_mgr.tabs[0].backend.pty.master = -1
+	buf: [32]u8
+	n := posix.read(pipefd[0], raw_data(buf[:]), len(buf))
+	testing.expect_value(t, n, 0)
+}
+
+@(test)
+test_app_paste_stays_in_tab_menus :: proc(t: ^testing.T) {
+	a := new(app.App)
+	defer free(a)
+	_bare_app(a)
+	defer _bare_destroy(a)
+	if !_dummy_window(t, &a.window, "paste-tab-menus", 640, 480) {
+		return
+	}
+	defer win.window_destroy(&a.window)
+	testing.expect(t, win.window_set_clipboard_text(&a.window, "quux"), "clipboard setup must succeed")
+
+	pipefd: [2]posix.FD
+	if posix.pipe(&pipefd) != .OK {
+		testing.expect(t, false, "posix.pipe must succeed")
+		return
+	}
+	defer posix.close(pipefd[0])
+	a.pty.master = int(pipefd[1])
+	a.pty.state = .Running
+	defer if a.pty.master >= 0 {posix.close(posix.FD(a.pty.master))}
+
+	local_paste := input.Input_Event{event_type = .Local, action = .Paste}
+	a.tab_menu.visible = true
+	_, ok := app.app_dispatch_input_events(a, {local_paste})
+	testing.expect(t, ok && a.tab_menu.visible, "context menu must retain paste without PTY routing")
+	a.tab_menu.visible = false
+	a.tab_overflow.visible = true
+	_, ok = app.app_dispatch_input_events(a, {local_paste})
+	testing.expect(t, ok && a.tab_overflow.visible, "overflow menu must retain paste without PTY routing")
+
+	posix.close(pipefd[1])
+	a.pty.master = -1
+	buf: [32]u8
+	n := posix.read(pipefd[0], raw_data(buf[:]), len(buf))
+	testing.expect_value(t, n, 0)
 }
 
 @(test)
