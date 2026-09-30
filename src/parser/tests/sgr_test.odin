@@ -1,6 +1,7 @@
 package parser_test
 
 import "core:testing"
+import "core:fmt"
 import tg "../../terminal"
 import p "../../parser"
 
@@ -180,8 +181,12 @@ test_sgr_truecolor :: proc(t: ^testing.T) {
 	defer tg.terminal_destroy(&term)
 
 	_sgr_feed(&parser, &term, "\x1b[38;2;10;20;30mA")
-	st := _sgr_style_of(&term, 0, 0)
-	testing.expect(t, st.fg == 0xFF0A141E, "38;2;10;20;30 must be truecolor fg")
+	cell := tg.terminal_get_cell(&term, 0, 0)
+	testing.expect(t, u8(cell.flags) & u8(tg.Cell_Flags.Direct_Color) != 0, "cell must have Direct_Color flag")
+	testing.expect(t, u8(cell.flags) & u8(tg.Cell_Flags.Has_Extension) != 0, "cell must have Has_Extension flag")
+	phys := tg._grid_physical_row(&term.grid, 0)
+	testing.expect(t, .Direct_Color in term.grid.rows[phys].ext.channels, "row must have Direct_Color channel")
+	testing.expect(t, term.grid.rows[phys].ext.colors[0].fg == 0xFF0A141E, "38;2;10;20;30 must be direct truecolor fg")
 }
 
 @(test)
@@ -312,4 +317,96 @@ test_sgr_table_full :: proc(t: ^testing.T) {
 	testing.expect(t, term.current_style == 0, "full table must return style 0 per overflow rule")
 	cell := tg.terminal_get_cell(&term, 0, 0)
 	testing.expect(t, cell.content == 'A', "text must still print when style table is full")
+}
+
+@(test)
+test_fast_parse_sgr_truecolor :: proc(t: ^testing.T) {
+	// FG Semicolon
+	consumed, ok, is_fg, color := p.fast_parse_sgr_truecolor(transmute([]u8)string("38;2;255;128;64m"))
+	testing.expect(t, ok, "FG semicolon truecolor must parse ok")
+	testing.expect(t, is_fg, "must be fg")
+	testing.expect(t, consumed == 16, "must consume 16 bytes")
+	testing.expect(t, color == 0xFFFF8040, "color must match 0xFFFF8040")
+
+	// BG Semicolon
+	consumed, ok, is_fg, color = p.fast_parse_sgr_truecolor(transmute([]u8)string("48;2;10;20;30m"))
+	testing.expect(t, ok, "BG semicolon truecolor must parse ok")
+	testing.expect(t, !is_fg, "must be bg")
+	testing.expect(t, consumed == 14, "must consume 14 bytes")
+	testing.expect(t, color == 0xFF0A141E, "color must match 0xFF0A141E")
+
+	// Colon form 38:2::R:G:Bm
+	consumed, ok, is_fg, color = p.fast_parse_sgr_truecolor(transmute([]u8)string("38:2::255;128:64m"))
+	testing.expect(t, !ok, "mixed separator must fail")
+
+	consumed, ok, is_fg, color = p.fast_parse_sgr_truecolor(transmute([]u8)string("38:2::255:128:64m"))
+	testing.expect(t, ok, "Colon form 38:2::R:G:Bm must parse ok")
+	testing.expect(t, is_fg, "must be fg")
+	testing.expect(t, consumed == 17, "must consume 17 bytes")
+	testing.expect(t, color == 0xFFFF8040, "color must match 0xFFFF8040")
+
+	// Colon form 38:2:0:R:G:Bm
+	consumed, ok, is_fg, color = p.fast_parse_sgr_truecolor(transmute([]u8)string("38:2:0:255:128:64m"))
+	testing.expect(t, ok, "Colon form 38:2:0:R:G:Bm must parse ok")
+	testing.expect(t, is_fg, "must be fg")
+	testing.expect(t, consumed == 18, "must consume 18 bytes")
+	testing.expect(t, color == 0xFFFF8040, "color must match 0xFFFF8040")
+
+	// Clamping
+	consumed, ok, is_fg, color = p.fast_parse_sgr_truecolor(transmute([]u8)string("38;2;300;400;500m"))
+	testing.expect(t, ok, "Values > 255 must parse ok and clamp")
+	testing.expect(t, color == 0xFFFFFFFF, "clamped color must be 0xFFFFFFFF")
+
+	// Edge cases / Rejections
+	_, ok, _, _ = p.fast_parse_sgr_truecolor(transmute([]u8)string("38;2;1m"))
+	testing.expect(t, !ok, "short sequence must fail")
+	_, ok, _, _ = p.fast_parse_sgr_truecolor(transmute([]u8)string("58;2;1;2;3m"))
+	testing.expect(t, !ok, "invalid prefix must fail")
+	_, ok, _, _ = p.fast_parse_sgr_truecolor(transmute([]u8)string("38;5;123m"))
+	testing.expect(t, !ok, "256-color must fail fast path")
+	_, ok, _, _ = p.fast_parse_sgr_truecolor(transmute([]u8)string("38;2;1;2;3;1m"))
+	testing.expect(t, !ok, "compound SGR must fail fast path")
+}
+
+@(test)
+test_fast_csi_parse_chunk :: proc(t: ^testing.T) {
+	parser: p.Parser
+	p.parser_init(&parser)
+
+	term: tg.Terminal
+	tg.terminal_init(&term, 24, 80)
+	defer tg.terminal_destroy(&term)
+
+	// Feed direct truecolor FG + BG followed by UTF-8 half-block '▀'
+	_sgr_feed(&parser, &term, "\x1b[38;2;255;0;0m\x1b[48;2;0;0;255m\xe2\x96\x80")
+	testing.expect(t, term.cursor.col == 1 && term.cursor.row == 0, "cursor must advance by 1 cell")
+	cell := tg.terminal_get_cell(&term, 0, 0)
+	testing.expect(t, cell.content == 0x2580, "cell content must be half block U+2580")
+	testing.expect(t, term.has_direct_fg, "direct fg must be set")
+	testing.expect(t, term.direct_fg == 0xFFFF0000, "direct fg must be 0xFFFF0000")
+	testing.expect(t, term.has_direct_bg, "direct bg must be set")
+	testing.expect(t, term.direct_bg == 0xFF0000FF, "direct bg must be 0xFF0000FF")
+
+	// Fast reset \x1b[0m
+	_sgr_feed(&parser, &term, "\x1b[0m")
+	testing.expect(t, !term.has_direct_fg, "direct fg must be reset")
+	testing.expect(t, !term.has_direct_bg, "direct bg must be reset")
+
+	// Fast cursor home \x1b[H
+	tg.terminal_move_cursor(&term, 10, 15)
+	_sgr_feed(&parser, &term, "\x1b[H")
+	testing.expect(t, term.cursor.col == 0 && term.cursor.row == 0, "cursor must be at (0, 0)")
+
+	// Fast erase to end of line \x1b[K and \x1b[0K
+	_sgr_feed(&parser, &term, "ABCDEF")
+	_sgr_feed(&parser, &term, "\x1b[H")
+	_sgr_feed(&parser, &term, "\x1b[K")
+	c0 := tg.terminal_get_cell(&term, 0, 0)
+	testing.expect(t, c0.content == 0, "erased line must clear cell")
+
+	_sgr_feed(&parser, &term, "XYZ")
+	_sgr_feed(&parser, &term, "\x1b[H")
+	_sgr_feed(&parser, &term, "\x1b[0K")
+	c1 := tg.terminal_get_cell(&term, 0, 0)
+	testing.expect(t, c1.content == 0, "erased line with 0K must clear cell")
 }

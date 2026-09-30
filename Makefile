@@ -9,7 +9,7 @@ TEST_FLAGS ?= -define:ODIN_TEST_THREADS=1
 DEBUG_FLAGS ?= -debug
 RELEASE_FLAGS ?= -o:speed -no-bounds-check
 
-.PHONY: all build release build-mcp release-mcp test-mcp bench-mcp bundle install dmg run check test test-terminal test-parser test-pty test-input test-ui test-interaction test-render test-app test-bench bench bench-vte clean help
+.PHONY: all build release build-mcp release-mcp test-mcp bench-mcp bundle install dmg run check test test-terminal test-parser test-pty test-input test-ui test-interaction test-render test-app test-bench test-mcp test-diag test-probe bench bench-run bench-video bench-vte clean help
 
 all: build
 
@@ -74,8 +74,10 @@ check:
 	$(ODIN) check src/config $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/ui $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/interaction $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/diag $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/bench/probe $(CHECK_FLAGS) -no-entry-point
 
-test: test-config test-terminal test-parser test-pty test-input test-ui test-interaction test-render test-app test-bench test-mcp
+test: test-config test-terminal test-parser test-pty test-input test-ui test-interaction test-render test-app test-bench test-mcp test-diag test-probe
 
 test-config:
 	$(ODIN) test src/config/tests $(COMMON_FLAGS) $(TEST_FLAGS)
@@ -110,6 +112,12 @@ test-bench:
 test-mcp:
 	$(ODIN) test src/cmd/term_mcp/tests -strict-style $(TEST_FLAGS)
 
+test-diag:
+	$(ODIN) test src/diag/tests $(COMMON_FLAGS) $(TEST_FLAGS)
+
+test-probe:
+	$(ODIN) test src/bench/probe/tests $(COMMON_FLAGS) $(TEST_FLAGS)
+
 bench-mcp: release-mcp
 	python3 scripts/bench_mcp_comprehensive.py
 
@@ -119,6 +127,24 @@ bench:
 	$(ODIN) build src/bench/cmd_terminal -out:$(OUT_DIR)/bench_terminal -o:speed
 	$(ODIN) build src/bench/cmd_pty -out:$(OUT_DIR)/bench_pty -o:speed
 	$(ODIN) build src/bench/cmd_input_photon -out:$(OUT_DIR)/bench_input_photon -o:speed
+
+bench-run: bench
+	@echo "=== Running Parser Benchmarks ==="
+	@./$(OUT_DIR)/bench_parser
+	@echo "\n=== Running Terminal Grid Benchmarks ==="
+	@./$(OUT_DIR)/bench_terminal
+	@echo "\n=== Running PTY Benchmarks ==="
+	@./$(OUT_DIR)/bench_pty
+	@echo "\n=== Running Input Photon Latency Benchmarks ==="
+	@./$(OUT_DIR)/bench_input_photon
+
+bench-video:
+	@mkdir -p $(OUT_DIR)
+	@if [ ! -f $(OUT_DIR)/term_video_player ]; then \
+		echo "Building $(OUT_DIR)/term_video_player..."; \
+		swiftc -O -o $(OUT_DIR)/term_video_player scripts/term_video_player.swift; \
+	fi
+	./$(OUT_DIR)/term_video_player --fire --duration 5 --fps 60
 
 bench-vte:
 	@chmod +x scripts/bench_comparative.sh 2>/dev/null || true
@@ -152,6 +178,8 @@ help:
 	@echo "  test-bench      Run bench unit tests"
 	@echo "  test-mcp        Run MCP server unit tests"
 	@echo "  bench           Build benchmark executables to $(OUT_DIR)/bench_*"
+	@echo "  bench-run       Run microbenchmark suite (parser, terminal, pty, input)"
+	@echo "  bench-video     Run continuous 100% full-screen TrueColor stress benchmark"
 	@echo "  bench-vte       Run comparative VTE benchmark generator and instructions"
 	@echo "  clean           Remove build artifacts and temporary binaries"
 	@echo "  help            Show this help message"

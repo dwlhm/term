@@ -243,3 +243,35 @@ _terminal_view_write_cell :: proc(b: ^strings.Builder, cell: Semantic_Cell, stor
 		strings.write_rune(b, cluster.runes[i])
 	}
 }
+
+// terminal_view_get_direct_color returns a pointer to the cell's Direct_Color_Channel if the row has .Direct_Color active.
+terminal_view_get_direct_color :: proc(t: ^Terminal, view: ^Terminal_View, viewport_row, col: int) -> ^Direct_Color_Channel {
+	if t == nil do return nil
+	if view != nil {
+		document_row := terminal_view_document_row(t, view, viewport_row)
+		if document_row < 0 do return nil
+		sb_len := scrollback_len(&t.scrollback)
+		if document_row < sb_len {
+			sb_row := scrollback_get(&t.scrollback, document_row)
+			if sb_row != nil && .Direct_Color in sb_row.ext.channels && col >= 0 && col < len(sb_row.ext.colors) {
+				return &sb_row.ext.colors[col]
+			}
+			return nil
+		}
+		live_row := document_row - sb_len
+		if live_row < 0 || live_row >= t.grid.row_count do return nil
+		phys := _grid_physical_row(&t.grid, live_row)
+		row := &t.grid.rows[phys]
+		if .Direct_Color in row.ext.channels && col >= 0 && col < len(row.ext.colors) {
+			return &row.ext.colors[col]
+		}
+		return nil
+	}
+	if viewport_row < 0 || viewport_row >= t.grid.row_count do return nil
+	phys := _grid_physical_row(&t.grid, viewport_row)
+	row := &t.grid.rows[phys]
+	if .Direct_Color in row.ext.channels && col >= 0 && col < len(row.ext.colors) {
+		return &row.ext.colors[col]
+	}
+	return nil
+}

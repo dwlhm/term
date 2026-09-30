@@ -201,9 +201,10 @@ _e2e_pred_nonblank :: proc(a: ^app.App) -> bool {
 
 @(test)
 test_e2e_echo_hello_session :: proc(t: ^testing.T) {
-	a: app.App
-	_bare_app(&a)
-	defer _bare_destroy(&a)
+	a := new(app.App)
+	defer free(a)
+	_bare_app(a)
+	defer _bare_destroy(a)
 	if !pty.pty_spawn(&a.pty, APP_TEST_ROWS, APP_TEST_COLS, "/bin/sh", {}) {
 		testing.expect(t, false, "pty_spawn(/bin/sh) must succeed")
 		return
@@ -215,7 +216,7 @@ test_e2e_echo_hello_session :: proc(t: ^testing.T) {
 		testing.expect(t, false, "pty_write(echo hello) must succeed")
 		return
 	}
-	if !_e2e_run_until(&a, _e2e_pred_hello, 200) {
+	if !_e2e_run_until(a, _e2e_pred_hello, 200) {
 		_e2e_dump_grid(&a.terminal)
 		testing.expect(t, false, "grid must spell hello with cursor advanced after echo hello")
 	}
@@ -223,9 +224,10 @@ test_e2e_echo_hello_session :: proc(t: ^testing.T) {
 
 @(test)
 test_e2e_prompt_roundtrip :: proc(t: ^testing.T) {
-	a: app.App
-	_bare_app(&a)
-	defer _bare_destroy(&a)
+	a := new(app.App)
+	defer free(a)
+	_bare_app(a)
+	defer _bare_destroy(a)
 	if !pty.pty_spawn(&a.pty, APP_TEST_ROWS, APP_TEST_COLS, "/bin/sh", {}) {
 		testing.expect(t, false, "pty_spawn(/bin/sh) must succeed")
 		return
@@ -237,7 +239,7 @@ test_e2e_prompt_roundtrip :: proc(t: ^testing.T) {
 		testing.expect(t, false, "pty_write(printf ABC) must succeed")
 		return
 	}
-	if !_e2e_run_until(&a, _e2e_pred_abc, 200) {
+	if !_e2e_run_until(a, _e2e_pred_abc, 200) {
 		_e2e_dump_grid(&a.terminal)
 		testing.expect(t, false, "grid must contain ABC after printf ABC")
 	}
@@ -245,9 +247,10 @@ test_e2e_prompt_roundtrip :: proc(t: ^testing.T) {
 
 @(test)
 test_e2e_colored_output :: proc(t: ^testing.T) {
-	a: app.App
-	_bare_app(&a)
-	defer _bare_destroy(&a)
+	a := new(app.App)
+	defer free(a)
+	_bare_app(a)
+	defer _bare_destroy(a)
 	if !pty.pty_spawn(&a.pty, APP_TEST_ROWS, APP_TEST_COLS, "/bin/sh", {}) {
 		testing.expect(t, false, "pty_spawn(/bin/sh) must succeed")
 		return
@@ -259,7 +262,7 @@ test_e2e_colored_output :: proc(t: ^testing.T) {
 		testing.expect(t, false, "pty_write(colored printf) must succeed")
 		return
 	}
-	if !_e2e_run_until(&a, _e2e_pred_styled_red, 200) {
+	if !_e2e_run_until(a, _e2e_pred_styled_red, 200) {
 		_e2e_dump_grid(&a.terminal)
 		testing.expect(t, false, "grid must hold RED with SGR consumed after SGR printf")
 		return
@@ -308,9 +311,10 @@ test_e2e_colored_output :: proc(t: ^testing.T) {
 
 @(test)
 test_e2e_clear_screen :: proc(t: ^testing.T) {
-	a: app.App
-	_bare_app(&a)
-	defer _bare_destroy(&a)
+	a := new(app.App)
+	defer free(a)
+	_bare_app(a)
+	defer _bare_destroy(a)
 	if !pty.pty_spawn(&a.pty, APP_TEST_ROWS, APP_TEST_COLS, "/bin/sh", {}) {
 		testing.expect(t, false, "pty_spawn(/bin/sh) must succeed")
 		return
@@ -322,7 +326,7 @@ test_e2e_clear_screen :: proc(t: ^testing.T) {
 		testing.expect(t, false, "pty_write(fill) must succeed")
 		return
 	}
-	if !_e2e_run_until(&a, _e2e_pred_fillmarker, 200) {
+	if !_e2e_run_until(a, _e2e_pred_fillmarker, 200) {
 		_e2e_dump_grid(&a.terminal)
 		testing.expect(t, false, "setup must fill grid with fillmarker before clear")
 		return
@@ -332,7 +336,7 @@ test_e2e_clear_screen :: proc(t: ^testing.T) {
 		testing.expect(t, false, "pty_write(ED clear) must succeed")
 		return
 	}
-	if !_e2e_run_until(&a, _e2e_pred_blank, 200) {
+	if !_e2e_run_until(a, _e2e_pred_blank, 200) {
 		_e2e_dump_grid(&a.terminal)
 		testing.expect(t, false, "fillmarker must be gone after ED Entire through the real path")
 	}
@@ -340,9 +344,10 @@ test_e2e_clear_screen :: proc(t: ^testing.T) {
 
 @(test)
 test_e2e_typing_roundtrip :: proc(t: ^testing.T) {
-	a: app.App
-	_bare_app(&a)
-	defer _bare_destroy(&a)
+	a := new(app.App)
+	defer free(a)
+	_bare_app(a)
+	defer _bare_destroy(a)
 	if !pty.pty_spawn(&a.pty, APP_TEST_ROWS, APP_TEST_COLS, "/bin/cat", {}) {
 		testing.expect(t, false, "pty_spawn(/bin/cat) must succeed")
 		return
@@ -360,7 +365,7 @@ test_e2e_typing_roundtrip :: proc(t: ^testing.T) {
 		testing.expect(t, false, "pty_write(encoded x) must succeed")
 		return
 	}
-	if !_e2e_run_until(&a, _e2e_pred_x, 200) {
+	if !_e2e_run_until(a, _e2e_pred_x, 200) {
 		_e2e_dump_grid(&a.terminal)
 		testing.expect(t, false, "grid must contain x after encoded input roundtrip through cat")
 	}
@@ -368,16 +373,17 @@ test_e2e_typing_roundtrip :: proc(t: ^testing.T) {
 
 @(test)
 test_e2e_shell_exit_banner :: proc(t: ^testing.T) {
-	a: app.App
-	_bare_app(&a)
-	defer _bare_destroy(&a)
+	a := new(app.App)
+	defer free(a)
+	_bare_app(a)
+	defer _bare_destroy(a)
 	if !pty.pty_spawn(&a.pty, APP_TEST_ROWS, APP_TEST_COLS, "/bin/sh", {"-c", "exit 42"}) {
 		testing.expect(t, false, "pty_spawn(exit 42) must succeed")
 		return
 	}
 	defer _e2e_teardown(&a.pty)
 
-	if !_e2e_run_until(&a, _e2e_pred_exit42, 200) {
+	if !_e2e_run_until(a, _e2e_pred_exit42, 200) {
 		_e2e_dump_grid(&a.terminal)
 		testing.expect(t, false, "pty must reach Exited with exit banner for code 42")
 		return
@@ -401,9 +407,10 @@ test_e2e_login_shell_smoke :: proc(t: ^testing.T) {
 	}
 	defer delete(shell_val)
 
-	a: app.App
-	_bare_app(&a)
-	defer _bare_destroy(&a)
+	a := new(app.App)
+	defer free(a)
+	_bare_app(a)
+	defer _bare_destroy(a)
 	if !pty.pty_spawn(&a.pty, APP_TEST_ROWS, APP_TEST_COLS, shell_val, {}) {
 		_e2e_dump_grid(&a.terminal)
 		testing.expect(t, false, "$SHELL spawn must succeed")
@@ -416,7 +423,7 @@ test_e2e_login_shell_smoke :: proc(t: ^testing.T) {
 		testing.expect(t, false, "pty_write(echo $0) must succeed")
 		return
 	}
-	if !_e2e_run_until(&a, _e2e_pred_nonblank, 200) {
+	if !_e2e_run_until(a, _e2e_pred_nonblank, 200) {
 		_e2e_dump_grid(&a.terminal)
 		testing.expect(t, false, "grid must be non-blank after echo $0 on login shell")
 	}

@@ -9,9 +9,9 @@ import app "../"
 _seeded_manager :: proc(sm: ^app.Session_Manager, count: int, base: u32) {
 	app.session_manager_init(sm, 8)
 	for i in 0 ..< count {
-		tab: app.Tab_Session
+		resize(&sm.tabs, len(sm.tabs) + 1)
+		tab := &sm.tabs[len(sm.tabs) - 1]
 		tab.id = base + u32(i) + 1
-		append(&sm.tabs, tab)
 	}
 }
 
@@ -63,9 +63,9 @@ test_session_close_others_and_to_right :: proc(t: ^testing.T) {
 	// Rebuild with a fresh id range and keep only the second tab.
 	resize(&sm.tabs, 0)
 	for i in 0 ..< 4 {
-		tab: app.Tab_Session
+		resize(&sm.tabs, len(sm.tabs) + 1)
+		tab := &sm.tabs[len(sm.tabs) - 1]
 		tab.id = 10 + u32(i) + 1
-		append(&sm.tabs, tab)
 	}
 	sm.active_idx = 1
 	closed = app.session_close_others(&sm, 1)

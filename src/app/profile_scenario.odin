@@ -8,8 +8,10 @@ import "core:time"
 import termgrid "../terminal"
 import input "../platform/input"
 import platform "../platform"
+import probe "../bench/probe"
 
-Profile_Phase :: enum { Idle, Running, Complete, Failed }
+Profile_Phase :: probe.Profile_Phase
+Profile_Record_Kind :: probe.Profile_Record_Kind
 Profile_Scenario :: struct {
 	enabled: bool,
 	phase: Profile_Phase,

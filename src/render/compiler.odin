@@ -363,6 +363,9 @@ _compile_row_range_v2 :: proc(
 			if selected {
 				cf |= RENDER_CELL_V2_CFLAG_SELECTED
 			}
+			if u8(cell.flags) & u8(termgrid.Cell_Flags.Direct_Color) != 0 {
+				cf |= RENDER_CELL_V2_CFLAG_DIRECT_COLOR
+			}
 			if cell.width == 2 {
 				w = RENDER_CELL_V2_WIDTH_WIDE_LEAD
 			}
@@ -437,6 +440,9 @@ shaped_cell_from_cluster :: proc(
 	cf := u8(0)
 	if selected {
 		cf |= RENDER_CELL_V2_CFLAG_SELECTED
+	}
+	if u8(cell.flags) & u8(termgrid.Cell_Flags.Direct_Color) != 0 {
+		cf |= RENDER_CELL_V2_CFLAG_DIRECT_COLOR
 	}
 	if cell.width == 2 {
 		w = RENDER_CELL_V2_WIDTH_WIDE_LEAD

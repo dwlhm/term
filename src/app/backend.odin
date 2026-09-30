@@ -23,6 +23,7 @@ import input "../platform/input"
 import pty "../platform/pty"
 import config "../config"
 import inter "../interaction"
+import probe "../bench/probe"
 import session_core "../session_core"
 
 // UI_EVENT_QUEUE_CAP is the capacity of the thread-safe UI event queue.
@@ -132,6 +133,8 @@ Backend :: struct {
 	event_queue:          UI_Event_Queue,
 	drain_buf:            []u8,
 	resize_generation:    u64,
+	notify_data_ready_cb: proc(user_data: rawptr),
+	notify_user_data:     rawptr,
 
 	// Session core observer port & mode
 	observer:             session_core.Terminal_Observer_Port,
@@ -412,6 +415,12 @@ backend_set_clipboard_callbacks :: proc(
 	b.clipboard_user_data = user_data
 	b.clipboard_write_cb = write_cb
 	b.clipboard_read_cb = read_cb
+}
+
+backend_set_notify_data_ready :: proc(b: ^Backend, user_data: rawptr, cb: proc(user_data: rawptr)) {
+	if b == nil do return
+	b.notify_data_ready_cb = cb
+	b.notify_user_data = user_data
 }
 
 // backend_drain_pty reads available bytes from the PTY master into a buffer
@@ -834,11 +843,15 @@ _terminal_sync_to_front :: proc(b: ^Backend) {
 	if dst.grid.cells != nil && src.grid.cells != nil {
 		if dims_changed || alt_screen_switched || origin_changed {
 			copy(dst.grid.cells, src.grid.cells)
+			if dst.grid.ext_colors != nil && src.grid.ext_colors != nil {
+				copy(dst.grid.ext_colors, src.grid.ext_colors)
+			}
 			for i in 0..<src.grid.capacity {
 				if i < len(dst.grid.rows) && i < len(src.grid.rows) {
 					dst.grid.rows[i].generation = src.grid.rows[i].generation
 					dst.grid.rows[i].wrapped = src.grid.rows[i].wrapped
 					dst.grid.rows[i].is_prompt = src.grid.rows[i].is_prompt
+					dst.grid.rows[i].ext.channels = src.grid.rows[i].ext.channels
 				}
 			}
 			for r in 0..<dst.damage.row_count {
@@ -858,6 +871,10 @@ _terminal_sync_to_front :: proc(b: ^Backend) {
 							dst.grid.rows[dst_phys].generation = src.grid.rows[src_phys].generation
 							dst.grid.rows[dst_phys].wrapped = src.grid.rows[src_phys].wrapped
 							dst.grid.rows[dst_phys].is_prompt = src.grid.rows[src_phys].is_prompt
+							dst.grid.rows[dst_phys].ext.channels = src.grid.rows[src_phys].ext.channels
+							if len(dst.grid.rows[dst_phys].ext.colors) > 0 && len(src.grid.rows[src_phys].ext.colors) > 0 {
+								copy(dst.grid.rows[dst_phys].ext.colors, src.grid.rows[src_phys].ext.colors)
+							}
 						}
 					}
 				}
@@ -872,12 +889,16 @@ _terminal_sync_to_front :: proc(b: ^Backend) {
 		dst.alt_grid.style_table = src.alt_grid.style_table
 		if dst.alt_grid.cells != nil && src.alt_grid.cells != nil {
 			copy(dst.alt_grid.cells, src.alt_grid.cells)
+			if dst.alt_grid.ext_colors != nil && src.alt_grid.ext_colors != nil {
+				copy(dst.alt_grid.ext_colors, src.alt_grid.ext_colors)
+			}
 		}
 		for i in 0..<src.alt_grid.capacity {
 			if i < len(dst.alt_grid.rows) && i < len(src.alt_grid.rows) {
 				dst.alt_grid.rows[i].generation = src.alt_grid.rows[i].generation
 				dst.alt_grid.rows[i].wrapped = src.alt_grid.rows[i].wrapped
 				dst.alt_grid.rows[i].is_prompt = src.alt_grid.rows[i].is_prompt
+				dst.alt_grid.rows[i].ext.channels = src.alt_grid.rows[i].ext.channels
 			}
 		}
 	}
@@ -914,9 +935,13 @@ _terminal_sync_to_front :: proc(b: ^Backend) {
 	if viewing_history && needs_cell_sync {
 		if dst.scrollback.cells != nil && src.scrollback.cells != nil {
 			copy(dst.scrollback.cells, src.scrollback.cells)
+			if dst.scrollback.ext_colors != nil && src.scrollback.ext_colors != nil {
+				copy(dst.scrollback.ext_colors, src.scrollback.ext_colors)
+			}
 		}
 		for i in 0..<src.scrollback.max_lines {
 			dst.scrollback.rows[i].wrapped = src.scrollback.rows[i].wrapped
+			dst.scrollback.rows[i].ext.channels = src.scrollback.rows[i].ext.channels
 		}
 		b.front_scrollback_synced_pushed = src.scrollback.total_pushed
 		b.front_scrollback_synced_clear_gen = src.scrollback.clear_generation
@@ -1007,6 +1032,9 @@ _backend_swap_buffers :: proc(b: ^Backend) {
 	b.front_cursor = b.cursor
 	b.front_focused = b.focused
 	b.front_interaction = b.interaction
+	if b.notify_data_ready_cb != nil {
+		b.notify_data_ready_cb(b.notify_user_data)
+	}
 }
 
 // backend_start_thread starts the background worker thread.
@@ -1305,10 +1333,10 @@ backend_handle_ui_event :: proc(b: ^Backend, ev: UI_Event) {
 			if ui_event_queue_has_resize(&b.event_queue) {
 				return
 			}
-			started_ns := profile_clock_ns()
+			started_ns := probe.profile_clock_ns()
 			backend_on_resize(b, ev.rows, ev.cols)
-			elapsed := profile_elapsed_ns(started_ns)
-			profile_record_resize(.Idle, .Resize_Stage, ev.pixel_w, ev.pixel_h, ev.pixel_w, ev.pixel_h, i32(ev.rows), i32(ev.cols), i32(b.terminal.grid.row_count), i32(b.terminal.grid.col_count), elapsed, true)
+			elapsed := probe.profile_elapsed_ns(started_ns)
+			probe.profile_record_resize(.Idle, .Resize_Stage, ev.pixel_w, ev.pixel_h, ev.pixel_w, ev.pixel_h, i32(ev.rows), i32(ev.cols), i32(b.terminal.grid.row_count), i32(b.terminal.grid.col_count), elapsed, true)
 		}
 	case .Focus:
 		backend_set_focused(b, ev.focused)
@@ -1374,19 +1402,17 @@ backend_worker_proc :: proc(t: ^thread.Thread) {
 			if ui_event_queue_has_resize(&b.event_queue) {
 				continue
 			}
-			if bytes_read > 0 {
-				if sync.mutex_try_lock(&b.swap_mutex) {
-					_terminal_sync_to_front(b)
-					b.front_view = b.view
-					b.front_cursor = b.cursor
-					b.front_focused = b.focused
-					b.front_interaction = b.interaction
-					sync.mutex_unlock(&b.swap_mutex)
-					pending_swap = false
-				}
-			} else {
-				_backend_swap_buffers(b)
+			if sync.mutex_try_lock(&b.swap_mutex) {
+				_terminal_sync_to_front(b)
+				b.front_view = b.view
+				b.front_cursor = b.cursor
+				b.front_focused = b.focused
+				b.front_interaction = b.interaction
+				sync.mutex_unlock(&b.swap_mutex)
 				pending_swap = false
+				if b.notify_data_ready_cb != nil {
+					b.notify_data_ready_cb(b.notify_user_data)
+				}
 			}
 		}
 
@@ -1398,11 +1424,17 @@ backend_worker_proc :: proc(t: ^thread.Thread) {
 					// Truly idle: blocking lock to guarantee final frame delivery
 					_backend_swap_buffers(b)
 					pending_swap = false
+					if b.notify_data_ready_cb != nil {
+						b.notify_data_ready_cb(b.notify_user_data)
+					}
 				}
 			} else {
 				if pending_swap {
 					_backend_swap_buffers(b)
 					pending_swap = false
+					if b.notify_data_ready_cb != nil {
+						b.notify_data_ready_cb(b.notify_user_data)
+					}
 				}
 				time.sleep(2 * time.Millisecond)
 			}

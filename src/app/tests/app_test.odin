@@ -149,8 +149,9 @@ _row_matches :: proc(t: ^termgrid.Terminal, row: int, want: string) -> bool {
 @(test)
 test_app_init_rejects_nil_and_empty :: proc(t: ^testing.T) {
 	testing.expect(t, !app.app_init(nil, 24, 80, "/bin/sh", nil), "nil app must fail")
-	a: app.App
-	testing.expect(t, !app.app_init(&a, 24, 80, "", nil), "empty prog must fail without side effects")
+	a := new(app.App)
+	defer free(a)
+	testing.expect(t, !app.app_init(a, 24, 80, "", nil), "empty prog must fail without side effects")
 	testing.expect_value(t, a.pty.master, -1)
 }
 
@@ -161,14 +162,15 @@ test_app_frame_nil_safe :: proc(t: ^testing.T) {
 
 @(test)
 test_app_frame_headless_skip :: proc(t: ^testing.T) {
-	a: app.App
-	_bare_app(&a)
-	defer _bare_destroy(&a)
+	a := new(app.App)
+	defer free(a)
+	_bare_app(a)
+	defer _bare_destroy(a)
 
 	// Clean grid + steady cursor after the first arming tick: frames
 	// skip the GPU path but stay alive.
 	for i in 0..<3 {
-		testing.expect(t, app.app_frame(&a), "headless frame must stay alive")
+		testing.expect(t, app.app_frame(a), "headless frame must stay alive")
 	}
 	testing.expect(t, a.cursor.blink_on, "first tick must arm blink_on (visible+focused)")
 	testing.expect(t, !a.should_quit, "no quit without SDL events")
@@ -176,16 +178,17 @@ test_app_frame_headless_skip :: proc(t: ^testing.T) {
 
 @(test)
 test_app_frame_damage_consumed_and_cursor_staged :: proc(t: ^testing.T) {
-	a: app.App
-	_bare_app(&a)
-	defer _bare_destroy(&a)
-	_cpu_renderer(&a)
-	defer _cpu_renderer_destroy(&a)
+	a := new(app.App)
+	defer free(a)
+	_bare_app(a)
+	defer _bare_destroy(a)
+	_cpu_renderer(a)
+	defer _cpu_renderer_destroy(a)
 
 	termgrid.terminal_put_string(&a.terminal, "hi")
 	testing.expect(t, _damage_cells(&a.terminal) > 0, "setup must produce damage")
 
-	testing.expect(t, app.app_frame(&a), "damage frame must stay alive")
+	testing.expect(t, app.app_frame(a), "damage frame must stay alive")
 	testing.expect(t, _damage_cells(&a.terminal) > 0, "nil-backend publication failure must keep damage queued")
 
 	// The damage present found no backend (headless), but the cursor quad
@@ -201,15 +204,16 @@ test_app_frame_damage_consumed_and_cursor_staged :: proc(t: ^testing.T) {
 
 @(test)
 test_app_cursor_blink_change_renders_without_overlay_present :: proc(t: ^testing.T) {
-	a: app.App
-	_bare_app(&a)
-	defer _bare_destroy(&a)
-	_cpu_renderer(&a)
-	defer _cpu_renderer_destroy(&a)
+	a := new(app.App)
+	defer free(a)
+	_bare_app(a)
+	defer _bare_destroy(a)
+	_cpu_renderer(a)
+	defer _cpu_renderer_destroy(a)
 
 	// The first visible tick arms the cursor and marks a renderable cell even
 	// though the terminal scene starts clean.
-	testing.expect(t, app.app_frame(&a), "headless frame must stay alive")
+	testing.expect(t, app.app_frame(a), "headless frame must stay alive")
 	testing.expect(t, a.cursor.blink_on && a.cursor.visible, "cursor must start visible")
 	testing.expect(t, _damage_cells(&a.terminal) > 0, "nil-backend publication failure must keep cursor damage queued")
 
@@ -217,16 +221,17 @@ test_app_cursor_blink_change_renders_without_overlay_present :: proc(t: ^testing
 	// the cursor-only damage through the normal renderer path; no overlay-only
 	// present is available or required.
 	a.cursor.next_toggle = 1
-	testing.expect(t, app.app_frame(&a), "blink-change frame must stay alive")
+	testing.expect(t, app.app_frame(a), "blink-change frame must stay alive")
 	testing.expect(t, !a.cursor.blink_on, "blink change must hide the cursor")
 	testing.expect(t, _damage_cells(&a.terminal) > 0, "nil-backend publication failure must keep blink damage queued")
 }
 
 @(test)
 test_app_frame_quit_event :: proc(t: ^testing.T) {
-	a: app.App
-	_bare_app(&a)
-	defer _bare_destroy(&a)
+	a := new(app.App)
+	defer free(a)
+	_bare_app(a)
+	defer _bare_destroy(a)
 	if !_dummy_window(t, &a.window, "app-test-quit", 64, 64) {
 		testing.expect(t, true, "SKIP: dummy video unavailable after retries; infra flake, not a code defect")
 		return
@@ -239,15 +244,16 @@ test_app_frame_quit_event :: proc(t: ^testing.T) {
 		testing.expect(t, true, "SKIP: PushEvent transient queue failure; infra flake, not a code defect")
 		return
 	}
-	testing.expect(t, !app.app_frame(&a), "QUIT event must request quit")
+	testing.expect(t, !app.app_frame(a), "QUIT event must request quit")
 	testing.expect(t, a.should_quit, "should_quit must latch")
 }
 
 @(test)
 test_app_frame_drain_parse_exit :: proc(t: ^testing.T) {
-	a: app.App
-	_bare_app(&a)
-	defer _bare_destroy(&a)
+	a := new(app.App)
+	defer free(a)
+	_bare_app(a)
+	defer _bare_destroy(a)
 	if !_dummy_window(t, &a.window, "app-test-drain", APP_TEST_COLS * app.APP_CELL_W, APP_TEST_ROWS * app.APP_CELL_H) {
 		testing.expect(t, true, "SKIP: dummy video unavailable after retries; infra flake, not a code defect")
 		return
@@ -264,7 +270,7 @@ test_app_frame_drain_parse_exit :: proc(t: ^testing.T) {
 
 	found := false
 	for i in 0..<200 {
-		if !app.app_frame(&a) {
+		if !app.app_frame(a) {
 			break
 		}
 		if _row_matches(&a.terminal, 0, "hello") {
@@ -277,7 +283,7 @@ test_app_frame_drain_parse_exit :: proc(t: ^testing.T) {
 
 	exited := false
 	for i in 0..<200 {
-		_ = app.app_frame(&a)
+		_ = app.app_frame(a)
 		if a.pty.state == .Exited {
 			exited = true
 			break
@@ -287,19 +293,20 @@ test_app_frame_drain_parse_exit :: proc(t: ^testing.T) {
 	testing.expect(t, exited, "exit poll must record the Exited state")
 
 	// Exited loop keeps running (banner is step 15), input parked.
-	testing.expect(t, app.app_frame(&a), "post-exit frame must stay alive")
+	testing.expect(t, app.app_frame(a), "post-exit frame must stay alive")
 }
 
 @(test)
 test_app_zoom_request_bounds_and_coalescing :: proc(t: ^testing.T) {
-	a: app.App
+	a := new(app.App)
+	defer free(a)
 	a.pty.state = .Running
 	a.logical_font_size = app.APP_FONT_SIZE
 
 	// Multiple local actions update one target; the renderer rebuild is
 	// deferred until the app frame applies that target.
-	testing.expect(t, app._app_request_zoom(&a, 1), "first zoom request must advance")
-	testing.expect(t, app._app_request_zoom(&a, 1), "second zoom request must coalesce")
+	testing.expect(t, app._app_request_zoom(a, 1), "first zoom request must advance")
+	testing.expect(t, app._app_request_zoom(a, 1), "second zoom request must coalesce")
 	testing.expect_value(
 		t,
 		a.zoom_target_logical_size,
@@ -308,54 +315,56 @@ test_app_zoom_request_bounds_and_coalescing :: proc(t: ^testing.T) {
 
 	a.zoom_target_logical_size = 0
 	a.logical_font_size = app.APP_FONT_ZOOM_MIN
-	testing.expect(t, !app._app_request_zoom(&a, -1), "minimum zoom must clamp")
+	testing.expect(t, !app._app_request_zoom(a, -1), "minimum zoom must clamp")
 	testing.expect_value(t, a.zoom_target_logical_size, app.APP_FONT_ZOOM_MIN)
 
 	a.zoom_target_logical_size = 0
 	a.logical_font_size = app.APP_FONT_ZOOM_MAX
-	testing.expect(t, !app._app_request_zoom(&a, 1), "maximum zoom must clamp")
+	testing.expect(t, !app._app_request_zoom(a, 1), "maximum zoom must clamp")
 	testing.expect_value(t, a.zoom_target_logical_size, app.APP_FONT_ZOOM_MAX)
 
 	a.pty.state = .Exited
 	a.zoom_target_logical_size = 0
-	testing.expect(t, !app._app_request_zoom(&a, 1), "exited child must ignore zoom")
+	testing.expect(t, !app._app_request_zoom(a, 1), "exited child must ignore zoom")
 	testing.expect_value(t, a.zoom_target_logical_size, 0.0)
 }
 
 @(test)
 test_app_pointer_cell_scales_logical_coordinates :: proc(t: ^testing.T) {
-	a: app.App
-	_bare_app(&a)
-	defer _bare_destroy(&a)
-	_cpu_renderer(&a)
-	defer _cpu_renderer_destroy(&a)
+	a := new(app.App)
+	defer free(a)
+	_bare_app(a)
+	defer _bare_destroy(a)
+	_cpu_renderer(a)
+	defer _cpu_renderer_destroy(a)
 
 	a.window.width = 640
 	a.window.height = 384
 	a.window.pixel_w = 1280
 	a.window.pixel_h = 768
 
-	retina := app._app_pointer_cell(&a, 12, 24)
+	retina := app._app_pointer_cell(a, 12, 24)
 	testing.expect(t, retina.row == 3 && retina.col == 3, "HiDPI logical pointer must map to physical grid cell")
 
 	a.window.pixel_w = a.window.width
 	a.window.pixel_h = a.window.height
-	standard := app._app_pointer_cell(&a, 12, 24)
+	standard := app._app_pointer_cell(a, 12, 24)
 	testing.expect(t, standard.row == 1 && standard.col == 1, "equal logical and pixel sizes must not scale twice")
 
 	a.window.width = 0
 	a.window.height = 0
 	a.window.pixel_w = 0
 	a.window.pixel_h = 0
-	invalid := app._app_pointer_cell(&a, 12, 24)
+	invalid := app._app_pointer_cell(a, 12, 24)
 	testing.expect(t, invalid.row == 1 && invalid.col == 1, "invalid window sizes must keep unit scale")
 }
 
 @(test)
 test_app_init_failure_unwind :: proc(t: ^testing.T) {
 	// Pre-window failures unwind trivially and leave the pty drain-safe.
-	a: app.App
-	testing.expect(t, !app.app_init(&a, APP_TEST_ROWS, APP_TEST_COLS, "", nil), "empty prog must fail init")
+	a := new(app.App)
+	defer free(a)
+	testing.expect(t, !app.app_init(a, APP_TEST_ROWS, APP_TEST_COLS, "", nil), "empty prog must fail init")
 	testing.expect_value(t, a.pty.master, -1)
 	testing.expect_value(t, a.pty.pid, -1)
 	// HEADLESS LIMIT (honest): stages past window creation (surface,
@@ -489,9 +498,10 @@ test_app_synchronized_output_deferral_and_timeout :: proc(t: ^testing.T) {
 
 @(test)
 test_app_reload_config :: proc(t: ^testing.T) {
-	a: app.App
-	_bare_app(&a)
-	defer _bare_destroy(&a)
+	a := new(app.App)
+	defer free(a)
+	_bare_app(a)
+	defer _bare_destroy(a)
 
 	render.style_lut_rebuild(&a.lut, &a.terminal.grid.style_table)
 
@@ -511,7 +521,7 @@ font_size = 18.0
 	os.set_env("TERM_CONFIG", tmp_cfg)
 	defer os.unset_env("TERM_CONFIG")
 
-	ok := app.app_reload_config(&a)
+	ok := app.app_reload_config(a)
 	testing.expect(t, ok, "app_reload_config must succeed on valid config")
 	testing.expect_value(t, a.config.background, u32(0xFF000000))
 	testing.expect_value(t, a.config.foreground, u32(0xFFFFFFFF))
@@ -524,7 +534,7 @@ background = = 1234
 `
 	_ = os.write_entire_file(tmp_cfg, transmute([]u8)bad_cfg_content)
 
-	bad_ok := app.app_reload_config(&a)
+	bad_ok := app.app_reload_config(a)
 	testing.expect(t, !bad_ok, "app_reload_config must fail on syntax error")
 	// State must be 100% retained
 	testing.expect_value(t, a.config.background, u32(0xFF000000))
@@ -533,7 +543,8 @@ background = = 1234
 
 @(test)
 test_backend_threaded_worker_and_double_buffer :: proc(t: ^testing.T) {
-	b: app.Backend
+	b := new(app.Backend)
+	defer free(b)
 	theme := termgrid.Theme{
 		name                 = "test",
 		foreground           = 0xFFFFFFFF,
@@ -545,14 +556,14 @@ test_backend_threaded_worker_and_double_buffer :: proc(t: ^testing.T) {
 	cfg := config.config_default()
 	defer config.config_destroy(&cfg)
 
-	ok := app.backend_init(&b, 24, 80, "/bin/sh", {}, &cfg, theme)
+	ok := app.backend_init(b, 24, 80, "/bin/sh", {}, &cfg, theme)
 	testing.expect(t, ok, "backend_init must succeed")
-	defer app.backend_destroy(&b)
+	defer app.backend_destroy(b)
 
 	// Start worker thread
-	started := app.backend_start_thread(&b)
+	started := app.backend_start_thread(b)
 	testing.expect(t, started, "backend_start_thread must succeed")
-	testing.expect(t, app.backend_is_threaded(&b), "backend_is_threaded must report true")
+	testing.expect(t, app.backend_is_threaded(b), "backend_is_threaded must report true")
 
 	// Push key event to write echo command to child shell
 	echo_cmd := "echo THREAD_OK\n"
@@ -562,14 +573,14 @@ test_backend_threaded_worker_and_double_buffer :: proc(t: ^testing.T) {
 			kind       = .Printable if ch != '\n' else .Enter,
 			rune       = ch,
 		}
-		app.backend_push_event(&b, app.UI_Event{type = .Input, input = ev})
+		app.backend_push_event(b, app.UI_Event{type = .Input, input = ev})
 	}
 
 	// Poll front buffer render state until the text appears in front buffer
 	found := false
 	for _ in 0..<100 {
-		app.backend_lock_render(&b)
-		state := app.backend_get_render_state(&b)
+		app.backend_lock_render(b)
+		state := app.backend_get_render_state(b)
 		if state.terminal != nil {
 			// Scan front buffer grid for THREAD_OK
 			for r in 0..<state.terminal.grid.row_count {
@@ -593,7 +604,7 @@ test_backend_threaded_worker_and_double_buffer :: proc(t: ^testing.T) {
 				}
 			}
 		}
-		app.backend_unlock_render(&b)
+		app.backend_unlock_render(b)
 		if found {
 			break
 		}
@@ -602,8 +613,8 @@ test_backend_threaded_worker_and_double_buffer :: proc(t: ^testing.T) {
 	testing.expect(t, found, "front buffer must receive parsed output from background thread")
 
 	// Stop thread and verify clean join
-	app.backend_stop_thread(&b)
-	testing.expect(t, !app.backend_is_threaded(&b), "backend_is_threaded must report false after stop")
+	app.backend_stop_thread(b)
+	testing.expect(t, !app.backend_is_threaded(b), "backend_is_threaded must report false after stop")
 }
 
 @(test)
@@ -717,7 +728,8 @@ test_backend_paste_shadow_worker_routing :: proc(t: ^testing.T) {
 
 @(test)
 test_app_interaction_dispatch_integration :: proc(t: ^testing.T) {
-	b: app.Backend
+	b := new(app.Backend)
+	defer free(b)
 	termgrid.terminal_init(&b.terminal, APP_TEST_ROWS, APP_TEST_COLS)
 	defer termgrid.terminal_destroy(&b.terminal)
 	parser.parser_init(&b.parser)
@@ -732,7 +744,7 @@ test_app_interaction_dispatch_integration :: proc(t: ^testing.T) {
 	testing.expect(t, !b.interaction.selection_active, "selection must start inactive")
 
 	// Render state interaction pointer verification
-	state := app.backend_get_render_state(&b)
+	state := app.backend_get_render_state(b)
 	testing.expect(t, state.interaction != nil, "render state must include interaction pointer")
 	testing.expect_value(t, state.interaction.mode, interaction.Interaction_Mode.Passthrough)
 
@@ -750,7 +762,7 @@ test_app_interaction_dispatch_integration :: proc(t: ^testing.T) {
 			shift      = true,
 		},
 	}
-	app.backend_handle_ui_event(&b, enter_visual_ev)
+	app.backend_handle_ui_event(b, enter_visual_ev)
 
 	testing.expect_value(t, b.interaction.mode, interaction.Interaction_Mode.Visual)
 	testing.expect(t, b.interaction.selection_active, "selection must be active in visual mode")
@@ -766,7 +778,7 @@ test_app_interaction_dispatch_integration :: proc(t: ^testing.T) {
 			rune       = 'l',
 		},
 	}
-	app.backend_handle_ui_event(&b, nav_ev)
+	app.backend_handle_ui_event(b, nav_ev)
 	testing.expect_value(t, b.interaction.visual_cursor.col, col_before + 1)
 	testing.expect_value(t, b.view.selection.focus.col, col_before + 1)
 
@@ -784,7 +796,7 @@ test_app_interaction_dispatch_integration :: proc(t: ^testing.T) {
 		rows = 0,
 		cols = 8, // inside "banana"
 	}
-	app.backend_handle_ui_event(&b, ptr_ev)
+	app.backend_handle_ui_event(b, ptr_ev)
 	testing.expect(t, b.interaction.selection_active, "selection must remain active after double click")
 	extracted := interaction.interaction_extract_selection_text(&b.terminal, &b.interaction)
 	defer delete(extracted)
@@ -807,7 +819,7 @@ test_app_interaction_dispatch_integration :: proc(t: ^testing.T) {
 			rune       = 'y',
 		},
 	}
-	app.backend_handle_ui_event(&b, yank_ev)
+	app.backend_handle_ui_event(b, yank_ev)
 	testing.expect_value(t, b.interaction.mode, interaction.Interaction_Mode.Passthrough)
 	testing.expect(t, !b.interaction.selection_active, "selection must be cleared after yank")
 	testing.expect(t, !b.view.selection.active, "view selection must be cleared after yank")
@@ -838,9 +850,10 @@ test_app_interaction_dispatch_integration :: proc(t: ^testing.T) {
 
 @(test)
 test_app_search_and_tab_sync :: proc(t: ^testing.T) {
-	a: app.App
-	_bare_app(&a)
-	defer _bare_destroy(&a)
+	a := new(app.App)
+	defer free(a)
+	_bare_app(a)
+	defer _bare_destroy(a)
 	app.session_manager_init(&a.session_mgr, 4)
 	defer app.session_manager_destroy(&a.session_mgr)
 
@@ -849,7 +862,7 @@ test_app_search_and_tab_sync :: proc(t: ^testing.T) {
 	testing.expect_value(t, idx, 0)
 	a.session_mgr.active_idx = 0
 
-	active_b := app.app_active_backend(&a)
+	active_b := app.app_active_backend(a)
 	testing.expect(t, active_b != nil, "active backend must exist")
 	termgrid.terminal_put_string(&active_b.terminal, "hello search world hello\r\n")
 
@@ -860,7 +873,7 @@ test_app_search_and_tab_sync :: proc(t: ^testing.T) {
 		rune       = 'f',
 		gui        = true,
 	}
-	app.app_dispatch_input_events(&a, {cmd_f})
+	app.app_dispatch_input_events(a, {cmd_f})
 	testing.expect(t, a.search_bar.visible, "search bar must be visible after Cmd+F")
 	testing.expect_value(t, active_b.interaction.mode, interaction.Interaction_Mode.Search)
 	testing.expect(t, active_b.interaction.search_active, "search_active must be true")
@@ -874,7 +887,7 @@ test_app_search_and_tab_sync :: proc(t: ^testing.T) {
 			kind       = .Printable,
 			rune       = r,
 		}
-		app.app_dispatch_input_events(&a, {ev})
+		app.app_dispatch_input_events(a, {ev})
 	}
 	testing.expect_value(t, string(a.search_bar.query[:a.search_bar.query_len]), "hello")
 	testing.expect_value(t, string(active_b.interaction.search_query[:active_b.interaction.search_len]), "hello")
@@ -887,7 +900,7 @@ test_app_search_and_tab_sync :: proc(t: ^testing.T) {
 		event_type = .Key,
 		kind       = .Enter,
 	}
-	app.app_dispatch_input_events(&a, {enter_ev})
+	app.app_dispatch_input_events(a, {enter_ev})
 	testing.expect_value(t, a.search_bar.match_idx, 1)
 	testing.expect_value(t, active_b.interaction.search_match_idx, 1)
 
@@ -896,7 +909,7 @@ test_app_search_and_tab_sync :: proc(t: ^testing.T) {
 		event_type = .Key,
 		kind       = .Escape,
 	}
-	app.app_dispatch_input_events(&a, {esc_ev})
+	app.app_dispatch_input_events(a, {esc_ev})
 	testing.expect(t, !a.search_bar.visible, "search bar must be hidden after Escape")
 	testing.expect_value(t, active_b.interaction.mode, interaction.Interaction_Mode.Passthrough)
 	testing.expect(t, !active_b.interaction.search_active, "search_active must be false after Escape")
@@ -914,7 +927,7 @@ test_app_search_and_tab_sync :: proc(t: ^testing.T) {
 			y    = 100.0,
 		},
 	}
-	app.app_dispatch_input_events(&a, {outside_ptr})
+	app.app_dispatch_input_events(a, {outside_ptr})
 	testing.expect_value(t, a.tab_bar.hover_tab_idx, -1)
 	testing.expect_value(t, a.tab_bar.hover_close_idx, -1)
 	testing.expect(t, !a.tab_bar.hover_new_tab, "hover_new_tab must be cleared")
@@ -923,14 +936,15 @@ test_app_search_and_tab_sync :: proc(t: ^testing.T) {
 
 @(test)
 test_app_cmd_r_renames_active_tab :: proc(t: ^testing.T) {
-	a: app.App
+	a := new(app.App)
+	defer free(a)
 	app.session_manager_init(&a.session_mgr, 4)
 	defer app.session_manager_destroy(&a.session_mgr)
-	tab: app.Tab_Session
+	resize(&a.session_mgr.tabs, len(a.session_mgr.tabs) + 1)
+	tab := &a.session_mgr.tabs[len(a.session_mgr.tabs) - 1]
 	tab.id = 1
 	tab.backend.pty.master = -1
 	tab.backend.pty.pid = -1
-	append(&a.session_mgr.tabs, tab)
 	a.session_mgr.active_idx = 0
 
 	ev: input.Input_Event
@@ -939,7 +953,7 @@ test_app_cmd_r_renames_active_tab :: proc(t: ^testing.T) {
 	ev.gui = true
 	ev.rune = 'r'
 	evs := [1]input.Input_Event{ev}
-	_, _ = app.app_dispatch_input_events(&a, evs[:])
+	_, _ = app.app_dispatch_input_events(a, evs[:])
 	testing.expect(t, a.tab_rename.active, "Cmd+R must start inline rename on the active tab")
 }
 
@@ -1096,11 +1110,11 @@ test_app_paste_shadow_rename_dispatch :: proc(t: ^testing.T) {
 	defer posix.close(pipefd[0])
 	app.session_manager_init(&a.session_mgr, 4)
 	defer app.session_manager_destroy(&a.session_mgr)
-	tab: app.Tab_Session
+	resize(&a.session_mgr.tabs, len(a.session_mgr.tabs) + 1)
+	tab := &a.session_mgr.tabs[len(a.session_mgr.tabs) - 1]
 	tab.id = 1
 	tab.backend.pty.master = int(pipefd[1])
 	tab.backend.pty.state = .Running
-	append(&a.session_mgr.tabs, tab)
 	a.session_mgr.active_idx = 0
 
 	cmd_r := input.Input_Event{kind = .Printable, rune = 'r', gui = true}
@@ -1230,7 +1244,8 @@ test_app_shell_quote_path :: proc(t: ^testing.T) {
 
 @(test)
 test_app_drop_fx_state_flow :: proc(t: ^testing.T) {
-	a: app.App
+	a := new(app.App)
+	defer free(a)
 	// 1. Drop Begin sets hovering and coordinates
 	ev_begin := input.Input_Event{
 		event_type = .Drop,
@@ -1240,7 +1255,7 @@ test_app_drop_fx_state_flow :: proc(t: ^testing.T) {
 			y = 150,
 		},
 	}
-	_, _ = app.app_dispatch_input_events(&a, {ev_begin})
+	_, _ = app.app_dispatch_input_events(a, {ev_begin})
 	testing.expect(t, a.drop_fx.hovering, "drop begin must start hovering")
 	testing.expect_value(t, a.drop_fx.hover_x, f32(100))
 	testing.expect_value(t, a.drop_fx.hover_y, f32(150))
@@ -1254,7 +1269,7 @@ test_app_drop_fx_state_flow :: proc(t: ^testing.T) {
 			y = 250,
 		},
 	}
-	_, _ = app.app_dispatch_input_events(&a, {ev_pos})
+	_, _ = app.app_dispatch_input_events(a, {ev_pos})
 	testing.expect(t, a.drop_fx.hovering, "drop position must maintain hovering")
 	testing.expect_value(t, a.drop_fx.hover_x, f32(200))
 	testing.expect_value(t, a.drop_fx.hover_y, f32(250))
@@ -1266,7 +1281,7 @@ test_app_drop_fx_state_flow :: proc(t: ^testing.T) {
 			kind = .Complete,
 		},
 	}
-	_, _ = app.app_dispatch_input_events(&a, {ev_complete})
+	_, _ = app.app_dispatch_input_events(a, {ev_complete})
 	testing.expect(t, !a.drop_fx.hovering, "drop complete must stop hovering")
 
 	// 4. Dropping a file spawns splash at drop position
@@ -1278,7 +1293,7 @@ test_app_drop_fx_state_flow :: proc(t: ^testing.T) {
 			y = 350,
 		},
 	}
-	_, _ = app.app_dispatch_input_events(&a, {ev_file})
+	_, _ = app.app_dispatch_input_events(a, {ev_file})
 	testing.expect(t, !a.drop_fx.hovering, "drop file must ensure hovering is stopped")
 	splash_found := false
 	for &sp in a.drop_fx.splashes {

@@ -253,7 +253,7 @@ test_raster_duplicate_coalesced :: proc(t: ^testing.T) {
 	render.raster_worker_shutdown(&q)
 	render.raster_drain_completions(&q, &atlas, &cache, &term, &chain, &fcounters)
 
-	testing.expect(t, term.damage.dirty_rows[0].span_count >= 2, "all coalesced targets must be damaged")
+	testing.expect(t, (term.damage.dirty_rows[0].span_count >= 2) || (term.damage.dirty_rows[0].span_count == 1 && term.damage.dirty_rows[0].spans[0].col_start == 0 && term.damage.dirty_rows[0].spans[0].col_end >= 2), "all coalesced targets must be damaged")
 }
 
 @(test)

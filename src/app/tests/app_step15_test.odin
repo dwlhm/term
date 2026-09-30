@@ -97,28 +97,30 @@ test_s15_exited_key_routing :: proc(t: ^testing.T) {
 
 @(test)
 test_s15_banner_once :: proc(t: ^testing.T) {
-	a: app.App
-	_bare_app(&a)
-	defer _bare_destroy(&a)
+	a := new(app.App)
+	defer free(a)
+	_bare_app(a)
+	defer _bare_destroy(a)
 
 	a.pty.exit_code = 3
-	app.app_show_banner(&a)
+	app.app_show_banner(a)
 	testing.expect(t, a.banner_shown, "banner must latch banner_shown")
 	last := a.terminal.grid.row_count - 1
 	testing.expect(t, _s15_row_has_prefix(&a.terminal, last, "[ process exited (3)"), "bottom row must carry the exit banner")
 
 	// Second call rewrites the same text (transition gate in frame keeps
 	// it to one write per Exited episode).
-	app.app_show_banner(&a)
+	app.app_show_banner(a)
 	testing.expect(t, a.banner_shown, "banner flag must stay latched")
 	testing.expect(t, _s15_row_has_prefix(&a.terminal, last, "[ process exited (3)"), "banner text must survive the rewrite")
 }
 
 @(test)
 test_s15_relaunch_cycle :: proc(t: ^testing.T) {
-	a: app.App
-	_bare_app(&a)
-	defer _bare_destroy(&a)
+	a := new(app.App)
+	defer free(a)
+	_bare_app(a)
+	defer _bare_destroy(a)
 
 	a.prog = "/bin/cat"
 	a.argv = nil
@@ -137,10 +139,10 @@ test_s15_relaunch_cycle :: proc(t: ^testing.T) {
 	}
 	testing.expect(t, a.pty.state == .Exited, "killed child must poll Exited")
 
-	app.app_show_banner(&a)
+	app.app_show_banner(a)
 	testing.expect(t, a.banner_shown, "exited episode must latch the banner")
 
-	testing.expect(t, app.app_relaunch(&a), "relaunch must succeed")
+	testing.expect(t, app.app_relaunch(a), "relaunch must succeed")
 	testing.expect(t, a.pty.state == .Running, "relaunched child must be Running")
 	testing.expect(t, a.pty.pid != old_pid, "relaunch must spawn a new pid")
 	testing.expect(t, !a.banner_shown, "relaunch must clear the banner latch")
@@ -155,14 +157,15 @@ test_s15_relaunch_cycle :: proc(t: ^testing.T) {
 
 @(test)
 test_s15_relaunch_fail :: proc(t: ^testing.T) {
-	a: app.App
-	_bare_app(&a)
-	defer _bare_destroy(&a)
+	a := new(app.App)
+	defer free(a)
+	_bare_app(a)
+	defer _bare_destroy(a)
 
 	a.prog = "/nonexistent/term-step15-bad-prog"
 	a.argv = nil
 	a.pty.state = .Exited
-	testing.expect(t, !app.app_relaunch(&a), "bad prog must fail relaunch")
+	testing.expect(t, !app.app_relaunch(a), "bad prog must fail relaunch")
 	testing.expect(t, a.pty.state == .Exited, "failed relaunch must keep Exited")
 	testing.expect(t, a.banner_shown, "failed relaunch must show the FAIL banner")
 	last := a.terminal.grid.row_count - 1
@@ -171,31 +174,33 @@ test_s15_relaunch_fail :: proc(t: ^testing.T) {
 
 @(test)
 test_s15_resize_noop :: proc(t: ^testing.T) {
-	a: app.App
-	_bare_app(&a)
-	defer _bare_destroy(&a)
+	a := new(app.App)
+	defer free(a)
+	_bare_app(a)
+	defer _bare_destroy(a)
 
 	px_w := i32(APP_TEST_COLS * app.APP_CELL_W)
 	px_h := i32(APP_TEST_ROWS * app.APP_CELL_H)
 	a.last_px_w = px_w
 	a.last_px_h = px_h
-	testing.expect(t, !app.app_on_resize(&a, px_w, px_h), "same dims+px must be a no-op false")
-	testing.expect(t, !app.app_on_resize(&a, 0, px_h), "degenerate px_w must be false untouched")
-	testing.expect(t, !app.app_on_resize(&a, px_w, -1), "degenerate px_h must be false untouched")
+	testing.expect(t, !app.app_on_resize(a, px_w, px_h), "same dims+px must be a no-op false")
+	testing.expect(t, !app.app_on_resize(a, 0, px_h), "degenerate px_w must be false untouched")
+	testing.expect(t, !app.app_on_resize(a, px_w, -1), "degenerate px_h must be false untouched")
 	testing.expect(t, a.terminal.grid.row_count == APP_TEST_ROWS && a.terminal.grid.col_count == APP_TEST_COLS, "no-op resizes must leave dims")
 }
 
 @(test)
 test_s15_resize_chain :: proc(t: ^testing.T) {
-	a: app.App
-	_bare_app(&a)
-	defer _bare_destroy(&a)
-	defer _s15_renderer_teardown(&a)
+	a := new(app.App)
+	defer free(a)
+	_bare_app(a)
+	defer _bare_destroy(a)
+	defer _s15_renderer_teardown(a)
 
 	termgrid.terminal_put_string(&a.terminal, "hi")
 	px_w := i32(100 * app.APP_CELL_W)
 	px_h := i32(30 * app.APP_CELL_H)
-	testing.expect(t, app.app_on_resize(&a, px_w, px_h), "bigger dims must resize true")
+	testing.expect(t, app.app_on_resize(a, px_w, px_h), "bigger dims must resize true")
 	testing.expect(t, a.terminal.grid.row_count == 30 && a.terminal.grid.col_count == 100, "terminal dims must follow the resize")
 	testing.expect(t, a.renderer.rows == 30 && a.renderer.cols == 100, "renderer grid dims must follow the resize")
 	testing.expect(t, a.last_px_w == px_w && a.last_px_h == px_h, "last_px must store the applied size")
@@ -204,15 +209,16 @@ test_s15_resize_chain :: proc(t: ^testing.T) {
 
 @(test)
 test_app_dispatch_paste_local_action :: proc(t: ^testing.T) {
-	a: app.App
-	_bare_app(&a)
-	defer _bare_destroy(&a)
+	a := new(app.App)
+	defer free(a)
+	_bare_app(a)
+	defer _bare_destroy(a)
 	a.window.is_open = true
 
 	evs := [1]input.Input_Event{
 		{event_type = .Local, action = .Paste},
 	}
-	quit, ok := app.app_dispatch_input_events(&a, evs[:])
+	quit, ok := app.app_dispatch_input_events(a, evs[:])
 	testing.expect(t, !quit, "Paste must not trigger quit")
 	testing.expect(t, ok, "Paste dispatch on bare app must succeed")
 }

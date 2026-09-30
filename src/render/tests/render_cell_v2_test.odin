@@ -458,3 +458,37 @@ test_expand_instance_decor_underline_and_strike :: proc(t: ^testing.T) {
 	testing.expect_value(t, decor.b, sdb)
 }
 
+@(test)
+test_render_cell_direct_color :: proc(t: ^testing.T) {
+	lut := _test_lut()
+	atlas := _test_atlas()
+	bg, glyph: instance.Instance_Data
+
+	dc := termgrid.Direct_Color_Channel{
+		fg = 0xFFFF8020,
+		bg = 0xFF104080,
+	}
+
+	cell := render.render_cell_pack_v2(0x41, 0, render.RENDER_CELL_V2_WIDTH_NARROW, render.RENDER_CELL_V2_CFLAG_DIRECT_COLOR, render.RENDER_CELL_V2_SLOT_UNRESOLVED)
+	emit_bg, emit_glyph, _, _ := render.render_cell_expand_instance(
+		cell, &lut, &atlas, 0, 0, 8, 16,
+		&bg, &glyph, direct_color = &dc,
+	)
+	testing.expect(t, emit_bg, "direct color cell emits bg")
+	testing.expect(t, emit_glyph, "direct color cell emits glyph")
+
+	want_bg_r := f32(0x10) / 255.0
+	want_bg_g := f32(0x40) / 255.0
+	want_bg_b := f32(0x80) / 255.0
+	testing.expect(t, abs(bg.r - want_bg_r) < 0.001, "bg.r must match direct ARGB")
+	testing.expect(t, abs(bg.g - want_bg_g) < 0.001, "bg.g must match direct ARGB")
+	testing.expect(t, abs(bg.b - want_bg_b) < 0.001, "bg.b must match direct ARGB")
+
+	want_fg_r := f32(0xFF) / 255.0
+	want_fg_g := f32(0x80) / 255.0
+	want_fg_b := f32(0x20) / 255.0
+	testing.expect(t, abs(glyph.r - want_fg_r) < 0.001, "glyph.r must match direct ARGB")
+	testing.expect(t, abs(glyph.g - want_fg_g) < 0.001, "glyph.g must match direct ARGB")
+	testing.expect(t, abs(glyph.b - want_fg_b) < 0.001, "glyph.b must match direct ARGB")
+}
+

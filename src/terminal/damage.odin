@@ -114,6 +114,18 @@ damage_mark_cell :: proc(d: ^Damage, row, col: int, generation: u32) {
 
 	dr.generation = generation
 
+	if dr.span_count > 0 {
+		last_span := &dr.spans[dr.span_count - 1]
+		cu := u16(c)
+		if cu >= last_span.col_start && cu < last_span.col_end {
+			return
+		}
+		if last_span.col_end == cu {
+			last_span.col_end = cu + 1
+			return
+		}
+	}
+
 	if dr.span_count < DIRTY_ROW_MAX_SPANS {
 		idx := int(dr.span_count)
 		dr.spans[idx] = Span{col_start = u16(c), col_end = u16(c + 1)}

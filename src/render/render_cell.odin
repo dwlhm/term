@@ -121,9 +121,18 @@ RENDER_CELL_V2_WIDTH_CONTINUATION :: u8(0)
 RENDER_CELL_V2_WIDTH_NARROW       :: u8(1)
 RENDER_CELL_V2_WIDTH_WIDE_LEAD    :: u8(2)
 
-RENDER_CELL_V2_CFLAG_WIDE_CONT :: u8(1 << 0)
-RENDER_CELL_V2_CFLAG_SELECTED  :: u8(1 << 1)
-RENDER_CELL_V2_CFLAG_EMOJI     :: u8(1 << 2) // cell contains color emoji (route to emoji atlas)
+RENDER_CELL_V2_CFLAG_WIDE_CONT    :: u8(1 << 0)
+RENDER_CELL_V2_CFLAG_SELECTED     :: u8(1 << 1)
+RENDER_CELL_V2_CFLAG_EMOJI        :: u8(1 << 2) // cell contains color emoji (route to emoji atlas)
+RENDER_CELL_V2_CFLAG_DIRECT_COLOR :: u8(1 << 3) // cell uses direct 32-bit ARGB TrueColor
+
+// unpack_argb_float unpacks an ARGB 32-bit color to f32 RGB components [0, 1].
+unpack_argb_float :: #force_inline proc(argb: u32) -> (r, g, b: f32) {
+	r = f32((argb >> 16) & 0xFF) / 255.0
+	g = f32((argb >> 8) & 0xFF) / 255.0
+	b = f32(argb & 0xFF) / 255.0
+	return
+}
 
 // _RENDER_CELL_V2_STYLE_SHIFT is the bit position of the style_id field (== codepoint width).
 _RENDER_CELL_V2_STYLE_SHIFT :: u64(RENDER_CELL_V2_CODEPOINT_BITS)
@@ -209,6 +218,9 @@ render_cell_from_semantic :: proc(cell: termgrid.Semantic_Cell, selected: bool =
 	}
 	if termgrid.is_emoji_codepoint(rune(cell.content)) {
 		cf |= RENDER_CELL_V2_CFLAG_EMOJI
+	}
+	if u8(cell.flags) & u8(termgrid.Cell_Flags.Direct_Color) != 0 {
+		cf |= RENDER_CELL_V2_CFLAG_DIRECT_COLOR
 	}
 	if selected {
 		cf |= RENDER_CELL_V2_CFLAG_SELECTED
@@ -300,6 +312,7 @@ render_cell_expand_instance :: proc(
 	emoji_atlas_ptr: ^Emoji_Atlas = nil,
 	store: ^termgrid.Grapheme_Store = nil,
 	decor_out: ^instance.Instance_Data = nil,
+	direct_color: ^termgrid.Direct_Color_Channel = nil,
 ) -> (emit_bg: bool, emit_glyph: bool, emit_emoji: bool, emit_decor: bool) {
 	content, style, width, cflags, slot := render_cell_unpack_v2(cell)
 
@@ -307,6 +320,11 @@ render_cell_expand_instance :: proc(
 	if width == RENDER_CELL_V2_WIDTH_CONTINUATION {
 		return false, false, false, false
 	}
+
+	// Direct color resolution (General Terminal Extension Contract)
+	has_direct_color := (cflags & RENDER_CELL_V2_CFLAG_DIRECT_COLOR != 0 || direct_color != nil) && direct_color != nil
+	has_direct_bg := has_direct_color && direct_color.bg != 0
+	has_direct_fg := has_direct_color && direct_color.fg != 0
 
 	// LUT lookup with bounds fallback to entry 0.
 	lut_idx := 0
@@ -320,6 +338,20 @@ render_cell_expand_instance :: proc(
 		bg = lut.selection_bg_r5g6b5
 	}
 	flags := lut.flags[lut_idx]
+
+	bg_r, bg_g, bg_b: f32
+	if has_direct_bg {
+		bg_r, bg_g, bg_b = unpack_argb_float(direct_color.bg)
+	} else {
+		bg_r, bg_g, bg_b = instance.unpack_r5g6b5(bg)
+	}
+
+	fg_r, fg_g, fg_b: f32
+	if has_direct_fg {
+		fg_r, fg_g, fg_b = unpack_argb_float(direct_color.fg)
+	} else {
+		fg_r, fg_g, fg_b = instance.unpack_r5g6b5(fg)
+	}
 
 	// Decoration emission (underline, strikethrough).
 	if flags & termgrid.STYLE_FLAG_UNDERLINE != 0 {
@@ -341,7 +373,7 @@ render_cell_expand_instance :: proc(
 		strike_y := y + math.floor(cell_h * 0.5)
 		strike_h := max(f32(1.0), math.floor(cell_h * 0.08))
 		if decor_out != nil {
-			dr, dg, db := instance.unpack_r5g6b5(lut.fg_r5g6b5[lut_idx])
+			dr, dg, db := fg_r, fg_g, fg_b
 			decor_out^ = instance.Instance_Data{
 				x = x, y = strike_y,
 				cw = cw, ch = strike_h,
@@ -353,13 +385,12 @@ render_cell_expand_instance :: proc(
 	}
 
 	// Empty skip: space or NUL with default/black bg emits nothing.
-	if (content == 0x20 || content == 0) && (bg == 0x0000 || bg == lut.bg_r5g6b5[0]) {
+	if !has_direct_bg && (content == 0x20 || content == 0) && (bg == 0x0000 || bg == lut.bg_r5g6b5[0]) {
 		return false, false, false, emit_decor
 	}
 
 	// Background instance. Wide leads span double width.
 	if bg_out != nil {
-		bg_r, bg_g, bg_b := instance.unpack_r5g6b5(bg)
 		bg_cw := cell_w
 		if width == RENDER_CELL_V2_WIDTH_WIDE_LEAD {
 			bg_cw = cell_w * 2.0
@@ -457,7 +488,6 @@ render_cell_expand_instance :: proc(
 
 	// Glyph instance (wide leads span double width).
 	if glyph_out != nil {
-		fg_r, fg_g, fg_b := instance.unpack_r5g6b5(fg)
 		gw := cell_w
 		if width == RENDER_CELL_V2_WIDTH_WIDE_LEAD {
 			gw = cell_w * 2.0

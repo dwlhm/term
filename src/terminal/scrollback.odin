@@ -1,6 +1,7 @@
 package termgrid
 
 import "base:runtime"
+import "core:slice"
 
 // SCROLLBACK_MAX_LINES caps stored scrollback rows; memory stays bounded.
 SCROLLBACK_MAX_LINES :: 1000
@@ -10,20 +11,22 @@ SCROLLBACK_MAX_LINES :: 1000
 // (transferred from the grid on push, released on evict/clear/destroy).
 Scrollback_Row :: struct {
 	cells:   []Semantic_Cell,
+	ext:     Row_Extensions,
 	wrapped: bool,
 }
 
 // Scrollback is a bounded FIFO of evicted grid rows.
 // Full-grid scroll_up appends; partial region scroll never appends.
 Scrollback :: struct {
-	rows:      []Scrollback_Row,
-	cells:     []Semantic_Cell, // Flattened 2D array
-	head:      int,
-	count:     int,
-	total_pushed: u64, // Successful pushes, including oldest-row eviction.
+	rows:             []Scrollback_Row,
+	cells:            []Semantic_Cell, // Flattened 2D array
+	ext_colors:       []Direct_Color_Channel, // Flattened 2D direct colors
+	head:             int,
+	count:            int,
+	total_pushed:     u64, // Successful pushes, including oldest-row eviction.
 	clear_generation: u64, // Explicit document invalidation boundary.
-	max_lines: int,
-	col_count: int,
+	max_lines:        int,
+	col_count:        int,
 }
 
 // scrollback_init prepares an empty scrollback for rows of cols cells.
@@ -42,8 +45,11 @@ scrollback_get :: #force_inline proc(s: ^Scrollback, index: int) -> ^Scrollback_
 scrollback_init :: proc(s: ^Scrollback, cols: int, max_lines: int = SCROLLBACK_MAX_LINES, allocator: runtime.Allocator = context.allocator) {
 	s.rows = make([]Scrollback_Row, max_lines, allocator)
 	s.cells = make([]Semantic_Cell, max_lines * cols, allocator)
+	s.ext_colors = make([]Direct_Color_Channel, max_lines * cols, allocator)
 	for i in 0..<max_lines {
 		s.rows[i].cells = s.cells[i * cols : (i + 1) * cols]
+		s.rows[i].ext.channels = {}
+		s.rows[i].ext.colors = s.ext_colors[i * cols : (i + 1) * cols]
 		s.rows[i].wrapped = false
 	}
 	s.head = 0
@@ -58,6 +64,10 @@ scrollback_init :: proc(s: ^Scrollback, cols: int, max_lines: int = SCROLLBACK_M
 // mirroring the scroll/erase release discipline) and frees the list.
 scrollback_destroy :: proc(s: ^Scrollback, store: ^Grapheme_Store, allocator: runtime.Allocator = context.allocator) {
 	scrollback_clear(s, store, allocator)
+	if s.ext_colors != nil {
+		delete(s.ext_colors, allocator)
+		s.ext_colors = nil
+	}
 	if s.cells != nil {
 		delete(s.cells, allocator)
 		s.cells = nil
@@ -78,6 +88,10 @@ scrollback_clear :: proc(s: ^Scrollback, store: ^Grapheme_Store, allocator: runt
 		row := scrollback_get(s, i)
 		_scrollback_release_row(row, store)
 		row.wrapped = false
+		row.ext.channels = {}
+		if len(row.ext.colors) > 0 {
+			slice.zero(row.ext.colors)
+		}
 		// We DO NOT delete row.cells because they are slices of s.cells
 	}
 	s.head = 0
@@ -94,10 +108,14 @@ scrollback_resize :: proc(s: ^Scrollback, new_cols: int, store: ^Grapheme_Store,
 	}
 	if s.count == 0 {
 		s.col_count = new_cols
+		if s.ext_colors != nil { delete(s.ext_colors, allocator) }
+		s.ext_colors = make([]Direct_Color_Channel, s.max_lines * new_cols, allocator)
 		if s.cells != nil { delete(s.cells, allocator) }
 		s.cells = make([]Semantic_Cell, s.max_lines * new_cols, allocator)
 		for i in 0..<s.max_lines {
 			s.rows[i].cells = s.cells[i * new_cols : (i + 1) * new_cols]
+			s.rows[i].ext.channels = {}
+			s.rows[i].ext.colors = s.ext_colors[i * new_cols : (i + 1) * new_cols]
 			s.rows[i].wrapped = false
 		}
 		return
@@ -232,12 +250,18 @@ scrollback_resize :: proc(s: ^Scrollback, new_cols: int, store: ^Grapheme_Store,
 		surviving_rows = surviving_rows[evict_count:]
 	}
 
+	if s.ext_colors != nil {
+		delete(s.ext_colors, allocator)
+	}
+	s.ext_colors = make([]Direct_Color_Channel, s.max_lines * new_cols, allocator)
 	if s.cells != nil {
 		delete(s.cells, allocator)
 	}
 	s.cells = make([]Semantic_Cell, s.max_lines * new_cols, allocator)
 	for i in 0..<s.max_lines {
 		s.rows[i].cells = s.cells[i * new_cols : (i + 1) * new_cols]
+		s.rows[i].ext.channels = {}
+		s.rows[i].ext.colors = s.ext_colors[i * new_cols : (i + 1) * new_cols]
 		s.rows[i].wrapped = false
 	}
 
@@ -262,23 +286,31 @@ scrollback_push :: proc(
 	store: ^Grapheme_Store,
 	wrapped: bool = false,
 	allocator: runtime.Allocator = context.allocator,
+	ext: Row_Extensions = {},
 ) {
 	if len(cells) != s.col_count || s.max_lines <= 0 {
 		return
 	}
 	
 	s.total_pushed += 1
+	target: ^Scrollback_Row = nil
 	if s.count < s.max_lines {
 		real_idx := (s.head + s.count) % s.max_lines
-		copy(s.rows[real_idx].cells, cells)
-		s.rows[real_idx].wrapped = wrapped
+		target = &s.rows[real_idx]
 		s.count += 1
 	} else {
-		old := &s.rows[s.head]
-		_scrollback_release_row(old, store)
-		copy(old.cells, cells)
-		old.wrapped = wrapped
+		target = &s.rows[s.head]
+		_scrollback_release_row(target, store)
 		s.head = (s.head + 1) % s.max_lines
+	}
+
+	copy(target.cells, cells)
+	target.wrapped = wrapped
+	target.ext.channels = ext.channels
+	if len(ext.colors) > 0 && len(target.ext.colors) >= len(ext.colors) {
+		copy(target.ext.colors, ext.colors)
+	} else if len(target.ext.colors) > 0 {
+		slice.zero(target.ext.colors)
 	}
 }
 

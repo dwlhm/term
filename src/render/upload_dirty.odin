@@ -99,7 +99,14 @@ dirty_upload_validate_mirror :: proc(d: ^Dirty_Upload, r: ^Renderer) -> bool {
 // dirty_upload_rebase fully expands r.compiled_v2 into the mirror and
 // performs ONE full write_buffer at offset 0, then arms the upload.
 // Skipped cells (empty/continuation) are zeroed so no stale data survives.
-dirty_upload_rebase :: proc(d: ^Dirty_Upload, r: ^Renderer, lut: ^Style_LUT, store: ^termgrid.Grapheme_Store = nil) {
+dirty_upload_rebase :: proc(
+	d: ^Dirty_Upload,
+	r: ^Renderer,
+	lut: ^Style_LUT,
+	store: ^termgrid.Grapheme_Store = nil,
+	terminal: ^termgrid.Terminal = nil,
+	view: ^termgrid.Terminal_View = nil,
+) {
 	if d.mirror == nil || d.cells <= 0 {
 		return
 	}
@@ -123,10 +130,12 @@ dirty_upload_rebase :: proc(d: ^Dirty_Upload, r: ^Renderer, lut: ^Style_LUT, sto
 			emoji_atlas_ptr = &r.emoji_atlas
 		}
 
+		dc := termgrid.terminal_view_get_direct_color(terminal, view, row, col)
 		emit_bg, emit_glyph, emit_emoji, _ := render_cell_expand_instance(
 			r.compiled_v2.cells[idx], lut, &r.atlas, x, y, cw, ch,
 			&d.mirror[idx], &d.mirror[n+idx],
 			emoji_inst_ptr, emoji_atlas_ptr, store,
+			direct_color = dc,
 		)
 		if !emit_bg {
 			d.mirror[idx] = instance.Instance_Data{}
@@ -161,6 +170,7 @@ dirty_upload_frame :: proc(
 	journal: ^termgrid.Damage_Journal,
 	lut: ^Style_LUT,
 	ranges: ^[DIRTY_UPLOAD_MAX_RANGES]Dirty_Upload_Range,
+	view: ^termgrid.Terminal_View = nil,
 ) -> (flushed_ranges: int, flushed_bytes: u64, fell_back: bool) {
 	if len(journal.scroll_ops) > 0 {
 		return 0, 0, true
@@ -185,7 +195,7 @@ dirty_upload_frame :: proc(
 			continue
 		}
 		if dr.full {
-			if !_dirty_expand_row(d, r, terminal, lut, row_idx, 0, cols, ranges, &range_count) {
+			if !_dirty_expand_row(d, r, terminal, lut, row_idx, 0, cols, ranges, &range_count, view) {
 				return 0, 0, true
 			}
 			continue
@@ -234,14 +244,14 @@ dirty_upload_frame :: proc(
 					me = ends[s]
 				}
 			} else {
-				if !_dirty_expand_row(d, r, terminal, lut, row_idx, ms, me, ranges, &range_count) {
+				if !_dirty_expand_row(d, r, terminal, lut, row_idx, ms, me, ranges, &range_count, view) {
 					return 0, 0, true
 				}
 				ms = starts[s]
 				me = ends[s]
 			}
 		}
-		if !_dirty_expand_row(d, r, terminal, lut, row_idx, ms, me, ranges, &range_count) {
+		if !_dirty_expand_row(d, r, terminal, lut, row_idx, ms, me, ranges, &range_count, view) {
 			return 0, 0, true
 		}
 	}
@@ -275,6 +285,7 @@ _dirty_expand_row :: proc(
 	col_end: int,
 	ranges: ^[DIRTY_UPLOAD_MAX_RANGES]Dirty_Upload_Range,
 	range_count: ^int,
+	view: ^termgrid.Terminal_View = nil,
 ) -> bool {
 	cols := int(r.cols)
 	cs := col_start
@@ -307,10 +318,12 @@ _dirty_expand_row :: proc(
 			emoji_atlas_ptr = &r.emoji_atlas
 		}
 
+		dc := termgrid.terminal_view_get_direct_color(terminal, view, row, col)
 		emit_bg, emit_glyph, emit_emoji, _ := render_cell_expand_instance(
 			r.compiled_v2.cells[idx], lut, &r.atlas, x, y, cw, ch,
 			&d.mirror[idx], &d.mirror[n+idx],
 			emoji_inst_ptr, emoji_atlas_ptr, store,
+			direct_color = dc,
 		)
 		if !emit_bg {
 			d.mirror[idx] = instance.Instance_Data{}

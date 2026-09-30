@@ -85,8 +85,8 @@ test_csi_subparam_bitmask_sgr :: proc(t: ^testing.T) {
 	p.parse_chunk(&parser, &term, []u8{
 		0x1B, '[', '3', '8', ':', '2', ':', ':', '2', '5', '5', ':', '1', '2', '8', ':', '6', '4', 'm',
 	})
-	style = term.grid.style_table.entries[term.current_style]
-	testing.expect(t, style.fg == 0xFF_FF_80_40, "colon truecolor must parse correctly with subparam_mask")
+	testing.expect(t, term.has_direct_fg, "colon truecolor must set has_direct_fg")
+	testing.expect(t, term.direct_fg == 0xFF_FF_80_40, "colon truecolor must parse correctly with subparam_mask")
 }
 
 // --- Batch Span Printing ---

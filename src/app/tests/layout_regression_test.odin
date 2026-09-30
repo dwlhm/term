@@ -36,8 +36,9 @@ test_layout_pointer_scale_and_padding :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(t, app.frontend_content_scale(nil), f32(1))
 	app.frontend_update_padding(nil)
-	f_headless: app.Frontend
-	app.frontend_update_padding(&f_headless)
+	f_headless := new(app.Frontend)
+	defer free(f_headless)
+	app.frontend_update_padding(f_headless)
 	testing.expect_value(t, f_headless.renderer.pad_x, f32(0))
 	testing.expect_value(t, f_headless.renderer.pad_y, f32(0))
 }
@@ -56,7 +57,7 @@ test_layout_dispatch_refreshes_logical_chrome :: proc(t: ^testing.T) {
 	defer app.session_manager_destroy(&a.session_mgr)
 	// Parked sessions avoid process or GPU dependencies.
 	for _ in 0..<2 {
-		append(&a.session_mgr.tabs, app.Tab_Session{})
+		resize(&a.session_mgr.tabs, len(a.session_mgr.tabs) + 1)
 	}
 	a.session_mgr.active_idx = 0
 	ui.tab_bar_init(&a.tab_bar)

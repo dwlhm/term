@@ -182,6 +182,64 @@ parse_chunk :: proc(p: ^Parser, t: ^termgrid.Terminal, input: []u8) {
 				continue
 			}
 		}
+
+		if p.state == .Ground && p.utf8_state == .Ground {
+			// Fast-path CSI SGR TrueColor, Reset, and Cursor controls
+			if input[pos] == 0x1B && pos + 1 < len(input) && input[pos + 1] == '[' {
+				tail := input[pos + 2:]
+				if consumed, ok, is_fg, color := fast_parse_sgr_truecolor(tail); ok {
+					if is_fg {
+						termgrid.terminal_set_direct_fg(t, color)
+					} else {
+						termgrid.terminal_set_direct_bg(t, color)
+					}
+					pos += 2 + consumed
+					continue
+				}
+				// Fast-path SGR 0 / Reset: \033[0m or \033[m
+				if len(tail) >= 1 && tail[0] == 'm' {
+					_fast_sgr_reset(t)
+					pos += 3
+					continue
+				} else if len(tail) >= 2 && tail[0] == '0' && tail[1] == 'm' {
+					_fast_sgr_reset(t)
+					pos += 4
+					continue
+				}
+				// Fast-path Cursor Home: \033[H
+				if len(tail) >= 1 && tail[0] == 'H' {
+					termgrid.terminal_move_cursor(t, 0, 0)
+					pos += 3
+					continue
+				}
+				// Fast-path Erase to end of line: \033[K or \033[0K
+				if len(tail) >= 1 && tail[0] == 'K' {
+					termgrid.terminal_erase_line(t, .To_End)
+					pos += 3
+					continue
+				} else if len(tail) >= 2 && tail[0] == '0' && tail[1] == 'K' {
+					termgrid.terminal_erase_line(t, .To_End)
+					pos += 4
+					continue
+				}
+			}
+
+			// Fast-path Box Drawing and Block Elements UTF-8 runes (0x2500..=0x259F)
+			if input[pos] == 0xE2 && pos + 2 < len(input) {
+				b1 := input[pos + 1]
+				b2 := input[pos + 2]
+				if (b1 >= 0x94 && b1 <= 0x96) && (b2 >= 0x80 && b2 <= 0xBF) {
+					r := rune((u32(0x02) << 12) | (u32(b1 & 0x3F) << 6) | u32(b2 & 0x3F))
+					if r >= 0x2500 && r <= 0x259F {
+						for pos + 2 < len(input) && input[pos] == 0xE2 && input[pos + 1] == b1 && input[pos + 2] == b2 {
+							termgrid.terminal_put_char(t, r)
+							pos += 3
+						}
+						continue
+					}
+				}
+			}
+		}
 		
 		// Level 2: VT State Machine
 		byte := input[pos]

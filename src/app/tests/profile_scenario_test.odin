@@ -11,6 +11,7 @@ import posix "core:sys/posix"
 import termgrid "../../terminal"
 
 import pty "../../platform/pty"
+import probe "../../bench/probe"
 
 @(test)
 test_profile_failure_reasons_are_actionable :: proc(t: ^testing.T) {
@@ -149,10 +150,11 @@ _grid_nonblank_count :: proc(t: ^termgrid.Terminal) -> int {
 
 @(test)
 test_profile_scenario_ls_then_resize_ladder :: proc(t: ^testing.T) {
-	a: app.App
-	_bare_app(&a)
-	defer _bare_destroy(&a)
-	defer _s15_renderer_teardown(&a)
+	a := new(app.App)
+	defer free(a)
+	_bare_app(a)
+	defer _bare_destroy(a)
+	defer _s15_renderer_teardown(a)
 	// Suite-order guard: an earlier test may leave a stdio fd closed, and
 	// posix_openpt would then hand the pty master that slot (the spawn's
 	// child closes the master after dup2 and takes its own stdio with it,
@@ -184,7 +186,7 @@ test_profile_scenario_ls_then_resize_ladder :: proc(t: ^testing.T) {
 	listing_seen := false
 	done_seen := false
 	for _ in 0..<200 {
-		_ = app.app_frame(&a)
+		_ = app.app_frame(a)
 		if !listing_seen && _grid_nonblank_count(&a.terminal) > base_count {
 			listing_seen = true
 		}
@@ -210,7 +212,7 @@ test_profile_scenario_ls_then_resize_ladder :: proc(t: ^testing.T) {
 			testing.expectf(t, false, "ladder step %d must have a valid target", step)
 			return
 		}
-		if !app.app_on_resize(&a, target_w, target_h) {
+		if !app.app_on_resize(a, target_w, target_h) {
 			testing.expectf(t, false, "ladder step %d (%d, %d) must resize", step, target_w, target_h)
 			return
 		}
@@ -227,10 +229,11 @@ test_profile_scenario_ls_then_resize_ladder :: proc(t: ^testing.T) {
 
 @(test)
 test_profile_ring_counts_full_drops :: proc(t: ^testing.T) {
-	ring := app.Profile_Ring{}
-	for i in 0..<(app.PROFILE_RECORD_CAP + 1) {
-		ok := app.profile_try_record(&ring, app.Profile_Record{})
-		if i < app.PROFILE_RECORD_CAP {
+	ring := new(probe.Profile_Ring)
+	defer free(ring)
+	for i in 0..<(probe.PROFILE_RECORD_CAP + 1) {
+		ok := probe.profile_try_record(ring, probe.Profile_Record{})
+		if i < probe.PROFILE_RECORD_CAP {
 			testing.expect(t, ok, "records fit while bounded ring has capacity")
 		} else {
 			testing.expect(t, !ok, "full ring drops profiler record")

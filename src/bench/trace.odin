@@ -199,6 +199,7 @@ trace_load :: proc(path: string, allocator: runtime.Allocator = context.allocato
 	if stat_err != os.ERROR_NONE {
 		return Trace{}, false
 	}
+	defer os.file_info_delete(file_info, allocator)
 	file_size := int(file_info.size)
 	if file_size < 13 { // Minimum: magic(4) + name_len(4) + name(0) + flag(1) + data_count(4)
 		return Trace{}, false

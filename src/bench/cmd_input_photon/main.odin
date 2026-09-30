@@ -71,9 +71,12 @@ _photon_once :: proc(ctx: ^bench.Benchmark_Context) {
 		return
 	}
 	defer _photon_cleanup(&p)
-	term: termgrid.Terminal
-	termgrid.terminal_init(&term, PHOTON_ROWS, PHOTON_COLS)
-	defer termgrid.terminal_destroy(&term)
+	term := new(termgrid.Terminal)
+	termgrid.terminal_init(term, PHOTON_ROWS, PHOTON_COLS)
+	defer {
+		termgrid.terminal_destroy(term)
+		free(term)
+	}
 	ps: parser.Parser
 	parser.parser_init(&ps)
 	frame: render.Compiled_Frame_V2
@@ -125,8 +128,8 @@ _photon_once :: proc(ctx: ^bench.Benchmark_Context) {
 		}
 		append(&acc, ..buf[:m])
 	}
-	parser.parse_chunk(&ps, &term, acc[:])
-	render.render_compile_full_v2(&frame, &term)
+	parser.parse_chunk(&ps, term, acc[:])
+	render.render_compile_full_v2(&frame, term)
 }
 
 // _photon_has_byte reports whether b holds the echo byte.

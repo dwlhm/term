@@ -4,6 +4,7 @@ import "core:testing"
 import ".."
 import "../../platform"
 import "core:math"
+import "core:os"
 
 // --- Timer Tests ---
 
@@ -167,6 +168,7 @@ test_trace_save_load :: proc(t: ^testing.T) {
 
 	// Save to temp file
 	path := "/tmp/bench_trace_test.bin"
+	defer os.remove(path)
 	ok := bench.trace_save(&tr, path)
 	testing.expect(t, ok, "trace_save should succeed")
 

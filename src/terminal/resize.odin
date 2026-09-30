@@ -4,6 +4,7 @@ import "base:runtime"
 
 _Logical_Line :: struct {
 	cells:         [dynamic]Semantic_Cell,
+	colors:        [dynamic]Direct_Color_Channel,
 	wrapped:       bool,
 	has_cursor:    bool,
 	cursor_offset: int,
@@ -13,6 +14,7 @@ _Logical_Line :: struct {
 _reflow_make_row :: proc(cols: int, allocator: runtime.Allocator) -> Row {
 	r: Row
 	r.cells = make([]Semantic_Cell, cols, allocator)
+	r.ext.colors = make([]Direct_Color_Channel, cols, allocator)
 	row_init(&r, cols)
 	return r
 }
@@ -95,6 +97,7 @@ _terminal_resize_primary :: proc(t: ^Terminal, new_rows: int, new_cols: int, all
 	for r <= max_active_row {
 		ll: _Logical_Line
 		ll.cells = make([dynamic]Semantic_Cell, context.temp_allocator)
+		ll.colors = make([dynamic]Direct_Color_Channel, context.temp_allocator)
 		ll.has_cursor = false
 		ll.cursor_offset = 0
 		ll.wrapped = false
@@ -110,6 +113,7 @@ _terminal_resize_primary :: proc(t: ^Terminal, new_rows: int, new_cols: int, all
 				}
 				for c in 0..<take_cols {
 					append(&ll.cells, s_row[c])
+					append(&ll.colors, Direct_Color_Channel{})
 				}
 			}
 		}
@@ -146,6 +150,8 @@ _terminal_resize_primary :: proc(t: ^Terminal, new_rows: int, new_cols: int, all
 				}
 				for c in 0..<take_cols {
 					append(&ll.cells, t.grid.rows[phys].cells[c])
+					col_clr := t.grid.rows[phys].ext.colors[c] if (len(t.grid.rows[phys].ext.colors) > c) else Direct_Color_Channel{}
+					append(&ll.colors, col_clr)
 				}
 				r += 1
 				if r > max_active_row {
@@ -172,6 +178,8 @@ _terminal_resize_primary :: proc(t: ^Terminal, new_rows: int, new_cols: int, all
 				}
 				for c in 0..<take_cols {
 					append(&ll.cells, t.grid.rows[phys].cells[c])
+					col_clr := t.grid.rows[phys].ext.colors[c] if (len(t.grid.rows[phys].ext.colors) > c) else Direct_Color_Channel{}
+					append(&ll.colors, col_clr)
 				}
 				ll.wrapped = false
 				r += 1
@@ -185,9 +193,15 @@ _terminal_resize_primary :: proc(t: ^Terminal, new_rows: int, new_cols: int, all
 	new_cap := _next_pow2(new_rows)
 	new_backing := make([]Row, new_cap, allocator)
 	new_cells := make([]Semantic_Cell, new_cap * new_cols, allocator)
+	new_ext_colors := make([]Direct_Color_Channel, new_cap * new_cols, allocator)
 	for i in 0..<new_cap {
 		new_backing[i].cells = new_cells[i * new_cols : (i + 1) * new_cols]
-		for c in 0..<new_cols { new_backing[i].cells[c] = CELL_DEFAULT }
+		new_backing[i].ext.channels = {}
+		new_backing[i].ext.colors = new_ext_colors[i * new_cols : (i + 1) * new_cols]
+		for c in 0..<new_cols {
+			new_backing[i].cells[c] = CELL_DEFAULT
+			new_backing[i].ext.colors[c] = {}
+		}
 		new_backing[i].generation = 0
 		new_backing[i].wrapped = false
 		new_backing[i].is_prompt = false
@@ -221,10 +235,25 @@ _terminal_resize_primary :: proc(t: ^Terminal, new_rows: int, new_cols: int, all
 				if is_lead && ci + 1 < limit && _cell_is_continuation(ll.cells[ci + 1]) {
 					current_row.cells[col] = cell
 					current_row.cells[col + 1] = ll.cells[ci + 1]
+					if u8(cell.flags) & u8(Cell_Flags.Direct_Color) != 0 && ci < len(ll.colors) {
+						current_row.ext.channels |= {.Direct_Color}
+						if col < len(current_row.ext.colors) {
+							current_row.ext.colors[col] = ll.colors[ci]
+						}
+						if ci + 1 < len(ll.colors) && col + 1 < len(current_row.ext.colors) {
+							current_row.ext.colors[col + 1] = ll.colors[ci + 1]
+						}
+					}
 					col += 2
 					ci += 2
 				} else {
 					current_row.cells[col] = cell
+					if u8(cell.flags) & u8(Cell_Flags.Direct_Color) != 0 && ci < len(ll.colors) {
+						current_row.ext.channels |= {.Direct_Color}
+						if col < len(current_row.ext.colors) {
+							current_row.ext.colors[col] = ll.colors[ci]
+						}
+					}
 					col += 1
 					ci += 1
 				}
@@ -288,6 +317,15 @@ _terminal_resize_primary :: proc(t: ^Terminal, new_rows: int, new_cols: int, all
 				cont := ll.cells[ci + 1]
 				current_row.cells[col] = cell
 				current_row.cells[col + 1] = cont
+				if u8(cell.flags) & u8(Cell_Flags.Direct_Color) != 0 && ci < len(ll.colors) {
+					current_row.ext.channels |= {.Direct_Color}
+					if col < len(current_row.ext.colors) {
+						current_row.ext.colors[col] = ll.colors[ci]
+					}
+					if ci + 1 < len(ll.colors) && col + 1 < len(current_row.ext.colors) {
+						current_row.ext.colors[col + 1] = ll.colors[ci + 1]
+					}
+				}
 
 				if ll.has_cursor && !cursor_found && ll.cursor_offset == ci + 1 {
 					new_cursor_row = len(reflowed_rows)
@@ -299,6 +337,12 @@ _terminal_resize_primary :: proc(t: ^Terminal, new_rows: int, new_cols: int, all
 				ci += 2
 			} else {
 				current_row.cells[col] = cell
+				if u8(cell.flags) & u8(Cell_Flags.Direct_Color) != 0 && ci < len(ll.colors) {
+					current_row.ext.channels |= {.Direct_Color}
+					if col < len(current_row.ext.colors) {
+						current_row.ext.colors[col] = ll.colors[ci]
+					}
+				}
 				col += 1
 				ci += 1
 			}
@@ -355,7 +399,7 @@ _terminal_resize_primary :: proc(t: ^Terminal, new_rows: int, new_cols: int, all
 		overflow := total_rows - new_rows
 		for i in 0..<overflow {
 			if t.scrollback.max_lines > 0 {
-				scrollback_push(&t.scrollback, reflowed_rows[i].cells, &t.grapheme_store, reflowed_rows[i].wrapped, allocator)
+				scrollback_push(&t.scrollback, reflowed_rows[i].cells, &t.grapheme_store, reflowed_rows[i].wrapped, allocator, reflowed_rows[i].ext)
 			} else {
 				if t.grapheme_store.live_count != 0 {
 					for c in 0..<len(reflowed_rows[i].cells) {
@@ -366,10 +410,15 @@ _terminal_resize_primary :: proc(t: ^Terminal, new_rows: int, new_cols: int, all
 		}
 		for i in 0..<new_rows {
 			src_row := &reflowed_rows[overflow + i]
-			copy(new_backing[i].cells, src_row.cells)
-			new_backing[i].generation = src_row.generation
-			new_backing[i].wrapped = src_row.wrapped
-			new_backing[i].is_prompt = src_row.is_prompt
+			dest_row := &new_backing[i]
+			copy(dest_row.cells, src_row.cells)
+			dest_row.generation = src_row.generation
+			dest_row.wrapped = src_row.wrapped
+			dest_row.is_prompt = src_row.is_prompt
+			dest_row.ext.channels = src_row.ext.channels
+			if len(dest_row.ext.colors) > 0 && len(src_row.ext.colors) > 0 {
+				copy(dest_row.ext.colors, src_row.ext.colors)
+			}
 		}
 		new_cursor_row -= overflow
 	} else {
@@ -397,6 +446,10 @@ _terminal_resize_primary :: proc(t: ^Terminal, new_rows: int, new_cols: int, all
 				dest_row.generation = src_row.generation
 				dest_row.wrapped = src_row.wrapped
 				dest_row.is_prompt = src_row.is_prompt
+				dest_row.ext.channels = src_row.ext.channels
+				if len(dest_row.ext.colors) > 0 && len(src_row.ext.colors) > 0 {
+					copy(dest_row.ext.colors, src_row.ext.colors)
+				}
 			}
 			new_cursor_row += shift_down + pull_count
 		} else {
@@ -407,6 +460,10 @@ _terminal_resize_primary :: proc(t: ^Terminal, new_rows: int, new_cols: int, all
 				dest_row.generation = src_row.generation
 				dest_row.wrapped = src_row.wrapped
 				dest_row.is_prompt = src_row.is_prompt
+				dest_row.ext.channels = src_row.ext.channels
+				if len(dest_row.ext.colors) > 0 && len(src_row.ext.colors) > 0 {
+					copy(dest_row.ext.colors, src_row.ext.colors)
+				}
 			}
 			new_cursor_row += shift_down
 		}
@@ -415,12 +472,16 @@ _terminal_resize_primary :: proc(t: ^Terminal, new_rows: int, new_cols: int, all
 	// f. Set t.grid.rows = new_backing, ...
 	for i in 0..<len(t.grid.rows) {
 	}
+	if t.grid.ext_colors != nil {
+		delete(t.grid.ext_colors)
+	}
 	if t.grid.cells != nil {
 		delete(t.grid.cells)
 	}
 	delete(t.grid.rows)
 	t.grid.rows = new_backing
 	t.grid.cells = new_cells
+	t.grid.ext_colors = new_ext_colors
 	t.grid.row_count = new_rows
 	t.grid.col_count = new_cols
 	t.grid.capacity = new_cap
@@ -490,10 +551,12 @@ _grid_resize_alt :: proc(g: ^Grid, new_rows, new_cols: int, store: ^Grapheme_Sto
 	old_cols := g.col_count
 	old_rows_slice := g.rows
 	old_cells_slice := g.cells
+	old_ext_colors_slice := g.ext_colors
 
 	new_cap := _next_pow2(new_rows)
 	new_rows_slice := make([]Row, new_cap, allocator)
 	new_cells_slice := make([]Semantic_Cell, new_cap * new_cols, allocator)
+	new_ext_colors_slice := make([]Direct_Color_Channel, new_cap * new_cols, allocator)
 
 	// Release grapheme handles from cells that will be discarded
 	if store != nil && store.live_count > 0 {
@@ -518,11 +581,18 @@ _grid_resize_alt :: proc(g: ^Grid, new_rows, new_cols: int, store: ^Grapheme_Sto
 
 	for i in 0..<new_cap {
 		new_rows_slice[i].cells = new_cells_slice[i * new_cols : (i + 1) * new_cols]
+		new_rows_slice[i].ext.channels = {}
+		new_rows_slice[i].ext.colors = new_ext_colors_slice[i * new_cols : (i + 1) * new_cols]
 		for c in 0..<new_cols {
 			new_rows_slice[i].cells[c] = CELL_DEFAULT
+			new_rows_slice[i].ext.colors[c] = {}
 		}
 		if i < copy_rows && i < len(old_rows_slice) {
 			copy(new_rows_slice[i].cells[:copy_cols], old_rows_slice[i].cells[:copy_cols])
+			new_rows_slice[i].ext.channels = old_rows_slice[i].ext.channels
+			if len(old_rows_slice[i].ext.colors) > 0 {
+				copy(new_rows_slice[i].ext.colors[:copy_cols], old_rows_slice[i].ext.colors[:copy_cols])
+			}
 			new_rows_slice[i].generation = old_rows_slice[i].generation + 1
 			new_rows_slice[i].wrapped = old_rows_slice[i].wrapped
 			new_rows_slice[i].is_prompt = false
@@ -533,6 +603,9 @@ _grid_resize_alt :: proc(g: ^Grid, new_rows, new_cols: int, store: ^Grapheme_Sto
 		}
 	}
 
+	if old_ext_colors_slice != nil {
+		delete(old_ext_colors_slice)
+	}
 	if old_cells_slice != nil {
 		delete(old_cells_slice)
 	}
@@ -542,6 +615,7 @@ _grid_resize_alt :: proc(g: ^Grid, new_rows, new_cols: int, store: ^Grapheme_Sto
 
 	g.rows = new_rows_slice
 	g.cells = new_cells_slice
+	g.ext_colors = new_ext_colors_slice
 	g.row_count = new_rows
 	g.col_count = new_cols
 	g.capacity = new_cap
@@ -558,6 +632,9 @@ _grid_resize_clean :: proc(t: ^Terminal, new_rows, new_cols: int, allocator: run
 			}
 		}
 	}
+	if g.ext_colors != nil {
+		delete(g.ext_colors)
+	}
 	if g.cells != nil {
 		delete(g.cells)
 	}
@@ -572,9 +649,15 @@ _grid_resize_clean :: proc(t: ^Terminal, new_rows, new_cols: int, allocator: run
 	g.origin = 0
 	g.rows = make([]Row, new_cap, allocator)
 	g.cells = make([]Semantic_Cell, new_cap * new_cols, allocator)
+	g.ext_colors = make([]Direct_Color_Channel, new_cap * new_cols, allocator)
 	for i in 0..<new_cap {
 		g.rows[i].cells = g.cells[i * new_cols : (i + 1) * new_cols]
-		for c in 0..<new_cols { g.rows[i].cells[c] = CELL_DEFAULT }
+		g.rows[i].ext.channels = {}
+		g.rows[i].ext.colors = g.ext_colors[i * new_cols : (i + 1) * new_cols]
+		for c in 0..<new_cols {
+			g.rows[i].cells[c] = CELL_DEFAULT
+			g.rows[i].ext.colors[c] = {}
+		}
 		g.rows[i].generation = 0
 		g.rows[i].wrapped = false
 		g.rows[i].is_prompt = false

@@ -1,5 +1,6 @@
 package parser
 
+import "core:fmt"
 import termgrid "../terminal"
 
 // CSI_Params holds CSI parameters.
@@ -770,12 +771,15 @@ _sgr_clamp_rgb :: proc(v: u32) -> u32 {
 _csi_execute_sgr :: proc(t: ^termgrid.Terminal, params: CSI_Params) {
 	cur := termgrid.style_table_get(&t.grid.style_table, t.current_style)
 	theme := t.grid.style_table.theme
+	style_modified := false
 
 	count := int(params.count)
 	if count == 0 {
 		// Bare ESC[m with no params: treat as [0] reset.
 		cur = termgrid.style_table_default(&t.grid.style_table)
 		termgrid.terminal_set_style(t, termgrid.style_table_insert(&t.grid.style_table, cur))
+		termgrid.terminal_reset_direct_fg(t)
+		termgrid.terminal_reset_direct_bg(t)
 		return
 	}
 
@@ -786,12 +790,18 @@ _csi_execute_sgr :: proc(t: ^termgrid.Terminal, params: CSI_Params) {
 		switch code {
 		case 0: // Reset
 			cur = termgrid.style_table_default(&t.grid.style_table)
+			termgrid.terminal_reset_direct_fg(t)
+			termgrid.terminal_reset_direct_bg(t)
+			style_modified = true
 		case 1: // Bold
 			cur.flags |= termgrid.STYLE_FLAG_BOLD
+			style_modified = true
 		case 2: // Dim (fish autosuggestion uses this)
 			cur.flags |= termgrid.STYLE_FLAG_DIM
+			style_modified = true
 		case 3: // Italic
 			cur.flags |= termgrid.STYLE_FLAG_ITALIC
+			style_modified = true
 		case 4: // Underline, or underline style variant when colon-joined (4:0..4:5)
 			if i + 1 < count && csi_is_subparam(params, i + 1) {
 				sub := int(params.values[i + 1])
@@ -804,28 +814,44 @@ _csi_execute_sgr :: proc(t: ^termgrid.Terminal, params: CSI_Params) {
 			} else {
 				cur.flags |= termgrid.STYLE_FLAG_UNDERLINE
 			}
+			style_modified = true
 		case 7: // Inverse
 			cur.flags |= termgrid.STYLE_FLAG_INVERSE
+			style_modified = true
 		case 9: // Strike
 			cur.flags |= termgrid.STYLE_FLAG_STRIKE
+			style_modified = true
 		case 22: // Normal intensity: clears both bold and dim (xterm)
 			cur.flags = cur.flags & (~(termgrid.STYLE_FLAG_BOLD | termgrid.STYLE_FLAG_DIM))
+			style_modified = true
 		case 23: // Italic off
 			cur.flags = cur.flags & (~termgrid.STYLE_FLAG_ITALIC)
+			style_modified = true
 		case 24: // Underline off
 			cur.flags = cur.flags & (~termgrid.STYLE_FLAG_UNDERLINE)
+			style_modified = true
 		case 27: // Inverse off
 			cur.flags = cur.flags & (~termgrid.STYLE_FLAG_INVERSE)
+			style_modified = true
 		case 29: // Strike off
 			cur.flags = cur.flags & (~termgrid.STYLE_FLAG_STRIKE)
+			style_modified = true
 		case 30..=37: // Standard foreground
 			cur.fg = termgrid.theme_palette_256(theme, code - 30)
+			termgrid.terminal_reset_direct_fg(t)
+			style_modified = true
 		case 40..=47: // Standard background
 			cur.bg = termgrid.theme_palette_256(theme, code - 40)
+			termgrid.terminal_reset_direct_bg(t)
+			style_modified = true
 		case 90..=97: // Bright foreground
 			cur.fg = termgrid.theme_palette_256(theme, code - 90 + 8)
+			termgrid.terminal_reset_direct_fg(t)
+			style_modified = true
 		case 100..=107: // Bright background
 			cur.bg = termgrid.theme_palette_256(theme, code - 100 + 8)
+			termgrid.terminal_reset_direct_bg(t)
+			style_modified = true
 		case 38, 48, 58: // Extended color: 38 fg, 48 bg, 58 underline
 			is_fg := code == 38
 			is_ul := code == 58
@@ -846,11 +872,14 @@ _csi_execute_sgr :: proc(t: ^termgrid.Terminal, params: CSI_Params) {
 					c := termgrid.theme_palette_256(theme, idx)
 					if is_fg {
 						cur.fg = c
+						termgrid.terminal_reset_direct_fg(t)
 					} else if is_ul {
 						cur.underline = c
 					} else {
 						cur.bg = c
+						termgrid.terminal_reset_direct_bg(t)
 					}
+					style_modified = true
 				}
 				i += 2
 			} else if mode == 2 {
@@ -870,11 +899,12 @@ _csi_execute_sgr :: proc(t: ^termgrid.Terminal, params: CSI_Params) {
 				b := _sgr_clamp_rgb(params.values[offset + 2])
 				c := 0xFF000000 | (r << 16) | (g << 8) | b
 				if is_fg {
-					cur.fg = c
+					termgrid.terminal_set_direct_fg(t, c)
 				} else if is_ul {
 					cur.underline = c
+					style_modified = true
 				} else {
-					cur.bg = c
+					termgrid.terminal_set_direct_bg(t, c)
 				}
 				i = offset + 2
 			} else {
@@ -883,13 +913,110 @@ _csi_execute_sgr :: proc(t: ^termgrid.Terminal, params: CSI_Params) {
 			}
 		case 39: // Default foreground
 			cur.fg = termgrid.style_table_default(&t.grid.style_table).fg
+			termgrid.terminal_reset_direct_fg(t)
+			style_modified = true
 		case 49: // Default background
 			cur.bg = termgrid.style_table_default(&t.grid.style_table).bg
+			termgrid.terminal_reset_direct_bg(t)
+			style_modified = true
 		case 59: // Default underline color (follow foreground)
 			cur.underline = termgrid.style_table_default(&t.grid.style_table).underline
+			style_modified = true
 		}
 		i += 1
 	}
 
+	if style_modified {
+		termgrid.terminal_set_style(t, termgrid.style_table_insert(&t.grid.style_table, cur))
+	}
+}
+
+// fast_parse_sgr_truecolor parses "38;2;R;G;Bm" or "48;2;R;G;Bm",
+// or colon forms "38:2::R:G:Bm" / "38:2:0:R:G:Bm".
+// buf starts immediately after ESC [ (i.e. at '3' or '4').
+// Returns consumed byte count (including 'm'), ok = true, is_fg, and packed color 0xFFRRGGBB.
+fast_parse_sgr_truecolor :: proc(buf: []u8) -> (consumed: int, ok: bool, is_fg: bool, color: u32) {
+	if len(buf) < 10 do return 0, false, false, 0
+
+	if buf[0] == '3' && buf[1] == '8' {
+		is_fg = true
+	} else if buf[0] == '4' && buf[1] == '8' {
+		is_fg = false
+	} else {
+		return 0, false, false, 0
+	}
+
+	sep := buf[2]
+	if sep != ';' && sep != ':' {
+		return 0, false, false, 0
+	}
+
+	if buf[3] != '2' {
+		return 0, false, false, 0
+	}
+	if buf[4] != sep {
+		return 0, false, false, 0
+	}
+
+	idx := 5
+	if sep == ':' {
+		if idx < len(buf) && buf[idx] == ':' {
+			idx += 1
+		} else if idx + 1 < len(buf) && buf[idx] == '0' && buf[idx + 1] == ':' {
+			idx += 2
+		}
+	}
+
+	// Parse R (0..255)
+	r: u32 = 0
+	digits := 0
+	for idx < len(buf) && buf[idx] >= '0' && buf[idx] <= '9' {
+		r = r * 10 + u32(buf[idx] - '0')
+		digits += 1
+		idx += 1
+	}
+	if digits == 0 || digits > 3 || idx >= len(buf) || buf[idx] != sep {
+		return 0, false, false, 0
+	}
+	idx += 1 // skip sep
+
+	// Parse G (0..255)
+	g: u32 = 0
+	digits = 0
+	for idx < len(buf) && buf[idx] >= '0' && buf[idx] <= '9' {
+		g = g * 10 + u32(buf[idx] - '0')
+		digits += 1
+		idx += 1
+	}
+	if digits == 0 || digits > 3 || idx >= len(buf) || buf[idx] != sep {
+		return 0, false, false, 0
+	}
+	idx += 1 // skip sep
+
+	// Parse B (0..255)
+	b: u32 = 0
+	digits = 0
+	for idx < len(buf) && buf[idx] >= '0' && buf[idx] <= '9' {
+		b = b * 10 + u32(buf[idx] - '0')
+		digits += 1
+		idx += 1
+	}
+	if digits == 0 || digits > 3 || idx >= len(buf) || buf[idx] != 'm' {
+		return 0, false, false, 0
+	}
+	idx += 1 // skip 'm'
+
+	if r > 255 do r = 255
+	if g > 255 do g = 255
+	if b > 255 do b = 255
+
+	color = 0xFF000000 | (r << 16) | (g << 8) | b
+	return idx, true, is_fg, color
+}
+
+_fast_sgr_reset :: proc(t: ^termgrid.Terminal) {
+	cur := termgrid.style_table_default(&t.grid.style_table)
 	termgrid.terminal_set_style(t, termgrid.style_table_insert(&t.grid.style_table, cur))
+	termgrid.terminal_reset_direct_fg(t)
+	termgrid.terminal_reset_direct_bg(t)
 }

@@ -363,8 +363,8 @@ test_fx_sgr_fg_truecolor_colon :: proc(t: ^testing.T) {
 		&term,
 		[]u8{0x1B, '[', '3', '8', ':', '2', ':', ':', '1', '0', ':', '2', '0', ':', '3', '0', 'm'},
 	)
-	st := tg.style_table_get(&term.grid.style_table, term.current_style)
-	testing.expect(t, st.fg == 0xFF0A141E, "38:2::10:20:30 must set truecolor fg")
+	testing.expect(t, term.has_direct_fg, "38:2::10:20:30 must activate direct fg")
+	testing.expect(t, term.direct_fg == 0xFF0A141E, "38:2::10:20:30 must set truecolor fg")
 }
 
 // --- OSC: titles, cwd, bg query, clipboard ---

@@ -7,6 +7,7 @@ import "base:runtime"
 Grid :: struct {
 	rows:        []Row,       // length = capacity (power of 2)
 	cells:       []Semantic_Cell, // Flattened contiguous memory backing all rows
+	ext_colors:  []Direct_Color_Channel, // Flattened backing for Direct Color
 	row_count:   int,         // logical number of rows (visible area)
 	col_count:   int,         // number of columns
 	capacity:    int,         // power of 2, >= row_count
@@ -43,10 +44,16 @@ grid_init :: proc(
 
 	g.rows = make([]Row, g.capacity, allocator)
 	g.cells = make([]Semantic_Cell, g.capacity * cols, allocator)
+	g.ext_colors = make([]Direct_Color_Channel, g.capacity * cols, allocator)
 	for i in 0..<g.capacity {
 		// Initialize without standalone allocation
 		g.rows[i].cells = g.cells[i * cols : (i + 1) * cols]
-		for c in 0..<cols { g.rows[i].cells[c] = CELL_DEFAULT }
+		g.rows[i].ext.channels = {}
+		g.rows[i].ext.colors = g.ext_colors[i * cols : (i + 1) * cols]
+		for c in 0..<cols {
+			g.rows[i].cells[c] = CELL_DEFAULT
+			g.rows[i].ext.colors[c] = {}
+		}
 		g.rows[i].generation = 0
 		g.rows[i].wrapped = false
 		g.rows[i].is_prompt = false
@@ -57,6 +64,10 @@ grid_init :: proc(
 
 // grid_destroy frees all rows and the style table.
 grid_destroy :: proc(g: ^Grid, allocator: runtime.Allocator = context.allocator) {
+	if g.ext_colors != nil {
+		delete(g.ext_colors, allocator)
+		g.ext_colors = nil
+	}
 	if g.cells != nil {
 		delete(g.cells, allocator)
 		g.cells = nil

@@ -10,9 +10,12 @@ main :: proc() {
 	p: parser.Parser
 	parser.parser_init(&p)
 	
-	t: termgrid.Terminal
-	termgrid.terminal_init(&t, 24, 80)
-	defer termgrid.terminal_destroy(&t)
+	t := new(termgrid.Terminal)
+	termgrid.terminal_init(t, 24, 80)
+	defer {
+		termgrid.terminal_destroy(t)
+		free(t)
+	}
 	
 	// Test 1: ASCII throughput
 	fmt.println("=== Performance Test 1: ASCII Throughput ===")
@@ -24,7 +27,7 @@ main :: proc() {
 	}
 	
 	// Warm up
-	parser.parse_chunk(&p, &t, ascii_data[:1024])
+	parser.parse_chunk(&p, t, ascii_data[:1024])
 	parser.parser_reset(&p)
 	
 	// Benchmark
@@ -32,7 +35,7 @@ main :: proc() {
 	iterations := 100
 	for i in 0..<iterations {
 		parser.parser_reset(&p)
-		parser.parse_chunk(&p, &t, ascii_data)
+		parser.parse_chunk(&p, t, ascii_data)
 	}
 	elapsed := time.since(start)
 	
@@ -40,7 +43,7 @@ main :: proc() {
 	mb_per_sec := f64(total_bytes) / f64(elapsed / time.Millisecond) / 1024.0
 	cycles_per_byte := f64(elapsed) / f64(total_bytes)
 	
-	fmt.printf("Processed %d bytes in %d ms\n", total_bytes, elapsed / time.Millisecond)
+	fmt.printf("Processed %d bytes in %d ms\n", total_bytes, cast(int)(elapsed / time.Millisecond))
 	fmt.printf("Throughput: %.2f MB/s\n", mb_per_sec)
 	fmt.printf("Cycles/byte: %.2f ns/byte\n", cycles_per_byte)
 	fmt.printf("Target: >100 MB/s, <10 ns/byte\n")
@@ -70,7 +73,7 @@ main :: proc() {
 	}
 	
 	// Warm up
-	parser.parse_chunk(&p, &t, csi_data[:60])
+	parser.parse_chunk(&p, t, csi_data[:60])
 	parser.parser_reset(&p)
 	
 	// Benchmark
@@ -78,13 +81,13 @@ main :: proc() {
 	iterations = 1000
 	for i in 0..<iterations {
 		parser.parser_reset(&p)
-		parser.parse_chunk(&p, &t, csi_data)
+		parser.parse_chunk(&p, t, csi_data)
 	}
 	elapsed = time.since(start)
 	
 	sequences_per_sec := f64(1000 * iterations) / (f64(elapsed) / f64(time.Second))
 	
-	fmt.printf("Processed %d sequences in %d ms\n", 1000 * iterations, elapsed / time.Millisecond)
+	fmt.printf("Processed %d sequences in %d ms\n", 1000 * iterations, cast(int)(elapsed / time.Millisecond))
 	fmt.printf("Throughput: %.0f sequences/sec\n", sequences_per_sec)
 	fmt.printf("Target: >1M sequences/sec\n")
 	
@@ -116,7 +119,7 @@ main :: proc() {
 	}
 	
 	// Warm up
-	parser.parse_chunk(&p, &t, mixed_data[:1000])
+	parser.parse_chunk(&p, t, mixed_data[:1000])
 	parser.parser_reset(&p)
 	
 	// Benchmark
@@ -124,14 +127,14 @@ main :: proc() {
 	iterations = 100
 	for i in 0..<iterations {
 		parser.parser_reset(&p)
-		parser.parse_chunk(&p, &t, mixed_data)
+		parser.parse_chunk(&p, t, mixed_data)
 	}
 	elapsed = time.since(start)
 	
 	total_bytes = int(len(mixed_data)) * iterations
 	mb_per_sec = f64(total_bytes) / f64(elapsed / time.Millisecond) / 1024.0
 	
-	fmt.printf("Processed %d bytes in %d ms\n", total_bytes, elapsed / time.Millisecond)
+	fmt.printf("Processed %d bytes in %d ms\n", total_bytes, cast(int)(elapsed / time.Millisecond))
 	fmt.printf("Throughput: %.2f MB/s\n", mb_per_sec)
 	fmt.printf("Target: >100 MB/s for typical terminal output\n")
 	

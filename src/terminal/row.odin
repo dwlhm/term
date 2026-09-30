@@ -2,10 +2,29 @@ package termgrid
 
 import "base:runtime"
 
+// Direct_Color_Channel stores 32-bit ARGB TrueColor for a cell.
+Direct_Color_Channel :: struct {
+	fg: u32, // 0xFFRRGGBB (0 = unassigned / follow style)
+	bg: u32, // 0xFFRRGGBB (0 = unassigned / follow style)
+}
+
+Cell_Channel :: enum u8 {
+	Direct_Color = 1 << 0,
+	Hyperlink    = 1 << 1,
+	Decorations  = 1 << 2,
+}
+Cell_Channels :: distinct bit_set[Cell_Channel; u8]
+
+Row_Extensions :: struct {
+	channels: Cell_Channels,
+	colors:   []Direct_Color_Channel,
+}
+
 // Row represents a single row in the terminal grid.
 // Each row has a generation counter for damage tracking.
 Row :: struct {
 	cells:      []Semantic_Cell, // length = grid.col_count
+	ext:        Row_Extensions,
 	generation: u32,             // incremented on every mutation
 	wrapped:    bool,            // true if this row soft-wrapped into the next row
 	is_prompt:  bool,
@@ -21,6 +40,10 @@ row_init :: proc(r: ^Row, cols: int) {
 	for i in 0..<cols {
 		r.cells[i] = CELL_DEFAULT
 	}
+	r.ext.channels = {}
+	if len(r.ext.colors) >= cols {
+		slice.zero(r.ext.colors[:cols])
+	}
 	r.generation = 0
 	r.wrapped = false
 	r.is_prompt = false
@@ -28,6 +51,7 @@ row_init :: proc(r: ^Row, cols: int) {
 
 // row_destroy is a no-op since Grid owns memory contiguously
 row_destroy :: proc(r: ^Row) {
+	r.ext.channels = {}
 	r.generation = 0
 	r.wrapped = false
 	r.is_prompt = false
@@ -38,6 +62,10 @@ import "core:slice"
 
 row_clear :: proc(r: ^Row) {
 	slice.fill(r.cells, CELL_DEFAULT)
+	r.ext.channels = {}
+	if len(r.ext.colors) > 0 {
+		slice.zero(r.ext.colors)
+	}
 	r.generation += 1
 	r.wrapped = false
 	r.is_prompt = false
@@ -50,6 +78,11 @@ row_set_cell :: proc(r: ^Row, col: int, cell: Semantic_Cell) -> bool {
 		return false
 	}
 	r.cells[col] = cell
+	if u8(cell.flags) & u8(Cell_Flags.Direct_Color) != 0 {
+		r.ext.channels |= {.Direct_Color}
+	} else if len(r.ext.colors) > col {
+		r.ext.colors[col] = {}
+	}
 	r.generation += 1
 	return true
 }
@@ -126,6 +159,16 @@ row_insert_cells :: proc(r: ^Row, col: int, n: int) -> bool {
 	for i in col..<(col + m) {
 		r.cells[i] = CELL_DEFAULT
 	}
+	if len(r.ext.colors) >= len(r.cells) {
+		ci := len(r.ext.colors) - 1
+		for ci >= col + m {
+			r.ext.colors[ci] = r.ext.colors[ci - m]
+			ci -= 1
+		}
+		for ci in col..<(col + m) {
+			r.ext.colors[ci] = {}
+		}
+	}
 	_wide_shift_repair(r, col, m, true)
 	r.generation += 1
 	return true
@@ -152,6 +195,14 @@ row_delete_cells :: proc(r: ^Row, col: int, n: int) -> bool {
 	}
 	for i in (len(r.cells) - m)..<len(r.cells) {
 		r.cells[i] = CELL_DEFAULT
+	}
+	if len(r.ext.colors) >= len(r.cells) {
+		for ci in col..<(len(r.ext.colors) - m) {
+			r.ext.colors[ci] = r.ext.colors[ci + m]
+		}
+		for ci in (len(r.ext.colors) - m)..<len(r.ext.colors) {
+			r.ext.colors[ci] = {}
+		}
 	}
 	_wide_shift_repair(r, col, m, false)
 	r.generation += 1

@@ -9,6 +9,8 @@ Cell_Flags :: enum u8 {
 	None              = 0,
 	Wide_Continuation = 1 << 0, // this cell is the right half of a wide char
 	Dirty             = 1 << 1, // cell has been modified (for internal tracking)
+	Has_Extension     = 1 << 2, // cell has additional data in row extensions
+	Direct_Color      = 1 << 3, // cell has direct 32-bit ARGB TrueColor
 }
 
 // Semantic_Cell represents a single cell in the terminal grid.

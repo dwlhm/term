@@ -898,6 +898,8 @@ _prepare_instances_v2 :: proc(
 	r: ^Renderer,
 	lut: ^Style_LUT,
 	store: ^termgrid.Grapheme_Store = nil,
+	terminal: ^termgrid.Terminal = nil,
+	view: ^termgrid.Terminal_View = nil,
 ) -> (bg_count: u32, glyph_count: u32, emoji_count: u32, decor_count: u32) {
 	cells := r.compiled_v2.cells
 	cols := r.cols
@@ -922,9 +924,11 @@ _prepare_instances_v2 :: proc(
 		x := r.pad_x + f32(col) * cell_w
 		y := r.pad_y + f32(row) * cell_h
 
+		dc := termgrid.terminal_view_get_direct_color(terminal, view, int(row), int(col))
 		emit_bg, _, _, _ := render_cell_expand_instance(
 			cells[idx], lut, atlas, x, y, cell_w, cell_h,
 			&inst.instance_data[bg_count], nil,
+			direct_color = dc,
 		)
 		if emit_bg {
 			bg_count += 1
@@ -951,12 +955,14 @@ _prepare_instances_v2 :: proc(
 			emoji_atlas_ptr = &r.emoji_atlas
 		}
 
+		dc := termgrid.terminal_view_get_direct_color(terminal, view, int(row), int(col))
 		_, emit_glyph, emit_emoji, _ := render_cell_expand_instance(
 			cells[idx], lut, atlas, x, y, cell_w, cell_h,
 			nil, &inst.instance_data[glyph_idx],
 			emoji_inst_ptr,
 			emoji_atlas_ptr,
 			store,
+			direct_color = dc,
 		)
 		if emit_emoji {
 			emoji_count += 1
@@ -976,10 +982,12 @@ _prepare_instances_v2 :: proc(
 		x := r.pad_x + f32(col) * cell_w
 		y := r.pad_y + f32(row) * cell_h
 
+		dc := termgrid.terminal_view_get_direct_color(terminal, view, int(row), int(col))
 		_, _, _, emit_decor := render_cell_expand_instance(
 			cells[idx], lut, atlas, x, y, cell_w, cell_h,
 			nil, nil, nil, nil, nil,
 			&inst.instance_data[decor_idx],
+			direct_color = dc,
 		)
 		if emit_decor {
 			decor_count += 1
@@ -1208,10 +1216,10 @@ _renderer_frame_v2_journal :: proc(
 	if !force_full && len(journal.scroll_ops) == 0 && r.dirty.mirror != nil && !r.ui_staged && !r.interaction_staged {
 		if !r.dirty.armed {
 			render_compile_full_v2(&r.compiled_v2, terminal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster, view)
-			dirty_upload_rebase(&r.dirty, r, lut, &terminal.grapheme_store)
+			dirty_upload_rebase(&r.dirty, r, lut, &terminal.grapheme_store, terminal, view)
 		}
 		ranges: [DIRTY_UPLOAD_MAX_RANGES]Dirty_Upload_Range
-		_, _, fell_back := dirty_upload_frame(&r.dirty, r, terminal, journal, lut, &ranges)
+		_, _, fell_back := dirty_upload_frame(&r.dirty, r, terminal, journal, lut, &ranges, view)
 		if !fell_back {
 			if r.unlock_cb != nil {
 				r.unlock_cb(r.unlock_data)
@@ -1243,7 +1251,7 @@ _renderer_frame_v2_journal :: proc(
 
 	r.dirty.armed = false
 	render_compile_full_v2(&r.compiled_v2, terminal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster, view)
-	bg_count, glyph_count, emoji_count, decor_count := _prepare_instances_v2(r, lut, &terminal.grapheme_store)
+	bg_count, glyph_count, emoji_count, decor_count := _prepare_instances_v2(r, lut, &terminal.grapheme_store, terminal, view)
 	if r.unlock_cb != nil {
 		r.unlock_cb(r.unlock_data)
 	}

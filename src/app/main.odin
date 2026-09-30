@@ -18,6 +18,21 @@ import "core:time"
 
 import "vendor:sdl3"
 
+import diag "../diag"
+import probe "../bench/probe"
+
+Profile_Ring :: probe.Profile_Ring
+Profile_Record :: probe.Profile_Record
+PROFILE_RECORD_CAP :: probe.PROFILE_RECORD_CAP
+profile_phase_publish :: probe.profile_phase_publish
+profile_clock_ns :: probe.profile_clock_ns
+profile_elapsed_ns :: probe.profile_elapsed_ns
+profile_record :: probe.profile_record
+profile_record_resize :: probe.profile_record_resize
+profile_try_record :: probe.profile_try_record
+profile_ring_init :: probe.profile_ring_init
+profile_ring_stop_and_join :: probe.profile_ring_stop_and_join
+
 PTY_DATA_READY :: sdl3.EventType(cast(u32)sdl3.EventType.USER + 1)
 
 when ODIN_OS == .Darwin {
@@ -196,8 +211,8 @@ _profile_scenario_step :: proc(a: ^App) -> bool {
 		}
 		profile_phase_publish(.Idle)
 		if telemetry_enabled() {
-			if !profile_ring_init(&_profile_ring) { _profile_scenario.phase = .Failed; return false }
-			sync.atomic_store(&_profile_enabled, true)
+			if !probe.profile_ring_init(&probe._profile_ring) { _profile_scenario.phase = .Failed; return false }
+			sync.atomic_store(&probe._profile_enabled, true)
 		}
 		profile_record(.Scenario_Phase, .Idle, a.window.pixel_w, a.window.pixel_h, i32(b.terminal.grid.row_count), i32(b.terminal.grid.col_count), 0, backend_is_threaded(b))
 	}
@@ -353,6 +368,8 @@ App :: struct {
 	pty_event_pending:   b32,
 	pending_wake_event:  sdl3.Event,
 	has_wake_event:      bool,
+	frame_probe:         probe.Frame_Probe,
+	alloc_probe:         probe.Alloc_Probe,
 }
 
 pty_monitor_proc :: proc(t: ^odin_thread.Thread) {
@@ -386,7 +403,7 @@ pty_monitor_proc :: proc(t: ^odin_thread.Thread) {
 			continue
 		}
 
-		r := posix.poll(&pfds[0], posix.nfds_t(count), 50)
+		r := posix.poll(&pfds[0], posix.nfds_t(count), 10)
 		if r > 0 {
 			has_data := false
 			for i in 0 ..< count {
@@ -405,6 +422,17 @@ pty_monitor_proc :: proc(t: ^odin_thread.Thread) {
 				time.sleep(1 * time.Millisecond)
 			}
 		}
+	}
+}
+
+_app_on_backend_data_ready :: proc(user_data: rawptr) {
+	a := (^App)(user_data)
+	if a == nil do return
+	if !sync.atomic_load(&a.pty_event_pending) {
+		sync.atomic_store(&a.pty_event_pending, true)
+		user_ev: sdl3.Event
+		user_ev.type = PTY_DATA_READY
+		_ = sdl3.PushEvent(&user_ev)
 	}
 }
 
@@ -581,6 +609,7 @@ _app_execute_tab_menu :: proc(a: ^App, item: platform_tabs.Tab_Menu_Item, target
 		if spawn_ok {
 			new_b := &a.session_mgr.tabs[new_idx].backend
 			backend_set_clipboard_callbacks(new_b, &a.frontend, _frontend_clipboard_write_cb, _frontend_clipboard_read_cb)
+			backend_set_notify_data_ready(new_b, a, _app_on_backend_data_ready)
 			session_switch_tab(&a.session_mgr, new_idx)
 		}
 	case .Rename:
@@ -742,6 +771,8 @@ app_init :: proc(a: ^App, rows, cols: int, prog: string, argv: []string) -> bool
 		_frontend_clipboard_write_cb,
 		_frontend_clipboard_read_cb,
 	)
+	backend_set_notify_data_ready(active_b, a, _app_on_backend_data_ready)
+	backend_set_notify_data_ready(&a.backend, a, _app_on_backend_data_ready)
 	app_global = a
 
 	render.renderer_resize_grid(&a.renderer, &active_b.terminal, i32(init_rows), i32(init_cols))
@@ -781,6 +812,12 @@ app_init :: proc(a: ^App, rows, cols: int, prog: string, argv: []string) -> bool
 		odin_thread.start(a.pty_monitor_thread)
 	}
 
+	probe.frame_probe_init(&a.frame_probe)
+	if debug_env, ok := os.lookup_env("TERM_DEBUG", context.temp_allocator); ok && debug_env == "1" {
+		probe.alloc_probe_init(&a.alloc_probe, context.allocator)
+		probe.alloc_probe_mark_init_done(&a.alloc_probe)
+	}
+
 	return true
 }
 
@@ -800,7 +837,11 @@ app_destroy :: proc(a: ^App) {
 	if a.backend.drain_buf != nil {
 		backend_destroy(&a.backend)
 	}
-	profile_ring_stop_and_join(&_profile_ring)
+	report := probe.frame_probe_report(&a.frame_probe)
+	diag.diag_info("[telemetry] %s", report)
+	delete(report)
+
+	probe.profile_ring_stop_and_join(&probe._profile_ring)
 	if _profile_scenario_initialized {
 		status_path, status_ok := os.lookup_env("TERM_PROFILE_RESIZE_STATUS_FILE", context.temp_allocator)
 		if status_ok && len(status_path) > 0 {
@@ -808,9 +849,9 @@ app_destroy :: proc(a: ^App) {
 			reason := _profile_failure_reason
 			if _profile_scenario.phase != .Complete && reason == .None { reason = .Scenario_Failed }
 			if _profile_scenario.phase == .Complete {
-				if sync.atomic_load(&_profile_export_failed) {
+				if sync.atomic_load(&probe._profile_export_failed) {
 					reason = .Telemetry_Export_Failed
-				} else if sync.atomic_load(&_profile_ring.dropped) != 0 {
+				} else if sync.atomic_load(&probe._profile_ring.dropped) != 0 {
 					status = "valid"
 					reason = .Telemetry_Dropped_Records
 				} else {
@@ -1358,6 +1399,7 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 					if spawn_ok {
 						new_b := &a.session_mgr.tabs[new_idx].backend
 						backend_set_clipboard_callbacks(new_b, &a.frontend, _frontend_clipboard_write_cb, _frontend_clipboard_read_cb)
+						backend_set_notify_data_ready(new_b, a, _app_on_backend_data_ready)
 						session_switch_tab(&a.session_mgr, new_idx)
 						_app_resync_tab_modals(a)
 						ui.tab_bar_anim_activate(&a.tab_bar)
@@ -1816,6 +1858,7 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 						if spawn_ok {
 							new_b := &a.session_mgr.tabs[new_idx].backend
 							backend_set_clipboard_callbacks(new_b, &a.frontend, _frontend_clipboard_write_cb, _frontend_clipboard_read_cb)
+							backend_set_notify_data_ready(new_b, a, _app_on_backend_data_ready)
 							session_switch_tab(&a.session_mgr, new_idx)
 						}
 						_app_resync_tab_modals(a)
@@ -2393,12 +2436,34 @@ app_frame :: proc(a: ^App) -> bool {
 		}
 	}
 
+	strategy_str := fmt.tprintf("%v", a.renderer.strategy)
+	probe.frame_probe_record(&a.frame_probe, is_dirty, strategy_str, 0)
+	diag.diag_set_snapshot(diag.Diag_Snapshot{
+		strategy  = strategy_str,
+		tab_count = len(a.session_mgr.tabs),
+		grid_rows = int(a.renderer.rows),
+		grid_cols = int(a.renderer.cols),
+	})
+
 	backend_poll_exit(active_b)
 
 	return !a.should_quit
 }
 
 main :: proc() {
+	debug_mode := false
+	if val, ok := os.lookup_env("TERM_DEBUG", context.temp_allocator); ok && val == "1" {
+		debug_mode = true
+	}
+	diag.diag_init(diag.Diag_Config{
+		app_version   = "0.3.0",
+		log_to_stderr = true,
+		log_to_file   = true,
+		min_level     = .Debug if debug_mode else .Info,
+	})
+	defer diag.diag_destroy()
+	diag.diag_install_crash_handler()
+
 	shell, shell_allocated := _resolve_shell()
 	defer if shell_allocated { delete(shell) }
 	shell_argv := _resolve_shell_argv(shell)
@@ -2425,10 +2490,12 @@ main :: proc() {
 
 		drop_fx_anim_active := drop_fx_active(&app.drop_fx)
 		anim_active := app.tab_bar.anim.anim_active || drop_fx_anim_active
+		active_b := app_active_backend(app)
+		has_pending_damage := active_b != nil && _damage_cells(&active_b.front_terminal) > 0
 		ev: sdl3.Event
 		has_ev := false
-		if anim_active || profile_scenario_enabled() {
-			if sdl3.WaitEventTimeout(&ev, 16) {
+		if anim_active || profile_scenario_enabled() || has_pending_damage {
+			if sdl3.WaitEventTimeout(&ev, 1) {
 				has_ev = true
 			}
 		} else {

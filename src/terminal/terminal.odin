@@ -198,6 +198,37 @@ Terminal :: struct {
 	charset_g1:             Terminal_Charset,
 	active_charset_is_g1:   bool,
 	active_charset_is_dec:  bool, // cached boolean: true if active slot is DEC_Line_Drawing
+
+	// Active cursor direct color state (GT-ERC TrueColor channel)
+	direct_fg:              u32,
+	direct_bg:              u32,
+	has_direct_fg:          bool,
+	has_direct_bg:          bool,
+}
+
+// Direct color mutation procs
+terminal_set_direct_fg :: proc(t: ^Terminal, rgb: u32) {
+	if t == nil do return
+	t.direct_fg = rgb
+	t.has_direct_fg = true
+}
+
+terminal_set_direct_bg :: proc(t: ^Terminal, rgb: u32) {
+	if t == nil do return
+	t.direct_bg = rgb
+	t.has_direct_bg = true
+}
+
+terminal_reset_direct_fg :: proc(t: ^Terminal) {
+	if t == nil do return
+	t.direct_fg = 0
+	t.has_direct_fg = false
+}
+
+terminal_reset_direct_bg :: proc(t: ^Terminal) {
+	if t == nil do return
+	t.direct_bg = 0
+	t.has_direct_bg = false
 }
 
 // Erase_Mode specifies how to erase content.
@@ -221,6 +252,10 @@ terminal_init :: proc(
 	t.saved_cursor = t.cursor
 	t.saved_cursor_valid = false
 	t.current_style = 0
+	t.direct_fg = 0
+	t.direct_bg = 0
+	t.has_direct_fg = false
+	t.has_direct_bg = false
 	damage_init(&t.damage, rows, cols, allocator)
 	t.scroll_top = 0
 	t.scroll_bottom = rows - 1
@@ -278,9 +313,10 @@ terminal_put_char :: proc(t: ^Terminal, c: rune) {
 		}
 	}
 
-	if c < 0x80 {
+	is_fast_single_width := (c < 0x80) || (c >= 0x2500 && c <= 0x259F)
+	if is_fast_single_width {
 		ch := c
-		if t.active_charset_is_dec && ch >= 0x5F && ch <= 0x7E {
+		if c < 0x80 && t.active_charset_is_dec && ch >= 0x5F && ch <= 0x7E {
 			ch = terminal_translate_dec_line(u8(ch))
 		}
 		cell := Semantic_Cell{
@@ -293,26 +329,26 @@ terminal_put_char :: proc(t: ^Terminal, c: rune) {
 		row := t.cursor.row
 		col := t.cursor.col
 
-		// Wide-overwrite repair (same as the slow path): an ASCII write
-		// landing on half of a wide pair must blank the orphaned half,
-		// or the surviving half renders as an undeletable ghost. This is
-		// exactly what shells emit when destructively backspacing over a
-		// 2-cell emoji (BS, space, BS). Cost is one bounds-checked read
-		// plus flag compares in the common narrow case — O(1), no
-		// allocation, no width tables.
+		if t.has_direct_fg || t.has_direct_bg {
+			cell.flags = Cell_Flags(u8(cell.flags) | u8(Cell_Flags.Has_Extension) | u8(Cell_Flags.Direct_Color))
+			phys := _grid_physical_row(&t.grid, row)
+			t.grid.rows[phys].ext.channels |= {.Direct_Color}
+			t.grid.rows[phys].ext.colors[col] = Direct_Color_Channel{
+				fg = t.direct_fg if t.has_direct_fg else 0,
+				bg = t.direct_bg if t.has_direct_bg else 0,
+			}
+		}
+
 		_wide_overwrite_repair(t, row, col, 1)
 
 		_terminal_release_cell_grapheme(t, row, col)
 
-		// Write the cell
 		ok := grid_set_cell(&t.grid, row, col, cell)
 		if ok {
-			// Mark damage
 			gen := t.grid.rows[_grid_physical_row(&t.grid, row)].generation
 			damage_mark_cell(&t.damage, row, col, gen)
 		}
 
-		// Advance cursor (may set pending_wrap if at last column)
 		scroll_needed: bool
 		cursor_advance(&t.cursor, 1, t.grid.row_count, t.grid.col_count, &scroll_needed)
 
@@ -424,6 +460,16 @@ terminal_put_char_slow :: proc(t: ^Terminal, c: rune) {
 		flags   = .None,
 	}
 
+	if t.has_direct_fg || t.has_direct_bg {
+		cell.flags = Cell_Flags(u8(cell.flags) | u8(Cell_Flags.Has_Extension) | u8(Cell_Flags.Direct_Color))
+		phys := _grid_physical_row(&t.grid, row)
+		t.grid.rows[phys].ext.channels |= {.Direct_Color}
+		t.grid.rows[phys].ext.colors[col] = Direct_Color_Channel{
+			fg = t.direct_fg if t.has_direct_fg else 0,
+			bg = t.direct_bg if t.has_direct_bg else 0,
+		}
+	}
+
 	ok := grid_set_cell(&t.grid, row, col, cell)
 	if ok {
 		gen := t.grid.rows[_grid_physical_row(&t.grid, row)].generation
@@ -478,13 +524,34 @@ terminal_print_span :: proc(t: ^Terminal, data: []u8, style: Style_Id) {
 			}
 		}
 
+		flags := Cell_Flags.None
+		if t.has_direct_fg || t.has_direct_bg {
+			flags = Cell_Flags(u8(flags) | u8(Cell_Flags.Has_Extension) | u8(Cell_Flags.Direct_Color))
+			phys_row.ext.channels |= {.Direct_Color}
+			clr := Direct_Color_Channel{
+				fg = t.direct_fg if t.has_direct_fg else 0,
+				bg = t.direct_bg if t.has_direct_bg else 0,
+			}
+			for i in 0..<chunk_len {
+				if t.cursor.col + i < len(phys_row.ext.colors) {
+					phys_row.ext.colors[t.cursor.col + i] = clr
+				}
+			}
+		} else if len(phys_row.ext.colors) > t.cursor.col {
+			for i in 0..<chunk_len {
+				if t.cursor.col + i < len(phys_row.ext.colors) {
+					phys_row.ext.colors[t.cursor.col + i] = {}
+				}
+			}
+		}
+
 		if !t.active_charset_is_dec {
 			for i in 0..<chunk_len {
 				phys_row.cells[t.cursor.col + i] = Semantic_Cell{
 					content = Content_Handle(data[offset + i]),
 					style   = style,
 					width   = 1,
-					flags   = .None,
+					flags   = flags,
 				}
 			}
 		} else {
@@ -495,7 +562,7 @@ terminal_print_span :: proc(t: ^Terminal, data: []u8, style: Style_Id) {
 					content = Content_Handle(ch),
 					style   = style,
 					width   = 1,
-					flags   = .None,
+					flags   = flags,
 				}
 			}
 		}
@@ -570,6 +637,21 @@ terminal_put_wide :: proc(t: ^Terminal, c: rune) {
 		style   = t.current_style,
 		width   = 1,
 		flags   = .Wide_Continuation,
+	}
+
+	if t.has_direct_fg || t.has_direct_bg {
+		lead.flags = Cell_Flags(u8(lead.flags) | u8(Cell_Flags.Has_Extension) | u8(Cell_Flags.Direct_Color))
+		cont.flags = Cell_Flags(u8(cont.flags) | u8(Cell_Flags.Has_Extension) | u8(Cell_Flags.Direct_Color))
+		phys := _grid_physical_row(&t.grid, row)
+		t.grid.rows[phys].ext.channels |= {.Direct_Color}
+		clr := Direct_Color_Channel{
+			fg = t.direct_fg if t.has_direct_fg else 0,
+			bg = t.direct_bg if t.has_direct_bg else 0,
+		}
+		t.grid.rows[phys].ext.colors[col] = clr
+		if col + 1 < len(t.grid.rows[phys].ext.colors) {
+			t.grid.rows[phys].ext.colors[col + 1] = clr
+		}
 	}
 
 	if grid_set_cell(&t.grid, row, col, lead) {
@@ -694,12 +776,21 @@ _terminal_release_cell_grapheme :: #force_inline proc(t: ^Terminal, row, col: in
 	}
 }
 
-// _terminal_blank_cell resets a cell to CELL_DEFAULT, releasing any pool
+// _terminal_blank_cell replaces a cell (default CELL_DEFAULT), releasing any pool
 // handle it held, and marks damage.
-_terminal_blank_cell :: proc(t: ^Terminal, row, col: int) {
+_terminal_blank_cell :: proc(t: ^Terminal, row, col: int, blank: Semantic_Cell = CELL_DEFAULT) {
 	grapheme_store_release(&t.grapheme_store, grid_get_cell(&t.grid, row, col).content)
-	if grid_set_cell(&t.grid, row, col, CELL_DEFAULT) {
-		gen := t.grid.rows[_grid_physical_row(&t.grid, row)].generation
+	if grid_set_cell(&t.grid, row, col, blank) {
+		phys := _grid_physical_row(&t.grid, row)
+		if u8(blank.flags) & u8(Cell_Flags.Direct_Color) != 0 && t.has_direct_bg {
+			t.grid.rows[phys].ext.channels |= {.Direct_Color}
+			if col < len(t.grid.rows[phys].ext.colors) {
+				t.grid.rows[phys].ext.colors[col] = Direct_Color_Channel{ fg = 0, bg = t.direct_bg }
+			}
+		} else if len(t.grid.rows[phys].ext.colors) > col {
+			t.grid.rows[phys].ext.colors[col] = {}
+		}
+		gen := t.grid.rows[phys].generation
 		damage_mark_cell(&t.damage, row, col, gen)
 	}
 }
@@ -837,12 +928,12 @@ terminal_set_sync_output :: proc(t: ^Terminal, enable: bool) {
 // _wide_erase_repair blanks orphaned wide halves after clearing the
 // inclusive range [start, end] on row: a lead at start-1 whose continuation
 // was cleared, and a continuation at end+1 whose lead was cleared.
-_wide_erase_repair :: proc(t: ^Terminal, row, start, end: int) {
+_wide_erase_repair :: proc(t: ^Terminal, row, start, end: int, blank: Semantic_Cell) {
 	if start > 0 && _cell_is_lead(grid_get_cell(&t.grid, row, start - 1)) {
-		_terminal_blank_cell(t, row, start - 1)
+		_terminal_blank_cell(t, row, start - 1, blank)
 	}
 	if end + 1 < t.grid.col_count && _cell_is_continuation(grid_get_cell(&t.grid, row, end + 1)) {
-		_terminal_blank_cell(t, row, end + 1)
+		_terminal_blank_cell(t, row, end + 1, blank)
 	}
 }
 
@@ -858,10 +949,44 @@ _terminal_release_row_handles :: proc(t: ^Terminal, phys: int) {
 	}
 }
 
+// Erasure retains only the current raw background; text attributes and links reset.
+_terminal_erase_cell :: proc(t: ^Terminal) -> Semantic_Cell {
+	style := style_table_default(&t.grid.style_table)
+	style.bg = style_table_get(&t.grid.style_table, t.current_style).bg
+	blank := CELL_DEFAULT
+	blank.style = style_table_insert(&t.grid.style_table, style)
+	if t.has_direct_bg {
+		blank.flags = Cell_Flags(u8(blank.flags) | u8(Cell_Flags.Has_Extension) | u8(Cell_Flags.Direct_Color))
+	}
+	return blank
+}
+
+_terminal_erase_row :: proc(t: ^Terminal, phys: int, blank: Semantic_Cell) {
+	_terminal_release_row_handles(t, phys)
+	for &cell in t.grid.rows[phys].cells { cell = blank }
+	if t.has_direct_bg {
+		t.grid.rows[phys].ext.channels |= {.Direct_Color}
+		clr := Direct_Color_Channel{ fg = 0, bg = t.direct_bg }
+		for i in 0..<len(t.grid.rows[phys].ext.colors) {
+			t.grid.rows[phys].ext.colors[i] = clr
+		}
+	} else if len(t.grid.rows[phys].ext.colors) > 0 {
+		for i in 0..<len(t.grid.rows[phys].ext.colors) {
+			t.grid.rows[phys].ext.colors[i] = {}
+		}
+	}
+	t.grid.rows[phys].wrapped = false
+	t.grid.rows[phys].is_prompt = false
+	t.grid.rows[phys].generation += 1
+}
+
 // terminal_erase_line erases content on the current line.
 // Handles of cleared cells are released; a pair split by the range edge has
-// its orphan half blanked to CELL_DEFAULT. Cursor unmoved.
+// its orphan half blanked with the current background. Cursor unmoved.
 terminal_erase_line :: proc(t: ^Terminal, mode: Erase_Mode) {
+	if t == nil || t.grid.row_count == 0 || t.grid.col_count == 0 { return }
+	if t.cursor.row < 0 || t.cursor.row >= t.grid.row_count || t.cursor.col < 0 || t.cursor.col >= t.grid.col_count { return }
+	blank := _terminal_erase_cell(t)
 	row := t.cursor.row
 	col := t.cursor.col
 	phys := _grid_physical_row(&t.grid, row)
@@ -886,17 +1011,34 @@ terminal_erase_line :: proc(t: ^Terminal, mode: Erase_Mode) {
 	switch mode {
 	case .To_End:
 		for c in col..<t.grid.col_count {
-			t.grid.rows[phys].cells[c] = CELL_DEFAULT
+			t.grid.rows[phys].cells[c] = blank
 		}
 	case .To_Beginning:
 		for c in 0..<(col + 1) {
-			t.grid.rows[phys].cells[c] = CELL_DEFAULT
+			t.grid.rows[phys].cells[c] = blank
 		}
 	case .Entire:
-		row_clear(&t.grid.rows[phys])
+		for &cell in t.grid.rows[phys].cells { cell = blank }
+		t.grid.rows[phys].is_prompt = false
 	}
 
-	_wide_erase_repair(t, row, start, end)
+	if t.has_direct_bg {
+		t.grid.rows[phys].ext.channels |= {.Direct_Color}
+		clr := Direct_Color_Channel{ fg = 0, bg = t.direct_bg }
+		for c in start..=end {
+			if c < len(t.grid.rows[phys].ext.colors) {
+				t.grid.rows[phys].ext.colors[c] = clr
+			}
+		}
+	} else if len(t.grid.rows[phys].ext.colors) > 0 {
+		for c in start..=end {
+			if c < len(t.grid.rows[phys].ext.colors) {
+				t.grid.rows[phys].ext.colors[c] = {}
+			}
+		}
+	}
+
+	_wide_erase_repair(t, row, start, end, blank)
 
 	t.grid.rows[phys].wrapped = false
 	t.grid.rows[phys].generation += 1
@@ -906,6 +1048,9 @@ terminal_erase_line :: proc(t: ^Terminal, mode: Erase_Mode) {
 
 // terminal_erase_display erases content on the display.
 terminal_erase_display :: proc(t: ^Terminal, mode: Erase_Mode) {
+	if t == nil || t.grid.row_count == 0 || t.grid.col_count == 0 { return }
+	if t.cursor.row < 0 || t.cursor.row >= t.grid.row_count || t.cursor.col < 0 || t.cursor.col >= t.grid.col_count { return }
+	blank := _terminal_erase_cell(t)
 	row := t.cursor.row
 
 	switch mode {
@@ -915,16 +1060,14 @@ terminal_erase_display :: proc(t: ^Terminal, mode: Erase_Mode) {
 		// Erase all lines below
 		for r in (row + 1)..<t.grid.row_count {
 			phys := _grid_physical_row(&t.grid, r)
-			_terminal_release_row_handles(t, phys)
-			row_clear(&t.grid.rows[phys])
+			_terminal_erase_row(t, phys, blank)
 			damage_mark_row(&t.damage, r, t.grid.rows[phys].generation)
 		}
 	case .To_Beginning:
 		// Erase all lines above
 		for r in 0..<row {
 			phys := _grid_physical_row(&t.grid, r)
-			_terminal_release_row_handles(t, phys)
-			row_clear(&t.grid.rows[phys])
+			_terminal_erase_row(t, phys, blank)
 			damage_mark_row(&t.damage, r, t.grid.rows[phys].generation)
 		}
 		// Erase from beginning of current line to cursor
@@ -934,8 +1077,7 @@ terminal_erase_display :: proc(t: ^Terminal, mode: Erase_Mode) {
 		// .To_End/.To_Beginning discipline), then mark all rows dirty.
 		for i in 0..<t.grid.row_count {
 			phys := _grid_physical_row(&t.grid, i)
-			_terminal_release_row_handles(t, phys)
-			row_clear(&t.grid.rows[phys])
+			_terminal_erase_row(t, phys, blank)
 		}
 		gens := make([]u32, t.grid.row_count)
 		for i in 0..<t.grid.row_count {
@@ -996,6 +1138,9 @@ terminal_clear_scrollback :: proc(t: ^Terminal) {
 // terminal_reset implements RIS for the terminal state owned by this model.
 terminal_reset :: proc(t: ^Terminal) {
 	if t == nil { return }
+	t.current_style = 0
+	terminal_reset_direct_fg(t)
+	terminal_reset_direct_bg(t)
 	terminal_erase_display(t, .Entire)
 	terminal_clear_scrollback(t)
 	style_table_init(&t.grid.style_table, t.grid.style_table.theme)
@@ -1109,7 +1254,7 @@ terminal_scroll_up :: proc(t: ^Terminal, n: int) {
 	if !t.is_alt_screen && top == 0 && bottom == t.grid.row_count - 1 && t.scrollback.col_count == t.grid.col_count {
 		for i in 0..<actual {
 			phys := _grid_physical_row(&t.grid, top + i)
-			scrollback_push(&t.scrollback, t.grid.rows[phys].cells, &t.grapheme_store, t.grid.rows[phys].wrapped)
+			scrollback_push(&t.scrollback, t.grid.rows[phys].cells, &t.grapheme_store, t.grid.rows[phys].wrapped, ext = t.grid.rows[phys].ext)
 		}
 	} else {
 		for i in 0..<actual {
@@ -1276,7 +1421,7 @@ terminal_leave_alt_screen :: proc(t: ^Terminal) {
 }
 
 // terminal_erase_chars erases n cells starting at the cursor column on the cursor row.
-// Cells are reset to CELL_DEFAULT and any grapheme handles released. Cursor does not move.
+// Cells retain the current background and release grapheme handles. Cursor does not move.
 terminal_erase_chars :: proc(t: ^Terminal, n: int) {
 	if t == nil || n <= 0 || t.grid.row_count == 0 || t.grid.col_count == 0 {
 		return
@@ -1291,6 +1436,7 @@ terminal_erase_chars :: proc(t: ^Terminal, n: int) {
 		return
 	}
 
+	blank := _terminal_erase_cell(t)
 	phys := _grid_physical_row(&t.grid, row)
 	if t.grapheme_store.live_count > 0 {
 		for c in col..<(col + actual) {
@@ -1298,9 +1444,24 @@ terminal_erase_chars :: proc(t: ^Terminal, n: int) {
 		}
 	}
 	for c in col..<(col + actual) {
-		t.grid.rows[phys].cells[c] = CELL_DEFAULT
+		t.grid.rows[phys].cells[c] = blank
 	}
-	_wide_erase_repair(t, row, col, col + actual - 1)
+	if t.has_direct_bg {
+		t.grid.rows[phys].ext.channels |= {.Direct_Color}
+		clr := Direct_Color_Channel{ fg = 0, bg = t.direct_bg }
+		for c in col..<(col + actual) {
+			if c < len(t.grid.rows[phys].ext.colors) {
+				t.grid.rows[phys].ext.colors[c] = clr
+			}
+		}
+	} else if len(t.grid.rows[phys].ext.colors) > 0 {
+		for c in col..<(col + actual) {
+			if c < len(t.grid.rows[phys].ext.colors) {
+				t.grid.rows[phys].ext.colors[c] = {}
+			}
+		}
+	}
+	_wide_erase_repair(t, row, col, col + actual - 1, blank)
 
 	t.grid.rows[phys].generation += 1
 	gen := t.grid.rows[phys].generation

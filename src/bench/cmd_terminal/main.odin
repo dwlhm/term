@@ -62,16 +62,18 @@ main :: proc() {
 		ns_per_op := r.stats.mean
 		switch r.name {
 		case "cell_mutation":
-			if ns_per_op < 10.0 {
-				fmt.printf("✓ Cell mutation: %.2f ns/op (target: <10ns)\n", ns_per_op)
+			ns_per_cell := ns_per_op / 1000.0
+			if ns_per_cell < 10.0 {
+				fmt.printf("✓ Cell mutation: %.2f ns/cell (target: <10ns)\n", ns_per_cell)
 			} else {
-				fmt.printf("✗ Cell mutation: %.2f ns/op (target: <10ns) - SLOW\n", ns_per_op)
+				fmt.printf("✗ Cell mutation: %.2f ns/cell (target: <10ns) - SLOW\n", ns_per_cell)
 			}
 		case "scroll_operation":
-			if ns_per_op < 50.0 {
-				fmt.printf("✓ Scroll operation: %.2f ns/op (target: <50ns)\n", ns_per_op)
+			ns_per_scroll := ns_per_op / 100.0
+			if ns_per_scroll < 50.0 {
+				fmt.printf("✓ Scroll operation: %.2f ns/scroll (target: <50ns)\n", ns_per_scroll)
 			} else {
-				fmt.printf("✗ Scroll operation: %.2f ns/op (target: <50ns) - SLOW\n", ns_per_op)
+				fmt.printf("✗ Scroll operation: %.2f ns/scroll (target: <50ns) - SLOW\n", ns_per_scroll)
 			}
 		case "damage_tracking":
 			// damage_tracking does 1000 put_chars + journal, so divide by 1000
@@ -90,37 +92,46 @@ main :: proc() {
 
 // Benchmark: Cell mutation (1000 put_char operations)
 bench_cell_mutation :: proc(ctx: ^bench.Benchmark_Context) {
-	t: tg.Terminal
-	tg.terminal_init(&t, 24, 80)
-	defer tg.terminal_destroy(&t)
+	t := new(tg.Terminal)
+	tg.terminal_init(t, 24, 80)
+	defer {
+		tg.terminal_destroy(t)
+		free(t)
+	}
 
 	for i in 0..<1000 {
-		tg.terminal_put_char(&t, 'a')
+		tg.terminal_put_char(t, 'a')
 	}
 }
 
 // Benchmark: Scroll operation (100 scroll_up operations)
 bench_scroll :: proc(ctx: ^bench.Benchmark_Context) {
-	t: tg.Terminal
-	tg.terminal_init(&t, 24, 80)
-	defer tg.terminal_destroy(&t)
+	t := new(tg.Terminal)
+	tg.terminal_init(t, 24, 80)
+	defer {
+		tg.terminal_destroy(t)
+		free(t)
+	}
 
 	for _ in 0..<100 {
-		tg.terminal_scroll_up(&t, 1)
+		tg.terminal_scroll_up(t, 1)
 	}
 }
 
 // Benchmark: Damage tracking (1000 put_char + take_journal)
 bench_damage_tracking :: proc(ctx: ^bench.Benchmark_Context) {
-	t: tg.Terminal
-	tg.terminal_init(&t, 24, 80)
-	defer tg.terminal_destroy(&t)
-
-	for i in 0..<1000 {
-		tg.terminal_put_char(&t, 'a')
+	t := new(tg.Terminal)
+	tg.terminal_init(t, 24, 80)
+	defer {
+		tg.terminal_destroy(t)
+		free(t)
 	}
 
-	journal := tg.terminal_take_damage(&t)
+	for i in 0..<1000 {
+		tg.terminal_put_char(t, 'a')
+	}
+
+	journal := tg.terminal_take_damage(t)
 	tg.damage_journal_destroy(&journal)
 }
 
@@ -162,24 +173,26 @@ bench_scroll_o1_rows_independent :: proc(ctx: ^bench.Benchmark_Context) {
 		_ = bench_scroll_single(&g)
 	}
 
-	fmt.println("--- scroll O(1) gate: ns/scroll per size ---")
-	for s, si in sizes {
-		fmt.printf("  rows=%v cols=80 ns/scroll=%.2f\n", s, per_size[si])
-	}
-	min_v, max_v := per_size[0], per_size[0]
-	for v in per_size {
-		if v < min_v {
-			min_v = v
+	if ctx == nil {
+		fmt.println("--- scroll O(1) gate: ns/scroll per size ---")
+		for s, si in sizes {
+			fmt.printf("  rows=%v cols=80 ns/scroll=%.2f\n", s, per_size[si])
 		}
-		if v > max_v {
-			max_v = v
+		min_v, max_v := per_size[0], per_size[0]
+		for v in per_size {
+			if v < min_v {
+				min_v = v
+			}
+			if v > max_v {
+				max_v = v
+			}
 		}
-	}
-	ratio := max_v / (min_v + 1e-9)
-	if ratio < 1.5 {
-		fmt.printf("✓ O(1) scroll gate: max/min=%.3f (target <1.5)\n", ratio)
-	} else {
-		fmt.printf("✗ O(1) scroll gate: max/min=%.3f (target <1.5) - NOT O(1)\n", ratio)
+		ratio := max_v / (min_v + 1e-9)
+		if ratio < 1.5 {
+			fmt.printf("✓ O(1) scroll gate: max/min=%.3f (target <1.5)\n", ratio)
+		} else {
+			fmt.printf("✗ O(1) scroll gate: max/min=%.3f (target <1.5) - NOT O(1)\n", ratio)
+		}
 	}
 }
 
@@ -210,7 +223,9 @@ bench_scroll_region_partial :: proc(ctx: ^bench.Benchmark_Context) {
 	end_reg := platform.platform_now()
 	ns_reg := f64(platform.platform_ticks_to_ns(end_reg - start_reg)) / f64(iters)
 
-	fmt.println("--- scroll region contrast ---")
-	fmt.printf("  full-grid scroll: %.2f ns/scroll\n", ns_full)
-	fmt.printf("  10-row region scroll: %.2f ns/scroll\n", ns_reg)
+	if ctx == nil {
+		fmt.println("--- scroll region contrast ---")
+		fmt.printf("  full-grid scroll: %.2f ns/scroll\n", ns_full)
+		fmt.printf("  10-row region scroll: %.2f ns/scroll\n", ns_reg)
+	}
 }

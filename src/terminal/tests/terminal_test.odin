@@ -756,8 +756,8 @@ test_integration_hello_world :: proc(t: ^testing.T) {
 	journal := tg.terminal_take_damage(&term)
 	defer tg.damage_journal_destroy(&journal)
 
-	testing.expect(t, journal.dirty_rows[0].full, "Row 0 should be marked dirty")
-	testing.expect(t, journal.dirty_rows[1].full, "Row 1 should be marked dirty")
+	testing.expect(t, journal.dirty_rows[0].span_count > 0 || journal.dirty_rows[0].full, "Row 0 should be marked dirty")
+	testing.expect(t, journal.dirty_rows[1].span_count > 0 || journal.dirty_rows[1].full, "Row 1 should be marked dirty")
 }
 
 // --- Notification and Bell Tests ---
