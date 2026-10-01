@@ -35,6 +35,9 @@ profile_ring_stop_and_join :: probe.profile_ring_stop_and_join
 
 PTY_DATA_READY :: sdl3.EventType(cast(u32)sdl3.EventType.USER + 1)
 
+TARGET_FRAME_INTERVAL_120HZ_NS :: 8_333_333 // 8.33ms for 120Hz display
+TARGET_FRAME_INTERVAL_60HZ_NS  :: 16_666_667 // 16.66ms for 60Hz display
+
 when ODIN_OS == .Darwin {
 	foreign import AppKit "system:AppKit.framework"
 	@(default_calling_convention="c")
@@ -368,8 +371,11 @@ App :: struct {
 	pty_event_pending:   b32,
 	pending_wake_event:  sdl3.Event,
 	has_wake_event:      bool,
-	frame_probe:         probe.Frame_Probe,
-	alloc_probe:         probe.Alloc_Probe,
+	frame_probe:              probe.Frame_Probe,
+	alloc_probe:              probe.Alloc_Probe,
+	last_present_time_ns:     u64,
+	target_frame_interval_ns: u64,
+	has_deferred_render:      bool,
 }
 
 pty_monitor_proc :: proc(t: ^odin_thread.Thread) {
@@ -419,7 +425,6 @@ pty_monitor_proc :: proc(t: ^odin_thread.Thread) {
 					user_ev.type = PTY_DATA_READY
 					_ = sdl3.PushEvent(&user_ev)
 				}
-				time.sleep(1 * time.Millisecond)
 			}
 		}
 	}
@@ -748,6 +753,9 @@ app_init :: proc(a: ^App, rows, cols: int, prog: string, argv: []string) -> bool
 	platform_tabs.tab_overflow_close(&a.tab_overflow)
 	a.ui_theme = ui.theme_catppuccin_mocha()
 	a.should_quit = false
+	a.target_frame_interval_ns = TARGET_FRAME_INTERVAL_120HZ_NS
+	a.last_present_time_ns = 0
+	a.has_deferred_render = false
 
 	// The window exists after frontend_init; install the (inert) drag region now
 	// and let each layout pass refresh its bounds.
@@ -2339,6 +2347,7 @@ app_frame :: proc(a: ^App) -> bool {
 
 	// The main loop owns PTY parsing and terminal state for every tab.
 	n_events := 0
+	has_keyboard_input := false
 	if a.window.handle != nil {
 		evs: [input.INPUT_PUMP_MAX_EVENTS]input.Input_Event
 		first_ev: ^sdl3.Event = nil
@@ -2347,6 +2356,12 @@ app_frame :: proc(a: ^App) -> bool {
 			a.has_wake_event = false
 		}
 		n_events = input.window_poll_input(&a.window, evs[:], input.INPUT_PUMP_MAX_EVENTS, first_ev)
+		for i in 0 ..< n_events {
+			if evs[i].event_type == .Key {
+				has_keyboard_input = true
+				break
+			}
+		}
 		quit, _ := app_dispatch_input_events(a, evs[:n_events])
 		if quit {
 			a.should_quit = true
@@ -2418,21 +2433,35 @@ app_frame :: proc(a: ^App) -> bool {
 		anim_active = true
 	}
 
-	is_dirty := any_damaged || n_events > 0 || a.renderer.full_redraw_pending || anim_active
+	is_dirty := any_damaged || n_events > 0 || a.renderer.full_redraw_pending || anim_active || a.has_deferred_render
 	if is_dirty {
-		if threaded {
-			backend_lock_render(active_b)
-			a.frontend.renderer.unlock_cb = _app_render_unlock
-			a.frontend.renderer.unlock_data = rawptr(active_b)
+		should_render := true
+		now_ns := u64(platform.platform_ticks_to_ns(platform.platform_now()))
+		if a.target_frame_interval_ns > 0 && a.window.handle != nil {
+			elapsed_ns := now_ns - a.last_present_time_ns if now_ns > a.last_present_time_ns else a.target_frame_interval_ns
+			if !has_keyboard_input && a.last_present_time_ns > 0 && elapsed_ns < a.target_frame_interval_ns {
+				should_render = false
+				a.has_deferred_render = true
+			}
 		}
-		state := backend_get_render_state(active_b)
-		state.debug_frames = a.debug_frames
-		_app_stage_ui(a)
-		_ = frontend_render(&a.frontend, &state)
-		if threaded {
-			a.frontend.renderer.unlock_cb = nil
-			a.frontend.renderer.unlock_data = nil
-			backend_unlock_render(active_b)
+
+		if should_render {
+			a.has_deferred_render = false
+			if threaded {
+				backend_lock_render(active_b)
+				a.frontend.renderer.unlock_cb = _app_render_unlock
+				a.frontend.renderer.unlock_data = rawptr(active_b)
+			}
+			state := backend_get_render_state(active_b)
+			state.debug_frames = a.debug_frames
+			_app_stage_ui(a)
+			_ = frontend_render(&a.frontend, &state)
+			if threaded {
+				a.frontend.renderer.unlock_cb = nil
+				a.frontend.renderer.unlock_data = nil
+				backend_unlock_render(active_b)
+			}
+			a.last_present_time_ns = u64(platform.platform_ticks_to_ns(platform.platform_now()))
 		}
 	}
 
@@ -2491,10 +2520,10 @@ main :: proc() {
 		drop_fx_anim_active := drop_fx_active(&app.drop_fx)
 		anim_active := app.tab_bar.anim.anim_active || drop_fx_anim_active
 		active_b := app_active_backend(app)
-		has_pending_damage := active_b != nil && _damage_cells(&active_b.front_terminal) > 0
+		has_pending_damage := active_b != nil && (_damage_cells(&active_b.front_terminal) > 0 || _damage_cells(&active_b.terminal) > 0)
 		ev: sdl3.Event
 		has_ev := false
-		if anim_active || profile_scenario_enabled() || has_pending_damage {
+		if anim_active || profile_scenario_enabled() || has_pending_damage || app.has_deferred_render {
 			if sdl3.WaitEventTimeout(&ev, 1) {
 				has_ev = true
 			}

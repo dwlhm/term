@@ -177,7 +177,16 @@ parse_chunk :: proc(p: ^Parser, t: ^termgrid.Terminal, input: []u8) {
 		if p.state == .Ground {
 			run := scan_ascii_run(input[pos:])
 			if run.length > 0 {
-				terminal_print_run(t, run.data, t.current_style)
+				offset := 0
+				for offset < run.length {
+					consumed := termgrid.terminal_put_ascii_span(t, run.data[offset:])
+					if consumed > 0 {
+						offset += consumed
+					} else {
+						terminal_print_run(t, run.data[offset:], t.current_style)
+						break
+					}
+				}
 				pos += run.length
 				continue
 			}
@@ -196,30 +205,26 @@ parse_chunk :: proc(p: ^Parser, t: ^termgrid.Terminal, input: []u8) {
 					pos += 2 + consumed
 					continue
 				}
-				// Fast-path SGR 0 / Reset: \033[0m or \033[m
-				if len(tail) >= 1 && tail[0] == 'm' {
-					_fast_sgr_reset(t)
-					pos += 3
-					continue
-				} else if len(tail) >= 2 && tail[0] == '0' && tail[1] == 'm' {
-					_fast_sgr_reset(t)
-					pos += 4
-					continue
-				}
-				// Fast-path Cursor Home: \033[H
-				if len(tail) >= 1 && tail[0] == 'H' {
-					termgrid.terminal_move_cursor(t, 0, 0)
-					pos += 3
+				if consumed, ok, is_fg, idx_val := fast_parse_sgr_256(tail); ok {
+					cur := termgrid.style_table_get(&t.grid.style_table, t.current_style)
+					col := termgrid.theme_palette_256(t.grid.style_table.theme, idx_val)
+					if is_fg {
+						cur.fg = col
+						termgrid.terminal_reset_direct_fg(t)
+					} else {
+						cur.bg = col
+						termgrid.terminal_reset_direct_bg(t)
+					}
+					termgrid.terminal_set_style(t, termgrid.style_table_insert(&t.grid.style_table, cur))
+					pos += 2 + consumed
 					continue
 				}
-				// Fast-path Erase to end of line: \033[K or \033[0K
-				if len(tail) >= 1 && tail[0] == 'K' {
-					termgrid.terminal_erase_line(t, .To_End)
-					pos += 3
+				if consumed, ok := fast_parse_sgr_basic(tail, t); ok {
+					pos += 2 + consumed
 					continue
-				} else if len(tail) >= 2 && tail[0] == '0' && tail[1] == 'K' {
-					termgrid.terminal_erase_line(t, .To_End)
-					pos += 4
+				}
+				if consumed, ok := fast_parse_cursor(tail, t); ok {
+					pos += 2 + consumed
 					continue
 				}
 			}
@@ -357,7 +362,20 @@ clear_parser_state :: proc(p: ^Parser) {
 
 // terminal_print_run writes a run of bytes to the terminal.
 terminal_print_run :: proc(t: ^termgrid.Terminal, data: []u8, style: termgrid.Style_Id) {
-	termgrid.terminal_print_span(t, data, style)
+	if style == t.current_style {
+		offset := 0
+		for offset < len(data) {
+			consumed := termgrid.terminal_put_ascii_span(t, data[offset:])
+			if consumed > 0 {
+				offset += consumed
+			} else {
+				termgrid.terminal_print_span(t, data[offset:], style)
+				break
+			}
+		}
+	} else {
+		termgrid.terminal_print_span(t, data, style)
+	}
 }
 
 // execute_c0 executes a C0 control character.

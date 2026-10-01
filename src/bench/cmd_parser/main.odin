@@ -145,6 +145,130 @@ main :: proc() {
 	}
 	
 	delete(mixed_data)
+
+	// Test 4: 16-color & 256-color SGR Throughput
+	fmt.println("\n=== Performance Test 4: 16-Color & 256-Color SGR Throughput ===")
 	
+	sgr_color_seqs := [?]string{
+		"\x1b[31m", "\x1b[42m", "\x1b[93m", "\x1b[104m", "\x1b[39m", "\x1b[49m",
+		"\x1b[38;5;196m", "\x1b[48;5;21m", "\x1b[38:5:82m", "\x1b[48:5:235m",
+	}
+	sgr_color_data := make([]u8, 100000)
+	sgr_color_count := 0
+	pos = 0
+	for pos + 20 < len(sgr_color_data) {
+		seq := sgr_color_seqs[sgr_color_count % len(sgr_color_seqs)]
+		copy(sgr_color_data[pos:], transmute([]u8)seq)
+		pos += len(seq)
+		sgr_color_count += 1
+	}
+	sgr_color_slice := sgr_color_data[:pos]
+	
+	// Warm up
+	parser.parse_chunk(&p, t, sgr_color_slice[:min(pos, 1000)])
+	parser.parser_reset(&p)
+	
+	// Benchmark
+	start = time.now()
+	iterations = 500
+	for i in 0..<iterations {
+		parser.parser_reset(&p)
+		parser.parse_chunk(&p, t, sgr_color_slice)
+	}
+	elapsed = time.since(start)
+	
+	total_bytes = len(sgr_color_slice) * iterations
+	total_seqs := sgr_color_count * iterations
+	sec := f64(elapsed) / f64(time.Second)
+	mb_per_sec = (f64(total_bytes) / (1024.0 * 1024.0)) / sec
+	sequences_per_sec = f64(total_seqs) / sec
+	
+	fmt.printf("Processed %d bytes (%d sequences) in %d ms\n", total_bytes, total_seqs, cast(int)(elapsed / time.Millisecond))
+	fmt.printf("Throughput: %.2f MB/s, %.0f sequences/sec\n", mb_per_sec, sequences_per_sec)
+	delete(sgr_color_data)
+
+	// Test 5: SGR Text Attributes Throughput
+	fmt.println("\n=== Performance Test 5: SGR Text Attributes Throughput ===")
+	
+	sgr_attr_seqs := [?]string{
+		"\x1b[1m", "\x1b[2m", "\x1b[3m", "\x1b[4m", "\x1b[7m", "\x1b[9m",
+		"\x1b[22m", "\x1b[23m", "\x1b[24m", "\x1b[27m", "\x1b[29m", "\x1b[1;31m", "\x1b[0m",
+	}
+	sgr_attr_data := make([]u8, 100000)
+	sgr_attr_count := 0
+	pos = 0
+	for pos + 20 < len(sgr_attr_data) {
+		seq := sgr_attr_seqs[sgr_attr_count % len(sgr_attr_seqs)]
+		copy(sgr_attr_data[pos:], transmute([]u8)seq)
+		pos += len(seq)
+		sgr_attr_count += 1
+	}
+	sgr_attr_slice := sgr_attr_data[:pos]
+	
+	// Warm up
+	parser.parse_chunk(&p, t, sgr_attr_slice[:min(pos, 1000)])
+	parser.parser_reset(&p)
+	
+	// Benchmark
+	start = time.now()
+	iterations = 500
+	for i in 0..<iterations {
+		parser.parser_reset(&p)
+		parser.parse_chunk(&p, t, sgr_attr_slice)
+	}
+	elapsed = time.since(start)
+	
+	total_bytes = len(sgr_attr_slice) * iterations
+	total_seqs = sgr_attr_count * iterations
+	sec = f64(elapsed) / f64(time.Second)
+	mb_per_sec = (f64(total_bytes) / (1024.0 * 1024.0)) / sec
+	sequences_per_sec = f64(total_seqs) / sec
+	
+	fmt.printf("Processed %d bytes (%d sequences) in %d ms\n", total_bytes, total_seqs, cast(int)(elapsed / time.Millisecond))
+	fmt.printf("Throughput: %.2f MB/s, %.0f sequences/sec\n", mb_per_sec, sequences_per_sec)
+	delete(sgr_attr_data)
+
+	// Test 6: Cursor Controls Throughput
+	fmt.println("\n=== Performance Test 6: Cursor Controls Throughput ===")
+	
+	cursor_seqs := [?]string{
+		"\x1b[H", "\x1b[10;20H", "\x1b[1;1f", "\x1b[A", "\x1b[5A", "\x1b[B", "\x1b[3B",
+		"\x1b[C", "\x1b[4C", "\x1b[D", "\x1b[2D", "\x1b[G", "\x1b[15G", "\x1b[d", "\x1b[8d",
+		"\x1b[K", "\x1b[1K", "\x1b[2K", "\x1b[J", "\x1b[2J",
+	}
+	cursor_data := make([]u8, 100000)
+	cursor_count := 0
+	pos = 0
+	for pos + 20 < len(cursor_data) {
+		seq := cursor_seqs[cursor_count % len(cursor_seqs)]
+		copy(cursor_data[pos:], transmute([]u8)seq)
+		pos += len(seq)
+		cursor_count += 1
+	}
+	cursor_slice := cursor_data[:pos]
+	
+	// Warm up
+	parser.parse_chunk(&p, t, cursor_slice[:min(pos, 1000)])
+	parser.parser_reset(&p)
+	
+	// Benchmark
+	start = time.now()
+	iterations = 500
+	for i in 0..<iterations {
+		parser.parser_reset(&p)
+		parser.parse_chunk(&p, t, cursor_slice)
+	}
+	elapsed = time.since(start)
+	
+	total_bytes = len(cursor_slice) * iterations
+	total_seqs = cursor_count * iterations
+	sec = f64(elapsed) / f64(time.Second)
+	mb_per_sec = (f64(total_bytes) / (1024.0 * 1024.0)) / sec
+	sequences_per_sec = f64(total_seqs) / sec
+	
+	fmt.printf("Processed %d bytes (%d sequences) in %d ms\n", total_bytes, total_seqs, cast(int)(elapsed / time.Millisecond))
+	fmt.printf("Throughput: %.2f MB/s, %.0f sequences/sec\n", mb_per_sec, sequences_per_sec)
+	delete(cursor_data)
+
 	fmt.println("\n=== All Performance Tests Complete ===")
 }

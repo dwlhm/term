@@ -1020,3 +1020,286 @@ _fast_sgr_reset :: proc(t: ^termgrid.Terminal) {
 	termgrid.terminal_reset_direct_fg(t)
 	termgrid.terminal_reset_direct_bg(t)
 }
+
+// fast_parse_sgr_256 parses 256-color SGR sequences:
+// "38;5;<idx>m", "48;5;<idx>m", "38:5:<idx>m", "48:5:<idx>m".
+// buf starts immediately after ESC [ (i.e. at '3' or '4').
+// Returns consumed byte count (including 'm'), ok = true, is_fg, and palette idx (0..255).
+fast_parse_sgr_256 :: proc(buf: []u8) -> (consumed: int, ok: bool, is_fg: bool, idx: int) {
+	if len(buf) < 7 do return 0, false, false, 0
+
+	if buf[0] == '3' && buf[1] == '8' {
+		is_fg = true
+	} else if buf[0] == '4' && buf[1] == '8' {
+		is_fg = false
+	} else {
+		return 0, false, false, 0
+	}
+
+	sep := buf[2]
+	if sep != ';' && sep != ':' {
+		return 0, false, false, 0
+	}
+
+	if buf[3] != '5' {
+		return 0, false, false, 0
+	}
+	if buf[4] != sep {
+		return 0, false, false, 0
+	}
+
+	pos := 5
+	val := 0
+	digits := 0
+	for pos < len(buf) && buf[pos] >= '0' && buf[pos] <= '9' {
+		val = val * 10 + int(buf[pos] - '0')
+		digits += 1
+		pos += 1
+		if digits > 3 do return 0, false, false, 0
+	}
+	if digits == 0 || pos >= len(buf) || buf[pos] != 'm' {
+		return 0, false, false, 0
+	}
+	if val < 0 || val > 255 {
+		return 0, false, false, 0
+	}
+	pos += 1 // consume 'm'
+
+	return pos, true, is_fg, val
+}
+
+// fast_parse_sgr_basic parses semicolon-separated SGR sequences ending in 'm',
+// or bare 'm' and '0m' for reset.
+// buf starts immediately after ESC [.
+// Applies valid codes directly to terminal t.
+// Rejects any code that is 38, 48, 58 or unrecognized/invalid (returns 0, false).
+fast_parse_sgr_basic :: proc(buf: []u8, t: ^termgrid.Terminal) -> (consumed: int, ok: bool) {
+	if len(buf) == 0 do return 0, false
+
+	if buf[0] == 'm' {
+		cur := termgrid.style_table_default(&t.grid.style_table)
+		termgrid.terminal_set_style(t, termgrid.style_table_insert(&t.grid.style_table, cur))
+		termgrid.terminal_reset_direct_fg(t)
+		termgrid.terminal_reset_direct_bg(t)
+		return 1, true
+	}
+
+	codes: [16]int
+	code_count := 0
+	idx := 0
+
+	for idx < len(buf) {
+		val := 0
+		digits := 0
+		for idx < len(buf) && buf[idx] >= '0' && buf[idx] <= '9' {
+			val = val * 10 + int(buf[idx] - '0')
+			digits += 1
+			idx += 1
+			if digits > 3 do return 0, false
+		}
+		if digits == 0 do return 0, false
+		if code_count >= len(codes) do return 0, false
+
+		switch val {
+		case 0, 1, 2, 3, 4, 7, 9, 22, 23, 24, 27, 29, 30..=37, 39, 40..=47, 49, 90..=97, 100..=107:
+			// valid basic SGR code
+		case:
+			// 38, 48, 58 or unrecognized/invalid
+			return 0, false
+		}
+
+		codes[code_count] = val
+		code_count += 1
+
+		if idx >= len(buf) do return 0, false
+		if buf[idx] == 'm' {
+			idx += 1
+			break
+		} else if buf[idx] == ';' {
+			idx += 1
+			if idx >= len(buf) do return 0, false
+		} else {
+			return 0, false
+		}
+	}
+
+	if code_count == 0 do return 0, false
+
+	cur := termgrid.style_table_get(&t.grid.style_table, t.current_style)
+	theme := t.grid.style_table.theme
+	default_style := termgrid.style_table_default(&t.grid.style_table)
+
+	for i in 0..<code_count {
+		code := codes[i]
+		switch code {
+		case 0:
+			cur = default_style
+			termgrid.terminal_reset_direct_fg(t)
+			termgrid.terminal_reset_direct_bg(t)
+		case 1:
+			cur.flags |= termgrid.STYLE_FLAG_BOLD
+		case 2:
+			cur.flags |= termgrid.STYLE_FLAG_DIM
+		case 3:
+			cur.flags |= termgrid.STYLE_FLAG_ITALIC
+		case 4:
+			cur.flags |= termgrid.STYLE_FLAG_UNDERLINE
+		case 7:
+			cur.flags |= termgrid.STYLE_FLAG_INVERSE
+		case 9:
+			cur.flags |= termgrid.STYLE_FLAG_STRIKE
+		case 22:
+			cur.flags = cur.flags & (~(termgrid.STYLE_FLAG_BOLD | termgrid.STYLE_FLAG_DIM))
+		case 23:
+			cur.flags = cur.flags & (~termgrid.STYLE_FLAG_ITALIC)
+		case 24:
+			cur.flags = cur.flags & (~termgrid.STYLE_FLAG_UNDERLINE)
+		case 27:
+			cur.flags = cur.flags & (~termgrid.STYLE_FLAG_INVERSE)
+		case 29:
+			cur.flags = cur.flags & (~termgrid.STYLE_FLAG_STRIKE)
+		case 30..=37:
+			cur.fg = termgrid.theme_palette_256(theme, code - 30)
+			termgrid.terminal_reset_direct_fg(t)
+		case 40..=47:
+			cur.bg = termgrid.theme_palette_256(theme, code - 40)
+			termgrid.terminal_reset_direct_bg(t)
+		case 90..=97:
+			cur.fg = termgrid.theme_palette_256(theme, code - 90 + 8)
+			termgrid.terminal_reset_direct_fg(t)
+		case 100..=107:
+			cur.bg = termgrid.theme_palette_256(theme, code - 100 + 8)
+			termgrid.terminal_reset_direct_bg(t)
+		case 39:
+			cur.fg = default_style.fg
+			termgrid.terminal_reset_direct_fg(t)
+		case 49:
+			cur.bg = default_style.bg
+			termgrid.terminal_reset_direct_bg(t)
+		}
+	}
+
+	termgrid.terminal_set_style(t, termgrid.style_table_insert(&t.grid.style_table, cur))
+	return idx, true
+}
+
+// fast_parse_cursor parses cursor navigation and erase sequences:
+// Bare commands: H, f, A, B, C, D, G, d, J, K.
+// 1 param commands: <n>A, <n>B, <n>C, <n>D, <n>G, <n>d, <n>J, <n>K, <n>H, <n>f.
+// 2 param commands: <row>;<col>H, <row>;<col>f.
+// buf starts immediately after ESC [.
+fast_parse_cursor :: proc(buf: []u8, t: ^termgrid.Terminal) -> (consumed: int, ok: bool) {
+	if len(buf) == 0 do return 0, false
+
+	cmd0 := buf[0]
+	switch cmd0 {
+	case 'H', 'f':
+		termgrid.terminal_move_cursor(t, 0, 0)
+		return 1, true
+	case 'A':
+		termgrid.terminal_cursor_up(t, 1)
+		return 1, true
+	case 'B':
+		termgrid.terminal_cursor_down(t, 1)
+		return 1, true
+	case 'C':
+		termgrid.terminal_cursor_right(t, 1)
+		return 1, true
+	case 'D':
+		termgrid.terminal_cursor_left(t, 1)
+		return 1, true
+	case 'G':
+		termgrid.terminal_move_cursor(t, t.cursor.row, 0)
+		return 1, true
+	case 'd':
+		termgrid.terminal_move_cursor(t, 0, t.cursor.col)
+		return 1, true
+	case 'J':
+		termgrid.terminal_erase_display(t, .To_End)
+		return 1, true
+	case 'K':
+		termgrid.terminal_erase_line(t, .To_End)
+		return 1, true
+	}
+
+	if cmd0 < '0' || cmd0 > '9' do return 0, false
+
+	idx := 0
+	n := 0
+	digits := 0
+	for idx < len(buf) && buf[idx] >= '0' && buf[idx] <= '9' {
+		n = n * 10 + int(buf[idx] - '0')
+		digits += 1
+		idx += 1
+		if digits > 5 do return 0, false
+	}
+	if idx >= len(buf) do return 0, false
+
+	cmd1 := buf[idx]
+	switch cmd1 {
+	case 'A':
+		termgrid.terminal_cursor_up(t, max(1, n))
+		return idx + 1, true
+	case 'B':
+		termgrid.terminal_cursor_down(t, max(1, n))
+		return idx + 1, true
+	case 'C':
+		termgrid.terminal_cursor_right(t, max(1, n))
+		return idx + 1, true
+	case 'D':
+		termgrid.terminal_cursor_left(t, max(1, n))
+		return idx + 1, true
+	case 'G':
+		termgrid.terminal_move_cursor(t, t.cursor.row, max(1, n) - 1)
+		return idx + 1, true
+	case 'd':
+		termgrid.terminal_move_cursor(t, max(1, n) - 1, t.cursor.col)
+		return idx + 1, true
+	case 'J':
+		switch n {
+		case 0:
+			termgrid.terminal_erase_display(t, .To_End)
+		case 1:
+			termgrid.terminal_erase_display(t, .To_Beginning)
+		case 2:
+			termgrid.terminal_erase_display(t, .Entire)
+		case 3:
+			termgrid.terminal_clear_scrollback(t)
+		case:
+			return 0, false
+		}
+		return idx + 1, true
+	case 'K':
+		switch n {
+		case 0:
+			termgrid.terminal_erase_line(t, .To_End)
+		case 1:
+			termgrid.terminal_erase_line(t, .To_Beginning)
+		case 2:
+			termgrid.terminal_erase_line(t, .Entire)
+		case:
+			return 0, false
+		}
+		return idx + 1, true
+	case 'H', 'f':
+		termgrid.terminal_move_cursor(t, max(1, n) - 1, 0)
+		return idx + 1, true
+	case ';':
+		idx += 1
+		col := 0
+		col_digits := 0
+		for idx < len(buf) && buf[idx] >= '0' && buf[idx] <= '9' {
+			col = col * 10 + int(buf[idx] - '0')
+			col_digits += 1
+			idx += 1
+			if col_digits > 5 do return 0, false
+		}
+		if col_digits == 0 || idx >= len(buf) do return 0, false
+		cmd2 := buf[idx]
+		if cmd2 != 'H' && cmd2 != 'f' do return 0, false
+		termgrid.terminal_move_cursor(t, max(1, n) - 1, max(1, col) - 1)
+		return idx + 1, true
+	}
+
+	return 0, false
+}

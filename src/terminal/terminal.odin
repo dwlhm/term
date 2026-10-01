@@ -484,6 +484,104 @@ terminal_put_char_slow :: proc(t: ^Terminal, c: rune) {
 	}
 }
 
+// terminal_put_ascii_span writes a span of printable ASCII characters (0x20..0x7E)
+// directly to the current line, bypassing per-character loop, xenl wrap checks for
+// middle characters, and per-character grapheme checks.
+// Returns the number of bytes consumed.
+terminal_put_ascii_span :: proc(t: ^Terminal, text: []u8) -> int {
+	if t == nil || len(text) == 0 || t.grid.col_count <= 0 || t.grid.row_count <= 0 {
+		return 0
+	}
+
+	if t.cursor.pending_wrap {
+		phys := _grid_physical_row(&t.grid, t.cursor.row)
+		t.grid.rows[phys].wrapped = true
+		scroll_needed := cursor_apply_pending_wrap(&t.cursor, t.grid.row_count)
+		if scroll_needed {
+			terminal_scroll_up(t, 1)
+		}
+	}
+
+	row := t.cursor.row
+	col := t.cursor.col
+	avail := t.grid.col_count - col
+	if avail <= 0 {
+		t.cursor.pending_wrap = true
+		return 0
+	}
+
+	span_len := 0
+	limit := min(len(text), avail)
+	for span_len < limit && text[span_len] >= 0x20 && text[span_len] <= 0x7E {
+		span_len += 1
+	}
+	if span_len == 0 {
+		return 0
+	}
+
+	phys_idx := _grid_physical_row(&t.grid, row)
+	phys_row := &t.grid.rows[phys_idx]
+
+	_wide_overwrite_repair(t, row, col, 1)
+	if span_len > 1 {
+		_wide_overwrite_repair(t, row, col + span_len - 1, 1)
+	}
+
+	flags := Cell_Flags.None
+	if t.has_direct_fg || t.has_direct_bg {
+		flags = Cell_Flags(u8(flags) | u8(Cell_Flags.Has_Extension) | u8(Cell_Flags.Direct_Color))
+		phys_row.ext.channels |= {.Direct_Color}
+		clr := Direct_Color_Channel{
+			fg = t.direct_fg if t.has_direct_fg else 0,
+			bg = t.direct_bg if t.has_direct_bg else 0,
+		}
+		for i in 0 ..< span_len {
+			if col + i < len(phys_row.ext.colors) {
+				phys_row.ext.colors[col + i] = clr
+			}
+		}
+	} else if len(phys_row.ext.colors) > col {
+		for i in 0 ..< span_len {
+			if col + i < len(phys_row.ext.colors) {
+				phys_row.ext.colors[col + i] = {}
+			}
+		}
+	}
+
+	if !t.active_charset_is_dec {
+		for i in 0 ..< span_len {
+			phys_row.cells[col + i] = Semantic_Cell{
+				content = Content_Handle(text[i]),
+				style   = t.current_style,
+				width   = 1,
+				flags   = flags,
+			}
+		}
+	} else {
+		for i in 0 ..< span_len {
+			b := text[i]
+			ch := terminal_translate_dec_line(b) if (b >= 0x5F && b <= 0x7E) else rune(b)
+			phys_row.cells[col + i] = Semantic_Cell{
+				content = Content_Handle(ch),
+				style   = t.current_style,
+				width   = 1,
+				flags   = flags,
+			}
+		}
+	}
+
+	phys_row.generation += 1
+	damage_mark_span(&t.damage, row, col, col + span_len - 1, phys_row.generation)
+
+	t.cursor.col += span_len
+	if t.cursor.col == t.grid.col_count {
+		t.cursor.pending_wrap = true
+		t.cursor.col = t.grid.col_count - 1
+	}
+
+	return span_len
+}
+
 // terminal_print_span writes a contiguous byte slice (ASCII run) to the terminal,
 // batching writes into ring-buffer rows and issuing one damage_mark_span per row.
 terminal_print_span :: proc(t: ^Terminal, data: []u8, style: Style_Id) {

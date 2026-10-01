@@ -256,6 +256,9 @@ _metal_configure_surface :: proc(surface: rawptr, device: gpu.Gpu_Device, format
 	surf.layer->setPixelFormat(.BGRA8Unorm)
 	surf.layer->setDrawableSize(NS.Size{NS.Float(width), NS.Float(height)})
 
+	intrinsics.objc_send(nil, surf.layer, "setMaximumDrawableCount:", NS.UInteger(3))
+	intrinsics.objc_send(nil, surf.layer, "setPresentsWithTransaction:", bool(false))
+
 	top_left := _create_ns_string("topLeft")
 	if top_left != nil {
 		intrinsics.objc_send(nil, surf.layer, "setContentsGravity:", top_left)

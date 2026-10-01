@@ -1029,3 +1029,50 @@ test_terminal_prompt_zone_propagation :: proc(t: ^testing.T) {
 	testing.expect(t, !term.grid.rows[4].is_prompt, "row 4 is not prompt after prompt_end")
 }
 
+@(test)
+test_terminal_put_ascii_span :: proc(t: ^testing.T) {
+	term: tg.Terminal
+	tg.terminal_init(&term, 4, 10)
+	defer tg.terminal_destroy(&term)
+
+	// Direct colors enabled
+	tg.terminal_set_direct_fg(&term, 0xFF00FF)
+	tg.terminal_set_direct_bg(&term, 0x112233)
+
+	text := transmute([]u8)string("ABCDE")
+	n := tg.terminal_put_ascii_span(&term, text)
+	testing.expect_value(t, n, 5)
+	testing.expect_value(t, term.cursor.row, 0)
+	testing.expect_value(t, term.cursor.col, 5)
+	testing.expect(t, !term.cursor.pending_wrap, "pending_wrap should be false")
+
+	for i in 0 ..< 5 {
+		cell := tg.grid_get_cell(&term.grid, 0, i)
+		testing.expect_value(t, cell.content, tg.Content_Handle(text[i]))
+		testing.expect_value(t, cell.width, 1)
+		testing.expect(t, cell.flags & .Direct_Color != nil, "Direct_Color flag must be set")
+	}
+
+	// Write remaining 5 characters to fill the 10-column row
+	text2 := transmute([]u8)string("FGHIJ")
+	n2 := tg.terminal_put_ascii_span(&term, text2)
+	testing.expect_value(t, n2, 5)
+	testing.expect_value(t, term.cursor.row, 0)
+	testing.expect_value(t, term.cursor.col, 9)
+	testing.expect(t, term.cursor.pending_wrap, "pending_wrap must be set when filling row")
+
+	// Next span write must wrap to row 1 col 0
+	text3 := transmute([]u8)string("KLM")
+	n3 := tg.terminal_put_ascii_span(&term, text3)
+	testing.expect_value(t, n3, 3)
+	testing.expect_value(t, term.cursor.row, 1)
+	testing.expect_value(t, term.cursor.col, 3)
+	testing.expect(t, !term.cursor.pending_wrap, "pending_wrap must clear after wrap write")
+
+	for i in 0 ..< 3 {
+		cell := tg.grid_get_cell(&term.grid, 1, i)
+		testing.expect_value(t, cell.content, tg.Content_Handle(text3[i]))
+	}
+}
+
+
