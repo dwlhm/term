@@ -19,6 +19,19 @@ SESSION_SWITCHER_WIDTH: f32 : 540.0
 SESSION_SWITCHER_ROW_HEIGHT: f32 : 44.0
 SESSION_SWITCHER_HEADER_HEIGHT: f32 : 64.0
 SESSION_SWITCHER_FOOTER_HEIGHT: f32 : 48.0
+// The close affordance spans the full row height so the target is comfortable to hit;
+// the inset keeps it clear of the row's right edge.
+SESSION_SWITCHER_CLOSE_WIDTH: f32 : 28.0
+SESSION_SWITCHER_CLOSE_INSET: f32 : 8.0
+// Smallest comfortable click target the close affordance must keep on both axes.
+SESSION_SWITCHER_MIN_TARGET: f32 : 20.0
+
+// Footer copy advertises only the actions that are actually valid for the selected row.
+SESSION_SWITCHER_HINT_EMPTY :: "↑↓ / scroll · Enter: Open · Esc: Close"
+SESSION_SWITCHER_HINT_LAYOUT :: "Enter: Restore layout · Esc: Close"
+SESSION_SWITCHER_HINT_BACKGROUND :: "Enter: Attach · ✕ or ⌘X: Terminate · Esc: Close"
+SESSION_SWITCHER_HINT_SPLIT_TAB :: "Enter: Switch · ✕ or ⌘X: Close"
+SESSION_SWITCHER_HINT_TAB :: "Enter: Switch · ⌥⌘B: Background · ⌘X: Close"
 
 // Tab_Session carries lightweight tab session metadata for standalone caller and test compatibility.
 Tab_Session :: struct {
@@ -43,6 +56,8 @@ Session_Switcher_Item :: struct {
 	rss_mb:      int,
 	cpu_pct:     f32,
 	is_persisted: bool,
+	// Pane count of the row's tab; 1 for single-pane tabs, background sessions and layouts.
+	pane_count: int,
 	layout_name: string,
 	id_buf:      [64]u8,
 	title_buf:   [128]u8,
@@ -53,6 +68,8 @@ Session_Switcher_Item :: struct {
 // Session_Switcher_State tracks modal search query, matching results, and visual bounds.
 Session_Switcher_State :: struct {
 	visible:            bool,
+	// Row index whose close affordance the pointer is over, or -1 when none.
+	hover_close_row:    int,
 	rect:               Rect_f32,
 	query:              [SESSION_SWITCHER_MAX_QUERY]u8,
 	query_len:          int,
@@ -194,10 +211,38 @@ session_switcher_filter :: proc(state: ^Session_Switcher_State) {
 	}
 }
 
+// session_switcher_footer_hint returns the footer copy for the selected row. It never
+// advertises an action the row cannot service: detach is single-pane only, and saved
+// layouts cannot be terminated at all.
+session_switcher_footer_hint :: proc(item: ^Session_Switcher_Item) -> string {
+	if item == nil do return SESSION_SWITCHER_HINT_EMPTY
+	if item.is_persisted do return SESSION_SWITCHER_HINT_LAYOUT
+	if item.is_detached do return SESSION_SWITCHER_HINT_BACKGROUND
+	if item.pane_count > 1 do return SESSION_SWITCHER_HINT_SPLIT_TAB
+	return SESSION_SWITCHER_HINT_TAB
+}
+
+// session_switcher_pane_count reports how many leaf panes a tab shows. `tab_leaf_panes`
+// lives in the app package, which imports this one, so the leaf count is derived from the
+// pane tree's fixed node pool through the same compile-time reflection the rest of the
+// ingestion path uses. Leaf nodes are exactly the panes: a split contributes an extra
+// node of kind Split, which must not be counted.
+session_switcher_pane_count :: proc($T: typeid, tab: ^T) -> int {
+	when intrinsics.type_has_field(T, "tree") {
+		leaves := 0
+		for i in 0 ..< len(tab.tree.node_in_use) {
+			if tab.tree.node_in_use[i] && tab.tree.nodes[i].kind == .Leaf do leaves += 1
+		}
+		return leaves
+	}
+	return 1
+}
+
 // session_switcher_init zeroes and initializes switcher state.
 session_switcher_init :: proc(state: ^Session_Switcher_State) {
 	if state == nil do return
 	state^ = {}
+	state.hover_close_row = -1
 }
 
 // session_switcher_show populates switcher items from active tabs and detached registry sessions,
@@ -208,6 +253,7 @@ session_switcher_show :: proc(state: ^Session_Switcher_State, tabs: []$T, active
 	state.item_count = 0
 	state.truncated = false
 	state.scroll_offset = 0
+	state.hover_close_row = -1
 
 	// 1. Ingest active tabs
 	for i := 0; i < len(tabs); i += 1 {
@@ -215,9 +261,13 @@ session_switcher_show :: proc(state: ^Session_Switcher_State, tabs: []$T, active
 		tab := &tabs[i]
 		item := &state.items[state.item_count]
 		item^ = {}
+		item.pane_count = 1
 		item.tab_idx = i
 		item.is_detached = false
 		item.is_current = i == active_idx
+		if panes := session_switcher_pane_count(T, tab); panes > 1 {
+			item.pane_count = panes
+		}
 
 		when intrinsics.type_has_field(T, "id") {
 			item.tab_id = tab.id
@@ -292,6 +342,7 @@ session_switcher_show :: proc(state: ^Session_Switcher_State, tabs: []$T, active
 
 			item := &state.items[state.item_count]
 			item^ = {}
+			item.pane_count = 1
 			item.tab_idx = -1
 			item.is_detached = true
 
@@ -323,6 +374,7 @@ session_switcher_show :: proc(state: ^Session_Switcher_State, tabs: []$T, active
 		name := saved_layouts[l]
 		item := &state.items[state.item_count]
 		item^ = {}
+		item.pane_count = 1
 		item.tab_idx = -1
 		item.is_detached = false
 		item.is_persisted = true
@@ -359,6 +411,7 @@ session_switcher_hide :: proc(state: ^Session_Switcher_State) {
 	if state == nil do return
 	state.visible = false
 	state.query_len = 0
+	state.hover_close_row = -1
 }
 
 // session_switcher_layout calculates floating modal bounds positioned upper-center.
@@ -474,6 +527,15 @@ session_switcher_row_rect :: proc(state: ^Session_Switcher_State, row: int) -> R
 	return Rect_f32{x = state.rect.x + 4, y = state.rect.y + SESSION_SWITCHER_HEADER_HEIGHT + f32(row) * SESSION_SWITCHER_ROW_HEIGHT, w = max(0, state.rect.w - 8), h = SESSION_SWITCHER_ROW_HEIGHT}
 }
 
+// session_switcher_close_rect returns the row's close affordance bounds. It is always
+// contained by the row rect and stays at least the minimum target size on both axes.
+session_switcher_close_rect :: proc(state: ^Session_Switcher_State, row: int) -> Rect_f32 {
+	rr := session_switcher_row_rect(state, row)
+	w := min(SESSION_SWITCHER_CLOSE_WIDTH, rr.w)
+	x := max(rr.x, rr.x + rr.w - SESSION_SWITCHER_CLOSE_INSET - w)
+	return Rect_f32{x = x, y = rr.y, w = w, h = rr.h}
+}
+
 session_switcher_reveal_selection :: proc(state: ^Session_Switcher_State) {
 	rows := max(1, state.visible_rows)
 	if state.selected_match_idx < state.scroll_offset do state.scroll_offset = state.selected_match_idx
@@ -488,9 +550,24 @@ session_switcher_dispatch_pointer :: proc(state: ^Session_Switcher_State, px, py
 		state.scroll_offset = clamp(state.scroll_offset - wheel, 0, max(0, state.match_count - max(1, state.visible_rows)))
 		state.selected_match_idx = clamp(state.selected_match_idx, state.scroll_offset, min(state.match_count - 1, state.scroll_offset + max(1, state.visible_rows) - 1)) if state.match_count > 0 else 0
 	}
-	for row in 0 ..< min(state.visible_rows, state.match_count - state.scroll_offset) {
-		if point_in_rect(px, py, session_switcher_row_rect(state, row)) && click {
-			state.selected_match_idx = state.scroll_offset + row
+	visible := min(state.visible_rows, state.match_count - state.scroll_offset)
+	state.hover_close_row = -1
+	for row in 0 ..< visible {
+		if !point_in_rect(px, py, session_switcher_row_rect(state, row)) do continue
+		item_idx := state.scroll_offset + row
+		entry := &state.items[item_idx]
+		// The close affordance wins over the row's Enter-equivalent, but only on rows
+		// where terminate is valid.
+		if !entry.is_persisted && point_in_rect(px, py, session_switcher_close_rect(state, row)) {
+			state.hover_close_row = row
+			if click {
+				state.selected_match_idx = item_idx
+				return .Terminate, entry^
+			}
+			return .None, {}
+		}
+		if click {
+			state.selected_match_idx = item_idx
 			_, action, item := session_switcher_dispatch_key(state, input.Input_Event{event_type = .Key, kind = .Enter})
 			return action, item
 		}

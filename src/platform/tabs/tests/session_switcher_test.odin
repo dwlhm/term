@@ -1,5 +1,7 @@
 package platform_tabs_test
 
+import "core:fmt"
+import "core:strings"
 import "core:testing"
 import tabs "../"
 import input "../../input"
@@ -238,4 +240,140 @@ test_session_switcher_scrolled_row_pointer_and_viewport :: proc(t: ^testing.T) {
 	testing.expect(t, state.rect.y + state.rect.h <= 90)
 	action, _ = tabs.session_switcher_dispatch_pointer(&state, -1, -1, true)
 	testing.expect_value(t, action, tabs.Session_Switcher_Action.Close)
+}
+
+// _switcher_with_rows builds a visible switcher whose items are given the supplied kind.
+_switcher_with_rows :: proc(state: ^tabs.Session_Switcher_State, count: int, detached: []bool, persisted: []bool = nil) {
+	tabs.session_switcher_init(state)
+	state.visible = true
+	for i in 0 ..< count {
+		state.items[i].title = fmt.bprintf(state.items[i].title_buf[:], "s%d", i)
+		state.items[i].cwd = "/tmp"
+		state.items[i].tab_idx = i
+		state.items[i].pane_count = 1
+		if detached != nil {
+			state.items[i].is_detached = detached[i]
+			state.items[i].tab_idx = -1 if detached[i] else i
+		}
+		if persisted != nil do state.items[i].is_persisted = persisted[i]
+	}
+	state.item_count = count
+	tabs.session_switcher_filter(state)
+	tabs.session_switcher_layout(state, 800, 600)
+}
+
+@(test)
+test_session_switcher_close_rect_fits_row :: proc(t: ^testing.T) {
+	state: tabs.Session_Switcher_State
+	_switcher_with_rows(&state, 6, nil)
+	testing.expect(t, state.visible_rows > 1, "layout must expose several rows")
+	for row in 0 ..< state.visible_rows {
+		rr := tabs.session_switcher_row_rect(&state, row)
+		close_rect := tabs.session_switcher_close_rect(&state, row)
+		testing.expect(t, close_rect.w > 0 && close_rect.h > 0, "close rect must be non-zero")
+		testing.expect(t, close_rect.w >= tabs.SESSION_SWITCHER_MIN_TARGET, "close target must stay comfortably wide")
+		testing.expect(t, close_rect.h >= tabs.SESSION_SWITCHER_MIN_TARGET, "close target must stay comfortably tall")
+		testing.expect(t, close_rect.x >= rr.x, "close rect must stay inside the row on the left")
+		testing.expect(t, close_rect.x + close_rect.w <= rr.x + rr.w, "close rect must stay inside the row on the right")
+		testing.expect(t, close_rect.y >= rr.y, "close rect must stay inside the row on the top")
+		testing.expect(t, close_rect.y + close_rect.h <= rr.y + rr.h, "close rect must stay inside the row on the bottom")
+	}
+	// Hit target must resolve even when the card is squeezed narrow.
+	tabs.session_switcher_layout(&state, 120, 90)
+	for row in 0 ..< state.visible_rows {
+		rr := tabs.session_switcher_row_rect(&state, row)
+		close_rect := tabs.session_switcher_close_rect(&state, row)
+		testing.expect(t, close_rect.x >= rr.x && close_rect.x + close_rect.w <= rr.x + rr.w)
+	}
+}
+
+@(test)
+test_session_switcher_close_click_terminates_row :: proc(t: ^testing.T) {
+	state: tabs.Session_Switcher_State
+	_switcher_with_rows(&state, 4, []bool{false, true, false, false})
+
+	// Row 0: foreground tab -> close yields .Terminate, the rest of the row yields .Switch_Tab.
+	close_rect := tabs.session_switcher_close_rect(&state, 0)
+	action, item := tabs.session_switcher_dispatch_pointer(&state, close_rect.x + close_rect.w * 0.5, close_rect.y + close_rect.h * 0.5, true)
+	testing.expect_value(t, action, tabs.Session_Switcher_Action.Terminate)
+	testing.expect_value(t, item.tab_idx, 0)
+
+	rr := tabs.session_switcher_row_rect(&state, 0)
+	action, item = tabs.session_switcher_dispatch_pointer(&state, rr.x + 4, rr.y + 4, true)
+	testing.expect_value(t, action, tabs.Session_Switcher_Action.Switch_Tab)
+	testing.expect_value(t, item.tab_idx, 0)
+
+	// Row 1: background session -> close yields .Terminate, the rest of the row yields .Attach.
+	close_rect = tabs.session_switcher_close_rect(&state, 1)
+	action, item = tabs.session_switcher_dispatch_pointer(&state, close_rect.x + 1, close_rect.y + 1, true)
+	testing.expect_value(t, action, tabs.Session_Switcher_Action.Terminate)
+	testing.expect_value(t, item.tab_idx, -1)
+
+	rr = tabs.session_switcher_row_rect(&state, 1)
+	action, item = tabs.session_switcher_dispatch_pointer(&state, rr.x + 4, rr.y + 4, true)
+	testing.expect_value(t, action, tabs.Session_Switcher_Action.Attach)
+
+	// A saved layout row has no close affordance: the same click stays a layout restore.
+	_switcher_with_rows(&state, 1, nil, []bool{true})
+	layout_rect := tabs.session_switcher_close_rect(&state, 0)
+	action, _ = tabs.session_switcher_dispatch_pointer(&state, layout_rect.x + 2, layout_rect.y + layout_rect.h * 0.5, true)
+	testing.expect_value(t, action, tabs.Session_Switcher_Action.Restore_Layout)
+	testing.expect(t, state.hover_close_row == -1, "a layout row must not report a hover target")
+}
+
+@(test)
+test_session_switcher_hover_close_row_tracking :: proc(t: ^testing.T) {
+	state: tabs.Session_Switcher_State
+	_switcher_with_rows(&state, 5, nil)
+	testing.expect_value(t, state.hover_close_row, -1)
+
+	close_rect := tabs.session_switcher_close_rect(&state, 2)
+	_, _ = tabs.session_switcher_dispatch_pointer(&state, close_rect.x + 1, close_rect.y + 1, false)
+	testing.expect_value(t, state.hover_close_row, 2)
+
+	rr := tabs.session_switcher_row_rect(&state, 2)
+	_, _ = tabs.session_switcher_dispatch_pointer(&state, rr.x + 4, rr.y + 4, false)
+	testing.expect_value(t, state.hover_close_row, -1)
+
+	// A saved layout row never reports a hover target.
+	_switcher_with_rows(&state, 1, nil, []bool{true})
+	rr = tabs.session_switcher_row_rect(&state, 0)
+	_, _ = tabs.session_switcher_dispatch_pointer(&state, rr.x + rr.w - 10, rr.y + rr.h * 0.5, false)
+	testing.expect_value(t, state.hover_close_row, -1)
+
+	tabs.session_switcher_hide(&state)
+	testing.expect_value(t, state.hover_close_row, -1)
+}
+
+@(test)
+test_session_switcher_pane_count_and_footer_hints :: proc(t: ^testing.T) {
+	// Tabs without a pane tree are single-pane by construction.
+	state: tabs.Session_Switcher_State
+	dummy_tabs := [3]tabs.Tab_Session{
+		{id = 1, title = "Tab 1", pid = 10, cwd = "/home", is_active = true},
+		{id = 2, title = "Tab 2", pid = 20, cwd = "/var", is_active = false},
+		{id = 3, title = "Tab 3", pid = 30, cwd = "/usr", is_active = false},
+	}
+	tabs.session_switcher_show(&state, dummy_tabs[:], 0, nil)
+	for i in 0 ..< state.item_count {
+		testing.expect(t, state.items[i].pane_count == 1, "rows without a pane tree default to a single pane")
+	}
+	testing.expect(t, state.hover_close_row == -1, "showing the switcher clears any stale hover")
+
+	// Split tabs advertise their pane count and drop the detach hint that would fail.
+	split_item := tabs.Session_Switcher_Item{is_current = false, pane_count = 2}
+	testing.expect_value(t, tabs.session_switcher_footer_hint(&split_item), tabs.SESSION_SWITCHER_HINT_SPLIT_TAB)
+	testing.expect(t, !strings.contains(tabs.session_switcher_footer_hint(&split_item), "Background"), "a split tab cannot be detached")
+
+	single_item := tabs.Session_Switcher_Item{is_current = true, pane_count = 1}
+	testing.expect_value(t, tabs.session_switcher_footer_hint(&single_item), tabs.SESSION_SWITCHER_HINT_TAB)
+	testing.expect(t, strings.contains(tabs.session_switcher_footer_hint(&single_item), "Background"), "a single-pane tab can still be detached")
+
+	background_item := tabs.Session_Switcher_Item{is_detached = true, tab_idx = -1, pane_count = 1}
+	testing.expect_value(t, tabs.session_switcher_footer_hint(&background_item), tabs.SESSION_SWITCHER_HINT_BACKGROUND)
+	testing.expect(t, strings.contains(tabs.session_switcher_footer_hint(&background_item), "\u2715"), "background rows surface the close affordance")
+
+	layout_item := tabs.Session_Switcher_Item{is_persisted = true, tab_idx = -1, pane_count = 1}
+	testing.expect_value(t, tabs.session_switcher_footer_hint(&layout_item), tabs.SESSION_SWITCHER_HINT_LAYOUT)
+	testing.expect(t, !strings.contains(tabs.session_switcher_footer_hint(&layout_item), "\u2715"), "saved layouts cannot be terminated")
 }

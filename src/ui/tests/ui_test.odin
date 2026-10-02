@@ -1,6 +1,7 @@
 package ui_test
 
 import "core:testing"
+import "core:fmt"
 import "core:strings"
 import "core:time"
 import posix "core:sys/posix"
@@ -1093,4 +1094,104 @@ test_ui_active_pane_outline_respects_edge_mask :: proc(t: ^testing.T) {
 	render.renderer_ui_reset(r)
 	ui.ui_stage_pane_chrome(r, &theme, nil, active_rect, all_edges, false, 1.0)
 	testing.expect_value(t, r.ui_layer_bg_count[render.UI_Layer.Pane_Chrome], u32(0))
+}
+
+// _rune_len counts runes in s; byte length differs once UI copy carries symbols.
+_rune_len :: proc(s: string) -> int {
+	n := 0
+	for _ in s do n += 1
+	return n
+}
+
+// _session_switcher_test_state builds a laid-out switcher with count rows; the trailing
+// `persisted` rows are saved layouts rather than sessions.
+_session_switcher_test_state :: proc(state: ^tabs.Session_Switcher_State, count, persisted_rows: int) {
+	tabs.session_switcher_init(state)
+	state.visible = true
+	state.item_count = count
+	for i in 0 ..< count {
+		state.items[i].title = fmt.bprintf(state.items[i].title_buf[:], "S%d", i)
+		state.items[i].cwd = "/tmp"
+		state.items[i].tab_idx = i
+		state.items[i].pane_count = 1
+		state.items[i].is_persisted = i >= count - persisted_rows
+	}
+	tabs.session_switcher_filter(state)
+	state.selected_match_idx = 0
+	tabs.session_switcher_layout(state, 800, 600)
+}
+
+@test
+test_session_switcher_renders_close_affordance_per_row :: proc(t: ^testing.T) {
+	r := new(render.Renderer)
+	for &slot in r.atlas.slots do slot.valid = true
+	// Tag the pinned close glyph's slot so staged affordances are identifiable.
+	r.atlas.slots[render.PINNED_SLOT_UI].u0 = 0.75
+	defer free(r)
+	theme := ui.theme_catppuccin_mocha()
+	bar: ui.Tab_Bar_State
+	ui.tab_bar_init(&bar)
+
+	state: ui.Session_Switcher_State
+	_session_switcher_test_state(&state, 5, 1)
+	rows := min(state.visible_rows, state.match_count)
+	testing.expect(t, rows == state.match_count, "every row must fit the visible window")
+
+	_ = ui.ui_render_stage(r, &theme, i18n.i18n_get(), &bar, nil, nil, nil, 800, 600, 1, "", nil, nil, nil, nil, nil, &state)
+	footer_y := state.rect.y + state.rect.h - tabs.SESSION_SWITCHER_FOOTER_HEIGHT
+	close_glyphs, hovered := 0, 0
+	for glyph in r.ui_glyph_data[render.UI_Layer.Modal][:r.ui_layer_glyph_count[render.UI_Layer.Modal]] {
+		if glyph.u0 != 0.75 || glyph.y >= footer_y do continue
+		close_glyphs += 1
+		if glyph.r == theme.status_danger.r do hovered += 1
+	}
+	testing.expect(t, close_glyphs == 4, "every non-layout row stages one close affordance")
+	testing.expect_value(t, hovered, 0)
+
+	// Hovering a row tints exactly that row's affordance.
+	state.hover_close_row = 1
+	_ = ui.ui_render_stage(r, &theme, i18n.i18n_get(), &bar, nil, nil, nil, 800, 600, 1, "", nil, nil, nil, nil, nil, &state)
+	close_glyphs, hovered = 0, 0
+	for glyph in r.ui_glyph_data[render.UI_Layer.Modal][:r.ui_layer_glyph_count[render.UI_Layer.Modal]] {
+		if glyph.u0 != 0.75 || glyph.y >= footer_y do continue
+		close_glyphs += 1
+		if glyph.r == theme.status_danger.r do hovered += 1
+	}
+	testing.expect_value(t, close_glyphs, 4)
+	testing.expect_value(t, hovered, 1)
+
+	// The affordance sits inside its row's close rect.
+	for row in 0 ..< rows {
+		close_rect := tabs.session_switcher_close_rect(&state, row)
+		row_rect := tabs.session_switcher_row_rect(&state, row)
+		testing.expect(t, close_rect.x >= row_rect.x && close_rect.x + close_rect.w <= row_rect.x + row_rect.w)
+	}
+}
+
+@test
+test_session_switcher_status_shows_pane_count :: proc(t: ^testing.T) {
+	r := new(render.Renderer)
+	for &slot in r.atlas.slots do slot.valid = true
+	defer free(r)
+	theme := ui.theme_catppuccin_mocha()
+	bar: ui.Tab_Bar_State
+	ui.tab_bar_init(&bar)
+
+	state: ui.Session_Switcher_State
+	_session_switcher_test_state(&state, 4, 0)
+	// Row 0 stays single-pane in both passes so the selected-row footer is unchanged.
+	for i in 1 ..< state.item_count {
+		state.items[i].pane_count = 3
+	}
+	_ = ui.ui_render_stage(r, &theme, i18n.i18n_get(), &bar, nil, nil, nil, 800, 600, 1, "", nil, nil, nil, nil, nil, &state)
+	split_glyphs := int(r.ui_layer_glyph_count[render.UI_Layer.Modal])
+
+	for i in 1 ..< state.item_count {
+		state.items[i].pane_count = 1
+	}
+	_ = ui.ui_render_stage(r, &theme, i18n.i18n_get(), &bar, nil, nil, nil, 800, 600, 1, "", nil, nil, nil, nil, nil, &state)
+	single_glyphs := int(r.ui_layer_glyph_count[render.UI_Layer.Modal])
+
+	// Each multi-pane row appends " · 3 panes" to its status column.
+	testing.expect_value(t, split_glyphs - single_glyphs, 3 * _rune_len(" · 3 panes"))
 }

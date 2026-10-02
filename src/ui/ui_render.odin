@@ -248,6 +248,15 @@ _rune_count :: proc(s: string) -> int {
 	return n
 }
 
+// _session_switcher_status_label names the row kind shown in the switcher's status column.
+_session_switcher_status_label :: proc(item: ^platform_tabs.Session_Switcher_Item) -> string {
+	if item.is_persisted do return "Saved layout"
+	if item.is_exited do return "Background · exited"
+	if item.is_detached do return "Background"
+	if item.is_current do return "Current"
+	return "Open tab"
+}
+
 // _emit_button_label_pair centers "label  hint" inside rect, hint in a fainter color.
 _emit_button_label_pair :: proc(r: ^render.Renderer, rect: Rect_f32, label, hint: string, cw, ch: f32, label_col, hint_col: [4]f32) {
 	if r == nil || cw <= 0 || ch <= 0 do return
@@ -696,19 +705,35 @@ ui_render_stage :: proc(
 				rr := platform_tabs.session_switcher_row_rect(state, row)
 				if rr.y + rr.h > cr.y + cr.h - platform_tabs.SESSION_SWITCHER_FOOTER_HEIGHT do break
 				if match_idx == state.selected_match_idx do emit_bg(r, rr.x, rr.y, rr.w, rr.h, theme.surface_hover)
-				status := "Saved layout" if item.is_persisted else ("Background · exited" if item.is_exited else ("Background" if item.is_detached else ("Current" if item.is_current else "Open tab")))
+				// The close affordance owns the row's right gutter wherever terminate is
+				// valid; the status column slides left to keep clear of it.
+				close_cols := 0
+				status_right := cr.x + cr.w - pad
+				if !item.is_persisted {
+					close_cols = 2
+					status_right = platform_tabs.session_switcher_close_rect(state, row).x - cw
+				}
+				status_buf: [96]u8
+				status := fmt.bprintf(status_buf[:], "%s", _session_switcher_status_label(item))
+				if item.pane_count > 1 {
+					status = fmt.bprintf(status_buf[:], "%s · %d panes", _session_switcher_status_label(item), item.pane_count)
+				}
 				status_cols := min(cols, int(len(status)))
-				_emit_text_clipped(r, item.title, cr.x + pad, rr.y + 3, cw, ch, max(0, cols - status_cols - 2), theme.text_primary)
-				_emit_text_clipped(r, status, cr.x + cr.w - pad - f32(status_cols) * cw, rr.y + 3, cw, ch, status_cols, theme.text_muted)
+				_emit_text_clipped(r, item.title, cr.x + pad, rr.y + 3, cw, ch, max(0, cols - status_cols - close_cols - 2), theme.text_primary)
+				_emit_text_clipped(r, status, status_right - f32(status_cols) * cw, rr.y + 3, cw, ch, status_cols, theme.text_muted)
 				_emit_text_clipped(r, item.cwd, cr.x + pad, rr.y + 23, cw, ch, cols, theme.text_faint)
+				if !item.is_persisted {
+					close_rect := platform_tabs.session_switcher_close_rect(state, row)
+					close_col := theme.status_danger if state.hover_close_row == row else theme.text_muted
+					emit_char(r, close_rect.x + (close_rect.w - cw) * 0.5, rr.y + 3, cw, ch, '\u2715', close_col)
+				}
 			}
 			if state.match_count == 0 && state.visible_rows > 0 do _emit_text_clipped(r, "No matching sessions", cr.x + pad, cr.y + platform_tabs.SESSION_SWITCHER_HEADER_HEIGHT + 8, cw, ch, cols, theme.text_faint)
 			fy := cr.y + cr.h - platform_tabs.SESSION_SWITCHER_FOOTER_HEIGHT
 			emit_bg(r, cr.x, fy, cr.w, 1, theme.border_subtle)
-			hint := "↑↓ / scroll · Enter: Open · Esc: Close"
+			hint := platform_tabs.SESSION_SWITCHER_HINT_EMPTY
 			if state.match_count > 0 {
-				item := &state.items[state.matches[state.selected_match_idx]]
-				hint = "Enter: Restore layout · Esc: Close" if item.is_persisted else ("Enter: Attach · ⌘X: Terminate · Esc: Close" if item.is_detached else "Enter: Switch · ⌥⌘B: Background · ⌘X: Close")
+				hint = platform_tabs.session_switcher_footer_hint(&state.items[state.matches[state.selected_match_idx]])
 			}
 			_emit_text_clipped(r, hint, cr.x + pad, fy + 4, cw, ch, cols, theme.text_faint)
 			message := string(state.message_buf[:state.message_len])

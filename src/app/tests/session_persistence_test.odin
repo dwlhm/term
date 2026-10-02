@@ -205,3 +205,55 @@ test_background_output_pointer_attach_and_termination_confirmation :: proc(t: ^t
 	_, _ = app.app_dispatch_input_events(a, []input.Input_Event{{event_type = .Key, gui = true, rune = 'x'}, {event_type = .Key, kind = .Enter}})
 	testing.expect_value(t, session_core.session_registry_detached_count(&reg), 0)
 }
+
+@(test)
+test_session_switcher_pane_count_tracks_split_leaves :: proc(t: ^testing.T) {
+	a := new(app.App)
+	defer free(a)
+	app.session_manager_init(&a.session_mgr, 4)
+	reg: session_core.Session_Registry
+	session_core.session_registry_init(&reg)
+	a.session_mgr.registry = &reg
+	defer session_core.session_registry_destroy(&reg)
+	defer app.session_manager_destroy(&a.session_mgr)
+	a.window.width = 800
+	a.window.height = 600
+	idx, spawned := app.session_spawn(&a.session_mgr, "/bin/sleep", {"30"}, 24, 80, nil, termgrid.Theme{})
+	testing.expect(t, spawned, "spawn tab must succeed")
+
+	// Split the first tab so it owns two leaves and, with the split node, three nodes.
+	tab := &a.session_mgr.tabs[idx]
+	testing.expect(t, tab.tree.root != nil && tab.tree.root.kind == .Leaf, "a fresh tab owns a single leaf")
+	b2 := new(app.Backend)
+	testing.expect(t, app.backend_init(b2, 24, 40, "/bin/sleep", {"pane2"}, nil, termgrid.Theme{}), "backend2 init must succeed")
+	_, split_ok := app.pane_tree_split(&tab.tree, tab.tree.root.id, .Vertical, b2)
+	testing.expect(t, split_ok, "split pane must succeed")
+	leaves: [app.MAX_PANE_NODES]^app.Pane_Node
+	testing.expect_value(t, app.tab_leaf_panes(tab, leaves[:]), 2)
+	testing.expect(t, tab.tree.node_count == 3, "a two-pane split also allocates the split node itself")
+
+	// A second, single-pane tab is detached so the list carries a background row too.
+	_, spawned = app.session_spawn(&a.session_mgr, "/bin/sleep", {"30"}, 24, 80, nil, termgrid.Theme{})
+	testing.expect(t, spawned, "spawn second tab must succeed")
+	testing.expect(t, app.session_detach_tab(&a.session_mgr, 1), "detach the single-pane tab")
+
+	state: tabs.Session_Switcher_State
+	tabs.session_switcher_init(&state)
+	tabs.session_switcher_show(&state, a.session_mgr.tabs[:], a.session_mgr.active_idx, &reg)
+	split_row := -1
+	background_row := -1
+	for i in 0 ..< state.item_count {
+		if state.items[i].is_detached {
+			background_row = i
+		} else if split_row < 0 {
+			split_row = i
+		}
+	}
+	testing.expect(t, split_row >= 0 && background_row >= 0, "the list must hold both a tab and a background session")
+	testing.expect(t, state.items[split_row].pane_count == 2, "a split tab reports its leaf count, not node_count")
+	testing.expect(t, state.items[background_row].pane_count == 1, "background rows are single-session")
+
+	// The footer stays honest about detach, which the app rejects for split panes.
+	testing.expect_value(t, tabs.session_switcher_footer_hint(&state.items[split_row]), tabs.SESSION_SWITCHER_HINT_SPLIT_TAB)
+	testing.expect_value(t, tabs.session_switcher_footer_hint(&state.items[background_row]), tabs.SESSION_SWITCHER_HINT_BACKGROUND)
+}
