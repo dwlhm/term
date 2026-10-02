@@ -176,6 +176,55 @@ test_atlas_pinned_slot_index_extra_symbols :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_atlas_ui_chrome_codepoints_pinned :: proc(t: ^testing.T) {
+	// UI chrome symbols must resolve through the pinned table. The non-pinned
+	// modulo fallback aliases them onto unrelated slots (cp % 512), which draws
+	// another codepoint's glyph.
+	testing.expect_value(t, len(render.PINNED_UI_CHROME_CODEPOINTS), render.PINNED_UI_CHROME_COUNT)
+
+	set := render.atlas_prewarm_set()
+	slot_to_cp: map[int]u32
+	for cp in set {
+		index, ok := render.atlas_pinned_slot_index(u32(cp))
+		testing.expect(t, ok, "Every prewarm codepoint should be pinned")
+		slot_to_cp[index] = u32(cp)
+	}
+
+	seen: map[rune]bool
+	for cp in render.PINNED_UI_CHROME_CODEPOINTS {
+		index, ok := render.atlas_pinned_slot_index(u32(cp))
+		testing.expect(t, ok, fmt.tprintf("UI chrome codepoint U+%04X should be pinned", int(cp)))
+		testing.expect(
+			t,
+			index >= render.PINNED_SLOT_UI_CHROME && index < render.PINNED_SLOT_UI_CHROME + render.PINNED_UI_CHROME_COUNT,
+			"UI chrome slot should be in [PINNED_SLOT_UI_CHROME, PINNED_SLOT_UI_CHROME + PINNED_UI_CHROME_COUNT)",
+		)
+		testing.expect(t, index != int(u32(cp) % render.ATLAS_SLOT_COUNT), "UI chrome slot must not be the modulo alias")
+
+		_, dup := seen[cp]
+		testing.expect(t, !dup, "UI chrome codepoints must be distinct")
+		seen[cp] = true
+
+		if owner, collides := slot_to_cp[index]; collides {
+			testing.expect(
+				t,
+				owner == u32(cp),
+				fmt.tprintf("slot %d shared by U+%04X and U+%04X", index, int(owner), int(cp)),
+			)
+		}
+
+		found := false
+		for prewarm_cp in set {
+			if prewarm_cp == cp {
+				found = true
+				break
+			}
+		}
+		testing.expect(t, found, fmt.tprintf("U+%04X missing from prewarm set", int(cp)))
+	}
+}
+
+@(test)
 test_atlas_pinned_slot_index_non_pinned :: proc(t: ^testing.T) {
 	// Test non-pinned codepoints
 	_, ok1 := render.atlas_pinned_slot_index(31)  // Below ASCII range

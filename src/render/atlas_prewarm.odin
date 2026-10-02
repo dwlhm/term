@@ -8,8 +8,11 @@ package render
 //   Box Drawing (2500-257F): 128 glyphs, slots 95-222
 //   Block Elements (2580-259F): 32 glyphs, slots 223-254
 //   Powerline (E0B0-E0BF): 16 glyphs, slots 255-270
+//   UI Symbols (2715):      1 glyph,  slot 271
+//   Extra UI actions:      6 glyphs, slots 272-277
+//   UI chrome symbols:     5 glyphs, slots 278-282
 //
-// Total: 271 glyphs
+// Total: 283 glyphs
 
 // ASCII range (printable characters)
 PINNED_ASCII_START :: 32
@@ -48,8 +51,21 @@ PINNED_EXTRA_CODEPOINTS := [6]rune{
 PINNED_EXTRA_COUNT :: len(PINNED_EXTRA_CODEPOINTS)
 PINNED_SLOT_EXTRA :: PINNED_SLOT_UI + PINNED_UI_COUNT
 
+// UI chrome symbols (paginator dots, ellipsis, arrows, badge circle).
+// These are emitted by the UI chrome layer, so they must own dedicated slots:
+// the non-pinned modulo fallback aliases them onto content glyphs.
+PINNED_UI_CHROME_CODEPOINTS := [5]rune{
+	0x00B7, // · middle dot
+	0x2026, // … horizontal ellipsis
+	0x2191, // ↑ up arrow
+	0x2193, // ↓ down arrow
+	0x25CB, // ○ white circle
+}
+PINNED_UI_CHROME_COUNT :: len(PINNED_UI_CHROME_CODEPOINTS)
+PINNED_SLOT_UI_CHROME :: PINNED_SLOT_EXTRA + PINNED_EXTRA_COUNT
+
 // Total pinned glyphs
-PINNED_TOTAL :: PINNED_ASCII_COUNT + PINNED_BOX_COUNT + PINNED_BLOCK_COUNT + PINNED_POWERLINE_COUNT + PINNED_UI_COUNT + PINNED_EXTRA_COUNT  // 278
+PINNED_TOTAL :: PINNED_ASCII_COUNT + PINNED_BOX_COUNT + PINNED_BLOCK_COUNT + PINNED_POWERLINE_COUNT + PINNED_UI_COUNT + PINNED_EXTRA_COUNT + PINNED_UI_CHROME_COUNT  // 283
 
 // Slot offsets (contiguous layout)
 PINNED_SLOT_ASCII     :: 0
@@ -99,6 +115,12 @@ atlas_prewarm_set :: proc() -> []rune {
 		idx += 1
 	}
 
+	// UI chrome symbols
+	for cp in PINNED_UI_CHROME_CODEPOINTS {
+		set[idx] = cp
+		idx += 1
+	}
+
 	return set
 }
 
@@ -133,6 +155,10 @@ atlas_pinned_slot_index :: proc(codepoint: u32) -> (index: int, ok: bool) {
 
 	for cp, i in PINNED_EXTRA_CODEPOINTS {
 		if codepoint == u32(cp) do return PINNED_SLOT_EXTRA + i, true
+	}
+
+	for cp, i in PINNED_UI_CHROME_CODEPOINTS {
+		if codepoint == u32(cp) do return PINNED_SLOT_UI_CHROME + i, true
 	}
 
 	// Not pinned

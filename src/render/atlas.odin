@@ -166,20 +166,33 @@ atlas_prewarm :: proc(a: ^Atlas, rasterizer: ^Font_Rasterizer) {
 			continue
 		}
 
-		_atlas_rasterize_into_slot(a, rasterizer, u32(codepoint), idx)
-		a.pinned_count += 1
+		if _atlas_rasterize_into_slot(a, rasterizer, u32(codepoint), idx) {
+			a.pinned_count += 1
+		}
 	}
 
 	a.gpu_dirty = true
 }
 
-// _atlas_rasterize_into_slot rasterizes a glyph into a specific atlas slot.
+// _atlas_rasterize_into_slot rasterizes a glyph into a specific atlas slot
+// and reports whether this rasterizer's face actually covers it.
+//
+// UV fields are written unconditionally, so an uncovered codepoint still
+// leaves correct coordinates behind for a later fallback fill. `valid` is
+// only raised when the face really covers the glyph: FreeType otherwise
+// silently rasterizes glyph index 0 (.notdef), and claiming validity for
+// that blank would permanently block atlas_prewarm_chain / atlas_pin_audit
+// from promoting the slot from the fallback chain.
+//
+// Ligature-slot codepoints address a glyph index directly rather than a
+// codepoint, so there is no coverage query for them; they stay
+// unconditionally valid.
 _atlas_rasterize_into_slot :: proc(
 	a: ^Atlas,
 	rasterizer: ^Font_Rasterizer,
 	codepoint: u32,
 	slot_index: int,
-) {
+) -> (covered: bool) {
 	slot := &a.slots[slot_index]
 
 	col := slot_index % ATLAS_COLS
@@ -197,10 +210,10 @@ _atlas_rasterize_into_slot :: proc(
 	slot.u1 = f32(x0 + a.cell_width) / tex_w
 	slot.v1 = f32(y0 + a.cell_height) / tex_h
 	slot.advance = f32(a.cell_width)
-	slot.valid = true
 
 	// Rasterize glyph directly into atlas pixel buffer
 	if codepoint >= CONTENT_LIGATURE_BASE && codepoint < 0x1FFFFF {
+		slot.valid = true
 		g_idx := codepoint - CONTENT_LIGATURE_BASE
 		font_rasterize_glyph_index_into(
 			rasterizer,
@@ -210,7 +223,17 @@ _atlas_rasterize_into_slot :: proc(
 			x0, y0,
 			glyph_size, glyph_size,
 		)
-	} else if codepoint >= PINNED_POWERLINE_START && codepoint <= PINNED_POWERLINE_END {
+		return true
+	}
+
+	// Codepoint-addressed paths: only claim validity when the face covers
+	// the codepoint, otherwise leave the slot for the fallback chain.
+	if !font_rasterizer_has_glyph(rasterizer, codepoint) {
+		return false
+	}
+	slot.valid = true
+
+	if codepoint >= PINNED_POWERLINE_START && codepoint <= PINNED_POWERLINE_END {
 		cw := a.cell_width
 		ch := a.cell_height
 		bmp := font_rasterize_glyph_fitted(rasterizer, codepoint, cw, ch)
@@ -228,6 +251,7 @@ _atlas_rasterize_into_slot :: proc(
 			glyph_size, glyph_size,
 		)
 	}
+	return true
 }
 
 // atlas_lookup returns the atlas slot for a given codepoint.

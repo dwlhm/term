@@ -251,9 +251,9 @@ tabs_layout :: proc(
 		return 0
 	}
 
-	left_offset: f32 = 0
+	traffic_light_offset: f32 = 0
 	when ODIN_OS == .Darwin {
-		left_offset = min(TRAFFIC_LIGHT_OFFSET_DARWIN, max(0, width - NEW_TAB_BTN_WIDTH))
+		traffic_light_offset = min(TRAFFIC_LIGHT_OFFSET_DARWIN, max(0, width - NEW_TAB_BTN_WIDTH))
 	}
 
 	max_title_len := state.max_title_len if state.max_title_len > 0 else 16
@@ -279,6 +279,14 @@ tabs_layout :: proc(
 
 	button_w := NEW_TAB_BTN_WIDTH
 	min_drag_w := TAB_BAR_MIN_DRAG_W
+	badge_w: f32 = 0
+	if state.detached_count > 0 {
+		buf: [32]u8
+		label := fmt.bprintf(buf[:], "○ %d background", state.detached_count)
+		badge_w = min(f32(_rune_count(label)) * cw + 12, max(0, width - traffic_light_offset - button_w))
+	}
+	// The detached badge is pinned to the far left; the tab strip follows it.
+	left_offset := traffic_light_offset + badge_w
 	base_reserved := left_offset + button_w + min_drag_w
 
 	fit_tabs :: proc(widths: []f32, start_idx, total_count: int, max_w: f32) -> int {
@@ -340,6 +348,12 @@ tabs_layout :: proc(
 	state.overflow_count = overflow_cnt
 
 	cur_x := left_offset
+	// The badge owns the left edge; the tab strip and its controls follow it.
+	if state.detached_count > 0 {
+		state.detached_badge_rect = Rect_f32{x = traffic_light_offset, y = 0, w = badge_w, h = TAB_BAR_HEIGHT}
+	} else {
+		state.detached_badge_rect = Rect_f32{}
+	}
 	for k in 0 ..< vis_count {
 		idx := state.display_start + k
 		if idx < count {
@@ -365,17 +379,6 @@ tabs_layout :: proc(
 	btn_w := min(button_w, max(0, width - cur_x))
 	state.new_tab_rect = Rect_f32{x = cur_x, y = 0, w = btn_w, h = TAB_BAR_HEIGHT}
 	cur_x += btn_w
-
-	if state.detached_count > 0 {
-		buf: [32]u8
-		str := fmt.bprintf(buf[:], "○ %d detached", state.detached_count)
-		det_w := f32(_rune_count(str)) * cw + 12.0
-		det_w = min(det_w, max(0, width - cur_x))
-		state.detached_badge_rect = Rect_f32{x = cur_x, y = 0, w = det_w, h = TAB_BAR_HEIGHT}
-		cur_x += det_w
-	} else {
-		state.detached_badge_rect = Rect_f32{}
-	}
 
 	remaining_w := max(0, width - cur_x)
 	state.drag_rect = Rect_f32{x = cur_x, y = 0, w = remaining_w, h = TAB_BAR_HEIGHT}

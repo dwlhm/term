@@ -450,7 +450,7 @@ ui_render_stage :: proc(
 		emit_char(r, bx, by, cw, ch, '○', theme.accent_primary if tab_state.hover_detached else theme.text_muted)
 		bx += cw + 4.0
 		buf: [32]u8
-		lbl := fmt.bprintf(buf[:], "%d detached", tab_state.detached_count)
+		lbl := fmt.bprintf(buf[:], "%d background", tab_state.detached_count)
 		text_col := theme.text_primary if tab_state.hover_detached else theme.text_muted
 		for cp in lbl {
 			if bx + cw > btn.x + btn.w do break

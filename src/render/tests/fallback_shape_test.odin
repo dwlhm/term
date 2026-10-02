@@ -126,7 +126,20 @@ test_prewarm_through_chain :: proc(t: ^testing.T) {
 	defer render.fallback_chain_destroy(&chain)
 	render.atlas_prewarm_chain(&atlas, &chain)
 	testing.expect(t, atlas.slots[95].valid, "box slot must refill through chain")
-	testing.expect_value(t, atlas.pinned_count, render.PINNED_TOTAL)
+
+	// pinned_count counts pinned glyphs the chain really covers. Codepoints
+	// no font in the chain covers stay invalid (so a later font change can
+	// still promote them) and are deliberately not counted.
+	expected_pinned := 0
+	prewarm := render.atlas_prewarm_set()
+	defer delete(prewarm)
+	for cp in prewarm {
+		if _, covered := render.fallback_resolve(&chain, u32(cp), nil); covered {
+			expected_pinned += 1
+		}
+	}
+	testing.expect(t, expected_pinned < render.PINNED_TOTAL, "fixture chain should not cover every pinned codepoint")
+	testing.expect_value(t, atlas.pinned_count, expected_pinned)
 
 	// Dynamic tags survive prewarm; an empty chain fills nothing.
 	atlas.slots[95].valid = false
