@@ -452,8 +452,16 @@ test_mcp_list_commands_and_get_output :: proc(t: ^testing.T) {
 	defer json.destroy_value(val_run)
 
 	res_run, err_run, _ := mcp.tools_dispatch_call(&sm, "terminal_run_command", val_run)
-	delete(res_run)
+	defer delete(res_run)
 	testing.expect(t, !err_run, "run command should succeed")
+	parsed_run, run_parse_err := json.parse_string(res_run, parse_integers = true)
+	if !testing.expect(t, run_parse_err == .None) do return
+	defer json.destroy_value(parsed_run)
+	run_obj := parsed_run.(json.Object)
+	expected_output :: "line_alpha\nline_beta_needle\nline_gamma"
+	testing.expect_value(t, run_obj["output"].(json.String), expected_output)
+	run_content := run_obj["content"].(json.Array)
+	testing.expect_value(t, run_content[0].(json.Object)["text"].(json.String), "[exit: 0]\n" + expected_output)
 
 	// List commands
 	list_res, list_err, _ := mcp.tools_dispatch_call(&sm, "terminal_list_commands", nil)
@@ -470,6 +478,12 @@ test_mcp_list_commands_and_get_output :: proc(t: ^testing.T) {
 	defer delete(get_res)
 	testing.expect(t, !get_err, "get output should succeed")
 	testing.expect(t, strings.contains(get_res, "line_alpha"), "output must contain line_alpha")
+	parsed_get, _ := json.parse_string(get_res, parse_integers = true)
+	defer json.destroy_value(parsed_get)
+	get_obj := parsed_get.(json.Object)
+	testing.expect_value(t, get_obj["output"].(json.String), expected_output)
+	get_content := get_obj["content"].(json.Array)
+	testing.expect_value(t, get_content[0].(json.Object)["text"].(json.String), expected_output)
 
 	// Get output with grep
 	grep_json := `{"grep":"needle"}`
@@ -482,9 +496,35 @@ test_mcp_list_commands_and_get_output :: proc(t: ^testing.T) {
 	parsed_grep, _ := json.parse_string(grep_res, parse_integers = true)
 	defer json.destroy_value(parsed_grep)
 	grep_obj := parsed_grep.(json.Object)
-	testing.expect(t, grep_obj["total_matched"].(json.Integer) == 1, "matched count must be 1")
+	testing.expect(t, grep_obj["total_matched"].(json.Integer) == 1, fmt.tprintf("matched count must be 1; run=%s get=%s grep=%s", res_run, get_res, grep_res))
 	testing.expect(t, strings.contains(grep_obj["output"].(json.String), "line_beta_needle"), "must match needle")
 	testing.expect(t, !strings.contains(grep_obj["output"].(json.String), "line_alpha"), "must not contain non-matching lines")
+
+	// Filtering precedes pagination, is case insensitive, and keeps historical output.
+	second_args, _ := json.parse_string(`{"command":"echo next_command"}`)
+	defer json.destroy_value(second_args)
+	second_res, second_err, _ := mcp.tools_dispatch_call(&sm, "terminal_run_command", second_args)
+	defer delete(second_res)
+	testing.expect(t, !second_err)
+	for query in ([]struct { args, output: string, matched: int }{
+		{`{"command_id":1,"grep":"NEEDLE"}`, "line_beta_needle", 1},
+		{`{"command_id":1,"grep":"LINE_","offset":1,"limit":1}`, "line_beta_needle", 3},
+		{`{"command_id":1,"grep":"absent"}`, "", 0},
+		{`{"command_id":1,"grep":"LINE_","offset":3,"limit":1}`, "", 3},
+	}) {
+		args, _ := json.parse_string(query.args, parse_integers = true)
+		defer json.destroy_value(args)
+		res, err, _ := mcp.tools_dispatch_call(&sm, "terminal_get_output", args)
+		defer delete(res)
+		if !testing.expect(t, !err, res) do continue
+		parsed, _ := json.parse_string(res, parse_integers = true)
+		defer json.destroy_value(parsed)
+		obj := parsed.(json.Object)
+		testing.expect_value(t, obj["output"].(json.String), query.output)
+		testing.expect_value(t, obj["total_matched"].(json.Integer), json.Integer(query.matched))
+		content := obj["content"].(json.Array)
+		testing.expect_value(t, content[0].(json.Object)["text"].(json.String), query.output)
+	}
 }
 
 @test

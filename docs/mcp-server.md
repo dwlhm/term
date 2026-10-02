@@ -126,7 +126,8 @@ When creating a session via `terminal_create_session`, callers specify the opera
 
 - **`Fast_Headless` (Default)**:
   - Spawns the shell with `--no-rcs` (zsh) or `--norc --noprofile` (bash) to skip slow user dotfiles.
-  - Injects a bootstrap preamble that disables line editing (`unsetopt zle`), disables terminal echo (`stty -echo`), and strips user prompts (`PROMPT=''`).
+  - Injects a shell-specific bootstrap preamble that disables terminal echo (`stty -echo`) and clears prompt variables. For zsh, it also disables line editing (`unsetopt zle`) and prompt hooks.
+  - Waits for an explicit readiness acknowledgement emitted after successful configuration before accepting commands. The acknowledgement is assembled by the shell so echoed bootstrap input cannot trigger readiness. Startup output is discarded; write failure, shell exit, or a five-second readiness timeout fails session creation and releases the PTY and child process.
   - Command execution latency drops to **0.27 ms**.
   - Ideal for build tools, package managers, and autonomous reasoning loops.
 - **`Interactive_GUI`**:
@@ -266,9 +267,11 @@ Executes a command synchronously in the specified session, returning clean outpu
 ```
 
 #### Output Guarantees
-- **Clean Output**: Output is extracted directly from the virtual terminal grid. It contains **no ANSI escape bloat**, no prompt strings, and no echo of the sentinel marker.
+- **Clean Output**: Output is extracted directly from the virtual terminal grid. It contains **no ANSI escape bloat**, no prompt strings, and no echo of the sentinel marker. In fast mode, bootstrap readiness also excludes command input echo from the captured output and command history.
 - **Exit Code Fidelity**: Returns the exact integer return code of the executed process (e.g., 0 for success, 127 for command not found).
 - **Timeout Protection**: If the command exceeds `timeout_ms`, a `SIGINT` (Ctrl+C) byte is transmitted to abort the hanging child, and `completed: false` is returned.
+
+`terminal_get_output` retrieves the uncompressed buffered output for a recorded command. Its optional `grep` performs a case-insensitive substring match before `offset` and `limit` pagination; `total_matched` reports the number of matching lines before pagination. Both the JSON `output` field and text content expose the same selected lines.
 
 #### Example Response
 ```json

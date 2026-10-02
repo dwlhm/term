@@ -17,7 +17,10 @@ import termgrid "../terminal"
 CANARY_PREFIX :: "__TERM_MCP_DONE_"
 CANARY_SUFFIX :: "__"
 
-BOOTSTRAP_PREAMBLE :: "stty -echo 2>/dev/null; export PROMPT='' RPROMPT='' PS1=''; precmd_functions=(); chpwd_functions=(); precmd() {}; unsetopt zle 2>/dev/null\n"
+HEADLESS_BOOTSTRAP_TIMEOUT_MS :: 5000
+HEADLESS_READY_MARKER :: "\x1e__TERM_MCP_READY__\x1f"
+BOOTSTRAP_PREAMBLE :: "stty -echo 2>/dev/null && export PROMPT='' RPROMPT='' PS1='' PS2='' PROMPT_COMMAND=''"
+BOOTSTRAP_ZSH_PREAMBLE :: " && precmd_functions=() && chpwd_functions=() && precmd() {} && unsetopt zle"
 
 Command_Record :: struct {
 	id:           int,
@@ -125,22 +128,55 @@ session_create :: proc(id: string, cfg: Session_Config) -> (^Core_Session, bool)
 	s.start_doc_row = 0
 
 	if cfg.mode == .Fast_Headless {
-		pty.pty_write(&s.pty_handle, transmute([]u8)string(BOOTSTRAP_PREAMBLE))
-		// Briefly drain startup echo / prompt from PTY
-		drain_buf: [4096]u8
-		for _ in 0 ..< 3 {
-			if pty.pty_wait_readable(&s.pty_handle, 5) {
-				n, _ := pty.pty_drain(&s.pty_handle, drain_buf[:], len(drain_buf))
-				if n <= 0 do break
-			} else {
-				break
-			}
+		if !_session_bootstrap_headless(s, prog) {
+			session_destroy(s)
+			free(s)
+			return nil, false
 		}
 		termgrid.terminal_reset(&s.term)
 	}
 
 	session_start_drain_loop(s)
 	return s, true
+}
+
+// Acknowledge shell configuration before exposing the PTY to command execution.
+// The marker is assembled by printf so terminal input echo cannot acknowledge readiness.
+@(private="file")
+_session_bootstrap_headless :: proc(s: ^Core_Session, prog: string) -> bool {
+	shell_preamble := BOOTSTRAP_ZSH_PREAMBLE if strings.contains(prog, "zsh") else ""
+	payload := fmt.tprintf("%s%s && printf '\\036%%s%%s\\037' '__TERM_MCP_' 'READY__'\n", BOOTSTRAP_PREAMBLE, shell_preamble)
+	deadline := time.time_add(time.now(), HEADLESS_BOOTSTRAP_TIMEOUT_MS * time.Millisecond)
+	if !pty.pty_write(&s.pty_handle, transmute([]u8)payload) do return false
+
+	drain_buf: [4096]u8
+	marker := string(HEADLESS_READY_MARKER)
+	matched := 0
+	for {
+		remaining := time.diff(time.now(), deadline)
+		if remaining <= 0 do return false
+		wait_ms := max(1, int(time.duration_milliseconds(remaining)))
+		if !pty.pty_wait_readable(&s.pty_handle, wait_ms) {
+			if pty.pty_poll_exit(&s.pty_handle) do return false
+			continue
+		}
+		n, eof := pty.pty_drain(&s.pty_handle, drain_buf[:], len(drain_buf))
+		ready := false
+		for byte in drain_buf[:n] {
+			if byte == marker[matched] {
+				matched += 1
+				if matched == len(marker) {
+					ready = true
+					break
+				}
+			} else {
+				// The initial control byte occurs nowhere else in the marker.
+				matched = 1 if byte == marker[0] else 0
+			}
+		}
+		if eof || pty.pty_poll_exit(&s.pty_handle) do return false
+		if ready do return true
+	}
 }
 
 // session_start_drain_loop launches the background thread reading PTY output.

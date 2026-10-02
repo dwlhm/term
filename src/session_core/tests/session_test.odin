@@ -2,10 +2,103 @@ package session_core_test
 
 import "core:strings"
 import "core:testing"
+import "core:os"
+import "core:fmt"
+import "core:path/filepath"
+import "core:c"
+import "core:strconv"
+import "core:time"
+import posix "core:sys/posix"
 
 import session_core "../"
 import termgrid "../../terminal"
 import parser "../../parser"
+
+@(test)
+test_headless_shell_bootstrap_clean_output :: proc(t: ^testing.T) {
+	for shell in ([]string{"/bin/zsh", "/bin/bash", "/bin/sh"}) {
+		if !os.exists(shell) do continue
+		s, ok := session_core.session_create(shell, {shell = shell, mode = .Fast_Headless})
+		if !testing.expect(t, ok, shell) do continue
+		defer free(s)
+		defer session_core.session_destroy(s)
+		for command in ([]string{"printf 'first_output\\n'", "printf 'second_output\\n'"}) {
+			output, exit_code, completed, _, _ := session_core.session_run_command(s, command)
+			defer delete(output)
+			testing.expect(t, completed, shell)
+			testing.expect_value(t, exit_code, 0)
+			expected := "first_output" if strings.contains(command, "first") else "second_output"
+			testing.expect(t, output == expected, fmt.tprintf("%s: expected %q, got %q", shell, expected, output))
+		}
+	}
+}
+
+@(test)
+test_headless_delayed_shell_bootstrap :: proc(t: ^testing.T) {
+	root, err := os.make_directory_temp("", "term-headless-*", context.allocator)
+	if !testing.expect(t, err == nil) do return
+	defer delete(root)
+	defer os.remove_all(root)
+	shell, _ := filepath.join({root, "delayed-sh"})
+	defer delete(shell)
+	// Deliberately delay shell execution to force startup echo to arrive after the old drain budget.
+	fixture :: "#!/bin/sh\n/bin/sleep 0.1\nexec /bin/sh\n"
+	if !testing.expect(t, os.write_entire_file(shell, string(fixture)) == nil) do return
+	if !testing.expect(t, os.chmod(shell, {.Read_User, .Write_User, .Execute_User}) == nil) do return
+	s, ok := session_core.session_create("delayed", {shell = shell, mode = .Fast_Headless})
+	if !testing.expect(t, ok) do return
+	defer free(s)
+	defer session_core.session_destroy(s)
+	output, exit_code, completed, _, _ := session_core.session_run_command(s, "printf 'delayed_output\\n'")
+	defer delete(output)
+	testing.expect(t, completed)
+	testing.expect_value(t, exit_code, 0)
+	testing.expect_value(t, output, "delayed_output")
+}
+
+@(test)
+test_headless_shell_exit_before_ready :: proc(t: ^testing.T) {
+	s, ok := session_core.session_create("exited", {shell = "/usr/bin/true", mode = .Fast_Headless})
+	if s != nil {
+		session_core.session_destroy(s)
+		free(s)
+	}
+	testing.expect(t, !ok, "shell exit before readiness must fail creation")
+	testing.expect(t, s == nil, "failed creation must not expose a session")
+}
+
+@(test)
+test_headless_readiness_timeout_reaps_child :: proc(t: ^testing.T) {
+	root, err := os.make_directory_temp("", "term-headless-timeout-*", context.allocator)
+	if !testing.expect(t, err == nil) do return
+	defer delete(root)
+	defer os.remove_all(root)
+	shell, _ := filepath.join({root, "unready-sh"})
+	defer delete(shell)
+	fixture :: "#!/bin/sh\nprintf '%s' \"$$\" > \"$0.pid\"\nexec /bin/sleep 30\n"
+	if !testing.expect(t, os.write_entire_file(shell, string(fixture)) == nil) do return
+	if !testing.expect(t, os.chmod(shell, {.Read_User, .Write_User, .Execute_User}) == nil) do return
+	start := time.now()
+	s, ok := session_core.session_create("unready", {shell = shell, mode = .Fast_Headless})
+	elapsed := time.diff(start, time.now())
+	if s != nil {
+		session_core.session_destroy(s)
+		free(s)
+	}
+	testing.expect(t, !ok && s == nil, "unacknowledged startup must fail without exposing a session")
+	timeout := session_core.HEADLESS_BOOTSTRAP_TIMEOUT_MS * time.Millisecond
+	testing.expect(t, elapsed >= timeout && elapsed < 2 * timeout, "startup must stop within its timeout budget")
+	pid_path := fmt.aprintf("%s.pid", shell)
+	defer delete(pid_path)
+	data, read_err := os.read_entire_file(pid_path, context.allocator)
+	if !testing.expect(t, read_err == nil) do return
+	defer delete(data)
+	pid, parsed := strconv.parse_int(string(data))
+	if !testing.expect(t, parsed && pid > 1) do return
+	status: c.int
+	waited := posix.waitpid(posix.pid_t(pid), &status, {.NOHANG})
+	testing.expect(t, waited == -1 && posix.errno() == .ECHILD, "failed startup must reap its child")
+}
 
 @(test)
 test_session_registry_init_and_destroy :: proc(t: ^testing.T) {
