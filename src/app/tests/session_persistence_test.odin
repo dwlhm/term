@@ -257,3 +257,55 @@ test_session_switcher_pane_count_tracks_split_leaves :: proc(t: ^testing.T) {
 	testing.expect_value(t, tabs.session_switcher_footer_hint(&state.items[split_row]), tabs.SESSION_SWITCHER_HINT_SPLIT_TAB)
 	testing.expect_value(t, tabs.session_switcher_footer_hint(&state.items[background_row]), tabs.SESSION_SWITCHER_HINT_BACKGROUND)
 }
+
+@(test)
+test_session_switcher_row_menu_routes_through_the_app :: proc(t: ^testing.T) {
+	a := new(app.App)
+	defer free(a)
+	app.session_manager_init(&a.session_mgr, 4)
+	reg: session_core.Session_Registry
+	session_core.session_registry_init(&reg)
+	a.session_mgr.registry = &reg
+	defer session_core.session_registry_destroy(&reg)
+	defer app.session_manager_destroy(&a.session_mgr)
+	a.window.width = 800
+	a.window.height = 600
+	_, spawned := app.session_spawn(&a.session_mgr, "/bin/sleep", {"30"}, 24, 80, nil, termgrid.Theme{})
+	testing.expect(t, spawned)
+	_, spawned = app.session_spawn(&a.session_mgr, "/bin/sleep", {"30"}, 24, 80, nil, termgrid.Theme{})
+	testing.expect(t, spawned)
+	testing.expect(t, app.session_detach_tab(&a.session_mgr, 1), "a single-pane tab detaches to the background")
+	app._app_open_session_switcher(a)
+	app._app_layout_ui(a)
+
+	background_row := -1
+	for i in 0 ..< a.session_switcher.item_count {
+		if a.session_switcher.items[i].is_detached do background_row = i
+	}
+	testing.expect(t, background_row >= 0, "the switcher must list the detached session")
+	row := tabs.session_switcher_row_rect(&a.session_switcher, background_row - a.session_switcher.scroll_offset)
+	testing.expect(t, tabs.point_in_rect(row.x + 4, row.y + 4, a.session_switcher.rect), "the background row must be inside the card")
+
+	// A right-click opens the row menu and leaves the session attached.
+	_, _ = app.app_dispatch_input_events(a, []input.Input_Event{{event_type = .Pointer, pointer = {kind = .Button_Down, button = tabs.SESSION_SWITCHER_BUTTON_RIGHT, x = row.x + 4, y = row.y + 4}}})
+	testing.expect(t, a.session_switcher.visible && a.session_switcher.menu.visible, "the right-click opens the row menu")
+	testing.expect_value(t, a.session_switcher.menu.target_idx, background_row)
+	testing.expect_value(t, session_core.session_registry_detached_count(&reg), 1)
+	testing.expect(t, a.session_mgr.active_idx >= 0, "the active tab is untouched")
+
+	// A click outside the menu dismisses it without acting on the row.
+	_, _ = app.app_dispatch_input_events(a, []input.Input_Event{{event_type = .Pointer, pointer = {kind = .Button_Down, button = 1, x = a.session_switcher.rect.x + 6, y = a.session_switcher.rect.y + 6}}})
+	testing.expect(t, a.session_switcher.visible && !a.session_switcher.menu.visible, "an outside click only dismisses the menu")
+
+	// Move to Background is unavailable on a background row, so it is greyed out.
+	_, _ = app.app_dispatch_input_events(a, []input.Input_Event{{event_type = .Pointer, pointer = {kind = .Button_Down, button = tabs.SESSION_SWITCHER_BUTTON_RIGHT, x = row.x + 4, y = row.y + 4}}})
+	testing.expect(t, a.session_switcher.menu.disabled[int(tabs.Session_Switcher_Menu_Item.Move_To_Background)])
+	testing.expect(t, !a.session_switcher.menu.disabled[int(tabs.Session_Switcher_Menu_Item.Close)])
+
+	// Choosing Close routes through the app to the terminate confirmation.
+	close_rect := a.session_switcher.menu.item_rects[int(tabs.Session_Switcher_Menu_Item.Close)]
+	_, _ = app.app_dispatch_input_events(a, []input.Input_Event{{event_type = .Pointer, pointer = {kind = .Button_Down, button = 1, x = close_rect.x + close_rect.w * 0.5, y = close_rect.y + close_rect.h * 0.5}}})
+	testing.expect(t, !a.session_switcher.visible && !a.session_switcher.menu.visible, "the menu action closes the switcher")
+	testing.expect(t, a.confirm_dialog.visible && a.confirm_dialog.background_session, "closing a background session asks first")
+	testing.expect_value(t, session_core.session_registry_detached_count(&reg), 1)
+}

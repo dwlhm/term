@@ -209,13 +209,16 @@ UI_Layer :: enum u8 {
 // a neighbour and callers may emit into any layer in any temporal order.
 // Pane_Chrome: <=32 dividers + 4 quads per inactive-pane hollow cursor + 4
 // border edges. Tab_Chrome/Modal: the strip and the switcher list dominate.
-// Overlay also carries the multi-quad drop-FX ripples.
+// Overlay also carries the multi-quad drop-FX ripples plus the session
+// switcher's row context menu, whose three label+shortcut rows need ~51 cells.
 // These are package-level values rather than constants so the staging helpers can
-// index them by layer; they live in static storage and never allocate.
+// index them by layer; they live in static storage and never allocate. A capacity
+// only bounds how much a layer may stage: every layer row is allocated at
+// UI_LAYER_MAX_GLYPH, so raising one does not grow the storage.
 // Positional entries follow the UI_Layer declaration order:
 // {Pane_Chrome, Tab_Chrome, Popover, Modal, Overlay}.
 UI_LAYER_BG_CAPACITY: [UI_LAYER_COUNT]int = [UI_LAYER_COUNT]int{160, 64, 48, 48, 160}
-UI_LAYER_GLYPH_CAPACITY: [UI_LAYER_COUNT]int = [UI_LAYER_COUNT]int{0, 256, 160, 256, 32}
+UI_LAYER_GLYPH_CAPACITY: [UI_LAYER_COUNT]int = [UI_LAYER_COUNT]int{0, 256, 160, 256, 64}
 
 // Storage dimensions: Odin arrays cannot be ragged, so every layer row is
 // allocated at the widest budget it needs. Total instance memory is

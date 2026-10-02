@@ -19,19 +19,26 @@ SESSION_SWITCHER_WIDTH: f32 : 540.0
 SESSION_SWITCHER_ROW_HEIGHT: f32 : 44.0
 SESSION_SWITCHER_HEADER_HEIGHT: f32 : 64.0
 SESSION_SWITCHER_FOOTER_HEIGHT: f32 : 48.0
-// The close affordance spans the full row height so the target is comfortable to hit;
-// the inset keeps it clear of the row's right edge.
-SESSION_SWITCHER_CLOSE_WIDTH: f32 : 28.0
-SESSION_SWITCHER_CLOSE_INSET: f32 : 8.0
-// Smallest comfortable click target the close affordance must keep on both axes.
-SESSION_SWITCHER_MIN_TARGET: f32 : 20.0
+
+// SDL pointer buttons: 1 left, 2 middle, 3 right.
+SESSION_SWITCHER_BUTTON_LEFT :: 1
+SESSION_SWITCHER_BUTTON_RIGHT :: 3
 
 // Footer copy advertises only the actions that are actually valid for the selected row.
 SESSION_SWITCHER_HINT_EMPTY :: "↑↓ / scroll · Enter: Open · Esc: Close"
 SESSION_SWITCHER_HINT_LAYOUT :: "Enter: Restore layout · Esc: Close"
-SESSION_SWITCHER_HINT_BACKGROUND :: "Enter: Attach · ✕ or ⌘X: Terminate · Esc: Close"
-SESSION_SWITCHER_HINT_SPLIT_TAB :: "Enter: Switch · ✕ or ⌘X: Close"
+SESSION_SWITCHER_HINT_BACKGROUND :: "Enter: Attach · ⌘X: Terminate · Esc: Close"
+SESSION_SWITCHER_HINT_SPLIT_TAB :: "Enter: Switch · ⌘X: Close"
 SESSION_SWITCHER_HINT_TAB :: "Enter: Switch · ⌥⌘B: Background · ⌘X: Close"
+
+// Row context menu geometry, mirroring the tab context menu's proportions.
+SESSION_SWITCHER_MENU_ITEM_COUNT :: 3
+SESSION_SWITCHER_MENU_WIDTH: f32 : 220.0
+SESSION_SWITCHER_MENU_ITEM_H: f32 : 26.0
+SESSION_SWITCHER_MENU_PAD_Y: f32 : 4.0
+SESSION_SWITCHER_MENU_HEIGHT: f32 : 2 * SESSION_SWITCHER_MENU_PAD_Y + f32(SESSION_SWITCHER_MENU_ITEM_COUNT) * SESSION_SWITCHER_MENU_ITEM_H
+// The panel keeps this much clearance from the card edge and from the window edge.
+SESSION_SWITCHER_MENU_EDGE_INSET: f32 : 4.0
 
 // Tab_Session carries lightweight tab session metadata for standalone caller and test compatibility.
 Tab_Session :: struct {
@@ -65,11 +72,33 @@ Session_Switcher_Item :: struct {
 	layout_buf:  [64]u8,
 }
 
+// Session_Switcher_Menu_Item enumerates the row context menu entries in display
+// order. They resolve onto the switcher's existing action set rather than a
+// parallel enum.
+Session_Switcher_Menu_Item :: enum u8 {
+	Activate = 0,
+	Move_To_Background,
+	Close,
+}
+
+// Session_Switcher_Menu_State owns the right-click row context menu. It mirrors
+// Tab_Menu_State but resolves its items against a Session_Switcher_Item, since
+// both the label and the enable rules depend on the row kind.
+Session_Switcher_Menu_State :: struct {
+	visible:    bool,
+	target_idx: int, // index into Session_Switcher_State.items, or -1
+	rect:       Rect_f32,
+	anchor_x:   f32,
+	anchor_y:   f32,
+	item_rects: [SESSION_SWITCHER_MENU_ITEM_COUNT]Rect_f32,
+	disabled:   [SESSION_SWITCHER_MENU_ITEM_COUNT]bool,
+	hover_item: int,
+}
+
 // Session_Switcher_State tracks modal search query, matching results, and visual bounds.
 Session_Switcher_State :: struct {
 	visible:            bool,
-	// Row index whose close affordance the pointer is over, or -1 when none.
-	hover_close_row:    int,
+	menu:               Session_Switcher_Menu_State,
 	rect:               Rect_f32,
 	query:              [SESSION_SWITCHER_MAX_QUERY]u8,
 	query_len:          int,
@@ -95,6 +124,58 @@ Session_Switcher_Action :: enum {
 	Terminate,
 	Close,
 	Restore_Layout,
+}
+
+// session_switcher_activate_action resolves the action an active row would perform,
+// matching the switcher's Enter path exactly.
+session_switcher_activate_action :: proc(item: ^Session_Switcher_Item) -> Session_Switcher_Action {
+	if item == nil do return .None
+	if item.is_persisted do return .Restore_Layout
+	if item.is_detached do return .Attach
+	return .Switch_Tab
+}
+
+// session_switcher_menu_enabled reports whether an entry can service the row. Detach
+// requires a single-pane tab (session_detach_tab rejects node_count > 1), so the rule
+// reads item.pane_count rather than restating the topology.
+session_switcher_menu_enabled :: proc(entry: Session_Switcher_Menu_Item, item: ^Session_Switcher_Item) -> bool {
+	if item == nil do return false
+	switch entry {
+	case .Activate:
+		return true
+	case .Move_To_Background:
+		return !item.is_detached && !item.is_persisted && item.pane_count <= 1
+	case .Close:
+		// A saved layout has no live session behind it, so it cannot be terminated.
+		return !item.is_persisted
+	}
+	return false
+}
+
+// session_switcher_menu_item_label returns the entry label for a row kind.
+session_switcher_menu_item_label :: proc(entry: Session_Switcher_Menu_Item, item: ^Session_Switcher_Item) -> string {
+	if item == nil do return ""
+	switch entry {
+	case .Activate:
+		if item.is_persisted do return "Restore Layout"
+		if item.is_detached do return "Attach"
+		return "Switch to Tab"
+	case .Move_To_Background:
+		return "Move to Background"
+	case .Close:
+		return "Terminate Session" if item.is_detached else "Close Tab"
+	}
+	return ""
+}
+
+// session_switcher_menu_item_shortcut returns the keybinding hint for an entry.
+session_switcher_menu_item_shortcut :: proc(entry: Session_Switcher_Menu_Item) -> string {
+	switch entry {
+	case .Activate:        return "↵"
+	case .Move_To_Background: return "⌥⌘B"
+	case .Close:           return "⌘X"
+	}
+	return ""
 }
 
 // session_query_taskinfo inspects resident memory and CPU usage for a given process PID.
@@ -242,7 +323,7 @@ session_switcher_pane_count :: proc($T: typeid, tab: ^T) -> int {
 session_switcher_init :: proc(state: ^Session_Switcher_State) {
 	if state == nil do return
 	state^ = {}
-	state.hover_close_row = -1
+	session_switcher_menu_close(&state.menu)
 }
 
 // session_switcher_show populates switcher items from active tabs and detached registry sessions,
@@ -253,7 +334,7 @@ session_switcher_show :: proc(state: ^Session_Switcher_State, tabs: []$T, active
 	state.item_count = 0
 	state.truncated = false
 	state.scroll_offset = 0
-	state.hover_close_row = -1
+	session_switcher_menu_close(&state.menu)
 
 	// 1. Ingest active tabs
 	for i := 0; i < len(tabs); i += 1 {
@@ -411,7 +492,116 @@ session_switcher_hide :: proc(state: ^Session_Switcher_State) {
 	if state == nil do return
 	state.visible = false
 	state.query_len = 0
-	state.hover_close_row = -1
+	session_switcher_menu_close(&state.menu)
+}
+
+// session_switcher_menu_close hides the row context menu and drops its target.
+session_switcher_menu_close :: proc(menu: ^Session_Switcher_Menu_State) {
+	if menu == nil do return
+	menu.visible = false
+	menu.target_idx = -1
+	menu.hover_item = -1
+}
+
+// session_switcher_menu_open shows the menu for a row, anchored at the pointer and
+// laid out inside the card (and the window, when its size is known).
+session_switcher_menu_open :: proc(state: ^Session_Switcher_State, item_idx: int, px, py, window_w, window_h: f32) {
+	if state == nil || item_idx < 0 || item_idx >= state.item_count do return
+	menu := &state.menu
+	menu.visible = true
+	menu.target_idx = item_idx
+	menu.anchor_x = px
+	menu.anchor_y = py
+	menu.hover_item = -1
+	session_switcher_menu_refresh(state)
+	session_switcher_menu_layout(state, window_w, window_h)
+}
+
+// session_switcher_menu_refresh re-applies the enable rules for the current target.
+session_switcher_menu_refresh :: proc(state: ^Session_Switcher_State) {
+	if state == nil do return
+	menu := &state.menu
+	item: ^Session_Switcher_Item
+	if menu.target_idx >= 0 && menu.target_idx < state.item_count {
+		item = &state.items[menu.target_idx]
+	}
+	for k in 0 ..< SESSION_SWITCHER_MENU_ITEM_COUNT {
+		menu.disabled[k] = !session_switcher_menu_enabled(Session_Switcher_Menu_Item(k), item)
+	}
+}
+
+// session_switcher_menu_layout places the panel and its item rectangles. The menu
+// flips away from the pointer when it would overflow the card and is then clamped,
+// so it is always fully readable and never leaves the window.
+session_switcher_menu_layout :: proc(state: ^Session_Switcher_State, window_w, window_h: f32) {
+	if state == nil do return
+	menu := &state.menu
+	w := min(SESSION_SWITCHER_MENU_WIDTH, max(0, state.rect.w - 2 * SESSION_SWITCHER_MENU_EDGE_INSET))
+	h := SESSION_SWITCHER_MENU_HEIGHT
+
+	// Vertical span the menu may occupy: the card, narrowed by the window when known.
+	top := state.rect.y + SESSION_SWITCHER_MENU_EDGE_INSET
+	bottom := state.rect.y + state.rect.h - SESSION_SWITCHER_MENU_EDGE_INSET
+	left := state.rect.x + SESSION_SWITCHER_MENU_EDGE_INSET
+	right := state.rect.x + state.rect.w - SESSION_SWITCHER_MENU_EDGE_INSET
+	if window_w > 0 { right = min(right, window_w - SESSION_SWITCHER_MENU_EDGE_INSET) }
+	if window_h > 0 { bottom = min(bottom, window_h - SESSION_SWITCHER_MENU_EDGE_INSET) }
+	right = max(right, left)
+	bottom = max(bottom, top)
+
+	x := menu.anchor_x
+	if x + w > right do x = menu.anchor_x - w
+	y := menu.anchor_y
+	if y + h > bottom do y = menu.anchor_y - h
+	x = clamp(x, left, max(left, right - w))
+	y = clamp(y, top, max(top, bottom - h))
+	menu.rect = Rect_f32{x = x, y = y, w = w, h = h}
+
+	iy := y + SESSION_SWITCHER_MENU_PAD_Y
+	for i in 0 ..< SESSION_SWITCHER_MENU_ITEM_COUNT {
+		menu.item_rects[i] = Rect_f32{x = x, y = iy, w = w, h = SESSION_SWITCHER_MENU_ITEM_H}
+		iy += SESSION_SWITCHER_MENU_ITEM_H
+	}
+}
+
+// session_switcher_menu_hit returns the entry under the pointer, or -1.
+session_switcher_menu_hit :: proc(menu: ^Session_Switcher_Menu_State, px, py: f32) -> int {
+	if menu == nil || !menu.visible do return -1
+	for i in 0 ..< SESSION_SWITCHER_MENU_ITEM_COUNT {
+		if point_in_rect(px, py, menu.item_rects[i]) do return i
+	}
+	return -1
+}
+
+// session_switcher_menu_dispatch_pointer owns every pointer event while the menu is
+// open: a press outside dismisses it, a press on an enabled entry resolves to that
+// entry's action, and motion only tracks the hover highlight.
+session_switcher_menu_dispatch_pointer :: proc(state: ^Session_Switcher_State, px, py: f32, is_press: bool) -> (consumed: bool, action: Session_Switcher_Action, item: Session_Switcher_Item) {
+	menu := &state.menu
+	if !menu.visible do return false, .None, {}
+	if menu.target_idx < 0 || menu.target_idx >= state.item_count {
+		session_switcher_menu_close(menu)
+		return true, .None, {}
+	}
+	entry := session_switcher_menu_hit(menu, px, py)
+
+	if is_press {
+		item := state.items[menu.target_idx]
+		session_switcher_menu_close(menu)
+		if entry < 0 || menu.disabled[entry] do return true, .None, {}
+		switch Session_Switcher_Menu_Item(entry) {
+		case .Activate:
+			return true, session_switcher_activate_action(&item), item
+		case .Move_To_Background:
+			return true, .Detach, item
+		case .Close:
+			return true, .Terminate, item
+		}
+		return true, .None, {}
+	}
+
+	menu.hover_item = entry if entry >= 0 && !menu.disabled[entry] else -1
+	return true, .None, {}
 }
 
 // session_switcher_layout calculates floating modal bounds positioned upper-center.
@@ -434,17 +624,22 @@ session_switcher_dispatch_key :: proc(
 	if state == nil || !state.visible do return false, .None, {}
 	if ev.event_type != .Key || ev.is_release do return false, .None, {}
 
-	// Escape -> Close
+	// Escape closes the row context menu first; only a second Escape closes the card.
 	if ev.kind == .Escape {
+		if state.menu.visible {
+			session_switcher_menu_close(&state.menu)
+			return true, .None, {}
+		}
 		return true, .Close, {}
 	}
 
-	// Arrow navigation
+	// Arrow navigation also dismisses the menu: the menu targets one fixed row.
 	if ev.kind == .Arrow_Up {
 		if state.match_count > 0 {
 			state.selected_match_idx = (state.selected_match_idx - 1 + state.match_count) % state.match_count
 			session_switcher_reveal_selection(state)
 		}
+		session_switcher_menu_close(&state.menu)
 		return true, .None, {}
 	}
 	if ev.kind == .Arrow_Down {
@@ -452,6 +647,7 @@ session_switcher_dispatch_key :: proc(
 			state.selected_match_idx = (state.selected_match_idx + 1) % state.match_count
 			session_switcher_reveal_selection(state)
 		}
+		session_switcher_menu_close(&state.menu)
 		return true, .None, {}
 	}
 
@@ -465,13 +661,7 @@ session_switcher_dispatch_key :: proc(
 	// Enter -> Activate (Attach, Restore_Layout, or Switch_Tab)
 	if ev.kind == .Enter {
 		if has_selected {
-			if selected_item.is_persisted {
-				return true, .Restore_Layout, selected_item
-			} else if selected_item.is_detached {
-				return true, .Attach, selected_item
-			} else {
-				return true, .Switch_Tab, selected_item
-			}
+			return true, session_switcher_activate_action(&selected_item), selected_item
 		}
 		return true, .None, {}
 	}
@@ -497,6 +687,8 @@ session_switcher_dispatch_key :: proc(
 	// Backspace: delete rune from search query
 	if ev.kind == .Backspace {
 		if state.query_len > 0 {
+			// Editing the query re-filters the list, so a row-targeted menu is stale.
+			session_switcher_menu_close(&state.menu)
 			state.query_len -= 1
 			for state.query_len > 0 && (state.query[state.query_len] & 0xC0) == 0x80 {
 				state.query_len -= 1
@@ -511,6 +703,7 @@ session_switcher_dispatch_key :: proc(
 		if ev.rune >= 32 {
 			buf, n := utf8.encode_rune(ev.rune)
 			if state.query_len + n <= len(state.query) {
+				session_switcher_menu_close(&state.menu)
 				copy(state.query[state.query_len:], buf[:n])
 				state.query_len += n
 				session_switcher_filter(state)
@@ -527,13 +720,17 @@ session_switcher_row_rect :: proc(state: ^Session_Switcher_State, row: int) -> R
 	return Rect_f32{x = state.rect.x + 4, y = state.rect.y + SESSION_SWITCHER_HEADER_HEIGHT + f32(row) * SESSION_SWITCHER_ROW_HEIGHT, w = max(0, state.rect.w - 8), h = SESSION_SWITCHER_ROW_HEIGHT}
 }
 
-// session_switcher_close_rect returns the row's close affordance bounds. It is always
-// contained by the row rect and stays at least the minimum target size on both axes.
-session_switcher_close_rect :: proc(state: ^Session_Switcher_State, row: int) -> Rect_f32 {
-	rr := session_switcher_row_rect(state, row)
-	w := min(SESSION_SWITCHER_CLOSE_WIDTH, rr.w)
-	x := max(rr.x, rr.x + rr.w - SESSION_SWITCHER_CLOSE_INSET - w)
-	return Rect_f32{x = x, y = rr.y, w = w, h = rr.h}
+// session_switcher_footer_hint_y returns the hint line's top edge inside the footer
+// band. Both footer lines are bottom-anchored so the copy sits flush against the
+// card's bottom edge with `pad` of breathing room below it.
+session_switcher_footer_hint_y :: proc(pad, line_h: f32) -> f32 {
+	return SESSION_SWITCHER_FOOTER_HEIGHT - pad - line_h
+}
+
+// session_switcher_footer_message_y returns the message line's top edge, one line
+// plus the `pad` gap above the hint so the two never overlap.
+session_switcher_footer_message_y :: proc(pad, line_h: f32) -> f32 {
+	return SESSION_SWITCHER_FOOTER_HEIGHT - pad - 2 * line_h - pad
 }
 
 session_switcher_reveal_selection :: proc(state: ^Session_Switcher_State) {
@@ -543,33 +740,56 @@ session_switcher_reveal_selection :: proc(state: ^Session_Switcher_State) {
 	state.scroll_offset = clamp(state.scroll_offset, 0, max(0, state.match_count - rows))
 }
 
-session_switcher_dispatch_pointer :: proc(state: ^Session_Switcher_State, px, py: f32, click: bool, wheel: int = 0) -> (Session_Switcher_Action, Session_Switcher_Item) {
+// session_switcher_dispatch_pointer routes one pointer event. The raw
+// Input_Pointer_Event is taken rather than a pre-reduced click flag so the switcher
+// can tell a right-click (which opens the row menu) from a left-click (which
+// activates the row); window dimensions are optional and only used to keep the
+// menu on-screen.
+session_switcher_dispatch_pointer :: proc(
+	state: ^Session_Switcher_State,
+	ev: input.Input_Pointer_Event,
+	wheel: int = 0,
+	window_w: f32 = 0,
+	window_h: f32 = 0,
+) -> (Session_Switcher_Action, Session_Switcher_Item) {
 	if state == nil || !state.visible do return .None, {}
-	if click && !point_in_rect(px, py, state.rect) do return .Close, {}
+	is_press := ev.kind == .Button_Down
+	is_right := is_press && ev.button == SESSION_SWITCHER_BUTTON_RIGHT
+	is_left := is_press && ev.button == SESSION_SWITCHER_BUTTON_LEFT
+
+	// The open menu is modal: only the primary button reaches it, and it consumes
+	// every press that dismisses or activates it.
+	if state.menu.visible {
+		if is_press && !is_left {
+			session_switcher_menu_close(&state.menu)
+			return .None, {}
+		}
+		consumed, action, item := session_switcher_menu_dispatch_pointer(state, ev.x, ev.y, is_left)
+		if consumed {
+			if is_left && action == .None do return .None, {}
+			return action, item
+		}
+	}
+
+	if is_press && !point_in_rect(ev.x, ev.y, state.rect) do return .Close, {}
 	if wheel != 0 {
 		state.scroll_offset = clamp(state.scroll_offset - wheel, 0, max(0, state.match_count - max(1, state.visible_rows)))
 		state.selected_match_idx = clamp(state.selected_match_idx, state.scroll_offset, min(state.match_count - 1, state.scroll_offset + max(1, state.visible_rows) - 1)) if state.match_count > 0 else 0
 	}
 	visible := min(state.visible_rows, state.match_count - state.scroll_offset)
-	state.hover_close_row = -1
 	for row in 0 ..< visible {
-		if !point_in_rect(px, py, session_switcher_row_rect(state, row)) do continue
+		if !point_in_rect(ev.x, ev.y, session_switcher_row_rect(state, row)) do continue
 		item_idx := state.scroll_offset + row
 		entry := &state.items[item_idx]
-		// The close affordance wins over the row's Enter-equivalent, but only on rows
-		// where terminate is valid.
-		if !entry.is_persisted && point_in_rect(px, py, session_switcher_close_rect(state, row)) {
-			state.hover_close_row = row
-			if click {
-				state.selected_match_idx = item_idx
-				return .Terminate, entry^
-			}
+		// A right-click targets the row menu and must never activate the row.
+		if is_right {
+			state.selected_match_idx = item_idx
+			session_switcher_menu_open(state, item_idx, ev.x, ev.y, window_w, window_h)
 			return .None, {}
 		}
-		if click {
+		if is_left {
 			state.selected_match_idx = item_idx
-			_, action, item := session_switcher_dispatch_key(state, input.Input_Event{event_type = .Key, kind = .Enter})
-			return action, item
+			return session_switcher_activate_action(entry), entry^
 		}
 	}
 	return .None, {}

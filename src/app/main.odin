@@ -1085,7 +1085,9 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 			} else if ev.event_type == .Pointer {
 				_app_layout_ui(a)
 				wheel := _app_pointer_wheel_delta(ev.pointer) if ev.pointer.kind == .Wheel else 0
-				action, item := platform_tabs.session_switcher_dispatch_pointer(&a.session_switcher, ev.pointer.x, ev.pointer.y, ev.pointer.kind == .Button_Down && ev.pointer.button == sdl3.BUTTON_LEFT, wheel)
+				win_w := f32(a.window.width) if a.window.width > 0 else f32(a.window.pixel_w)
+				win_h := f32(a.window.height) if a.window.height > 0 else f32(a.window.pixel_h)
+				action, item := platform_tabs.session_switcher_dispatch_pointer(&a.session_switcher, ev.pointer, wheel, win_w, win_h)
 				_app_execute_session_action(a, action, item)
 			} else if ev.event_type == .Local && ev.action == .Attach_Session {
 				_app_close_session_switcher(a)

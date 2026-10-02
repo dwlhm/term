@@ -1121,11 +1121,23 @@ _session_switcher_test_state :: proc(state: ^tabs.Session_Switcher_State, count,
 	tabs.session_switcher_layout(state, 800, 600)
 }
 
+// _count_close_glyphs counts staged glyphs that resolved to the pinned close slot,
+// which the test tags with a sentinel atlas coordinate.
+_count_close_glyphs :: proc(r: ^render.Renderer) -> int {
+	n := 0
+	for layer in render.UI_Layer {
+		for glyph in r.ui_glyph_data[layer][:r.ui_layer_glyph_count[layer]] {
+			if glyph.u0 == 0.75 do n += 1
+		}
+	}
+	return n
+}
+
 @test
-test_session_switcher_renders_close_affordance_per_row :: proc(t: ^testing.T) {
+test_session_switcher_emits_no_close_glyph :: proc(t: ^testing.T) {
 	r := new(render.Renderer)
 	for &slot in r.atlas.slots do slot.valid = true
-	// Tag the pinned close glyph's slot so staged affordances are identifiable.
+	// Tag the pinned close glyph's slot so any staged ✕ is identifiable by count.
 	r.atlas.slots[render.PINNED_SLOT_UI].u0 = 0.75
 	defer free(r)
 	theme := ui.theme_catppuccin_mocha()
@@ -1134,38 +1146,99 @@ test_session_switcher_renders_close_affordance_per_row :: proc(t: ^testing.T) {
 
 	state: ui.Session_Switcher_State
 	_session_switcher_test_state(&state, 5, 1)
-	rows := min(state.visible_rows, state.match_count)
-	testing.expect(t, rows == state.match_count, "every row must fit the visible window")
-
 	_ = ui.ui_render_stage(r, &theme, i18n.i18n_get(), &bar, nil, nil, nil, 800, 600, 1, "", nil, nil, nil, nil, nil, &state)
-	footer_y := state.rect.y + state.rect.h - tabs.SESSION_SWITCHER_FOOTER_HEIGHT
-	close_glyphs, hovered := 0, 0
-	for glyph in r.ui_glyph_data[render.UI_Layer.Modal][:r.ui_layer_glyph_count[render.UI_Layer.Modal]] {
-		if glyph.u0 != 0.75 || glyph.y >= footer_y do continue
-		close_glyphs += 1
-		if glyph.r == theme.status_danger.r do hovered += 1
-	}
-	testing.expect(t, close_glyphs == 4, "every non-layout row stages one close affordance")
-	testing.expect_value(t, hovered, 0)
+	testing.expect_value(t, _count_close_glyphs(r), 0)
 
-	// Hovering a row tints exactly that row's affordance.
-	state.hover_close_row = 1
+	// The row context menu and a footer message must not smuggle one back in.
+	tabs.session_switcher_menu_open(&state, 0, state.rect.x + 40, state.rect.y + 80, 800, 600)
+	state.message_len = copy(state.message_buf[:], "Cannot detach: use a single terminal without split panes.")
 	_ = ui.ui_render_stage(r, &theme, i18n.i18n_get(), &bar, nil, nil, nil, 800, 600, 1, "", nil, nil, nil, nil, nil, &state)
-	close_glyphs, hovered = 0, 0
-	for glyph in r.ui_glyph_data[render.UI_Layer.Modal][:r.ui_layer_glyph_count[render.UI_Layer.Modal]] {
-		if glyph.u0 != 0.75 || glyph.y >= footer_y do continue
-		close_glyphs += 1
-		if glyph.r == theme.status_danger.r do hovered += 1
-	}
-	testing.expect_value(t, close_glyphs, 4)
-	testing.expect_value(t, hovered, 1)
+	testing.expect_value(t, _count_close_glyphs(r), 0)
+}
 
-	// The affordance sits inside its row's close rect.
-	for row in 0 ..< rows {
-		close_rect := tabs.session_switcher_close_rect(&state, row)
-		row_rect := tabs.session_switcher_row_rect(&state, row)
-		testing.expect(t, close_rect.x >= row_rect.x && close_rect.x + close_rect.w <= row_rect.x + row_rect.w)
+@test
+test_session_switcher_menu_renders_above_the_modal_card :: proc(t: ^testing.T) {
+	r := new(render.Renderer)
+	for &slot in r.atlas.slots do slot.valid = true
+	defer free(r)
+	theme := ui.theme_catppuccin_mocha()
+	bar: ui.Tab_Bar_State
+	ui.tab_bar_init(&bar)
+
+	state: ui.Session_Switcher_State
+	_session_switcher_test_state(&state, 5, 0)
+	tabs.session_switcher_menu_open(&state, 1, state.rect.x + 120, state.rect.y + 90, 800, 600)
+	_ = ui.ui_render_stage(r, &theme, i18n.i18n_get(), &bar, nil, nil, nil, 800, 600, 1, "", nil, nil, nil, nil, nil, &state)
+
+	card_rect, menu_rect := state.rect, state.menu.rect
+	card_layer, menu_layer := render.UI_Layer.Modal, render.UI_Layer.Modal
+	card_found, menu_found := false, false
+	for layer in render.UI_Layer {
+		for quad in r.ui_bg_data[layer][:r.ui_layer_bg_count[layer]] {
+			// The card and the menu are both staged as one full-surface fill.
+			if quad.x == card_rect.x && quad.y == card_rect.y && quad.cw == card_rect.w && quad.ch == card_rect.h {
+				card_found, card_layer = true, layer
+			}
+			if quad.x == menu_rect.x && quad.y == menu_rect.y && quad.cw == menu_rect.w && quad.ch == menu_rect.h {
+				menu_found, menu_layer = true, layer
+			}
+		}
 	}
+	testing.expect(t, card_found, "the switcher card stages its own surface fill")
+	testing.expect(t, menu_found, "the row menu stages its own surface fill")
+	testing.expect(t, int(menu_layer) > int(card_layer), "the row menu must land in a layer above the card's")
+
+	// Every entry label must survive staging: the menu cannot afford truncation.
+	labels: [3]string = {
+		tabs.session_switcher_menu_item_label(.Activate, &state.items[1]),
+		tabs.session_switcher_menu_item_label(.Move_To_Background, &state.items[1]),
+		tabs.session_switcher_menu_item_label(.Close, &state.items[1]),
+	}
+	expected := 0
+	for label in labels {
+		expected += _rune_len(label)
+	}
+	testing.expect(t, int(r.ui_layer_glyph_count[menu_layer]) >= expected, "every menu label must be staged in full")
+}
+
+@test
+test_session_switcher_footer_is_flush_with_the_card_bottom :: proc(t: ^testing.T) {
+	r := new(render.Renderer)
+	for &slot in r.atlas.slots do slot.valid = true
+	defer free(r)
+	theme := ui.theme_catppuccin_mocha()
+	bar: ui.Tab_Bar_State
+	ui.tab_bar_init(&bar)
+
+	state: ui.Session_Switcher_State
+	_session_switcher_test_state(&state, 3, 0)
+	_ = ui.ui_render_stage(r, &theme, i18n.i18n_get(), &bar, nil, nil, nil, 800, 600, 1, "", nil, nil, nil, nil, nil, &state)
+
+	card_bottom := state.rect.y + state.rect.h
+	footer_top := card_bottom - tabs.SESSION_SWITCHER_FOOTER_HEIGHT
+	// The lowest glyph on the footer band is the hint's last cell.
+	lowest := f32(0)
+	for glyph in r.ui_glyph_data[render.UI_Layer.Modal][:r.ui_layer_glyph_count[render.UI_Layer.Modal]] {
+		if glyph.y >= footer_top do lowest = max(lowest, glyph.y + glyph.ch)
+	}
+	testing.expect(t, lowest > 0, "the footer must stage at least one line")
+	testing.expect(t, card_bottom - lowest <= theme.spacing.xs + 0.001, "the hint sits flush with the card's bottom edge")
+	testing.expect(t, card_bottom - lowest >= 0, "the hint never spills past the card")
+
+	// With a message present the two lines are stacked, message above hint.
+	state.message_len = copy(state.message_buf[:], "Cannot detach this session. The terminal remains available; try again.")
+	_ = ui.ui_render_stage(r, &theme, i18n.i18n_get(), &bar, nil, nil, nil, 800, 600, 1, "", nil, nil, nil, nil, nil, &state)
+	message_y, hint_y := f32(0), f32(0)
+	for glyph in r.ui_glyph_data[render.UI_Layer.Modal][:r.ui_layer_glyph_count[render.UI_Layer.Modal]] {
+		if glyph.y < footer_top do continue
+		// The upper line is the message, the lower one the hint.
+		if message_y == 0 || glyph.y < message_y do message_y = glyph.y
+		if glyph.y > hint_y do hint_y = glyph.y
+	}
+	testing.expect(t, message_y > 0 && hint_y > 0, "both footer lines must be staged")
+	testing.expect(t, message_y + ui.UI_CHROME_CELL_HEIGHT <= hint_y, "the message line must sit above the hint line")
+	testing.expect_value(t, hint_y, footer_top + tabs.session_switcher_footer_hint_y(theme.spacing.xs, ui.UI_CHROME_CELL_HEIGHT))
+	testing.expect_value(t, message_y, footer_top + tabs.session_switcher_footer_message_y(theme.spacing.xs, ui.UI_CHROME_CELL_HEIGHT))
 }
 
 @test

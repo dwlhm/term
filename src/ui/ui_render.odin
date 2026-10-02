@@ -705,28 +705,16 @@ ui_render_stage :: proc(
 				rr := platform_tabs.session_switcher_row_rect(state, row)
 				if rr.y + rr.h > cr.y + cr.h - platform_tabs.SESSION_SWITCHER_FOOTER_HEIGHT do break
 				if match_idx == state.selected_match_idx do emit_bg(r, rr.x, rr.y, rr.w, rr.h, theme.surface_hover)
-				// The close affordance owns the row's right gutter wherever terminate is
-				// valid; the status column slides left to keep clear of it.
-				close_cols := 0
-				status_right := cr.x + cr.w - pad
-				if !item.is_persisted {
-					close_cols = 2
-					status_right = platform_tabs.session_switcher_close_rect(state, row).x - cw
-				}
 				status_buf: [96]u8
 				status := fmt.bprintf(status_buf[:], "%s", _session_switcher_status_label(item))
 				if item.pane_count > 1 {
 					status = fmt.bprintf(status_buf[:], "%s · %d panes", _session_switcher_status_label(item), item.pane_count)
 				}
 				status_cols := min(cols, int(len(status)))
-				_emit_text_clipped(r, item.title, cr.x + pad, rr.y + 3, cw, ch, max(0, cols - status_cols - close_cols - 2), theme.text_primary)
+				status_right := cr.x + cr.w - pad
+				_emit_text_clipped(r, item.title, cr.x + pad, rr.y + 3, cw, ch, max(0, cols - status_cols - 2), theme.text_primary)
 				_emit_text_clipped(r, status, status_right - f32(status_cols) * cw, rr.y + 3, cw, ch, status_cols, theme.text_muted)
 				_emit_text_clipped(r, item.cwd, cr.x + pad, rr.y + 23, cw, ch, cols, theme.text_faint)
-				if !item.is_persisted {
-					close_rect := platform_tabs.session_switcher_close_rect(state, row)
-					close_col := theme.status_danger if state.hover_close_row == row else theme.text_muted
-					emit_char(r, close_rect.x + (close_rect.w - cw) * 0.5, rr.y + 3, cw, ch, '\u2715', close_col)
-				}
 			}
 			if state.match_count == 0 && state.visible_rows > 0 do _emit_text_clipped(r, "No matching sessions", cr.x + pad, cr.y + platform_tabs.SESSION_SWITCHER_HEADER_HEIGHT + 8, cw, ch, cols, theme.text_faint)
 			fy := cr.y + cr.h - platform_tabs.SESSION_SWITCHER_FOOTER_HEIGHT
@@ -735,10 +723,57 @@ ui_render_stage :: proc(
 			if state.match_count > 0 {
 				hint = platform_tabs.session_switcher_footer_hint(&state.items[state.matches[state.selected_match_idx]])
 			}
-			_emit_text_clipped(r, hint, cr.x + pad, fy + 4, cw, ch, cols, theme.text_faint)
 			message := string(state.message_buf[:state.message_len])
 			if len(message) == 0 && state.truncated do message = "List limit reached; showing the most recent background sessions."
-			_emit_text_clipped(r, message, cr.x + pad, fy + 25, cw, ch, cols, theme.text_muted)
+			// Both lines are bottom-anchored: the hint hugs the card's bottom edge and
+			// the message sits one line above it, so an empty message leaves the slack
+			// above the hint instead of below it.
+			foot_pad := theme.spacing.xs
+			if len(message) > 0 {
+				_emit_text_clipped(r, message, cr.x + pad, fy + platform_tabs.session_switcher_footer_message_y(foot_pad, ch), cw, ch, cols, theme.text_muted)
+			}
+			_emit_text_clipped(r, hint, cr.x + pad, fy + platform_tabs.session_switcher_footer_hint_y(foot_pad, ch), cw, ch, cols, theme.text_faint)
+		}
+	}
+
+	// The row context menu belongs above the switcher card, which owns the modal
+	// layer, so it is staged in the top layer and after the card within it.
+	render.renderer_ui_begin_layer(r, .Overlay)
+	if session_switcher != nil && session_switcher.visible && session_switcher.menu.visible && session_switcher.menu.target_idx >= 0 && session_switcher.menu.target_idx < session_switcher.item_count {
+		menu := &session_switcher.menu
+		item := &session_switcher.items[menu.target_idx]
+		mr := menu.rect
+		emit_bg(r, mr.x, mr.y, mr.w, mr.h, theme.surface_card)
+		emit_bg(r, mr.x, mr.y, mr.w, 1.0, theme.border_subtle)
+		emit_bg(r, mr.x, mr.y + mr.h - 1.0, mr.w, 1.0, theme.border_subtle)
+		emit_bg(r, mr.x, mr.y, 1.0, mr.h, theme.border_subtle)
+		emit_bg(r, mr.x + mr.w - 1.0, mr.y, 1.0, mr.h, theme.border_subtle)
+
+		for k in 0 ..< platform_tabs.SESSION_SWITCHER_MENU_ITEM_COUNT {
+			entry := platform_tabs.Session_Switcher_Menu_Item(k)
+			ir := menu.item_rects[k]
+			disabled := menu.disabled[k]
+			if !disabled && k == menu.hover_item do emit_bg(r, ir.x, ir.y, ir.w, ir.h, theme.surface_hover)
+
+			shortcut := platform_tabs.session_switcher_menu_item_shortcut(entry)
+			sc_w := f32(_rune_count(shortcut)) * cw
+			label := platform_tabs.session_switcher_menu_item_label(entry, item)
+			label_col := theme.text_muted if disabled else theme.text_primary
+			lx := ir.x + theme.spacing.md
+			ly := ir.y + (ir.h - ch) * 0.5
+			label_max_x := ir.x + ir.w - theme.spacing.md - sc_w - theme.spacing.sm
+			for cp in label {
+				if lx + cw > label_max_x do break
+				emit_char(r, lx, ly, cw, ch, cp, label_col)
+				lx += cw
+			}
+			if sc_w > 0 {
+				sx := ir.x + ir.w - theme.spacing.md - sc_w
+				for cp in shortcut {
+					emit_char(r, sx, ly, cw, ch, cp, theme.text_muted)
+					sx += cw
+				}
+			}
 		}
 	}
 
