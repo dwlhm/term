@@ -17,6 +17,11 @@ Font_Error :: enum {
 	Invalid_Font,
 }
 
+// FONT_SIZE_EPSILON_PX is the tolerance below which a requested pixel size
+// is treated as the face's configured size, so a measurement pass never
+// re-sizes (and re-hints) the face for a sub-pixel difference.
+FONT_SIZE_EPSILON_PX :: 0.001
+
 // Font_Metrics holds font measurement data.
 Font_Metrics :: struct {
 	pixel_size:  f32,   // requested pixel size
@@ -383,42 +388,32 @@ font_rasterize_glyph :: proc(
 	return font_rasterize_glyph_fitted(r, codepoint, 0, 0, allocator)
 }
 
-// font_rasterize_glyph_into rasterizes a glyph directly into a destination buffer.
-font_rasterize_glyph_into :: proc(
-	r: ^Font_Rasterizer,
-	codepoint: u32,
+// _font_blit_glyph_pixels copies a rendered glyph bitmap into dst, anchored
+// at (origin_x, origin_y) and clipped to the rect
+// [x0, x0+clip_w) x [y0, y0+clip_h). Every direct-into rasterizer shares it
+// so the pixel-mode conversion lives in exactly one place.
+_font_blit_glyph_pixels :: proc(
+	glyph: FT_GlyphSlot,
 	dst: []u8,
 	dst_stride: int,
-	dst_x, dst_y: int,
-	slot_w, slot_h: int,
+	origin_x, origin_y: int,
+	x0, y0: int,
+	clip_w, clip_h: int,
 ) {
-	if r == nil || r.face == nil do return
+	width := int(glyph.bitmap.width)
+	height := int(glyph.bitmap.rows)
 
-	glyph_index := FT_Get_Char_Index(r.face, FT_ULong(codepoint))
-	if glyph_index == 0 do return
-
-	if FT_Load_Glyph(r.face, glyph_index, FT_LOAD_RENDER | FT_LOAD_TARGET_NORMAL) != 0 do return
-
-	slot := r.face.glyph
-	width := int(slot.bitmap.width)
-	height := int(slot.bitmap.rows)
-	if width <= 0 || height <= 0 do return
-
-	ascent_px := int(math.round(r.metrics.ascent))
-	offset_x := dst_x + int(slot.bitmap_left)
-	offset_y := dst_y + ascent_px - int(slot.bitmap_top)
-
-	pitch := int(slot.bitmap.pitch)
-	src_buf := slot.bitmap.buffer
-	mode := slot.bitmap.pixel_mode
+	pitch := int(glyph.bitmap.pitch)
+	src_buf := glyph.bitmap.buffer
+	mode := glyph.bitmap.pixel_mode
 
 	for gy in 0..<height {
 		for gx in 0..<width {
-			dst_px := offset_x + gx
-			dst_py := offset_y + gy
+			dst_px := origin_x + gx
+			dst_py := origin_y + gy
 
-			if dst_px >= dst_x && dst_px < dst_x + slot_w &&
-			   dst_py >= dst_y && dst_py < dst_y + slot_h {
+			if dst_px >= x0 && dst_px < x0 + clip_w &&
+			   dst_py >= y0 && dst_py < y0 + clip_h {
 				dst_idx := dst_py * dst_stride + dst_px
 				if dst_idx >= 0 && dst_idx < len(dst) {
 					if mode == u8(FT_Pixel_Mode.GRAY) {
@@ -436,6 +431,171 @@ font_rasterize_glyph_into :: proc(
 			}
 		}
 	}
+}
+
+// _font_resize_face switches the face to pixel_size for a temporary
+// measurement or rasterization. It reports true when the size actually
+// changed, in which case the caller must defer _font_restore_face_size.
+_font_resize_face :: proc(r: ^Font_Rasterizer, pixel_size: f32) -> bool {
+	if pixel_size <= 0 || math.abs(pixel_size - r.metrics.pixel_size) <= FONT_SIZE_EPSILON_PX {
+		return false
+	}
+	FT_Set_Pixel_Sizes(r.face, 0, FT_UInt(pixel_size))
+	return true
+}
+
+// _font_restore_face_size restores the configured pixel size and re-syncs
+// HarfBuzz, which mirrors the FreeType face.
+_font_restore_face_size :: proc(r: ^Font_Rasterizer) {
+	FT_Set_Pixel_Sizes(r.face, 0, FT_UInt(r.metrics.pixel_size))
+	if r.hb_font != nil {
+		hb_ft_font_changed(r.hb_font)
+	}
+}
+
+// font_measure_glyph_ink_box rasterizes a codepoint and reports its ink
+// extents: the rendered bitmap size plus the cell-local rows the ink occupies
+// under the same placement font_rasterize_glyph_into applies (the face's own
+// ascender as the baseline anchor).
+//
+// Reporting top and bottom rather than only the bitmap size is what makes a
+// baseline comparison possible across faces: two glyphs are on the same
+// baseline exactly when their measured bottom rows are equal.
+//
+// pixel_size <= 0 (or a size equal to the configured one) leaves the face
+// alone; otherwise the face is switched for the measurement and restored
+// before returning, so the caller observes no state change. Allocation free.
+// ok is false when the face does not cover the codepoint or renders no ink.
+font_measure_glyph_ink_box :: proc(
+	r: ^Font_Rasterizer,
+	codepoint: u32,
+	pixel_size: f32 = 0,
+) -> (width, height, top, bottom: int, ok: bool) {
+	if r == nil || r.face == nil {
+		return
+	}
+
+	glyph_index := FT_Get_Char_Index(r.face, FT_ULong(codepoint))
+	if glyph_index == 0 {
+		return
+	}
+
+	resized := _font_resize_face(r, pixel_size)
+	defer if resized {
+		_font_restore_face_size(r)
+	}
+
+	if FT_Load_Glyph(r.face, glyph_index, FT_LOAD_RENDER | FT_LOAD_TARGET_NORMAL) != 0 {
+		return
+	}
+
+	slot := r.face.glyph
+	width = int(slot.bitmap.width)
+	height = int(slot.bitmap.rows)
+	if width <= 0 || height <= 0 {
+		return
+	}
+
+	ascent_px := int(math.round(r.metrics.ascent))
+	top = ascent_px - int(slot.bitmap_top)
+	bottom = top + height - 1
+	ok = true
+	return
+}
+
+// font_measure_glyph_ink rasterizes a codepoint and reports the rendered ink
+// extents. FreeType's FT_LOAD_RENDER produces a bitmap tight to the outline
+// box, so the bitmap width and row count are the ink extents.
+//
+// See font_measure_glyph_ink_box for the placement convention behind top and
+// bottom; this is the size-only view of it, for fit probing.
+font_measure_glyph_ink :: proc(
+	r: ^Font_Rasterizer,
+	codepoint: u32,
+	pixel_size: f32 = 0,
+) -> (ink_w: int, ink_h: int, ok: bool) {
+	ink_w, ink_h, _, _, ok = font_measure_glyph_ink_box(r, codepoint, pixel_size)
+	return
+}
+
+// font_rasterize_glyph_into rasterizes a glyph directly into a destination buffer.
+font_rasterize_glyph_into :: proc(
+	r: ^Font_Rasterizer,
+	codepoint: u32,
+	dst: []u8,
+	dst_stride: int,
+	dst_x, dst_y: int,
+	slot_w, slot_h: int,
+) {
+	if r == nil || r.face == nil do return
+
+	glyph_index := FT_Get_Char_Index(r.face, FT_ULong(codepoint))
+	if glyph_index == 0 do return
+
+	if FT_Load_Glyph(r.face, glyph_index, FT_LOAD_RENDER | FT_LOAD_TARGET_NORMAL) != 0 do return
+
+	slot := r.face.glyph
+	if int(slot.bitmap.width) <= 0 || int(slot.bitmap.rows) <= 0 do return
+
+	ascent_px := int(math.round(r.metrics.ascent))
+	offset_x := dst_x + int(slot.bitmap_left)
+	offset_y := dst_y + ascent_px - int(slot.bitmap_top)
+
+	_font_blit_glyph_pixels(slot, dst, dst_stride, offset_x, offset_y, dst_x, dst_y, slot_w, slot_h)
+}
+
+// font_rasterize_glyph_sized_into rasterizes a glyph at an explicit pixel size
+// directly into a destination buffer.
+//
+// Unlike font_rasterize_glyph_into, placement is not derived from the
+// rasterizing face's own metrics: the ink is bottom-aligned to ink_bottom_row
+// (a cell-local row, the same convention font_measure_glyph_ink_box reports),
+// so a glyph from a symbol face lands on a text face's baseline. The face's
+// own design baseline offset (bitmap_top) is discarded entirely — it is a
+// per-glyph property of the source face, and honoring it is what floated UI
+// symbols off the text baseline. center_w > 0 centers the bitmap within that
+// width instead of honoring the glyph's left bearing.
+//
+// pixel_size <= 0 keeps the face's configured size; any other size is applied
+// for this call and restored before returning. Allocation free.
+font_rasterize_glyph_sized_into :: proc(
+	r: ^Font_Rasterizer,
+	codepoint: u32,
+	pixel_size: f32,
+	dst: []u8,
+	dst_stride: int,
+	dst_x, dst_y: int,
+	slot_w, slot_h: int,
+	ink_bottom_row: int,
+	center_w: int = 0,
+) {
+	if r == nil || r.face == nil do return
+
+	glyph_index := FT_Get_Char_Index(r.face, FT_ULong(codepoint))
+	if glyph_index == 0 do return
+
+	resized := _font_resize_face(r, pixel_size)
+	defer if resized {
+		_font_restore_face_size(r)
+	}
+
+	if FT_Load_Glyph(r.face, glyph_index, FT_LOAD_RENDER | FT_LOAD_TARGET_NORMAL) != 0 do return
+
+	slot := r.face.glyph
+	width := int(slot.bitmap.width)
+	height := int(slot.bitmap.rows)
+	if width <= 0 || height <= 0 do return
+
+	origin_x := (center_w - width) / 2 if center_w > 0 else int(slot.bitmap_left)
+
+	// Bottom-align, then clamp the top to the cell: a glyph taller than the
+	// space above the baseline row would otherwise start above cell row 0 and
+	// be clipped away by the slot. Clamping pins such a glyph's top to the
+	// cell instead, so it stays whole (its bottom then sits below the
+	// baseline, which is the lesser error for an oversized glyph).
+	origin_y := max(ink_bottom_row - (height - 1), 0)
+
+	_font_blit_glyph_pixels(slot, dst, dst_stride, dst_x + origin_x, dst_y + origin_y, dst_x, dst_y, slot_w, slot_h)
 }
 
 // font_rasterize_glyph_index_into rasterizes a glyph directly by glyph index into a destination buffer.

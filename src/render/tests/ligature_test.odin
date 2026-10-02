@@ -233,7 +233,7 @@ test_atlas_rasterize_ligature_slot :: proc(t: ^testing.T) {
 	idx, slot := render.atlas_lookup(&atlas, lig_cp)
 	testing.expect(t, idx >= 0 && idx < render.ATLAS_SLOT_COUNT, "Slot index within bounds")
 
-	render._atlas_rasterize_into_slot(&atlas, &rasterizer, lig_cp, idx)
+	render._atlas_rasterize_into_slot(&atlas, &rasterizer, lig_cp, idx, true)
 	testing.expect(t, slot.valid, "Atlas slot must be valid after rasterization")
 	testing.expect(t, slot.advance > 0, "Slot advance must be positive")
 }

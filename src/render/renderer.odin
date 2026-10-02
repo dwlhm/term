@@ -1126,7 +1126,7 @@ _prepare_instances :: proc(
 			fg_r, fg_g, fg_b := instance.unpack_r5g6b5(fg_packed)
 
 			if !slot.valid && codepoint >= CONTENT_LIGATURE_BASE && codepoint < 0x1FFFFF {
-				_atlas_rasterize_into_slot(atlas, &r.rasterizer, codepoint, slot_idx)
+				_atlas_rasterize_into_slot(atlas, &r.rasterizer, codepoint, slot_idx, true)
 			}
 
 			if slot.valid {

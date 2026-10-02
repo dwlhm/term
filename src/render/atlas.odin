@@ -43,6 +43,29 @@ FALLBACK_SLOT_BASE :: PINNED_TOTAL
 // FALLBACK_SLOT_COUNT is the number of dynamic slots (PINNED_TOTAL..511).
 FALLBACK_SLOT_COUNT :: ATLAS_SLOT_COUNT - FALLBACK_SLOT_BASE
 
+// ATLAS_CAP_REFERENCE_PREFERRED is the primary-face glyph whose rendered ink
+// calibrates the primary's optical cap height. A Latin capital is flat-topped
+// and reaches the cap line in every text face.
+ATLAS_CAP_REFERENCE_PREFERRED :: u32('H')
+
+// ATLAS_CAP_REFERENCE_FALLBACK is used when the primary face carries no
+// Latin capital; digits share the cap line in essentially every text face.
+ATLAS_CAP_REFERENCE_FALLBACK :: u32('0')
+
+// ATLAS_FALLBACK_MAX_SCALE bounds how far a fallback glyph may be scaled up
+// to reach the primary's cap height. Symbol faces draw small outlines inside
+// a large em, so real UI glyphs need a sizeable boost; the bound keeps a
+// pathologically small outline from running past the atlas cell.
+ATLAS_FALLBACK_MAX_SCALE :: 4.0
+
+// ATLAS_FALLBACK_FIT_STEP is the multiplicative step used to shrink an
+// oversized fallback bitmap until it fits the cell, mirroring the fit loop in
+// font_rasterize_glyph_fitted.
+ATLAS_FALLBACK_FIT_STEP :: 0.95
+
+// ATLAS_FALLBACK_FIT_STEPS bounds that shrink loop.
+ATLAS_FALLBACK_FIT_STEPS :: 24
+
 // Atlas is a fixed-slot font atlas.
 Atlas :: struct {
 	slots:      [ATLAS_SLOT_COUNT]Atlas_Slot,
@@ -61,6 +84,14 @@ Atlas :: struct {
 
 	// Pinned glyph tracking
 	pinned_count: int,  // number of pinned glyphs successfully prewarmed
+
+	// Primary-face optical calibration, measured once in atlas_init. Slots
+	// filled from the fallback chain are scaled to primary_cap_px and
+	// bottom-aligned to primary_baseline_px, so UI chrome drawn by a symbol
+	// face shares the text face's baseline and optical size. primary_cap_px
+	// == 0 means "uncalibrated": fallback glyphs keep face-local placement.
+	primary_baseline_px: int,  // reference ink bottom row within a cell
+	primary_cap_px: int,  // primary cap height in px (measured ink height)
 
 	// Dynamic fallback region (FIFO): slots FALLBACK_SLOT_BASE..511 hold
 	// rasterized fallback glyphs. tag is (u64(font_index) << 32) | shaped;
@@ -89,6 +120,11 @@ atlas_init :: proc(a: ^Atlas, rasterizer: ^Font_Rasterizer, allocator: runtime.A
 	a.pinned_count = 0
 	a.gpu_dirty = true
 
+	// Primary-face optical calibration (once, init only): the fallback chain
+	// fills pinned slots the primary left blank, and those glyphs must be
+	// placed against the primary's baseline and optical size.
+	a.primary_cap_px, a.primary_baseline_px = _atlas_calibrate_reference(rasterizer)
+
 	// Allocate pixel buffer (R8 format, single channel)
 	pixel_count := a.tex_width * a.tex_height
 	a.pixels = make([]u8, pixel_count, allocator)
@@ -116,6 +152,33 @@ atlas_init :: proc(a: ^Atlas, rasterizer: ^Font_Rasterizer, allocator: runtime.A
 
 	// Prewarm pinned glyphs
 	atlas_prewarm(a, rasterizer)
+}
+
+// _atlas_calibrate_reference measures the primary face's cap height and its
+// baseline row from the rendered ink of a reference glyph.
+//
+// Cap height is not exposed by Font_Metrics, so it is measured instead: a
+// Latin capital (or a digit where the face has no capital) is flat-topped and
+// rises to the cap line in every text face, which makes its ink height the
+// primary's own cap height at the configured pixel size. Its ink bottom row
+// is the primary's baseline within an atlas cell. Measuring ink (not a font
+// table) keeps both targets valid for any primary font the app ships,
+// including hinted faces whose reported metrics round differently.
+//
+// Returns (0, -1) when the face covers neither reference, which leaves
+// fallback glyphs on their face-local placement.
+_atlas_calibrate_reference :: proc(rasterizer: ^Font_Rasterizer) -> (cap_px, baseline_px: int) {
+	references := [2]u32{ATLAS_CAP_REFERENCE_PREFERRED, ATLAS_CAP_REFERENCE_FALLBACK}
+	for cp in references {
+		if !font_rasterizer_has_glyph(rasterizer, cp) {
+			continue
+		}
+		_, height, _, bottom, ok := font_measure_glyph_ink_box(rasterizer, cp)
+		if ok {
+			return height, bottom
+		}
+	}
+	return 0, -1
 }
 
 // atlas_destroy frees the atlas pixel buffer and GPU resources.
@@ -166,12 +229,93 @@ atlas_prewarm :: proc(a: ^Atlas, rasterizer: ^Font_Rasterizer) {
 			continue
 		}
 
-		if _atlas_rasterize_into_slot(a, rasterizer, u32(codepoint), idx) {
+		if _atlas_rasterize_into_slot(a, rasterizer, u32(codepoint), idx, true) {
 			a.pinned_count += 1
 		}
 	}
 
 	a.gpu_dirty = true
+}
+
+// _atlas_rasterize_fallback_fitted rasterizes a fallback-sourced pinned glyph
+// scaled so its ink height matches the primary's calibrated cap height, then
+// blits it centered in the cell with its ink bottom on the primary's
+// baseline.
+//
+// Two things about the fallback face are deliberately discarded:
+//
+//   - its own ascender. A symbol face carries a much larger ascender than a
+//     text face (Apple Symbols reports roughly 11px against Maple Mono's 17px
+//     at the same pixel size), so anchoring against it lands the glyph high —
+//     a superscript next to normal-height text.
+//
+//   - its own design baseline offset (bitmap_top). That offset is per glyph,
+//     not per face: within one symbol face a control caret sits rows above the
+//     baseline while a return arrow dips below it. Bottom alignment instead
+//     pins every fallback glyph's ink bottom to one row — the primary's.
+//
+// This diverges on purpose from the Powerline branch in
+// _atlas_rasterize_into_slot, which routes through font_rasterize_glyph_fitted
+// + _atlas_blit_bitmap and therefore preserves bitmap_top. That is correct
+// there: a Powerline caret is a standalone decorative separator whose glyph is
+// designed to hang off the cell edge at its own height, and flattening it
+// onto the text baseline would detach it from the frame it draws. Inline UI
+// symbols are the opposite case — they are read as part of a text line, so the
+// text baseline wins over the source face's design offset.
+//
+// A slot's UVs span exactly one cell, so an oversized bitmap would be
+// clipped: the scaled size is shrunk (and only the scaled size; glyphs below
+// the optical target keep it) until the ink fits (cell_width, cell_height),
+// bounded by ATLAS_FALLBACK_MAX_SCALE upward and ATLAS_FALLBACK_FIT_STEPS
+// downward. A glyph still taller than the rows above the baseline after that
+// fit is top-clamped by the blit instead of being clipped. When the atlas
+// carries no calibration or the glyph has no measurable ink, placement falls
+// back to the face-local path.
+_atlas_rasterize_fallback_fitted :: proc(
+	a: ^Atlas,
+	rasterizer: ^Font_Rasterizer,
+	codepoint: u32,
+	dst_x, dst_y: int,
+	slot_size: int,
+) {
+	base_w, base_h, measured := font_measure_glyph_ink(rasterizer, codepoint)
+	if a.primary_cap_px <= 0 || a.primary_baseline_px < 0 || !measured || base_w <= 0 || base_h <= 0 {
+		font_rasterize_glyph_into(
+			rasterizer,
+			codepoint,
+			a.pixels,
+			a.tex_width,
+			dst_x, dst_y,
+			slot_size, slot_size,
+		)
+		return
+	}
+
+	size := rasterizer.metrics.pixel_size * f32(a.primary_cap_px) / f32(base_h)
+	size = min(size, rasterizer.metrics.pixel_size * ATLAS_FALLBACK_MAX_SCALE)
+
+	ink_w, ink_h, _ := font_measure_glyph_ink(rasterizer, codepoint, size)
+	steps := 0
+	for (ink_w > a.cell_width || ink_h > a.cell_height) && steps < ATLAS_FALLBACK_FIT_STEPS {
+		size *= ATLAS_FALLBACK_FIT_STEP
+		ink_w, ink_h, measured = font_measure_glyph_ink(rasterizer, codepoint, size)
+		if !measured || ink_h <= 0 {
+			break
+		}
+		steps += 1
+	}
+
+	font_rasterize_glyph_sized_into(
+		rasterizer,
+		codepoint,
+		size,
+		a.pixels,
+		a.tex_width,
+		dst_x, dst_y,
+		slot_size, slot_size,
+		a.primary_baseline_px,
+		a.cell_width,
+	)
 }
 
 // _atlas_rasterize_into_slot rasterizes a glyph into a specific atlas slot
@@ -187,11 +331,20 @@ atlas_prewarm :: proc(a: ^Atlas, rasterizer: ^Font_Rasterizer) {
 // Ligature-slot codepoints address a glyph index directly rather than a
 // codepoint, so there is no coverage query for them; they stay
 // unconditionally valid.
+//
+// is_primary states whether rasterizer is the atlas's primary face. Primary
+// glyphs are placed exactly as before; fallback-sourced glyphs are scaled to
+// the primary's cap height and bottom-aligned to the primary's baseline
+// (_atlas_rasterize_fallback_fitted), since a symbol face's ascender and its
+// per-glyph baseline offsets do not match the cell the atlas was laid out
+// for. The flag is explicit rather than inferred, so the branch cannot
+// silently follow a pointer change.
 _atlas_rasterize_into_slot :: proc(
 	a: ^Atlas,
 	rasterizer: ^Font_Rasterizer,
 	codepoint: u32,
 	slot_index: int,
+	is_primary: bool,
 ) -> (covered: bool) {
 	slot := &a.slots[slot_index]
 
@@ -241,7 +394,7 @@ _atlas_rasterize_into_slot :: proc(
 			_atlas_blit_bitmap(a, &bmp, slot_index, false, int(math.round(rasterizer.metrics.ascent)))
 			delete(bmp.pixels)
 		}
-	} else {
+	} else if is_primary {
 		font_rasterize_glyph_into(
 			rasterizer,
 			codepoint,
@@ -250,6 +403,8 @@ _atlas_rasterize_into_slot :: proc(
 			x0, y0,
 			glyph_size, glyph_size,
 		)
+	} else {
+		_atlas_rasterize_fallback_fitted(a, rasterizer, codepoint, x0, y0, glyph_size)
 	}
 	return true
 }
@@ -652,7 +807,7 @@ atlas_pin_audit :: proc(a: ^Atlas, chain: ^Fallback_Chain) -> (promoted: int) {
 			if font_rasterizer_find_glyph_index(f, u32(codepoint)) == 0 {
 				continue
 			}
-			_atlas_rasterize_into_slot(a, f, u32(codepoint), idx)
+			_atlas_rasterize_into_slot(a, f, u32(codepoint), idx, false)
 			promoted += 1
 			break
 		}
@@ -690,7 +845,7 @@ atlas_prewarm_chain :: proc(a: ^Atlas, chain: ^Fallback_Chain) {
 			if font_rasterizer_find_glyph_index(f, u32(codepoint)) == 0 {
 				continue
 			}
-			_atlas_rasterize_into_slot(a, f, u32(codepoint), idx)
+			_atlas_rasterize_into_slot(a, f, u32(codepoint), idx, false)
 			break
 		}
 	}
