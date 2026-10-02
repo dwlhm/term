@@ -6,6 +6,7 @@ import "core:time"
 import posix "core:sys/posix"
 
 import ui "../"
+import tabs "../../platform/tabs"
 import termgrid "../../terminal"
 import inter "../../interaction"
 import input "../../platform/input"
@@ -266,7 +267,7 @@ test_ui_render_staging_bounds :: proc(t: ^testing.T) {
 	testing.expect(t, staged > 0, "must stage UI quads")
 	testing.expect(t, staged <= ui.UI_MAX_INSTANCES, "staging must not exceed UI_MAX_INSTANCES quota")
 	testing.expect(t, r.ui_staged, "r.ui_staged must be true after staging")
-	testing.expect(t, r.ui_bg_count > 0, "r.ui_bg_count must be > 0 after staging")
+	testing.expect(t, r.ui_layer_bg_count[render.UI_Layer.Tab_Chrome] > 0, "tab chrome layer must hold quads after staging")
 }
 
 @test
@@ -297,7 +298,7 @@ test_ui_render_confirm_dialog_stages :: proc(t: ^testing.T) {
 	shown_count := ui.ui_render_stage(r, &theme, i18n.i18n_get(), &tab_state, tabs[:], rects[:], nil, 800, 600, 1, "", nil, nil, nil, &confirm)
 
 	testing.expect(t, shown_count > hidden_count, "visible dialog must stage additional card and button quads")
-	testing.expect(t, r.ui_bg_count > 0, "dialog card background must be staged")
+	testing.expect(t, r.ui_layer_bg_count[render.UI_Layer.Overlay] > 0, "dialog card background must be staged on the overlay layer")
 }
 
 @test
@@ -313,10 +314,10 @@ test_ui_render_logical_to_physical_scale :: proc(t: ^testing.T) {
 		tabs := [1]ui.UI_Tab_Info{{is_active = true}}
 		theme := ui.theme_catppuccin_mocha()
 		_ = ui.ui_render_stage(r, &theme, i18n.i18n_get(), &state, tabs[:], rects[:], nil, 800, 600, scale)
-		testing.expect_value(t, r.ui_bg_data[0].cw, state.rect.w * scale)
-		testing.expect_value(t, r.ui_bg_data[0].ch, ui.TAB_BAR_HEIGHT * scale)
-		// ui_bg_data[2] is the active tab underline at rects[0].x.
-		testing.expect_value(t, r.ui_bg_data[2].x, rects[0].x * scale)
+		testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Tab_Chrome][0].cw, state.rect.w * scale)
+		testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Tab_Chrome][0].ch, ui.TAB_BAR_HEIGHT * scale)
+		// Tab_Chrome quad 2 is the active tab underline at rects[0].x.
+		testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Tab_Chrome][2].x, rects[0].x * scale)
 		target, _ := ui.tab_bar_hit_test(&state, 1, rects[:], rects[0].x + rects[0].w / 2, ui.TAB_BAR_HEIGHT / 2)
 		testing.expect_value(t, target, ui.Tab_Hit_Target.Tab_Item)
 		target, _ = ui.tab_bar_hit_test(&state, 1, rects[:], state.new_tab_rect.x + state.new_tab_rect.w / 2, ui.TAB_BAR_HEIGHT / 2)
@@ -783,69 +784,69 @@ test_ui_render_overflow_hints_stage :: proc(t: ^testing.T) {
 test_ui_draw_water_ring_and_alpha :: proc(t: ^testing.T) {
 	r := new(render.Renderer)
 	defer free(r)
-	r.ui_bg_count = 0
+	render.renderer_ui_reset(r)
 
 	col := ui.Color{0.2, 0.4, 0.8, 0.5}
 	ui.ui_draw_water_ring(r, 100, 100, 30, 2, col)
-	testing.expect(t, r.ui_bg_count > 0, "water ring must stage background quads")
+	testing.expect(t, r.ui_layer_bg_count[render.UI_Layer.Overlay] > 0, "water ring must stage background quads")
 	// Verify that emit_bg preserved the alpha channel!
-	testing.expect_value(t, r.ui_bg_data[0].a, f32(0.5))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Overlay][0].a, f32(0.5))
 }
 
 @test
 test_ui_draw_hover_ripple :: proc(t: ^testing.T) {
 	r := new(render.Renderer)
 	defer free(r)
-	r.ui_bg_count = 0
+	render.renderer_ui_reset(r)
 
 	col := ui.Color{0.35, 0.75, 1.0, 0.8}
 	ui.ui_draw_hover_ripple(r, 150, 150, 0.5, col)
-	testing.expect(t, r.ui_bg_count >= 32, "hover ripple must stage multiple concentric rings")
+	testing.expect(t, r.ui_layer_bg_count[render.UI_Layer.Overlay] >= 32, "hover ripple must stage multiple concentric rings")
 }
 
 @test
 test_ui_draw_splash_ripple :: proc(t: ^testing.T) {
 	r := new(render.Renderer)
 	defer free(r)
-	r.ui_bg_count = 0
+	render.renderer_ui_reset(r)
 
 	col := ui.Color{0.35, 0.75, 1.0, 0.8}
 	ui.ui_draw_splash_ripple(r, 200, 200, 0.3, 0.8, col)
-	testing.expect(t, r.ui_bg_count >= 32, "splash ripple must stage expanding waves")
+	testing.expect(t, r.ui_layer_bg_count[render.UI_Layer.Overlay] >= 32, "splash ripple must stage expanding waves")
 }
 
 @test
 test_ui_stage_water_3d_hover :: proc(t: ^testing.T) {
 	r := new(render.Renderer)
 	defer free(r)
-	r.ui_bg_count = 0
+	render.renderer_ui_reset(r)
 
 	col := ui.Color{0.35, 0.75, 1.0, 0.85}
 	ui.ui_stage_water_3d_hover(r, 800, 600, 150, 150, 0.5, col)
-	testing.expect_value(t, r.ui_bg_count, 1)
-	testing.expect_value(t, r.ui_bg_data[0].cw, f32(800))
-	testing.expect_value(t, r.ui_bg_data[0].ch, f32(600))
-	testing.expect_value(t, r.ui_bg_data[0].u0, f32(150)) // cx
-	testing.expect_value(t, r.ui_bg_data[0].v0, f32(150)) // cy
-	testing.expect_value(t, r.ui_bg_data[0].u1, f32(0.5)) // hover_time
-	testing.expect_value(t, r.ui_bg_data[0].v1, f32(-1.0)) // reserved hover effect marker
+	testing.expect_value(t, r.ui_layer_bg_count[render.UI_Layer.Overlay], u32(1))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Overlay][0].cw, f32(800))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Overlay][0].ch, f32(600))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Overlay][0].u0, f32(150)) // cx
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Overlay][0].v0, f32(150)) // cy
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Overlay][0].u1, f32(0.5)) // hover_time
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Overlay][0].v1, f32(-1.0)) // reserved hover effect marker
 }
 
 @test
 test_ui_stage_water_3d_splash :: proc(t: ^testing.T) {
 	r := new(render.Renderer)
 	defer free(r)
-	r.ui_bg_count = 0
+	render.renderer_ui_reset(r)
 
 	col := ui.Color{0.35, 0.75, 1.0, 0.85}
 	ui.ui_stage_water_3d_splash(r, 1024, 768, 200, 300, 0.4, 1.6, col)
-	testing.expect_value(t, r.ui_bg_count, 1)
-	testing.expect_value(t, r.ui_bg_data[0].cw, f32(1024))
-	testing.expect_value(t, r.ui_bg_data[0].ch, f32(768))
-	testing.expect_value(t, r.ui_bg_data[0].u0, f32(200)) // cx
-	testing.expect_value(t, r.ui_bg_data[0].v0, f32(300)) // cy
-	testing.expect_value(t, r.ui_bg_data[0].u1, f32(0.4 / 1.6)) // normalized progress
-	testing.expect_value(t, r.ui_bg_data[0].v1, f32(-2.0)) // reserved splash effect marker
+	testing.expect_value(t, r.ui_layer_bg_count[render.UI_Layer.Overlay], u32(1))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Overlay][0].cw, f32(1024))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Overlay][0].ch, f32(768))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Overlay][0].u0, f32(200)) // cx
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Overlay][0].v0, f32(300)) // cy
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Overlay][0].u1, f32(0.4 / 1.6)) // normalized progress
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Overlay][0].v1, f32(-2.0)) // reserved splash effect marker
 }
 
 
@@ -857,21 +858,21 @@ test_ui_stage_water_3d_splash_duration_boundaries :: proc(t: ^testing.T) {
 	duration: f32 = 2.4
 	progress: f32 = 0.25
 	ui.ui_stage_water_3d_splash(r, 800, 600, 100, 150, duration * progress, duration, col)
-	testing.expect_value(t, r.ui_bg_count, 1)
-	testing.expect_value(t, r.ui_bg_data[0].u1, progress)
+	testing.expect_value(t, r.ui_layer_bg_count[render.UI_Layer.Overlay], u32(1))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Overlay][0].u1, progress)
 
-	r.ui_bg_count = 0
+	render.renderer_ui_reset(r)
 	ui.ui_stage_water_3d_splash(r, 800, 600, 100, 150, 0, duration, col)
-	testing.expect_value(t, r.ui_bg_count, 1)
-	testing.expect_value(t, r.ui_bg_data[0].u1, f32(0))
+	testing.expect_value(t, r.ui_layer_bg_count[render.UI_Layer.Overlay], u32(1))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Overlay][0].u1, f32(0))
 
-	r.ui_bg_count = 0
+	render.renderer_ui_reset(r)
 	ui.ui_stage_water_3d_splash(r, 800, 600, 100, 150, duration, duration, col)
 	ui.ui_stage_water_3d_splash(r, 800, 600, 100, 150, duration * 2, duration, col)
 	ui.ui_stage_water_3d_splash(r, 800, 600, 100, 150, 0, 0, col)
 	ui.ui_stage_water_3d_splash(r, 800, 600, 100, 150, 0, -duration, col)
 	ui.ui_stage_water_3d_splash(r, 800, 600, 100, 150, -duration, duration, col)
-	testing.expect_value(t, r.ui_bg_count, 0)
+	testing.expect_value(t, r.ui_layer_bg_count[render.UI_Layer.Overlay], u32(0))
 }
 
 @test
@@ -884,13 +885,13 @@ test_water_surface_filters_bounds_and_resets :: proc(t: ^testing.T) {
 		w = instance.Water_Wave{origin_age_strength = {100, 150, 0.3, 0.4}, lifetime_params = {2, 0, 0, 0}}
 	}
 	ui.ui_stage_water_surface(r, 800, 600, 2, waves[:], col)
-	testing.expect_value(t, r.ui_bg_count, 1)
-	testing.expect_value(t, r.ui_bg_data[0].v1, f32(-3))
+	testing.expect_value(t, r.ui_layer_bg_count[render.UI_Layer.Overlay], u32(1))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Overlay][0].v1, f32(-3))
 	testing.expect_value(t, r.instances.uniform_data.water_meta[0], f32(instance.WATER_MAX_WAVES))
 	testing.expect_value(t, r.instances.uniform_data.water_meta[1], f32(2))
 	testing.expect_value(t, r.instances.uniform_data.waves[0].origin_age_strength[0], f32(100))
 
-	r.ui_bg_count = 0
+	render.renderer_ui_reset(r)
 	bad := transmute(f32)u32(0x7fc00000)
 	waves[0].origin_age_strength[0] = bad
 	waves[1].origin_age_strength[2] = waves[1].lifetime_params[0]
@@ -898,15 +899,17 @@ test_water_surface_filters_bounds_and_resets :: proc(t: ^testing.T) {
 	testing.expect_value(t, r.instances.uniform_data.water_meta[0], f32(1))
 	testing.expect_value(t, r.instances.uniform_data.waves[1].lifetime_params[0], f32(0))
 
-	r.ui_bg_count = 0
+	render.renderer_ui_reset(r)
 	ui.ui_stage_water_surface(r, 800, 600, 2, nil, col)
-	testing.expect_value(t, r.ui_bg_count, 0)
+	testing.expect_value(t, r.ui_layer_bg_count[render.UI_Layer.Overlay], u32(0))
 	testing.expect_value(t, r.instances.uniform_data.water_meta[0], f32(0))
 	ui.ui_stage_water_surface(r, 800, 600, bad, waves[2:], col)
-	testing.expect_value(t, r.ui_bg_count, 0)
-	r.ui_bg_count = render.RENDER_MAX_UI_INSTANCES
+	testing.expect_value(t, r.ui_layer_bg_count[render.UI_Layer.Overlay], u32(0))
+	// A saturated layer must refuse new quads instead of spilling anywhere.
+	overlay_cap: u32 = u32(render.UI_LAYER_BG_CAPACITY[render.UI_Layer.Overlay])
+	r.ui_layer_bg_count[render.UI_Layer.Overlay] = overlay_cap
 	ui.ui_stage_water_surface(r, 800, 600, 2, waves[2:], col)
-	testing.expect_value(t, r.ui_bg_count, render.RENDER_MAX_UI_INSTANCES)
+	testing.expect_value(t, r.ui_layer_bg_count[render.UI_Layer.Overlay], overlay_cap)
 	testing.expect_value(t, r.instances.uniform_data.water_meta[0], f32(0))
 }
 
@@ -922,30 +925,32 @@ test_pane_chrome_dividers_and_active_border :: proc(t: ^testing.T) {
 	}
 	active_rect := ui.Rect_f32{x = 0, y = 28, w = 400, h = 572}
 
-	ui.ui_stage_pane_chrome(r, &theme, dividers, active_rect, true, 1.0)
+	all_edges := ui.PANE_EDGE_LEFT | ui.PANE_EDGE_RIGHT | ui.PANE_EDGE_TOP | ui.PANE_EDGE_BOTTOM
+	ui.ui_stage_pane_chrome(r, &theme, dividers, active_rect, all_edges, true, 1.0)
 	testing.expect(t, r.ui_staged, "ui must be staged")
-	// 2 dividers + 4 border quads = 6 quads
-	testing.expect_value(t, r.ui_bg_count, 6)
+	// 2 dividers + 4 border quads = 6 quads on the pane-chrome layer
+	testing.expect_value(t, r.ui_layer_bg_count[render.UI_Layer.Pane_Chrome], u32(6))
 
-	// Divider 0: border_subtle
-	testing.expect_value(t, r.ui_bg_data[0].x, f32(400))
-	testing.expect_value(t, r.ui_bg_data[0].y, f32(28))
-	testing.expect_value(t, r.ui_bg_data[0].cw, f32(1))
-	testing.expect_value(t, r.ui_bg_data[0].ch, f32(572))
-	testing.expect_value(t, r.ui_bg_data[0].r, theme.border_subtle.r)
+	// Divider 0: border_divider at full alpha
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Pane_Chrome][0].x, f32(400))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Pane_Chrome][0].y, f32(28))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Pane_Chrome][0].cw, f32(1))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Pane_Chrome][0].ch, f32(572))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Pane_Chrome][0].r, theme.border_divider.r)
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Pane_Chrome][0].a, theme.border_divider.a)
 
 	// Divider 1: surface_hover
-	testing.expect_value(t, r.ui_bg_data[1].x, f32(401))
-	testing.expect_value(t, r.ui_bg_data[1].y, f32(300))
-	testing.expect_value(t, r.ui_bg_data[1].cw, f32(399))
-	testing.expect_value(t, r.ui_bg_data[1].ch, f32(1))
-	testing.expect_value(t, r.ui_bg_data[1].r, theme.surface_hover.r)
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Pane_Chrome][1].x, f32(401))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Pane_Chrome][1].y, f32(300))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Pane_Chrome][1].cw, f32(399))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Pane_Chrome][1].ch, f32(1))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Pane_Chrome][1].r, theme.surface_hover.r)
 
 	// Border quads (top, bottom, left, right): accent_primary
 	for i in 2..<6 {
-		testing.expect_value(t, r.ui_bg_data[i].r, theme.accent_primary.r)
-		testing.expect_value(t, r.ui_bg_data[i].g, theme.accent_primary.g)
-		testing.expect_value(t, r.ui_bg_data[i].b, theme.accent_primary.b)
+		testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Pane_Chrome][i].r, theme.accent_primary.r)
+		testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Pane_Chrome][i].g, theme.accent_primary.g)
+		testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Pane_Chrome][i].b, theme.accent_primary.b)
 	}
 }
 
@@ -956,29 +961,104 @@ test_pane_chrome_hollow_cursor :: proc(t: ^testing.T) {
 
 	ui.ui_stage_hollow_cursor(r, 100, 200, 8, 16, {0.8, 0.8, 0.8, 0.8}, 1.0)
 	testing.expect(t, r.ui_staged, "ui must be staged")
-	testing.expect_value(t, r.ui_bg_count, 4)
+	testing.expect_value(t, r.ui_layer_bg_count[render.UI_Layer.Pane_Chrome], u32(4))
 
 	// Top: (100, 200, 8, 1)
-	testing.expect_value(t, r.ui_bg_data[0].x, f32(100))
-	testing.expect_value(t, r.ui_bg_data[0].y, f32(200))
-	testing.expect_value(t, r.ui_bg_data[0].cw, f32(8))
-	testing.expect_value(t, r.ui_bg_data[0].ch, f32(1))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Pane_Chrome][0].x, f32(100))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Pane_Chrome][0].y, f32(200))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Pane_Chrome][0].cw, f32(8))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Pane_Chrome][0].ch, f32(1))
 
 	// Bottom: (100, 215, 8, 1)
-	testing.expect_value(t, r.ui_bg_data[1].x, f32(100))
-	testing.expect_value(t, r.ui_bg_data[1].y, f32(215))
-	testing.expect_value(t, r.ui_bg_data[1].cw, f32(8))
-	testing.expect_value(t, r.ui_bg_data[1].ch, f32(1))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Pane_Chrome][1].x, f32(100))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Pane_Chrome][1].y, f32(215))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Pane_Chrome][1].cw, f32(8))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Pane_Chrome][1].ch, f32(1))
 
 	// Left: (100, 200, 1, 16)
-	testing.expect_value(t, r.ui_bg_data[2].x, f32(100))
-	testing.expect_value(t, r.ui_bg_data[2].y, f32(200))
-	testing.expect_value(t, r.ui_bg_data[2].cw, f32(1))
-	testing.expect_value(t, r.ui_bg_data[2].ch, f32(16))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Pane_Chrome][2].x, f32(100))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Pane_Chrome][2].y, f32(200))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Pane_Chrome][2].cw, f32(1))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Pane_Chrome][2].ch, f32(16))
 
 	// Right: (107, 200, 1, 16)
-	testing.expect_value(t, r.ui_bg_data[3].x, f32(107))
-	testing.expect_value(t, r.ui_bg_data[3].y, f32(200))
-	testing.expect_value(t, r.ui_bg_data[3].cw, f32(1))
-	testing.expect_value(t, r.ui_bg_data[3].ch, f32(16))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Pane_Chrome][3].x, f32(107))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Pane_Chrome][3].y, f32(200))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Pane_Chrome][3].cw, f32(1))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Pane_Chrome][3].ch, f32(16))
+}
+
+@test
+test_ui_layer_plan_puts_modal_above_pane_chrome :: proc(t: ^testing.T) {
+	r := new(render.Renderer)
+	defer free(r)
+	for &slot in r.atlas.slots do slot.valid = true
+	theme := ui.theme_catppuccin_mocha()
+
+	// Split-pane chrome is staged in device pixels by the app, after the
+	// tab chrome pass has already staged the visible session switcher.
+	dividers := []ui.Pane_Divider{{x = 400, y = 28, w = 1, h = 572}}
+	active_rect := ui.Rect_f32{x = 0, y = 28, w = 400, h = 572}
+
+	bar: ui.Tab_Bar_State
+	ui.tab_bar_init(&bar)
+	switcher: ui.Session_Switcher_State
+	tabs.session_switcher_init(&switcher)
+	switcher.visible = true
+	switcher.item_count = 3
+	for i in 0 ..< switcher.item_count {
+		switcher.items[i].title = "Session"
+		switcher.items[i].cwd = "/tmp"
+		switcher.items[i].tab_idx = i
+	}
+	tabs.session_switcher_filter(&switcher)
+	tabs.session_switcher_layout(&switcher, 800, 600)
+
+	render.renderer_ui_reset(r)
+	_ = ui.ui_render_stage(r, &theme, i18n.i18n_get(), &bar, nil, nil, nil, 800, 600, 1, "", nil, nil, nil, nil, nil, &switcher)
+	ui.ui_stage_pane_chrome(r, &theme, dividers, active_rect, ui.PANE_EDGE_RIGHT, true, 1.0)
+
+	testing.expect(t, r.ui_layer_bg_count[render.UI_Layer.Modal] > 0, "the visible switcher must populate the modal layer")
+	testing.expect(t, r.ui_layer_bg_count[render.UI_Layer.Pane_Chrome] > 0, "split-pane chrome must populate the pane-chrome layer")
+
+	runs: [render.UI_LAYER_COUNT]render.UI_Layer_Run
+	total := render.renderer_ui_layer_plan(r, 0, &runs)
+	testing.expect(t, total > 0, "the layer plan must cover staged instances")
+	testing.expect_value(t, runs[render.UI_Layer.Modal].bg_count, r.ui_layer_bg_count[render.UI_Layer.Modal])
+	testing.expect(t,
+		runs[render.UI_Layer.Modal].bg_offset >= runs[render.UI_Layer.Pane_Chrome].bg_offset + u64(runs[render.UI_Layer.Pane_Chrome].bg_count) * instance.INSTANCE_STRIDE,
+		"every modal instance must be uploaded after every pane-chrome instance",
+	)
+}
+
+@test
+test_ui_active_pane_outline_respects_edge_mask :: proc(t: ^testing.T) {
+	r := new(render.Renderer)
+	defer free(r)
+	theme := ui.theme_catppuccin_mocha()
+	active_rect := ui.Rect_f32{x = 0, y = 28, w = 400, h = 572}
+
+	// A single edge bit must emit exactly one accent quad.
+	ui.ui_stage_pane_chrome(r, &theme, nil, active_rect, ui.PANE_EDGE_RIGHT, true, 1.0)
+	testing.expect_value(t, r.ui_layer_bg_count[render.UI_Layer.Pane_Chrome], u32(1))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Pane_Chrome][0].x, f32(399))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Pane_Chrome][0].cw, f32(1))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Pane_Chrome][0].ch, f32(572))
+	testing.expect_value(t, r.ui_bg_data[render.UI_Layer.Pane_Chrome][0].r, theme.accent_primary.r)
+
+	// An empty mask emits nothing at all.
+	render.renderer_ui_reset(r)
+	ui.ui_stage_pane_chrome(r, &theme, nil, active_rect, 0, true, 1.0)
+	testing.expect_value(t, r.ui_layer_bg_count[render.UI_Layer.Pane_Chrome], u32(0))
+
+	// The outline never exceeds four quads, one per requested edge.
+	render.renderer_ui_reset(r)
+	all_edges := ui.PANE_EDGE_LEFT | ui.PANE_EDGE_RIGHT | ui.PANE_EDGE_TOP | ui.PANE_EDGE_BOTTOM
+	ui.ui_stage_pane_chrome(r, &theme, nil, active_rect, all_edges, true, 1.0)
+	testing.expect(t, r.ui_layer_bg_count[render.UI_Layer.Pane_Chrome] <= 4, "the outline is capped at four edges")
+
+	// show_active_border suppresses the outline even when edges are requested.
+	render.renderer_ui_reset(r)
+	ui.ui_stage_pane_chrome(r, &theme, nil, active_rect, all_edges, false, 1.0)
+	testing.expect_value(t, r.ui_layer_bg_count[render.UI_Layer.Pane_Chrome], u32(0))
 }

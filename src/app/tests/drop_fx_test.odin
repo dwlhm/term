@@ -4,6 +4,7 @@ import "core:testing"
 import app "../"
 import input "../../platform/input"
 import instance "../../render/instance"
+import render "../../render"
 import win "../../platform/window"
 
 _fx_count :: proc(s: ^app.Drop_Fx_State) -> int {
@@ -125,7 +126,8 @@ test_drop_fx_real_ui_stage_keeps_logical_origins :: proc(t: ^testing.T) {
 	testing.expect_value(t, a.renderer.instances.uniform_data.water_meta[1], f32(2))
 	testing.expect_value(t, a.renderer.instances.uniform_data.waves[0].origin_age_strength[0], f32(100))
 	count := 0
-	for quad in a.renderer.ui_bg_data[:a.renderer.ui_bg_count] {
+	overlay := render.UI_Layer.Overlay
+	for quad in a.renderer.ui_bg_data[overlay][:a.renderer.ui_layer_bg_count[overlay]] {
 		if quad.v1 == -3 { count += 1 }
 	}
 	testing.expect_value(t, count, 1)

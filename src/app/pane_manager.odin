@@ -16,6 +16,7 @@ import termgrid "../terminal"
 
 PANE_RESIZE_STEP :: f32(0.05)
 PANE_INACTIVE_DIM :: f32(0.78)
+PANE_EDGE_EPSILON: f32 : 0.5
 
 _app_active_tab :: proc(a: ^App) -> ^Tab_Session {
 	if a == nil || a.session_mgr.active_idx < 0 || a.session_mgr.active_idx >= len(a.session_mgr.tabs) do return nil
@@ -260,8 +261,40 @@ App_Pane_Frame :: struct {
 	count, lock_count, active: int,
 }
 
+// _pane_divider_edges reports which of the focused leaf's four edges are
+// occupied by a divider, as a ui.PANE_EDGE_* bitmask. Edges that face the window
+// frame or the tab bar are never marked, so the accent outline stays on the
+// interior seams only.
+_pane_divider_edges :: proc(rect: ui.Rect_f32, dividers: []ui.Pane_Divider) -> u8 {
+	edges: u8 = 0
+	if len(dividers) == 0 || rect.w <= 0 || rect.h <= 0 do return edges
+	eps := PANE_EDGE_EPSILON
+	for div in dividers {
+		vertical := div.w <= div.h
+		if vertical {
+			// Divider column must sit exactly on a vertical leaf edge and
+			// overlap the leaf vertically.
+			overlap := min(rect.y + rect.h, div.y + div.h) - max(rect.y, div.y)
+			if overlap <= 0 do continue
+			if abs((div.x + div.w) - rect.x) <= eps do edges |= ui.PANE_EDGE_LEFT
+			if abs(div.x - (rect.x + rect.w)) <= eps do edges |= ui.PANE_EDGE_RIGHT
+		} else {
+			overlap := min(rect.x + rect.w, div.x + div.w) - max(rect.x, div.x)
+			if overlap <= 0 do continue
+			if abs((div.y + div.h) - rect.y) <= eps do edges |= ui.PANE_EDGE_TOP
+			if abs(div.y - (rect.y + rect.h)) <= eps do edges |= ui.PANE_EDGE_BOTTOM
+		}
+	}
+	return edges
+}
+
 _app_present :: proc(a: ^App) -> bool {
 	if a == nil do return false
+	// Every frame rebuilds each UI layer from scratch. Pane chrome stages after
+	// _app_stage_ui; layers make that order irrelevant, but the reset still has
+	// to happen before anything stages so an early-out path cannot inherit the
+	// previous frame's quads.
+	render.renderer_ui_reset(&a.renderer)
 	_app_stage_ui(a) // Layout and dispatch run before borrowing worker snapshots.
 	frame: App_Pane_Frame
 	defer for b in frame.locked[:frame.lock_count] { backend_unlock_render(b) }
@@ -321,7 +354,10 @@ _app_present :: proc(a: ^App) -> bool {
 			}
 		}
 		active := pane_tree_find_pane(&tab.tree, tab.tree.focused_pane_id)
-		if active != nil do ui.ui_stage_pane_chrome(&a.renderer, &a.ui_theme, dividers[:dn], active.rect, tab.tree.node_count > 1)
+		if active != nil {
+			active_edges := _pane_divider_edges(active.rect, dividers[:dn])
+			ui.ui_stage_pane_chrome(&a.renderer, &a.ui_theme, dividers[:dn], active.rect, active_edges, tab.tree.node_count > 1)
+		}
 	} else {
 		b := app_active_backend(a)
 		if b == nil do return false

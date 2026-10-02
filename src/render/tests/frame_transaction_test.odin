@@ -454,8 +454,9 @@ test_pane_frame_damage_and_overlay_transaction :: proc(t: ^testing.T) {
 	}
 	r.cursor_staged = true
 	r.ui_staged = true
-	r.ui_bg_count = 1
-	r.ui_bg_data[0] = instance.Instance_Data{cw = 4, ch = 4}
+	r.ui_layer = render.UI_Layer.Pane_Chrome
+	r.ui_layer_bg_count[render.UI_Layer.Pane_Chrome] = 1
+	r.ui_bg_data[render.UI_Layer.Pane_Chrome][0] = instance.Instance_Data{cw = 4, ch = 4}
 	r.interaction_staged = true
 	r.interaction_slot_start = 126
 	r.interaction_quad_count = 1

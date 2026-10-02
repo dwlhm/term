@@ -84,10 +84,12 @@ Render_Frame_Transaction :: struct {
 	interaction_count:  u32,
 	scrollbar_offset:   u64,
 	scrollbar_count:    u32,
-	ui_bg_offset:    u64,
-	ui_bg_count:     u32,
-	ui_glyph_offset: u64,
-	ui_glyph_count:  u32,
+	// UI chrome is composited per layer, ascending: a higher layer always
+	// lands at a higher byte offset and therefore paints last.
+	ui_bg_offset:    [UI_LAYER_COUNT]u64,
+	ui_bg_count:     [UI_LAYER_COUNT]u32,
+	ui_glyph_offset: [UI_LAYER_COUNT]u64,
+	ui_glyph_count:  [UI_LAYER_COUNT]u32,
 	upload:        Upload_Ring_Frame,
 	upload_committed: bool,
 	command_buffer: rawptr,
@@ -144,10 +146,11 @@ Renderer :: struct {
 	frame_prepared:         bool,
 	cursor_staged:          bool, // cursor_overlay_draw staged the reserved instance
 	ui_staged:              bool,
-	ui_bg_count:            u32,
-	ui_glyph_count:         u32,
-	ui_bg_data:             [RENDER_MAX_UI_INSTANCES]instance.Instance_Data,
-	ui_glyph_data:          [RENDER_MAX_UI_INSTANCES]instance.Instance_Data,
+	ui_layer:               UI_Layer,        // currently open layer for staging
+	ui_layer_bg_count:      [UI_LAYER_COUNT]u32,
+	ui_layer_glyph_count:   [UI_LAYER_COUNT]u32,
+	ui_bg_data:             [UI_LAYER_COUNT][UI_LAYER_MAX_BG]instance.Instance_Data,
+	ui_glyph_data:          [UI_LAYER_COUNT][UI_LAYER_MAX_GLYPH]instance.Instance_Data,
 	interaction_staged:     bool, // interaction_overlay_draw staged quads
 	interaction_slot_start: u32,  // starting instance slot for interaction quads
 	interaction_quad_count: int,  // count of staged interaction quads
@@ -189,7 +192,133 @@ _renderer_instance_capacity :: proc(rows, cols: i32) -> u32 {
 	return max(u32(RENDER_MAX_INSTANCES), u32(RENDER_INSTANCES_PER_CELL * rows * cols + RENDER_INSTANCE_OVERLAY_SLACK))
 }
 
-RENDER_MAX_UI_INSTANCES :: 512
+// UI_LAYER_COUNT is the number of chrome compositing layers. Blended UI has no
+// depth test, so layer order alone decides paint order.
+UI_LAYER_COUNT :: 5
+
+UI_Layer :: enum u8 {
+	Pane_Chrome = 0,  // dividers, active-pane outline, hollow cursors
+	Tab_Chrome  = 1,  // tab bar bg + strip, search bar
+	Popover     = 2,  // tab context menu, tab overflow menu, tab rename
+	Modal       = 3,  // session switcher
+	Overlay     = 4,  // confirm dialog, drop FX surface
+}
+
+// Per-layer instance budgets, sized to real usage. Each layer owns a private
+// fixed sub-array, so a full layer drops its own quads instead of spilling into
+// a neighbour and callers may emit into any layer in any temporal order.
+// Pane_Chrome: <=32 dividers + 4 quads per inactive-pane hollow cursor + 4
+// border edges. Tab_Chrome/Modal: the strip and the switcher list dominate.
+// Overlay also carries the multi-quad drop-FX ripples.
+// These are package-level values rather than constants so the staging helpers can
+// index them by layer; they live in static storage and never allocate.
+// Positional entries follow the UI_Layer declaration order:
+// {Pane_Chrome, Tab_Chrome, Popover, Modal, Overlay}.
+UI_LAYER_BG_CAPACITY: [UI_LAYER_COUNT]int = [UI_LAYER_COUNT]int{160, 64, 48, 48, 160}
+UI_LAYER_GLYPH_CAPACITY: [UI_LAYER_COUNT]int = [UI_LAYER_COUNT]int{0, 256, 160, 256, 32}
+
+// Storage dimensions: Odin arrays cannot be ragged, so every layer row is
+// allocated at the widest budget it needs. Total instance memory is
+// (UI_LAYER_MAX_BG + UI_LAYER_MAX_GLYPH) * UI_LAYER_COUNT * INSTANCE_STRIDE
+// ~= 98 KB, about 2x the previous flat 2 x 512 staging pair.
+UI_LAYER_MAX_BG :: 160
+UI_LAYER_MAX_GLYPH :: 256
+
+// UI_Layer_Run records where one layer's background and glyph runs land inside
+// the contiguous staging region.
+UI_Layer_Run :: struct {
+	bg_offset:    u64,
+	bg_count:     u32,
+	glyph_offset: u64,
+	glyph_count:  u32,
+}
+
+// renderer_ui_reset clears every UI layer and reopens the base pane-chrome layer.
+renderer_ui_reset :: proc(r: ^Renderer) {
+	if r == nil do return
+	for layer in UI_Layer {
+		r.ui_layer_bg_count[layer] = 0
+		r.ui_layer_glyph_count[layer] = 0
+	}
+	r.ui_layer = .Pane_Chrome
+}
+
+// renderer_ui_begin_layer selects the layer that subsequent staging targets.
+renderer_ui_begin_layer :: proc(r: ^Renderer, layer: UI_Layer) {
+	if r == nil do return
+	r.ui_layer = layer
+}
+
+// renderer_ui_stage_bg appends one background quad to the open layer. Quads that
+// do not fit the open layer's budget are dropped, never written past its row.
+renderer_ui_stage_bg :: proc(
+	r: ^Renderer,
+	x, y, w, h: f32,
+	col: [4]f32,
+	params: [4]f32 = {0, 0, 0, 0},
+) {
+	if r == nil || w <= 0 || h <= 0 do return
+	layer := r.ui_layer
+	n := int(r.ui_layer_bg_count[layer])
+	if n >= UI_LAYER_BG_CAPACITY[layer] do return
+	r.ui_bg_data[layer][n] = instance.Instance_Data{
+		x = x, y = y, cw = w, ch = h,
+		u0 = params[0], v0 = params[1], u1 = params[2], v1 = params[3],
+		r = col.r, g = col.g, b = col.b, a = col.a,
+	}
+	r.ui_layer_bg_count[layer] += 1
+}
+
+// renderer_ui_can_stage_bg reports whether the open layer still has room for one
+// more background quad. Callers that mutate other uniform state use it to bail
+// out before doing work they would otherwise have to undo.
+renderer_ui_can_stage_bg :: proc(r: ^Renderer) -> bool {
+	if r == nil do return false
+	layer := r.ui_layer
+	return int(r.ui_layer_bg_count[layer]) < UI_LAYER_BG_CAPACITY[layer]
+}
+
+// renderer_ui_stage_glyph appends one atlas glyph quad to the open layer.
+renderer_ui_stage_glyph :: proc(
+	r: ^Renderer,
+	x, y, cw, ch: f32,
+	cp: rune,
+	col: [4]f32,
+) {
+	if r == nil do return
+	layer := r.ui_layer
+	n := int(r.ui_layer_glyph_count[layer])
+	if n >= UI_LAYER_GLYPH_CAPACITY[layer] do return
+	_, s := atlas_get_slot(&r.atlas, u32(cp))
+	if !s.valid do return
+	r.ui_glyph_data[layer][n] = instance.Instance_Data{
+		x = x, y = y, cw = cw, ch = ch,
+		u0 = s.u0, v0 = s.v0, u1 = s.u1, v1 = s.v1,
+		r = col.r, g = col.g, b = col.b, a = 1.0,
+	}
+	r.ui_layer_glyph_count[layer] += 1
+}
+
+// renderer_ui_layer_plan assigns ascending byte ranges to every layer's
+// background and glyph runs starting at base_offset, and returns the end offset.
+// Because ranges are handed out in layer order, a higher layer's first instance
+// is always drawn after a lower layer's last instance.
+renderer_ui_layer_plan :: proc(r: ^Renderer, base_offset: u64, runs: ^[UI_LAYER_COUNT]UI_Layer_Run) -> u64 {
+	if r == nil || runs == nil do return base_offset
+	offset := base_offset
+	for layer in UI_Layer {
+		bg := min(int(r.ui_layer_bg_count[layer]), UI_LAYER_BG_CAPACITY[layer])
+		glyph := min(int(r.ui_layer_glyph_count[layer]), UI_LAYER_GLYPH_CAPACITY[layer])
+		run := &runs[layer]
+		run.bg_offset = offset
+		run.bg_count = u32(bg)
+		offset += u64(bg) * instance.INSTANCE_STRIDE
+		run.glyph_offset = offset
+		run.glyph_count = u32(glyph)
+		offset += u64(glyph) * instance.INSTANCE_STRIDE
+	}
+	return offset
+}
 
 // RENDER_UPLOAD_CAPACITY is the bytes per upload ring slot.
 RENDER_UPLOAD_CAPACITY :: 1024 * 1024 // 1 MB
@@ -864,13 +993,15 @@ _renderer_upload_instances :: proc(r: ^Renderer, base_count: u32, frame: ^Render
 	if r.interaction_staged && r.interaction_quad_count > 0 { interaction_count = u64(r.interaction_quad_count) }
 	scrollbar_count: u64 = 0
 	if r.scrollbar_staged && r.scrollbar_count > 0 { scrollbar_count = u64(r.scrollbar_count) }
-	ui_bg_count: u64 = 0
-	ui_glyph_count: u64 = 0
+	// Each layer owns a private sub-array; the plan hands out ascending byte
+	// ranges so the copy order below is the paint order. An unstaged frame still
+	// copies nothing, so the runs stay zeroed.
+	ui_runs: [UI_LAYER_COUNT]UI_Layer_Run = {}
+	ui_instances: u64 = 0
 	if r.ui_staged {
-		ui_bg_count = u64(r.ui_bg_count)
-		ui_glyph_count = u64(r.ui_glyph_count)
+		ui_instances = (renderer_ui_layer_plan(r, 0, &ui_runs)) / instance.INSTANCE_STRIDE
 	}
-	total := count + cursor_count + interaction_count + scrollbar_count + ui_bg_count + ui_glyph_count
+	total := count + cursor_count + interaction_count + scrollbar_count + ui_instances
 	byte_count := total * instance.INSTANCE_STRIDE
 	upload := upload_ring_begin(&r.upload_ring)
 	if !upload.reserved { return false }
@@ -889,10 +1020,12 @@ _renderer_upload_instances :: proc(r: ^Renderer, base_count: u32, frame: ^Render
 	frame.interaction_count = 0
 	frame.scrollbar_offset = 0
 	frame.scrollbar_count = 0
-	frame.ui_bg_offset = 0
-	frame.ui_bg_count = 0
-	frame.ui_glyph_offset = 0
-	frame.ui_glyph_count = 0
+	for layer in UI_Layer {
+		frame.ui_bg_offset[layer] = 0
+		frame.ui_bg_count[layer] = 0
+		frame.ui_glyph_offset[layer] = 0
+		frame.ui_glyph_count[layer] = 0
+	}
 
 	offset := int(count * instance.INSTANCE_STRIDE)
 	if cursor_count > 0 {
@@ -922,19 +1055,22 @@ _renderer_upload_instances :: proc(r: ^Renderer, base_count: u32, frame: ^Render
 		mem.copy(raw_data(staging[offset:]), raw_data(r.scrollbar_data[:]), bytes)
 		offset += bytes
 	}
-	if ui_bg_count > 0 {
-		frame.ui_bg_offset = u64(offset)
-		frame.ui_bg_count = u32(ui_bg_count)
-		ui_bg_bytes := int(ui_bg_count * instance.INSTANCE_STRIDE)
-		mem.copy(raw_data(staging[offset:]), raw_data(r.ui_bg_data[:]), ui_bg_bytes)
-		offset += ui_bg_bytes
-	}
-	if ui_glyph_count > 0 {
-		frame.ui_glyph_offset = u64(offset)
-		frame.ui_glyph_count = u32(ui_glyph_count)
-		ui_glyph_bytes := int(ui_glyph_count * instance.INSTANCE_STRIDE)
-		mem.copy(raw_data(staging[offset:]), raw_data(r.ui_glyph_data[:]), ui_glyph_bytes)
-		offset += ui_glyph_bytes
+	for layer in UI_Layer {
+		run := ui_runs[layer]
+		if run.bg_count > 0 {
+			frame.ui_bg_offset[layer] = u64(offset)
+			frame.ui_bg_count[layer] = run.bg_count
+			ui_bg_bytes := int(run.bg_count) * instance.INSTANCE_STRIDE
+			mem.copy(raw_data(staging[offset:]), raw_data(r.ui_bg_data[layer][:]), ui_bg_bytes)
+			offset += ui_bg_bytes
+		}
+		if run.glyph_count > 0 {
+			frame.ui_glyph_offset[layer] = u64(offset)
+			frame.ui_glyph_count[layer] = run.glyph_count
+			ui_glyph_bytes := int(run.glyph_count) * instance.INSTANCE_STRIDE
+			mem.copy(raw_data(staging[offset:]), raw_data(r.ui_glyph_data[layer][:]), ui_glyph_bytes)
+			offset += ui_glyph_bytes
+		}
 	}
 	if !upload_ring_write(&r.upload_ring, &frame.upload, byte_count) {
 		upload_ring_abort(&r.upload_ring, &frame.upload)
@@ -1140,8 +1276,7 @@ _renderer_frame_published :: proc(r: ^Renderer, view: ^termgrid.Terminal_View = 
 	r.full_redraw_pending = false
 	r.cursor_staged = false
 	r.ui_staged = false
-	r.ui_bg_count = 0
-	r.ui_glyph_count = 0
+	renderer_ui_reset(r)
 	r.interaction_staged = false
 	r.interaction_slot_start = 0
 	r.interaction_quad_count = 0
@@ -1220,17 +1355,21 @@ _draw_instance_buffer :: proc(
 		r.backend.render_set_vertex_buffer(pass, 0, buffer, frame.scrollbar_offset)
 		r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, frame.scrollbar_count)
 	}
-	if ok && frame.ui_bg_count > 0 {
-		r.backend.render_set_pipeline(pass, r.instances.bg_pipeline)
-		r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_bg)
-		r.backend.render_set_vertex_buffer(pass, 0, buffer, frame.ui_bg_offset)
-		r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, frame.ui_bg_count)
-	}
-	if ok && frame.ui_glyph_count > 0 {
-		r.backend.render_set_pipeline(pass, r.instances.glyph_pipeline)
-		r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_glyph)
-		r.backend.render_set_vertex_buffer(pass, 0, buffer, frame.ui_glyph_offset)
-		r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, frame.ui_glyph_count)
+	// Ascending layer order is the compositing contract: each layer paints its
+	// backgrounds, then its glyphs, before the next layer starts.
+	for layer in UI_Layer {
+		if ok && frame.ui_bg_count[layer] > 0 {
+			r.backend.render_set_pipeline(pass, r.instances.bg_pipeline)
+			r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_bg)
+			r.backend.render_set_vertex_buffer(pass, 0, buffer, frame.ui_bg_offset[layer])
+			r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, frame.ui_bg_count[layer])
+		}
+		if ok && frame.ui_glyph_count[layer] > 0 {
+			r.backend.render_set_pipeline(pass, r.instances.glyph_pipeline)
+			r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_glyph)
+			r.backend.render_set_vertex_buffer(pass, 0, buffer, frame.ui_glyph_offset[layer])
+			r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, frame.ui_glyph_count[layer])
+		}
 	}
 	r.backend.end_render_pass(pass)
 	frame.pass = gpu.Gpu_RenderPassEncoder(nil)

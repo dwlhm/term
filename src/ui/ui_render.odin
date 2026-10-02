@@ -9,35 +9,29 @@ import i18n "../i18n"
 UI_MAX_INSTANCES :: 512
 UI_CHROME_CELL_WIDTH: f32 : 8
 UI_CHROME_CELL_HEIGHT: f32 : 16
+UI_MODAL_SCRIM_ALPHA: f32 : 0.35
+UI_CARD_SHADOW_STEPS :: 3
+UI_CARD_SHADOW_EXPAND: f32 : 4.0
+UI_CARD_SHADOW_ALPHA: f32 : 0.12
 
 UI_Render :: render.Renderer
 Color :: [4]f32
 
+// Modal scrim colour; the alpha token is shared by every modal card.
+UI_MODAL_SCRIM: Color : {0, 0, 0, UI_MODAL_SCRIM_ALPHA}
+
 emit_bg :: proc(r: ^render.Renderer, x, y, w, h: f32, col: [4]f32) {
-	if w > 0 && h > 0 && r.ui_bg_count < render.RENDER_MAX_UI_INSTANCES {
-		r.ui_bg_data[r.ui_bg_count] = instance.Instance_Data{
-			x = x, y = y, cw = w, ch = h,
-			u0 = 0, v0 = 0, u1 = 0, v1 = 0,
-			r = col.r, g = col.g, b = col.b, a = col.a,
-		}
-		r.ui_bg_count += 1
-	}
+	render.renderer_ui_stage_bg(r, x, y, w, h, col)
 }
 
 emit_bg_params :: proc(r: ^render.Renderer, x, y, w, h: f32, col: [4]f32, params: [4]f32) {
-	if w > 0 && h > 0 && r.ui_bg_count < render.RENDER_MAX_UI_INSTANCES {
-		r.ui_bg_data[r.ui_bg_count] = instance.Instance_Data{
-			x = x, y = y, cw = w, ch = h,
-			u0 = params[0], v0 = params[1], u1 = params[2], v1 = params[3],
-			r = col.r, g = col.g, b = col.b, a = col.a,
-		}
-		r.ui_bg_count += 1
-	}
+	render.renderer_ui_stage_bg(r, x, y, w, h, col, params)
 }
 
 // One shared surface consumes immutable logical-space wave origins.
 ui_stage_water_surface :: proc(r: ^UI_Render, screen_w, screen_h, scale: f32, waves: []instance.Water_Wave, base_col: Color) {
 	if r == nil do return
+	render.renderer_ui_begin_layer(r, .Overlay)
 	r.instances.uniform_data.water_meta = {}
 	r.instances.uniform_data.waves = {}
 	for value in ([4]f32{screen_w, screen_h, scale, base_col.a}) {
@@ -46,7 +40,7 @@ ui_stage_water_surface :: proc(r: ^UI_Render, screen_w, screen_h, scale: f32, wa
 	for value in base_col {
 		if math.is_nan(value) || math.is_inf(value) do return
 	}
-	if r.ui_bg_count >= render.RENDER_MAX_UI_INSTANCES do return
+	if !render.renderer_ui_can_stage_bg(r) do return
 	count := 0
 	for wave in waves {
 		valid := true
@@ -69,6 +63,7 @@ ui_stage_water_surface :: proc(r: ^UI_Render, screen_w, screen_h, scale: f32, wa
 // ui_stage_water_3d_hover emits a full-window quad for the 3D calm water breathing effect.
 ui_stage_water_3d_hover :: proc(r: ^UI_Render, screen_w, screen_h, cx, cy, hover_time: f32, base_col: Color) {
 	if r == nil || screen_w <= 0 || screen_h <= 0 || base_col.a <= 0.005 do return
+	render.renderer_ui_begin_layer(r, .Overlay)
 	params := [4]f32{cx, cy, hover_time, -1.0}
 	emit_bg_params(r, 0, 0, screen_w, screen_h, base_col, params)
 }
@@ -76,6 +71,7 @@ ui_stage_water_3d_hover :: proc(r: ^UI_Render, screen_w, screen_h, cx, cy, hover
 // ui_stage_water_3d_splash emits a full-window quad for the 3D water impact wave propagating across the whole window.
 ui_stage_water_3d_splash :: proc(r: ^UI_Render, screen_w, screen_h, cx, cy, time, max_t: f32, base_col: Color) {
 	if r == nil || screen_w <= 0 || screen_h <= 0 || max_t <= 0 || time < 0 || time >= max_t || base_col.a <= 0.005 do return
+	render.renderer_ui_begin_layer(r, .Overlay)
 	params := [4]f32{cx, cy, time / max_t, -2.0}
 	emit_bg_params(r, 0, 0, screen_w, screen_h, base_col, params)
 }
@@ -83,6 +79,7 @@ ui_stage_water_3d_splash :: proc(r: ^UI_Render, screen_w, screen_h, cx, cy, time
 // ui_draw_water_ring draws a circular ring with given center (cx, cy), radius, thickness, and color.
 ui_draw_water_ring :: proc(r: ^UI_Render, cx, cy, radius, thickness: f32, col: Color) {
 	if r == nil || radius < 1 || thickness <= 0 || col.a <= 0.005 do return
+	render.renderer_ui_begin_layer(r, .Overlay)
 	// Scale number of segments with radius to keep ring smooth and continuous
 	segments := int(math.clamp(radius * 1.5, 32, 72))
 	step := (2.0 * math.PI) / f32(segments)
@@ -105,6 +102,7 @@ ui_draw_ripple_fx :: proc(
 	base_color: Color,
 ) {
 	if r == nil || ring_count <= 0 || base_color.a <= 0.005 do return
+	render.renderer_ui_begin_layer(r, .Overlay)
 	for i in 0..<ring_count {
 		r_i := radius - f32(i) * spacing
 		if r_i <= 0 do continue
@@ -117,6 +115,7 @@ ui_draw_ripple_fx :: proc(
 // ui_draw_hover_ripple renders subtle, calm breathing concentric water ripples centered at (cx, cy).
 ui_draw_hover_ripple :: proc(r: ^UI_Render, cx, cy, hover_time: f32, base_col: Color) {
 	if r == nil || base_col.a <= 0.005 do return
+	render.renderer_ui_begin_layer(r, .Overlay)
 	// Calm breathing water effect: 2-3 gentle concentric rings pulsating softly around the cursor.
 	// Radius breathing between ~20px and ~50px using sine wave over hover_time.
 	// Alpha gentle (e.g. 0.25 to 0.45).
@@ -134,6 +133,7 @@ ui_draw_hover_ripple :: proc(r: ^UI_Render, cx, cy, hover_time: f32, base_col: C
 // ui_draw_splash_ripple renders an expanding shockwave ripple effect emanating from (cx, cy).
 ui_draw_splash_ripple :: proc(r: ^UI_Render, cx, cy, time, max_t: f32, base_col: Color) {
 	if r == nil || time >= max_t || max_t <= 0 || base_col.a <= 0.005 do return
+	render.renderer_ui_begin_layer(r, .Overlay)
 	// Expands rapidly outward from 0 to ~200px with ease-out curve.
 	// Features 2-3 concentric waves spreading out, with alpha fading to 0 as time reaches max_t.
 	MAX_RADIUS: f32 : 200.0
@@ -154,16 +154,7 @@ ui_draw_splash_ripple :: proc(r: ^UI_Render, cx, cy, time, max_t: f32, base_col:
 }
 
 emit_char :: proc(r: ^render.Renderer, x, y, cw, ch: f32, cp: rune, col: [4]f32) {
-	if r.ui_glyph_count >= render.RENDER_MAX_UI_INSTANCES do return
-	_, s := render.atlas_get_slot(&r.atlas, u32(cp))
-	if s.valid {
-		r.ui_glyph_data[r.ui_glyph_count] = instance.Instance_Data{
-			x = x, y = y, cw = cw, ch = ch,
-			u0 = s.u0, v0 = s.v0, u1 = s.u1, v1 = s.v1,
-			r = col.r, g = col.g, b = col.b, a = 1.0,
-		}
-		r.ui_glyph_count += 1
-	}
+	render.renderer_ui_stage_glyph(r, x, y, cw, ch, cp, col)
 }
 
 // _emit_runes stages a rune slice as glyphs starting at (x, y), advancing by cw.
@@ -283,6 +274,26 @@ _tab_glyph_in_viewport :: proc(x, cw: f32, viewport: Rect_f32) -> bool {
 	return x >= viewport.x && (x + cw) <= viewport.x + viewport.w
 }
 
+// _emit_card_ring stages a complete four-edge hairline ring around rect.
+_emit_card_ring :: proc(r: ^render.Renderer, rect: Rect_f32, col: [4]f32) {
+	if rect.w <= 0 || rect.h <= 0 do return
+	emit_bg(r, rect.x, rect.y, rect.w, 1.0, col)
+	emit_bg(r, rect.x, rect.y + rect.h - 1.0, rect.w, 1.0, col)
+	emit_bg(r, rect.x, rect.y, 1.0, rect.h, col)
+	emit_bg(r, rect.x + rect.w - 1.0, rect.y, 1.0, rect.h, col)
+}
+
+// _emit_card_shadow stages a cheap soft elevation shadow as three expanded quads
+// at decreasing alpha. It must be staged before the card fill it sits behind.
+_emit_card_shadow :: proc(r: ^render.Renderer, rect: Rect_f32, alpha: f32) {
+	if rect.w <= 0 || rect.h <= 0 || alpha <= 0 do return
+	for i in 1 ..= UI_CARD_SHADOW_STEPS {
+		expand := UI_CARD_SHADOW_EXPAND * f32(i)
+		a := alpha / f32(i)
+		emit_bg(r, rect.x - expand, rect.y - expand, rect.w + expand * 2.0, rect.h + expand * 2.0, Color{0, 0, 0, a})
+	}
+}
+
 // ui_render_stage stages UI quads and glyphs directly into the Renderer instance buffer. Zero allocation steady-state.
 ui_render_stage :: proc(
 	r:            ^render.Renderer,
@@ -307,13 +318,25 @@ ui_render_stage :: proc(
 		return 0
 	}
 
-	r.ui_staged = false
-	r.ui_bg_count = 0
-	r.ui_glyph_count = 0
+	render.renderer_ui_reset(r)
+
+	// Only quads emitted by this call are in logical units: pane chrome is
+	// staged by the app in device pixels, and the drop-FX surface is staged
+	// afterwards in device pixels too. Snapshot the layer tails so the
+	// conversion below touches exactly this call's contribution.
+	base_bg: [render.UI_LAYER_COUNT]u32
+	base_glyph: [render.UI_LAYER_COUNT]u32
+	for layer in render.UI_Layer {
+		base_bg[layer] = r.ui_layer_bg_count[layer]
+		base_glyph[layer] = r.ui_layer_glyph_count[layer]
+	}
 
 	content_scale := scale if scale > 0 else 1
 	cw := UI_CHROME_CELL_WIDTH
 	ch := UI_CHROME_CELL_HEIGHT
+
+	// Tab chrome sits above pane chrome but below every transient surface.
+	render.renderer_ui_begin_layer(r, .Tab_Chrome)
 
 	// 1. Tab Bar Background
 	emit_bg(r, tab_state.rect.x, tab_state.rect.y, tab_state.rect.w, tab_state.rect.h, theme.surface_bar)
@@ -322,7 +345,6 @@ ui_render_stage :: proc(
 	// 2. Typographic Tab Strip
 	tab_count := min(len(tabs), len(tab_rects))
 	for i in 0 ..< tab_count {
-		if r.ui_glyph_count >= render.RENDER_MAX_UI_INSTANCES do break
 		rect := tab_rects[i]
 		if rect.w <= 0 do continue
 		tab := tabs[i]
@@ -398,7 +420,7 @@ ui_render_stage :: proc(
 	}
 
 	// +N in accent_primary if overflow_count > 0
-	if tab_state.overflow_count > 0 && tab_state.overflow_indicator_rect.w > 0 && r.ui_glyph_count < render.RENDER_MAX_UI_INSTANCES {
+	if tab_state.overflow_count > 0 && tab_state.overflow_indicator_rect.w > 0 {
 		btn := tab_state.overflow_indicator_rect
 		buf: [16]u8
 		lbl := fmt.bprintf(buf[:], "+%d", tab_state.overflow_count)
@@ -411,14 +433,14 @@ ui_render_stage :: proc(
 	}
 
 	// '+' in text_muted (hover: text_primary)
-	if tab_state.new_tab_rect.w > 0 && r.ui_glyph_count < render.RENDER_MAX_UI_INSTANCES {
+	if tab_state.new_tab_rect.w > 0 {
 		btn := tab_state.new_tab_rect
 		col := theme.text_primary if tab_state.hover_new_tab else theme.text_muted
 		emit_char(r, btn.x + (btn.w - cw) * 0.5, (TAB_BAR_HEIGHT - ch) * 0.5, cw, ch, '+', col)
 	}
 
 	// '○ N detached' badge if detached_count > 0 (clickable to open Session Switcher)
-	if tab_state.detached_count > 0 && tab_state.detached_badge_rect.w > 0 && r.ui_glyph_count < render.RENDER_MAX_UI_INSTANCES {
+	if tab_state.detached_count > 0 && tab_state.detached_badge_rect.w > 0 {
 		btn := tab_state.detached_badge_rect
 		if tab_state.hover_detached {
 			emit_bg(r, btn.x + 2.0, 2.0, max(0.0, btn.w - 4.0), TAB_BAR_HEIGHT - 4.0, theme.surface_hover)
@@ -440,7 +462,7 @@ ui_render_stage :: proc(
 	// Trailing right area is completely clean/empty.
 
 	// 4. Floating Search Bar
-	if search_state != nil && search_state.visible && r.ui_bg_count < render.RENDER_MAX_UI_INSTANCES {
+	if search_state != nil && search_state.visible {
 		sr := search_state.rect
 		emit_bg(r, sr.x, sr.y, sr.w, sr.h, theme.surface_card)
 
@@ -507,6 +529,8 @@ ui_render_stage :: proc(
 	}
 
 	// 5. Tab drag overlay: accent drop indicator plus a ghost tab under the pointer.
+	// Transient tab surfaces sit above the tab chrome they float over.
+	render.renderer_ui_begin_layer(r, .Popover)
 	if tab_drag != nil && tab_drag.phase == .Dragging {
 		gap_x := tab_bar_gap_x(tab_state, tab_count, tab_rects, tab_drag.drop_gap)
 		emit_bg(r, gap_x, 0, 2.0, TAB_BAR_HEIGHT, theme.accent_primary)
@@ -560,19 +584,18 @@ ui_render_stage :: proc(
 		}
 	}
 
-	// 7. Confirm dialog: a flat card raised over the content. No scrim is drawn
-	// because the background pipeline is opaque and the flat design intentionally
-	// omits a translucent overlay.
+	// 7. Confirm dialog: a modal card raised over the content behind a scrim.
+	// The confirm action sits above every other surface, so it owns the top layer.
+	render.renderer_ui_begin_layer(r, .Overlay)
 	if confirm_state != nil && confirm_state.visible {
 		c := copy
 		if c == nil do c = i18n.i18n_get()
 
 		cr := confirm_state.rect
+		emit_bg(r, 0, 0, window_w, window_h, UI_MODAL_SCRIM)
+		_emit_card_shadow(r, cr, UI_CARD_SHADOW_ALPHA)
 		emit_bg(r, cr.x, cr.y, cr.w, cr.h, theme.surface_card)
-		emit_bg(r, cr.x, cr.y, cr.w, 1.0, theme.border_subtle)
-		emit_bg(r, cr.x, cr.y + cr.h - 1.0, cr.w, 1.0, theme.border_subtle)
-		emit_bg(r, cr.x, cr.y, 1.0, cr.h, theme.border_subtle)
-		emit_bg(r, cr.x + cr.w - 1.0, cr.y, 1.0, cr.h, theme.border_subtle)
+		_emit_card_ring(r, cr, theme.border_subtle)
 
 		pad := theme.spacing.md
 		max_cols := 0
@@ -598,13 +621,12 @@ ui_render_stage :: proc(
 		_emit_button_label_pair(r, confirm_state.cancel_rect, c.dialog_cancel, ui_shortcut_label(.Cancel), cw, ch, theme.text_primary, theme.text_faint)
 	}
 
+	// The tab overflow menu is a popover even though it is staged after modals.
+	render.renderer_ui_begin_layer(r, .Popover)
 	if tab_overflow != nil && tab_overflow.visible {
 		m := tab_overflow
 		emit_bg(r, m.rect.x, m.rect.y, m.rect.w, m.rect.h, theme.surface_card)
-		emit_bg(r, m.rect.x, m.rect.y, m.rect.w, 1.0, theme.border_subtle)
-		emit_bg(r, m.rect.x, m.rect.y + m.rect.h - 1.0, m.rect.w, 1.0, theme.border_subtle)
-		emit_bg(r, m.rect.x, m.rect.y, 1.0, m.rect.h, theme.border_subtle)
-		emit_bg(r, m.rect.x + m.rect.w - 1.0, m.rect.y, 1.0, m.rect.h, theme.border_subtle)
+		_emit_card_ring(r, m.rect, theme.border_subtle)
 		for row in 0 ..< m.visible_rows {
 			idx := m.scroll_row + row
 			if idx >= len(tabs) do break
@@ -646,6 +668,9 @@ ui_render_stage :: proc(
 		}
 	}
 
+	// The session switcher is a modal: it owns the modal layer and paints above
+	// every pane border, tab surface and popover.
+	render.renderer_ui_begin_layer(r, .Modal)
 	if session_switcher != nil && session_switcher.visible {
 		cr := session_switcher.rect
 		pad := theme.spacing.md
@@ -751,22 +776,28 @@ ui_render_stage :: proc(
 	}
 
 	// Convert once at the GPU boundary; hit rectangles remain in logical units.
-	for &quad in r.ui_bg_data[:r.ui_bg_count] {
-		quad.x *= content_scale
-		quad.y *= content_scale
-		quad.cw *= content_scale
-		quad.ch *= content_scale
+	for layer in render.UI_Layer {
+		for &quad in r.ui_bg_data[layer][base_bg[layer]:r.ui_layer_bg_count[layer]] {
+			quad.x *= content_scale
+			quad.y *= content_scale
+			quad.cw *= content_scale
+			quad.ch *= content_scale
+		}
+		for &quad in r.ui_glyph_data[layer][base_glyph[layer]:r.ui_layer_glyph_count[layer]] {
+			quad.x *= content_scale
+			quad.y *= content_scale
+			quad.cw *= content_scale
+			quad.ch *= content_scale
+		}
 	}
-	for &quad in r.ui_glyph_data[:r.ui_glyph_count] {
-		quad.x *= content_scale
-		quad.y *= content_scale
-		quad.cw *= content_scale
-		quad.ch *= content_scale
+	total_staged := 0
+	for layer in render.UI_Layer {
+		total_staged += int(r.ui_layer_bg_count[layer]) + int(r.ui_layer_glyph_count[layer])
 	}
-	if r.ui_bg_count > 0 || r.ui_glyph_count > 0 {
+	if total_staged > 0 {
 		r.ui_staged = true
 	}
-	return int(r.ui_bg_count + r.ui_glyph_count)
+	return total_staged
 }
 
 // Pane_Divider defines geometry and hover state for multi-pane split chrome.
@@ -775,26 +806,36 @@ Pane_Divider :: struct {
 	is_hovered: bool,
 }
 
-// ui_stage_pane_chrome stages 1px hairline dividers and active pane outline border.
+// Pane_Edge_L / _Right / _Top / _Bottom are the bit positions of active_edges.
+PANE_EDGE_LEFT: u8 : 1 << 0
+PANE_EDGE_RIGHT: u8 : 1 << 1
+PANE_EDGE_TOP: u8 : 1 << 2
+PANE_EDGE_BOTTOM: u8 : 1 << 3
+
+// ui_stage_pane_chrome stages 1px hairline dividers and the active pane outline.
+// active_edges is a PANE_EDGE_* bitmask; only divider-adjacent edges are outlined
+// so the accent never overpaints the window frame or the tab bar.
 ui_stage_pane_chrome :: proc(
 	r:                  ^UI_Render,
 	theme:              ^UI_Theme,
 	dividers:           []Pane_Divider,
 	active_rect:        Rect_f32,
+	active_edges:       u8,
 	show_active_border: bool,
 	scale:              f32 = 1.0,
 ) {
 	if r == nil || theme == nil do return
 	s := scale if scale > 0 else 1.0
+	render.renderer_ui_begin_layer(r, .Pane_Chrome)
 
 	// 1. Dividers
 	for div in dividers {
-		col := theme.surface_hover if div.is_hovered else theme.border_subtle
+		col := theme.surface_hover if div.is_hovered else theme.border_divider
 		emit_bg(r, div.x * s, div.y * s, max(f32(1.0), div.w * s), max(f32(1.0), div.h * s), col)
 	}
 
-	// 2. Active pane outline (1px hairline)
-	if show_active_border && active_rect.w > 0 && active_rect.h > 0 {
+	// 2. Active pane outline (1px hairline on divider-adjacent edges only)
+	if show_active_border && active_edges != 0 && active_rect.w > 0 && active_rect.h > 0 {
 		col := theme.accent_primary
 		border_size := max(f32(1.0), 1.0 * s)
 		ax := active_rect.x * s
@@ -802,14 +843,18 @@ ui_stage_pane_chrome :: proc(
 		aw := active_rect.w * s
 		ah := active_rect.h * s
 
-		// Top
-		emit_bg(r, ax, ay, aw, border_size, col)
-		// Bottom
-		emit_bg(r, ax, ay + ah - border_size, aw, border_size, col)
-		// Left
-		emit_bg(r, ax, ay, border_size, ah, col)
-		// Right
-		emit_bg(r, ax + aw - border_size, ay, border_size, ah, col)
+		if active_edges & PANE_EDGE_TOP != 0 {
+			emit_bg(r, ax, ay, aw, border_size, col)
+		}
+		if active_edges & PANE_EDGE_BOTTOM != 0 {
+			emit_bg(r, ax, ay + ah - border_size, aw, border_size, col)
+		}
+		if active_edges & PANE_EDGE_LEFT != 0 {
+			emit_bg(r, ax, ay, border_size, ah, col)
+		}
+		if active_edges & PANE_EDGE_RIGHT != 0 {
+			emit_bg(r, ax + aw - border_size, ay, border_size, ah, col)
+		}
 	}
 
 	if len(dividers) > 0 || show_active_border {
@@ -826,6 +871,7 @@ ui_stage_hollow_cursor :: proc(
 	scale: f32 = 1.0,
 ) {
 	if r == nil || w <= 0 || h <= 0 do return
+	render.renderer_ui_begin_layer(r, .Pane_Chrome)
 	s := scale if scale > 0 else 1.0
 	sx := x * s
 	sy := y * s

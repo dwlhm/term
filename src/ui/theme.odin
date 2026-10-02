@@ -34,6 +34,7 @@ UI_Theme :: struct {
 	surface_hover:  [4]f32,
 	surface_active: [4]f32,
 	border_subtle:  [4]f32,
+	border_divider: [4]f32,
 	accent_primary: [4]f32,
 	text_primary:   [4]f32,
 	text_muted:     [4]f32,
@@ -61,6 +62,7 @@ theme_catppuccin_mocha :: proc() -> UI_Theme {
 		surface_hover  = {69.0 / 255.0, 71.0 / 255.0, 90.0 / 255.0, 1.0},    // #45475a
 		surface_active = {88.0 / 255.0, 91.0 / 255.0, 112.0 / 255.0, 1.0},   // #585b70
 		border_subtle  = {69.0 / 255.0, 71.0 / 255.0, 90.0 / 255.0, 0.4},    // rgba(69, 71, 90, 0.4)
+		border_divider = {88.0 / 255.0, 91.0 / 255.0, 112.0 / 255.0, 1.0},    // #585b70 full-alpha pane divider
 		accent_primary = {203.0 / 255.0, 166.0 / 255.0, 247.0 / 255.0, 1.0}, // #cba6f7
 		text_primary   = {205.0 / 255.0, 214.0 / 255.0, 244.0 / 255.0, 1.0}, // #cdd6f4
 		text_muted     = {166.0 / 255.0, 173.0 / 255.0, 200.0 / 255.0, 1.0}, // #a6adc8
