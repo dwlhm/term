@@ -509,3 +509,28 @@ Crack: rejected splits report the reason and destroy any allocated backend. A re
 Need: pane layouts use physical pixels, pointer coordinates convert logical pixels once using content scale, and inner pane padding excludes tabbar height. Desired layout dimensions may precede worker resize completion, so compilation always uses actual snapshot storage dimensions with desired rectangle clipping. Layout/event dispatch occurs before snapshot locking; no snapshot lock encloses worker join, backend destruction, or event dispatch. Backend notifications own PTY readiness; no second PTY monitor scans session storage.
 
 Native divider feedback uses the same pane hit-test as dragging. One main-thread frame synchronization derives EW/NS resize cursors from physical geometry, or the active drag divider, after input and layout changes. Modal chrome, zoom, missing panes, and lost window/mouse focus restore the native default. SDL system resize cursor handles are cached by the window, creation/set failures report once and fall back, and owned handles are destroyed before SDL video shutdown. No cursor updates run in the event watch or cross the backend event boundary.
+
+
+### Background session interaction
+
+Detach (`Option+Command+B`, or tab menu **Run in background**) transfers a single
+terminal's PTY, parser, screen, scrollback, displayed title, rename override, and
+working directory to the in-app session registry. Split tabs cannot detach; the
+switcher explains the rejection. Detaching the last tab opens a replacement shell.
+Processes continue and output is parsed while the application remains running.
+Background sessions stop when the application exits; this is not restart persistence.
+
+`Command+O`, the tab menu **Sessions**, or the background count badge opens the
+session switcher. Search, arrow keys, wheel scrolling, and clicking a row select
+or open sessions. The badge selects a background row. Enter attaches the selected
+background session or focuses an open tab. Escape or an outside click dismisses.
+The modal consumes terminal input, paste, and drops. Rows show title, directory,
+and current/open/background/exited state. Exited background sessions retain output
+for review after attachment. A full tab strip leaves an unsuccessful attachment
+registered and running, with an inline explanation. `Command+X` requests termination
+through confirmation; saved layout rows never offer termination.
+
+The registry remains the authoritative lifecycle owner until an attached backend
+starts successfully. Failure restores the background owner. Each PTY has one drain
+worker; parser responses target that session's PTY, and background parsing releases
+GUI clipboard callbacks. Switcher item buffers are presentation snapshots only.

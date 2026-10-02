@@ -170,20 +170,8 @@ If you detach the **last remaining tab** in the window, Term does not close the 
 
 ## Session Switcher & Quick Palette (`Cmd+O`)
 
-The Session Switcher (`Cmd+O`) is an interactive modal palette designed for lightning-fast workspace switching, session re-attachment, and process telemetry inspection.
-
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│  Search sessions...                                              ⌘O   │
-├────────────────────────────────────────────────────────────────────────┤
-│  >  [Tab 1] zsh                PID 48210   RSS 14 MB    CPU 0.0%       │
-│     [Tab 2] htop               PID 48255   RSS 22 MB    CPU 1.2%       │
-│     [Tab 3] nvim               PID 48301   RSS 38 MB    CPU 0.4%       │
-│     session_42 (Detached)      PID 47912   RSS 86 MB    CPU 0.1%       │
-├────────────────────────────────────────────────────────────────────────┤
-│  ↑/↓: Navigate  •  Enter: Activate  •  ⌥⌘B: Detach  •  Esc: Close     │
-└────────────────────────────────────────────────────────────────────────┘
-```
+The Session Switcher (`Cmd+O`) shows open tabs and in-app background sessions.
+Each row displays its title, working directory, and current/open/background/exited status.
 
 ### Invoking the Quick Palette
 
@@ -198,15 +186,6 @@ As you type into the search bar, Term filters open tabs and detached sessions in
   - Matches occurring immediately after word boundary delimiters (`/`, `_`, `-`, ` `, `.`, `:`) (+15 points).
   - Consecutive character matches (+20 points).
 
-### Live Process Telemetry (PID, RSS, CPU)
-
-Every row displayed in the session switcher queries Darwin kernel APIs directly via `darwin.proc_pidinfo(..., .TASKINFO)`:
-- **PID**: The POSIX Process ID of the root child process spawned in the PTY.
-- **RSS (Resident Set Size)**: The actual physical memory (in Megabytes) currently occupied by the process in RAM (`pti_resident_size / (1024 * 1024)`).
-- **CPU %**: Instantaneous CPU utilization percentage of the task.
-
-This enables you to spot memory leaks, runaway builds, or high-CPU processes across all tabs and detached sessions without switching to an external task monitor.
-
 ### Palette Actions & Keyboard Navigation
 
 | Keystroke | Action | Description |
@@ -215,7 +194,7 @@ This enables you to spot memory leaks, runaway builds, or high-CPU processes acr
 | **`Down` (`↓`)** | Navigate Down | Moves the selection highlight to the next result. |
 | **`Enter` (`⏎`)** | Activate / Attach | If selecting an **active tab**, switches focus to it. If selecting a **detached session**, re-attaches it into the GUI tab bar. |
 | **`⌥⌘B` (`Alt+Cmd+B`)** | Detach Session | Immediately detaches the highlighted active tab into the background registry. |
-| **`⌘X` / `^X`** | Terminate Session | Sends a termination signal to the highlighted tab or detached session, killing its child process tree cleanly. |
+| **`⌘X` / `^X`** | Terminate Session | Opens confirmation before closing the highlighted tab or terminating a background session. |
 | **`Backspace`** | Delete Character | Deletes the trailing character from the active search query. |
 | **`Escape` (`esc`)** | Close Palette | Dismisses the quick palette and returns keyboard focus to the active terminal. |
 
@@ -417,3 +396,28 @@ The standard renderer supports multiple terminals within each tab. Each pane own
 | Tab overflow | Shift+Cmd+\ |
 
 These bindings require the exact modifiers and backslash key; pipe is not a split or overflow alias. Split rejects insufficient space, exhausted pane capacity, shell/worker startup failures, and the experimental single-terminal Pinnacle renderer with a diagnostic. Detach supports only a single embedded terminal; a split tab or a surviving separately allocated pane rejects detach without stopping its processes. Splitting clears pane zoom; changing pane focus while zoomed displays the newly focused pane. New split shells use the configured initial working directory.
+
+
+### Background session interaction
+
+Detach (`Option+Command+B`, or tab menu **Run in background**) transfers a single
+terminal's PTY, parser, screen, scrollback, displayed title, rename override, and
+working directory to the in-app session registry. Split tabs cannot detach; the
+switcher explains the rejection. Detaching the last tab opens a replacement shell.
+Processes continue and output is parsed while the application remains running.
+Background sessions stop when the application exits; this is not restart persistence.
+
+`Command+O`, the tab menu **Sessions**, or the background count badge opens the
+session switcher. Search, arrow keys, wheel scrolling, and clicking a row select
+or open sessions. The badge selects a background row. Enter attaches the selected
+background session or focuses an open tab. Escape or an outside click dismisses.
+The modal consumes terminal input, paste, and drops. Rows show title, directory,
+and current/open/background/exited state. Exited background sessions retain output
+for review after attachment. A full tab strip leaves an unsuccessful attachment
+registered and running, with an inline explanation. `Command+X` requests termination
+through confirmation; saved layout rows never offer termination.
+
+The registry remains the authoritative lifecycle owner until an attached backend
+starts successfully. Failure restores the background owner. Each PTY has one drain
+worker; parser responses target that session's PTY, and background parsing releases
+GUI clipboard callbacks. Switcher item buffers are presentation snapshots only.

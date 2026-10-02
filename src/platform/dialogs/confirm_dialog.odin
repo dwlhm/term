@@ -32,6 +32,7 @@ Confirm_Dialog_Target :: enum u8 {
 
 Confirm_Dialog_State :: struct {
 	visible:        bool,
+	background_session: bool,
 	rect:           Rect_f32,
 	target_tab_idx: int,
 	target_tab_id:  u32,
@@ -55,6 +56,7 @@ confirm_dialog_init :: proc(state: ^Confirm_Dialog_State) {
 confirm_dialog_show :: proc(state: ^Confirm_Dialog_State, target_idx: int, target_tab_id: u32 = 0) {
 	if state == nil do return
 	state.visible = true
+	state.background_session = false
 	state.target_tab_idx = target_idx
 	state.target_tab_id = target_tab_id
 	state.hover_target = .None

@@ -425,6 +425,11 @@ backend_init_from_core_session :: proc(
 	b.terminal = cs.term
 	b.parser = cs.vt_parser
 	b.session_mode = cs.mode
+	b.prog = cs.gui_prog
+	b.argv = cs.gui_argv
+	cs.pty_handle = pty.Pty{master = -1, pid = -1}
+	cs.term = {}
+	cs.vt_parser = {}
 
 	b.focused = true
 	b.should_quit = false
@@ -465,8 +470,7 @@ backend_init_from_core_session :: proc(
 	b.parser.clipboard_read_user_data = b
 	backend_global = b
 
-	spawn_cwd := cfg.working_directory if (cfg != nil && len(cfg.working_directory) > 0) else "~"
-	b.cwd = strings.clone(spawn_cwd)
+	b.cwd = strings.clone(cs.cwd)
 
 	b.observer = session_core.Terminal_Observer_Port{
 		user_data       = b,
@@ -493,6 +497,23 @@ backend_init_from_core_session :: proc(
 	b.view_generation += 1
 
 	return true
+}
+
+// backend_restore_core_session rolls an unsuccessful attach back to its core owner.
+// The backend worker must be stopped before transferring its PTY and parser.
+backend_restore_core_session :: proc(b: ^Backend, cs: ^session_core.Core_Session) {
+	if b == nil || cs == nil do return
+	backend_stop_thread(b)
+	cs.pty_handle = b.pty
+	cs.term = b.terminal
+	cs.vt_parser = b.parser
+	cs.mode = b.session_mode
+	cs.gui_prog = b.prog
+	cs.gui_argv = b.argv
+	b.pty = pty.Pty{master = -1, pid = -1}
+	b.terminal = {}
+	b.parser = {}
+	backend_destroy(b)
 }
 
 // backend_destroy frees terminal, parser, and closes PTY.

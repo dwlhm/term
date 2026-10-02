@@ -17,6 +17,7 @@ import "core:time"
 
 import "vendor:sdl3"
 
+import session_core "../session_core"
 import diag "../diag"
 import probe "../bench/probe"
 
@@ -363,6 +364,9 @@ App :: struct {
 	base_title:          string,
 	hud_active:          bool,
 	confirm_dialog:      platform_dialogs.Confirm_Dialog_State,
+	session_switcher:    platform_tabs.Session_Switcher_State,
+	confirm_session_buf: [64]u8,
+	confirm_session_len: int,
 	drag_region:         win.Drag_Region,
 	drop_fx:             Drop_Fx_State,
 	pty_event_pending:   b32,
@@ -564,6 +568,10 @@ _app_execute_tab_menu :: proc(a: ^App, item: platform_tabs.Tab_Menu_Item, target
 		}
 	case .Rename:
 		_app_begin_tab_rename(a, target_idx)
+	case .Detach:
+		_app_detach_tab(a, target_idx)
+	case .Sessions:
+		_app_open_session_switcher(a)
 	}
 	_app_resync_tab_modals(a)
 	platform_tabs.tab_bar_anim_activate(&a.tab_bar)
@@ -588,6 +596,7 @@ _app_request_close_tab :: proc(a: ^App, idx: int) {
 	if idx < 0 || idx >= len(a.session_mgr.tabs) do return
 	tab := &a.session_mgr.tabs[idx]
 	if _app_tab_has_running_processes(tab) {
+		a.confirm_session_len = 0
 		platform_dialogs.confirm_dialog_show(&a.confirm_dialog, idx, tab.id)
 		a.renderer.full_redraw_pending = true
 		_app_set_drag_region(a)
@@ -602,11 +611,25 @@ _app_apply_confirm_action :: proc(a: ^App, action: platform_dialogs.Confirm_Dial
 	if a == nil do return
 	switch action {
 	case .Confirm:
+		if a.confirm_session_len > 0 {
+			cs := session_core.session_registry_unregister(a.session_mgr.registry, string(a.confirm_session_buf[:a.confirm_session_len]))
+			if cs != nil {
+				session_core.session_destroy(cs)
+				free(cs)
+			}
+			a.confirm_session_len = 0
+			platform_dialogs.confirm_dialog_hide(&a.confirm_dialog)
+			_app_open_session_switcher(a, true)
+			return
+		}
 		idx := _app_tab_index_by_id(a, a.confirm_dialog.target_tab_id)
 		platform_dialogs.confirm_dialog_hide(&a.confirm_dialog)
 		if idx >= 0 do _app_close_tab_confirmed(a, idx)
 	case .Cancel:
+		background := a.confirm_session_len > 0
+		a.confirm_session_len = 0
 		platform_dialogs.confirm_dialog_hide(&a.confirm_dialog)
+		if background do _app_open_session_switcher(a, true)
 	case .None:
 	}
 	_app_set_drag_region(a)
@@ -618,7 +641,7 @@ _app_apply_confirm_action :: proc(a: ^App, action: platform_dialogs.Confirm_Dial
 _app_set_drag_region :: proc(a: ^App) {
 	if a == nil do return
 	dr := a.tab_bar.drag_rect
-	enabled := dr.w > 0 && dr.h > 0 && !a.confirm_dialog.visible && !a.tab_menu.visible && !a.tab_rename.active && !a.tab_overflow.visible
+	enabled := dr.w > 0 && dr.h > 0 && !a.confirm_dialog.visible && !a.tab_menu.visible && !a.tab_rename.active && !a.tab_overflow.visible && !a.session_switcher.visible
 	a.drag_region = win.Drag_Region{
 		x = dr.x, y = dr.y, w = dr.w, h = dr.h,
 		enabled = enabled,
@@ -774,6 +797,7 @@ app_destroy :: proc(a: ^App) {
 		return
 	}
 	sdl3.RemoveEventWatch(_app_event_watch, a)
+	if a.session_mgr.registry == session_core.session_registry_default() do session_core.session_registry_clear(a.session_mgr.registry)
 	session_manager_destroy(&a.session_mgr)
 	if a.backend.drain_buf != nil {
 		backend_destroy(&a.backend)
@@ -1021,7 +1045,7 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 	for ev in evs {
 		active_b = app_active_backend(a)
 		if active_b == nil || a.should_quit do break
-		if ev.paste_shadow && !a.tab_rename.active && !a.search_bar.visible do continue
+		if ev.paste_shadow && !a.tab_rename.active && !a.search_bar.visible && !a.session_switcher.visible do continue
 
 		if ev.event_type == .Drop {
 			drop_fx_handle(&a.drop_fx, ev.drop)
@@ -1052,6 +1076,27 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 				}
 				continue
 			}
+		}
+
+		if a.session_switcher.visible {
+			if ev.event_type == .Key {
+				_, action, item := platform_tabs.session_switcher_dispatch_key(&a.session_switcher, ev)
+				_app_execute_session_action(a, action, item)
+			} else if ev.event_type == .Pointer {
+				_app_layout_ui(a)
+				wheel := _app_pointer_wheel_delta(ev.pointer) if ev.pointer.kind == .Wheel else 0
+				action, item := platform_tabs.session_switcher_dispatch_pointer(&a.session_switcher, ev.pointer.x, ev.pointer.y, ev.pointer.kind == .Button_Down && ev.pointer.button == sdl3.BUTTON_LEFT, wheel)
+				_app_execute_session_action(a, action, item)
+			} else if ev.event_type == .Local && ev.action == .Attach_Session {
+				_app_close_session_switcher(a)
+			} else if ev.event_type == .Local && ev.action == .Detach_Tab && a.session_switcher.match_count > 0 {
+				item := a.session_switcher.items[a.session_switcher.matches[a.session_switcher.selected_match_idx]]
+				_app_execute_session_action(a, .Detach, item)
+			} else if ev.event_type == .Drop && len(ev.drop.text) > 0 {
+				delete(ev.drop.text)
+			}
+			a.renderer.full_redraw_pending = true
+			continue
 		}
 
 		// (0) Modal tab chrome: inline rename then context menu own every key event.
@@ -1206,6 +1251,12 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 			ok = _app_dispatch_backend(active_b, UI_Event{type = .Input, input = ev}) && ok
 		case .Local:
 			#partial switch ev.action {
+			case .Detach_Tab:
+				if a.tab_rename.active || a.search_bar.visible || a.tab_menu.visible || a.tab_overflow.visible do continue
+				_app_detach_tab(a, a.session_mgr.active_idx)
+			case .Attach_Session:
+				if a.tab_rename.active || a.search_bar.visible || a.tab_menu.visible || a.tab_overflow.visible do continue
+				_app_open_session_switcher(a)
 			case .Paste:
 				if a.tab_rename.active || a.search_bar.visible || a.tab_menu.visible || a.tab_overflow.visible do continue
 				if !_app_paste_clipboard(a) {
@@ -1407,6 +1458,8 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 						a.renderer.full_redraw_pending = true
 					case .Context_Menu:
 						// Handled by the right-click intercept above.
+					case .Open_Session_Switcher:
+						_app_open_session_switcher(a, true)
 					case .Show_Overflow:
 						_app_open_tab_overflow(a)
 					case .Window_Zoom:
@@ -1665,6 +1718,8 @@ _app_layout_ui :: proc(a: ^App) {
 	window_w := f32(a.window.width) if a.window.width > 0 else f32(a.window.pixel_w)
 	window_h := f32(a.window.height) if a.window.height > 0 else f32(a.window.pixel_h)
 	tab_count := len(a.session_mgr.tabs)
+	a.tab_bar.detached_count = session_core.session_registry_detached_count(a.session_mgr.registry)
+	if a.session_switcher.visible do platform_tabs.session_switcher_layout(&a.session_switcher, window_w, window_h)
 	a.tab_bar.max_title_len = a.config.tab_max_title_len if a.config.tab_max_title_len > 0 else 16
 	titles: [MAX_TABS]string
 	for i in 0 ..< tab_count {
@@ -1713,6 +1768,7 @@ _app_stage_ui :: proc(a: ^App) {
 		&a.tab_rename,
 		&a.confirm_dialog,
 		&a.tab_overflow,
+		&a.session_switcher,
 	)
 
 	// One shared logical-space surface; the shader applies the Retina scale once.

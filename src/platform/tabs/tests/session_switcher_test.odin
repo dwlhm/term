@@ -167,7 +167,8 @@ test_session_switcher_keyboard_navigation :: proc(t: ^testing.T) {
 	testing.expect(t, consumed)
 	testing.expect_value(t, action, tabs.Session_Switcher_Action.Close)
 
-	// 7. Alt+Cmd+b returns .Detach
+	// 7. Alt+Cmd+b detaches only an open tab
+	state.selected_match_idx = 0
 	ev_b := input.Input_Event{event_type = .Key, alt = true, gui = true, rune = 'b'}
 	consumed, action, item = tabs.session_switcher_dispatch_key(&state, ev_b)
 	testing.expect(t, consumed)
@@ -209,4 +210,32 @@ test_session_switcher_lifecycle :: proc(t: ^testing.T) {
 	tabs.session_switcher_hide(&state)
 	testing.expect(t, !state.visible)
 	testing.expect_value(t, state.query_len, 0)
+}
+
+@(test)
+test_session_switcher_scrolled_row_pointer_and_viewport :: proc(t: ^testing.T) {
+	state: tabs.Session_Switcher_State
+	tabs.session_switcher_init(&state)
+	state.visible = true
+	for i in 0 ..< 20 {
+		state.items[i].title = "session"
+		state.items[i].tab_idx = i
+	}
+	state.item_count = 20
+	tabs.session_switcher_filter(&state)
+	tabs.session_switcher_layout(&state, 640, 480)
+	for i in 0 ..< 12 {
+		_, _, _ = tabs.session_switcher_dispatch_key(&state, input.Input_Event{event_type = .Key, kind = .Arrow_Down})
+	}
+	testing.expect(t, state.scroll_offset > 0)
+	rr := tabs.session_switcher_row_rect(&state, state.selected_match_idx - state.scroll_offset)
+	action, item := tabs.session_switcher_dispatch_pointer(&state, rr.x + 4, rr.y + 4, true)
+	testing.expect_value(t, action, tabs.Session_Switcher_Action.Switch_Tab)
+	testing.expect_value(t, item.tab_idx, 12)
+	tabs.session_switcher_layout(&state, 120, 90)
+	testing.expect(t, state.rect.x >= 0 && state.rect.y >= 0)
+	testing.expect(t, state.rect.x + state.rect.w <= 120)
+	testing.expect(t, state.rect.y + state.rect.h <= 90)
+	action, _ = tabs.session_switcher_dispatch_pointer(&state, -1, -1, true)
+	testing.expect_value(t, action, tabs.Session_Switcher_Action.Close)
 }

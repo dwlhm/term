@@ -989,6 +989,38 @@ test_pane_chrome_hollow_cursor :: proc(t: ^testing.T) {
 }
 
 @test
+test_session_switcher_render_clips_scrolled_rows :: proc(t: ^testing.T) {
+	r := new(render.Renderer)
+	for &slot in r.atlas.slots do slot.valid = true
+	defer free(r)
+	theme := ui.theme_catppuccin_mocha()
+	bar: ui.Tab_Bar_State
+	ui.tab_bar_init(&bar)
+	state: ui.Session_Switcher_State
+	tabs.session_switcher_init(&state)
+	state.visible = true
+	state.item_count = 20
+	for i in 0 ..< state.item_count {
+		state.items[i].title = "A very long session title that should not overlap the status"
+		state.items[i].cwd = "/workspace/very/long/path/that/is/clipped"
+		state.items[i].tab_idx = i
+	}
+	tabs.session_switcher_filter(&state)
+	state.selected_match_idx = 15
+	tabs.session_switcher_layout(&state, 420, 300)
+	testing.expect(t, state.scroll_offset > 0)
+	_ = ui.ui_render_stage(r, &theme, i18n.i18n_get(), &bar, nil, nil, nil, 420, 300, 1, "", nil, nil, nil, nil, nil, &state)
+	testing.expect(t, r.ui_layer_glyph_count[render.UI_Layer.Modal] > 0)
+	for glyph in r.ui_glyph_data[render.UI_Layer.Modal][:r.ui_layer_glyph_count[render.UI_Layer.Modal]] {
+		testing.expect(t, glyph.x >= state.rect.x && glyph.x + glyph.cw <= state.rect.x + state.rect.w)
+		testing.expect(t, glyph.y >= state.rect.y && glyph.y + glyph.ch <= state.rect.y + state.rect.h)
+	}
+	tabs.session_switcher_layout(&state, 100, 80)
+	_ = ui.ui_render_stage(r, &theme, i18n.i18n_get(), &bar, nil, nil, nil, 100, 80, 1, "", nil, nil, nil, nil, nil, &state)
+	testing.expect_value(t, r.ui_layer_glyph_count[render.UI_Layer.Modal], u32(0))
+}
+
+@test
 test_ui_layer_plan_puts_modal_above_pane_chrome :: proc(t: ^testing.T) {
 	r := new(render.Renderer)
 	defer free(r)

@@ -3,6 +3,7 @@ package platform_tabs
 import "base:intrinsics"
 import "core:fmt"
 import "core:strings"
+import "core:sync"
 import "core:unicode"
 import "core:unicode/utf8"
 import input "../input"
@@ -12,12 +13,12 @@ import "core:sys/darwin"
 import posix "core:sys/posix"
 
 SESSION_SWITCHER_MAX_QUERY :: 64
-SESSION_SWITCHER_MAX_ITEMS :: 32
+SESSION_SWITCHER_MAX_ITEMS :: 256
 SESSION_SWITCHER_MAX_VISIBLE_ROWS :: 8
 SESSION_SWITCHER_WIDTH: f32 : 540.0
-SESSION_SWITCHER_ROW_HEIGHT: f32 : 26.0
-SESSION_SWITCHER_HEADER_HEIGHT: f32 : 38.0
-SESSION_SWITCHER_FOOTER_HEIGHT: f32 : 28.0
+SESSION_SWITCHER_ROW_HEIGHT: f32 : 44.0
+SESSION_SWITCHER_HEADER_HEIGHT: f32 : 64.0
+SESSION_SWITCHER_FOOTER_HEIGHT: f32 : 48.0
 
 // Tab_Session carries lightweight tab session metadata for standalone caller and test compatibility.
 Tab_Session :: struct {
@@ -34,6 +35,9 @@ Session_Switcher_Item :: struct {
 	title:       string,
 	pid:         int,
 	cwd:         string,
+	is_current:  bool,
+	is_exited:   bool,
+	tab_id:      u32,
 	is_detached: bool,
 	tab_idx:     int, // -1 if detached
 	rss_mb:      int,
@@ -58,6 +62,11 @@ Session_Switcher_State :: struct {
 	match_count:        int,
 	selected_match_idx: int,
 	detached_count:     int,
+	scroll_offset:      int,
+	visible_rows:       int,
+	message_buf:        [160]u8,
+	message_len:        int,
+	truncated:          bool,
 }
 
 // Session_Switcher_Action encodes actions triggered by keyboard navigation in the switcher.
@@ -197,6 +206,8 @@ session_switcher_show :: proc(state: ^Session_Switcher_State, tabs: []$T, active
 	if state == nil do return
 
 	state.item_count = 0
+	state.truncated = false
+	state.scroll_offset = 0
 
 	// 1. Ingest active tabs
 	for i := 0; i < len(tabs); i += 1 {
@@ -206,8 +217,10 @@ session_switcher_show :: proc(state: ^Session_Switcher_State, tabs: []$T, active
 		item^ = {}
 		item.tab_idx = i
 		item.is_detached = false
+		item.is_current = i == active_idx
 
 		when intrinsics.type_has_field(T, "id") {
+			item.tab_id = tab.id
 			id_str := fmt.bprintf(item.id_buf[:], "%v", tab.id)
 			item.id = id_str
 		} else {
@@ -269,7 +282,8 @@ session_switcher_show :: proc(state: ^Session_Switcher_State, tabs: []$T, active
 	if reg != nil {
 		detached_ids: [SESSION_SWITCHER_MAX_ITEMS]string
 		detached_cnt := session_core.session_registry_list_detached(reg, detached_ids[:])
-		state.detached_count = detached_cnt
+		state.detached_count = session_core.session_registry_detached_count(reg)
+		state.truncated = state.detached_count + len(tabs) + len(saved_layouts) > SESSION_SWITCHER_MAX_ITEMS
 		for d := 0; d < detached_cnt; d += 1 {
 			if state.item_count >= SESSION_SWITCHER_MAX_ITEMS do break
 			id := detached_ids[d]
@@ -285,10 +299,18 @@ session_switcher_show :: proc(state: ^Session_Switcher_State, tabs: []$T, active
 			copy(item.id_buf[:], id[:copy_len])
 			item.id = string(item.id_buf[:copy_len])
 
-			title_str := fmt.bprintf(item.title_buf[:], "%s (Detached)", id)
-			item.title = title_str
+			sync.mutex_lock(&cs.lock)
+			title := string(cs.title_buf[:cs.title_len])
+			if cs.title_override_len > 0 do title = string(cs.title_override_buf[:cs.title_override_len])
+			if len(title) == 0 do title = id
+			n := copy(item.title_buf[:], title)
+			item.title = string(item.title_buf[:n])
+			n = copy(item.cwd_buf[:], cs.cwd)
+			item.cwd = string(item.cwd_buf[:n])
+			item.is_exited = cs.pty_handle.state == .Exited
 
 			item.pid = cs.pty_handle.pid
+			sync.mutex_unlock(&cs.lock)
 			item.rss_mb, item.cpu_pct = session_query_taskinfo(item.pid)
 
 			state.item_count += 1
@@ -342,16 +364,13 @@ session_switcher_hide :: proc(state: ^Session_Switcher_State) {
 // session_switcher_layout calculates floating modal bounds positioned upper-center.
 session_switcher_layout :: proc(state: ^Session_Switcher_State, window_w, window_h: f32) {
 	if state == nil do return
-	w: f32 = min(SESSION_SWITCHER_WIDTH, window_w - 40.0)
-	if w < 200 do w = 200
-	visible_rows := max(1, min(state.match_count, SESSION_SWITCHER_MAX_VISIBLE_ROWS))
-	h: f32 = SESSION_SWITCHER_HEADER_HEIGHT + f32(visible_rows) * SESSION_SWITCHER_ROW_HEIGHT + SESSION_SWITCHER_FOOTER_HEIGHT
-	x: f32 = (window_w - w) * 0.5
-	y: f32 = 60.0
-	if y + h > window_h - 20.0 {
-		y = max(10.0, window_h - h - 20.0)
-	}
-	state.rect = Rect_f32{x = x, y = y, w = w, h = h}
+	w := max(0, min(SESSION_SWITCHER_WIDTH, window_w - 20))
+	available := max(0, window_h - 20 - SESSION_SWITCHER_HEADER_HEIGHT - SESSION_SWITCHER_FOOTER_HEIGHT)
+	state.visible_rows = min(SESSION_SWITCHER_MAX_VISIBLE_ROWS, max(0, int(available / SESSION_SWITCHER_ROW_HEIGHT)))
+	rows := min(max(1, state.match_count), state.visible_rows)
+	h := min(max(0, window_h - 20), SESSION_SWITCHER_HEADER_HEIGHT + f32(rows) * SESSION_SWITCHER_ROW_HEIGHT + SESSION_SWITCHER_FOOTER_HEIGHT)
+	state.rect = Rect_f32{x = max(0, (window_w - w) * 0.5), y = max(0, min(60, window_h - h - 10)), w = w, h = h}
+	session_switcher_reveal_selection(state)
 }
 
 // session_switcher_dispatch_key processes keyboard navigation and search typing.
@@ -371,12 +390,14 @@ session_switcher_dispatch_key :: proc(
 	if ev.kind == .Arrow_Up {
 		if state.match_count > 0 {
 			state.selected_match_idx = (state.selected_match_idx - 1 + state.match_count) % state.match_count
+			session_switcher_reveal_selection(state)
 		}
 		return true, .None, {}
 	}
 	if ev.kind == .Arrow_Down {
 		if state.match_count > 0 {
 			state.selected_match_idx = (state.selected_match_idx + 1) % state.match_count
+			session_switcher_reveal_selection(state)
 		}
 		return true, .None, {}
 	}
@@ -406,7 +427,7 @@ session_switcher_dispatch_key :: proc(
 
 	// Shortcut: Alt+Cmd+b for Detach (strictly consistent with global shortcut)
 	if ev.alt && ev.gui && !ev.ctrl && !ev.shift && (ev.rune == 'b' || ev.rune == 'B') {
-		if has_selected {
+		if has_selected && !selected_item.is_detached && !selected_item.is_persisted {
 			return true, .Detach, selected_item
 		}
 		return true, .None, {}
@@ -414,7 +435,7 @@ session_switcher_dispatch_key :: proc(
 
 	// Shortcuts: Ctrl+X / Cmd+X for Terminate / Kill
 	if is_ctrl_or_gui && (ev.rune == 'x' || ev.rune == 'X' || ev.rune == 24) {
-		if has_selected {
+		if has_selected && !selected_item.is_persisted {
 			return true, .Terminate, selected_item
 		}
 		return true, .None, {}
@@ -446,4 +467,33 @@ session_switcher_dispatch_key :: proc(
 	}
 
 	return true, .None, {}
+}
+
+// Drawing and hit testing share the same row geometry and scroll window.
+session_switcher_row_rect :: proc(state: ^Session_Switcher_State, row: int) -> Rect_f32 {
+	return Rect_f32{x = state.rect.x + 4, y = state.rect.y + SESSION_SWITCHER_HEADER_HEIGHT + f32(row) * SESSION_SWITCHER_ROW_HEIGHT, w = max(0, state.rect.w - 8), h = SESSION_SWITCHER_ROW_HEIGHT}
+}
+
+session_switcher_reveal_selection :: proc(state: ^Session_Switcher_State) {
+	rows := max(1, state.visible_rows)
+	if state.selected_match_idx < state.scroll_offset do state.scroll_offset = state.selected_match_idx
+	if state.selected_match_idx >= state.scroll_offset + rows do state.scroll_offset = state.selected_match_idx - rows + 1
+	state.scroll_offset = clamp(state.scroll_offset, 0, max(0, state.match_count - rows))
+}
+
+session_switcher_dispatch_pointer :: proc(state: ^Session_Switcher_State, px, py: f32, click: bool, wheel: int = 0) -> (Session_Switcher_Action, Session_Switcher_Item) {
+	if state == nil || !state.visible do return .None, {}
+	if click && !point_in_rect(px, py, state.rect) do return .Close, {}
+	if wheel != 0 {
+		state.scroll_offset = clamp(state.scroll_offset - wheel, 0, max(0, state.match_count - max(1, state.visible_rows)))
+		state.selected_match_idx = clamp(state.selected_match_idx, state.scroll_offset, min(state.match_count - 1, state.scroll_offset + max(1, state.visible_rows) - 1)) if state.match_count > 0 else 0
+	}
+	for row in 0 ..< min(state.visible_rows, state.match_count - state.scroll_offset) {
+		if point_in_rect(px, py, session_switcher_row_rect(state, row)) && click {
+			state.selected_match_idx = state.scroll_offset + row
+			_, action, item := session_switcher_dispatch_key(state, input.Input_Event{event_type = .Key, kind = .Enter})
+			return action, item
+		}
+	}
+	return .None, {}
 }

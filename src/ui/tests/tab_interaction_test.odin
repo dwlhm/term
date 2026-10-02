@@ -64,11 +64,16 @@ test_tab_menu_key_navigation :: proc(t: ^testing.T) {
 	testing.expect_value(t, m.active_item, int(ui.Tab_Menu_Item.New_Tab))
 	_, _, _ = ui.tab_menu_dispatch_key(&m, input.Input_Event{event_type = .Key, kind = .Arrow_Down}, 1, 4)
 	testing.expect_value(t, m.active_item, int(ui.Tab_Menu_Item.Rename))
-	// Forward wrap returns to Close, backward wrap returns to Rename.
+	// New session entries remain reachable before wrapping.
+	_, _, _ = ui.tab_menu_dispatch_key(&m, input.Input_Event{event_type = .Key, kind = .Arrow_Down}, 1, 4)
+	testing.expect_value(t, m.active_item, int(ui.Tab_Menu_Item.Detach))
+	_, _, _ = ui.tab_menu_dispatch_key(&m, input.Input_Event{event_type = .Key, kind = .Arrow_Down}, 1, 4)
+	testing.expect_value(t, m.active_item, int(ui.Tab_Menu_Item.Sessions))
+	// Forward wrap returns to Close, backward wrap returns to Sessions.
 	_, _, _ = ui.tab_menu_dispatch_key(&m, input.Input_Event{event_type = .Key, kind = .Arrow_Down}, 1, 4)
 	testing.expect_value(t, m.active_item, int(ui.Tab_Menu_Item.Close))
 	_, _, _ = ui.tab_menu_dispatch_key(&m, input.Input_Event{event_type = .Key, kind = .Arrow_Up}, 1, 4)
-	testing.expect_value(t, m.active_item, int(ui.Tab_Menu_Item.Rename))
+	testing.expect_value(t, m.active_item, int(ui.Tab_Menu_Item.Sessions))
 
 	// Enter activates the active enabled item.
 	m.active_item = int(ui.Tab_Menu_Item.New_Tab)

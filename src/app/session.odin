@@ -451,53 +451,44 @@ session_detach_tab :: proc(sm: ^Session_Manager, idx: int) -> bool {
 	if backend_is_threaded(&s.backend) {
 		backend_stop_thread(&s.backend)
 	}
-	leaves: [MAX_PANE_NODES]^Pane_Node
-	leaf_count := tab_leaf_panes(s, leaves[:])
-	for i in 0 ..< leaf_count {
-		leaf := leaves[i]
-		if leaf.backend != nil && leaf.backend != &s.backend {
-			if backend_is_threaded(leaf.backend) {
-				backend_stop_thread(leaf.backend)
-			}
-			backend_destroy(leaf.backend)
-			free(leaf.backend)
-			leaf.backend = nil
-		}
-	}
-	pane_tree_destroy(&s.tree)
-
-	// 3. Move PTY, terminal grid, and parser into persistent Core_Session
+	// Reserve the authoritative registry entry before transferring any ownership.
+	reg := sm.registry if sm.registry != nil else session_core.session_registry_default()
 	cs := new(session_core.Core_Session)
 	cs.id = fmt.aprintf("session_%d", s.id)
-	cs.pty_handle = s.backend.pty
-	cs.term = s.backend.terminal
-	cs.vt_parser = s.backend.parser
-	cs.mode = s.backend.session_mode
+	cs.gui_tab_id = s.id
 	cs.is_detached = true
-
-	// Clear backend handles so session_destroy does not close PTY or free grid memory
-	s.backend.pty.master = -1
-	s.backend.pty.pid = -1
-	s.backend.terminal.grid.cells = nil
-	s.backend.terminal.alt_grid.cells = nil
-	s.backend.terminal.scrollback.cells = nil
-	s.backend.terminal.grapheme_store = {}
-	if s.backend.drain_buf != nil {
-		delete(s.backend.drain_buf, runtime.heap_allocator())
-		s.backend.drain_buf = nil
+	if !session_core.session_registry_register(reg, cs) {
+		delete(cs.id)
+		free(cs)
+		for i in 0 ..< len(sm.tabs) {
+			for j in 0 ..< threaded_count {
+				if sm.tabs[i].id == threaded_ids[j] do _ = backend_start_thread(&sm.tabs[i].backend)
+			}
+		}
+		_ = backend_start_thread(&s.backend)
+		return false
 	}
-	delete(s.backend.cwd)
-	s.backend.cwd = ""
-	termgrid.terminal_destroy(&s.backend.front_terminal)
-
-	// Launch background drain loop on persistent session (idle zero work)
-	session_core.session_start_drain_loop(cs)
-
-	// Store in Session_Registry
-	reg := sm.registry if sm.registry != nil else session_core.session_registry_default()
-	if reg != nil {
-		session_core.session_registry_register(reg, cs)
+	cs.title_len = copy(cs.title_buf[:], s.title_buf[:s.title_len])
+	if s.title_override_active do cs.title_override_len = copy(cs.title_override_buf[:], s.title_override_buf[:s.title_override_len])
+	cwd := string(s.last_cwd_buf[:s.last_cwd_len]) if s.last_cwd_len > 0 else s.backend.cwd
+	cs.cwd = strings.clone(cwd)
+	backend_restore_core_session(&s.backend, cs)
+	if !session_core.session_start_drain_loop(cs) {
+		_ = session_core.session_registry_unregister(reg, cs.id)
+		_ = backend_init_from_core_session(&s.backend, cs, sm.default_config, sm.default_theme)
+		backend_set_notify_data_ready(&s.backend, sm.notify_user_data, sm.notify_data_ready_cb)
+		backend_set_clipboard_callbacks(&s.backend, sm.clipboard_user_data, sm.clipboard_write_cb, sm.clipboard_read_cb)
+		_ = backend_start_thread(&s.backend)
+		session_core.session_destroy(cs)
+		free(cs)
+		for i in 0 ..< len(sm.tabs) {
+			for j in 0 ..< threaded_count {
+				if sm.tabs[i].id == threaded_ids[j] do _ = backend_start_thread(&sm.tabs[i].backend)
+			}
+		}
+		return false
 	}
+	pane_tree_destroy(&s.tree)
 
 	// 4. Remove tab from sm.tabs
 	old_nodes: [MAX_TABS]rawptr
@@ -534,8 +525,7 @@ session_detach_tab :: proc(sm: ^Session_Manager, idx: int) -> bool {
 
 	// 7. If sm.tabs is empty, spawn fresh default shell tab so window stays usable
 	if len(sm.tabs) == 0 {
-		shell, shell_allocated := _resolve_shell()
-		defer if shell_allocated do delete(shell)
+		shell, _ := _resolve_shell()
 		shell_argv := _resolve_shell_argv(shell)
 		rows := sm.default_rows > 0 ? sm.default_rows : 24
 		cols := sm.default_cols > 0 ? sm.default_cols : 80
@@ -575,13 +565,10 @@ session_attach_tab :: proc(sm: ^Session_Manager, persistent_session: ^session_co
 
 	// 1. Stop background drain thread on persistent_session
 	session_core.session_stop_drain_loop(persistent_session)
-	persistent_session.is_detached = false
 
+	// Keep the registry owner until the attached backend successfully starts.
 	// Unregister from registry if registered
 	reg := sm.registry if sm.registry != nil else session_core.session_registry_default()
-	if reg != nil {
-		_ = session_core.session_registry_unregister(reg, persistent_session.id)
-	}
 
 	// 2. Pause other threaded backends safely before mutating sm.tabs
 	threaded_ids: [MAX_TABS]u32
@@ -600,15 +587,22 @@ session_attach_tab :: proc(sm: ^Session_Manager, persistent_session: ^session_co
 	resize(&sm.tabs, len(sm.tabs) + 1)
 	new_idx := len(sm.tabs) - 1
 	tab := &sm.tabs[new_idx]
-	tab.id = sm.next_id
-	sm.next_id += 1
-	tab.status = .Running
-	tab.title_len = session_sanitize_title(tab.title_buf[:], i18n.i18n_get().tab_untitled)
+	tab.id = persistent_session.gui_tab_id if persistent_session.gui_tab_id > 0 else sm.next_id
+	sm.next_id = max(sm.next_id + 1, tab.id + 1)
+	tab.status = .Exited if persistent_session.pty_handle.state == .Exited else .Running
+	tab.exit_code = i32(persistent_session.pty_handle.exit_code)
+	tab.exit_signal = 0
+	tab.title_len = copy(tab.title_buf[:], persistent_session.title_buf[:persistent_session.title_len])
+	if tab.title_len == 0 do tab.title_len = session_sanitize_title(tab.title_buf[:], i18n.i18n_get().tab_untitled)
+	tab.title_override_len = copy(tab.title_override_buf[:], persistent_session.title_override_buf[:persistent_session.title_override_len])
+	tab.title_override_active = tab.title_override_len > 0
+	tab.last_cwd_len = copy(tab.last_cwd_buf[:], persistent_session.cwd)
 
 	// 4. Initialize backend transferring ownership from persistent_session
 	b := &tab.backend
 	if !backend_init_from_core_session(b, persistent_session, sm.default_config, sm.default_theme) {
 		ordered_remove(&sm.tabs, new_idx)
+		_ = session_core.session_start_drain_loop(persistent_session)
 		for i in 0 ..< len(sm.tabs) {
 			for j in 0 ..< threaded_count {
 				if sm.tabs[i].id == threaded_ids[j] {
@@ -620,9 +614,6 @@ session_attach_tab :: proc(sm: ^Session_Manager, persistent_session: ^session_co
 		return -1, false
 	}
 
-	// Free persistent_session wrapper
-	delete(persistent_session.id)
-	free(persistent_session)
 
 	_ = pane_tree_init(&tab.tree, &tab.backend)
 	if tab.tree.root != nil {
@@ -639,8 +630,23 @@ session_attach_tab :: proc(sm: ^Session_Manager, persistent_session: ^session_co
 	}
 
 	// 5. Connect backend and start worker thread
-	_ = backend_start_thread(b)
+	if !backend_start_thread(b) {
+		pane_tree_destroy(&tab.tree)
+		backend_restore_core_session(b, persistent_session)
+		persistent_session.is_detached = true
+		_ = session_core.session_start_drain_loop(persistent_session)
+		ordered_remove(&sm.tabs, new_idx)
+		for i in 0 ..< len(sm.tabs) {
+			for j in 0 ..< threaded_count {
+				if sm.tabs[i].id == threaded_ids[j] do _ = backend_start_thread(&sm.tabs[i].backend)
+			}
+		}
+		return -1, false
+	}
 	_ = session_refresh_title(tab)
+	if reg != nil do _ = session_core.session_registry_unregister(reg, persistent_session.id)
+	session_core.session_destroy(persistent_session)
+	free(persistent_session)
 
 	// 6. Resume other tabs' worker threads
 	for i in 0 ..< len(sm.tabs) {

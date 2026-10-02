@@ -5,6 +5,7 @@ import "core:math"
 import render "../render"
 import instance "../render/instance"
 import i18n "../i18n"
+import platform_tabs "../platform/tabs"
 
 UI_MAX_INSTANCES :: 512
 UI_CHROME_CELL_WIDTH: f32 : 8
@@ -604,8 +605,10 @@ ui_render_stage :: proc(
 		}
 		tx := cr.x + pad
 		ty := cr.y + pad
-		_emit_text_clipped(r, c.dialog_close_title, tx, ty, cw, ch, max_cols, theme.text_primary)
-		_emit_text_wrapped2(r, c.dialog_close_body, tx, ty + ch + theme.spacing.sm, cw, ch, max_cols, theme.spacing.sm, theme.text_muted)
+		title := "Terminate background session?" if confirm_state.background_session else c.dialog_close_title
+		body := "The process will stop and its terminal output will be discarded." if confirm_state.background_session else c.dialog_close_body
+		_emit_text_clipped(r, title, tx, ty, cw, ch, max_cols, theme.text_primary)
+		_emit_text_wrapped2(r, body, tx, ty + ch + theme.spacing.sm, cw, ch, max_cols, theme.spacing.sm, theme.text_muted)
 
 		confirm_fill := theme.surface_active
 		if confirm_state.hover_target == .Btn_Confirm {
@@ -672,107 +675,46 @@ ui_render_stage :: proc(
 	// every pane border, tab surface and popover.
 	render.renderer_ui_begin_layer(r, .Modal)
 	if session_switcher != nil && session_switcher.visible {
-		cr := session_switcher.rect
+		state := session_switcher
+		cr := state.rect
 		pad := theme.spacing.md
-
-		// 1. Backdrop card & borders
+		emit_bg(r, 0, 0, window_w, window_h, UI_MODAL_SCRIM)
+		_emit_card_shadow(r, cr, UI_CARD_SHADOW_ALPHA)
 		emit_bg(r, cr.x, cr.y, cr.w, cr.h, theme.surface_card)
-		emit_bg(r, cr.x, cr.y, cr.w, 1.0, theme.border_subtle)
-		emit_bg(r, cr.x, cr.y + cr.h - 1.0, cr.w, 1.0, theme.border_subtle)
-		emit_bg(r, cr.x, cr.y, 1.0, cr.h, theme.border_subtle)
-		emit_bg(r, cr.x + cr.w - 1.0, cr.y, 1.0, cr.h, theme.border_subtle)
-
-		// 2. Search header: "> {query}_" and right-aligned "[{match_count} matches]"
-		header_h: f32 = 38.0
-		hy := cr.y + (header_h - ch) * 0.5
-		emit_char(r, cr.x + pad, hy, cw, ch, '>', theme.accent_primary)
-
-		hx := cr.x + pad + cw * 2
-		q_str := string(session_switcher.query[:session_switcher.query_len])
-		_emit_text_clipped(r, q_str, hx, hy, cw, ch, 36, theme.text_primary)
-
-		cursor_x := hx + f32(session_switcher.query_len) * cw
-		emit_char(r, cursor_x, hy, cw, ch, '_', theme.accent_primary)
-
-		count_buf: [48]u8
-		count_str := fmt.bprintf(count_buf[:], "[%d match%s • %d detached]", session_switcher.match_count, "es" if session_switcher.match_count != 1 else "", session_switcher.detached_count)
-		count_w := f32(len(count_str)) * cw
-		count_x := cr.x + cr.w - pad - count_w
-		_emit_text_clipped(r, count_str, count_x, hy, cw, ch, len(count_str), theme.text_faint)
-
-		// 3. Horizontal divider below header
-		emit_bg(r, cr.x, cr.y + header_h, cr.w, 1.0, theme.border_subtle)
-
-		// 4. Matched rows
-		row_h: f32 = 26.0
-		if session_switcher.match_count == 0 {
-			no_match_y := cr.y + header_h + (row_h - ch) * 0.5 + 4.0
-			_emit_text_clipped(r, "No matching sessions", cr.x + pad, no_match_y, cw, ch, 32, theme.text_faint)
-		} else {
-			visible_rows := min(session_switcher.match_count, 8)
-			for row in 0 ..< visible_rows {
-				item_idx := session_switcher.matches[row]
-				item := session_switcher.items[item_idx]
-				ry := cr.y + header_h + 1.0 + f32(row) * row_h
-
-				if row == session_switcher.selected_match_idx {
-					emit_bg(r, cr.x + 4.0, ry + 1.0, cr.w - 8.0, row_h - 2.0, theme.surface_hover)
-				}
-
-				glyph_y := ry + (row_h - ch) * 0.5
-				rx := cr.x + pad
-
-				// Status glyph: ● (active tab), ○ (detached), or ⊞ (layout)
-				glyph_cp: rune = '⊞' if item.is_persisted else (!item.is_detached ? '●' : '○')
-				glyph_col := theme.status_success if item.is_persisted else (!item.is_detached ? theme.accent_primary : theme.text_faint)
-				emit_char(r, rx, glyph_y, cw, ch, glyph_cp, glyph_col)
-				rx += cw * 2
-
-				// Item text: [{slot}] {title} ({status})
-				slot_buf: [16]u8
-				slot_str := fmt.bprintf(slot_buf[:], "[%d]", item.tab_idx + 1) if item.tab_idx >= 0 else (item.is_persisted ? "[L]" : "[–]")
-				status_str := "layout" if item.is_persisted else (!item.is_detached ? "active" : "detached")
-				title_buf: [128]u8
-				title_str := fmt.bprintf(title_buf[:], "%s %s (%s)", slot_str, item.title, status_str)
-				title_cols := 22
-				_emit_text_clipped(r, title_str, rx, glyph_y, cw, ch, title_cols, theme.text_primary)
-				rx += f32(min(len(title_str), title_cols)) * cw + cw * 2
-
-				// PID
-				if item.pid > 0 {
-					pid_buf: [32]u8
-					pid_str := fmt.bprintf(pid_buf[:], "PID %d", item.pid)
-					_emit_text_clipped(r, pid_str, rx, glyph_y, cw, ch, 10, theme.text_faint)
-					rx += f32(len(pid_str)) * cw + cw * 2
-				}
-
-				// Metrics
-				if item.rss_mb > 0 {
-					metric_buf: [32]u8
-					metric_str := fmt.bprintf(metric_buf[:], "%d MB", item.rss_mb)
-					_emit_text_clipped(r, metric_str, rx, glyph_y, cw, ch, 10, theme.text_muted)
-					rx += f32(len(metric_str)) * cw + cw * 2
-				}
-
-				// CWD truncated
-				if len(item.cwd) > 0 {
-					rem_w := max(0.0, cr.x + cr.w - pad - rx)
-					rem_cols := int(rem_w / cw)
-					if rem_cols > 0 {
-						_emit_text_clipped(r, item.cwd, rx, glyph_y, cw, ch, rem_cols, theme.text_faint)
-					}
-				}
+		_emit_card_ring(r, cr, theme.border_subtle)
+		cols := max(0, int((cr.w - pad * 2) / cw))
+		if cr.h >= platform_tabs.SESSION_SWITCHER_HEADER_HEIGHT + platform_tabs.SESSION_SWITCHER_FOOTER_HEIGHT {
+			count_buf: [64]u8
+			heading := fmt.bprintf(count_buf[:], "Sessions · %d background", state.detached_count)
+			_emit_text_clipped(r, heading, cr.x + pad, cr.y + 8, cw, ch, cols, theme.text_primary)
+			query_buf: [96]u8
+			query := fmt.bprintf(query_buf[:], "> %s_", string(state.query[:state.query_len])) if state.query_len > 0 else "> Search sessions…"
+			_emit_text_clipped(r, query, cr.x + pad, cr.y + 32, cw, ch, cols, theme.text_muted)
+			for row in 0 ..< min(state.visible_rows, state.match_count - state.scroll_offset) {
+				match_idx := state.scroll_offset + row
+				item := &state.items[state.matches[match_idx]]
+				rr := platform_tabs.session_switcher_row_rect(state, row)
+				if rr.y + rr.h > cr.y + cr.h - platform_tabs.SESSION_SWITCHER_FOOTER_HEIGHT do break
+				if match_idx == state.selected_match_idx do emit_bg(r, rr.x, rr.y, rr.w, rr.h, theme.surface_hover)
+				status := "Saved layout" if item.is_persisted else ("Background · exited" if item.is_exited else ("Background" if item.is_detached else ("Current" if item.is_current else "Open tab")))
+				status_cols := min(cols, int(len(status)))
+				_emit_text_clipped(r, item.title, cr.x + pad, rr.y + 3, cw, ch, max(0, cols - status_cols - 2), theme.text_primary)
+				_emit_text_clipped(r, status, cr.x + cr.w - pad - f32(status_cols) * cw, rr.y + 3, cw, ch, status_cols, theme.text_muted)
+				_emit_text_clipped(r, item.cwd, cr.x + pad, rr.y + 23, cw, ch, cols, theme.text_faint)
 			}
+			if state.match_count == 0 && state.visible_rows > 0 do _emit_text_clipped(r, "No matching sessions", cr.x + pad, cr.y + platform_tabs.SESSION_SWITCHER_HEADER_HEIGHT + 8, cw, ch, cols, theme.text_faint)
+			fy := cr.y + cr.h - platform_tabs.SESSION_SWITCHER_FOOTER_HEIGHT
+			emit_bg(r, cr.x, fy, cr.w, 1, theme.border_subtle)
+			hint := "↑↓ / scroll · Enter: Open · Esc: Close"
+			if state.match_count > 0 {
+				item := &state.items[state.matches[state.selected_match_idx]]
+				hint = "Enter: Restore layout · Esc: Close" if item.is_persisted else ("Enter: Attach · ⌘X: Terminate · Esc: Close" if item.is_detached else "Enter: Switch · ⌥⌘B: Background · ⌘X: Close")
+			}
+			_emit_text_clipped(r, hint, cr.x + pad, fy + 4, cw, ch, cols, theme.text_faint)
+			message := string(state.message_buf[:state.message_len])
+			if len(message) == 0 && state.truncated do message = "List limit reached; showing the most recent background sessions."
+			_emit_text_clipped(r, message, cr.x + pad, fy + 25, cw, ch, cols, theme.text_muted)
 		}
-
-		// 5. Footer divider and hint bar
-		footer_h: f32 = 28.0
-		footer_y := cr.y + cr.h - footer_h
-		emit_bg(r, cr.x, footer_y, cr.w, 1.0, theme.border_subtle)
-		hint_y := footer_y + (footer_h - ch) * 0.5
-		hints := "↑/↓: Navigate  •  Enter: Open  •  ⌥⌘b: Detach  •  Esc: Close"
-		hint_cols := int((cr.w - pad * 2) / cw)
-		_emit_text_clipped(r, hints, cr.x + pad, hint_y, cw, ch, hint_cols, theme.text_faint)
 	}
 
 	// Convert once at the GPU boundary; hit rectangles remain in logical units.

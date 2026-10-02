@@ -127,7 +127,7 @@ tab_drag_dispatch_pointer :: proc(
 	return true, .None, -1
 }
 
-TAB_MENU_ITEM_COUNT :: 5
+TAB_MENU_ITEM_COUNT :: 7
 TAB_MENU_WIDTH: f32 : 210.0
 TAB_MENU_ITEM_H: f32 : 26.0
 TAB_MENU_PAD_Y: f32 : 4.0
@@ -140,6 +140,8 @@ Tab_Menu_Item :: enum u8 {
 	Close_To_Right,
 	New_Tab,
 	Rename,
+	Detach,
+	Sessions,
 }
 
 // Tab_Menu_Action reports the discrete outcome of a menu interaction.
@@ -188,6 +190,8 @@ tab_menu_refresh :: proc(m: ^Tab_Menu_State, tab_count, max_tabs: int) {
 	m.disabled[int(Tab_Menu_Item.Close_Others)] = !(tab_count > 1)
 	m.disabled[int(Tab_Menu_Item.Close_To_Right)] = !(m.target_idx >= 0 && m.target_idx < tab_count - 1)
 	m.disabled[int(Tab_Menu_Item.New_Tab)] = !(tab_count < max_tabs)
+	m.disabled[int(Tab_Menu_Item.Detach)] = !(m.target_idx >= 0 && m.target_idx < tab_count)
+	m.disabled[int(Tab_Menu_Item.Sessions)] = false
 	m.disabled[int(Tab_Menu_Item.Rename)] = !(m.target_idx >= 0 && m.target_idx < tab_count)
 }
 
@@ -339,6 +343,10 @@ tab_menu_item_label :: proc(copy: ^i18n.Strings, item: Tab_Menu_Item) -> string 
 		return c.menu_new_tab
 	case .Rename:
 		return c.menu_rename
+	case .Detach:
+		return "Run in background"
+	case .Sessions:
+		return "Sessions"
 	}
 	return ""
 }
@@ -351,6 +359,8 @@ tab_menu_item_shortcut :: proc(item: Tab_Menu_Item) -> string {
 	case .Close_Others:   return "\u2325\u2318D"
 	case .Close_To_Right: return "\u2325\u21E7\u2318D"
 	case .Rename:         return "\u2318R"
+	case .Detach:         return "\u2325\u2318B"
+	case .Sessions:       return "\u2318O"
 	}
 	return ""
 }

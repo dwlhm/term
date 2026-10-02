@@ -39,6 +39,14 @@ Command_Record :: struct {
 Core_Session :: struct {
 	id:                      string,
 	cwd:                     string,
+	gui_tab_id:              u32,
+	// GUI launch arguments retain the Backend's borrowed lifetime contract.
+	gui_prog:                string,
+	gui_argv:                []string,
+	title_buf:               [128]u8,
+	title_len:               int,
+	title_override_buf:      [128]u8,
+	title_override_len:      int,
 	is_busy:                 bool,
 	active_cmd:              string,
 	command_history:         [dynamic]Command_Record,
@@ -136,7 +144,11 @@ session_create :: proc(id: string, cfg: Session_Config) -> (^Core_Session, bool)
 		termgrid.terminal_reset(&s.term)
 	}
 
-	session_start_drain_loop(s)
+	if !session_start_drain_loop(s) {
+		session_destroy(s)
+		free(s)
+		return nil, false
+	}
 	return s, true
 }
 
@@ -179,17 +191,37 @@ _session_bootstrap_headless :: proc(s: ^Core_Session, prog: string) -> bool {
 	}
 }
 
+@(private="file", thread_local)
+_session_response_owner: ^Core_Session
+
+@(private="file")
+_session_response_cb :: proc(data: []u8) {
+	s := _session_response_owner
+	if s != nil && s.pty_handle.master >= 0 && s.pty_handle.state == .Running {
+		_ = pty.pty_write(&s.pty_handle, data)
+	}
+}
+
 // session_start_drain_loop launches the background thread reading PTY output.
-session_start_drain_loop :: proc(s: ^Core_Session) {
-	if s == nil || s.thread != nil {
-		return
+session_start_drain_loop :: proc(s: ^Core_Session) -> bool {
+	if s == nil do return false
+	if s.thread != nil do return sync.atomic_load(&s.is_running)
+	s.vt_parser.response_cb = _session_response_cb
+	if s.is_detached {
+		// A transferred parser must never call the former GUI backend or clipboard.
+		s.vt_parser.clipboard_cb = nil
+		s.vt_parser.clipboard_read_cb = nil
+		s.vt_parser.clipboard_read_user_data = nil
 	}
-	sync.atomic_store(&s.is_running, true)
 	s.thread = thread.create(session_drain_worker)
-	if s.thread != nil {
-		s.thread.data = s
-		thread.start(s.thread)
+	if s.thread == nil {
+		sync.atomic_store(&s.is_running, false)
+		return false
 	}
+	s.thread.data = s
+	sync.atomic_store(&s.is_running, true)
+	thread.start(s.thread)
+	return true
 }
 
 // session_drain_worker is the background pump reading child output into the virtual grid.
@@ -198,6 +230,8 @@ session_drain_worker :: proc(t: ^thread.Thread) {
 	if s == nil {
 		return
 	}
+	_session_response_owner = s
+	defer _session_response_owner = nil
 
 	drain_buf: [64 * 1024]u8
 
@@ -879,6 +913,22 @@ session_registry_init :: proc(reg: ^Session_Registry) {
 	reg.detached_order = make([dynamic]string)
 }
 
+// session_registry_clear keeps the registry reusable, including the global singleton.
+session_registry_clear :: proc(reg: ^Session_Registry) {
+	if reg == nil do return
+	sync.mutex_lock(&reg.lock)
+	defer sync.mutex_unlock(&reg.lock)
+	for _, s in reg.sessions {
+		session_destroy(s)
+		free(s)
+	}
+	clear(&reg.sessions)
+	for id in reg.detached_order {
+		delete(id)
+	}
+	clear(&reg.detached_order)
+}
+
 // session_registry_destroy frees all tracked sessions and internal structures.
 session_registry_destroy :: proc(reg: ^Session_Registry) {
 	if reg == nil do return
@@ -948,6 +998,18 @@ session_registry_lookup :: proc(reg: ^Session_Registry, id: string) -> ^Core_Ses
 
 	s, ok := reg.sessions[id]
 	return s if ok else nil
+}
+
+// session_registry_detached_count reports the full count without a fixed output capacity.
+session_registry_detached_count :: proc(reg: ^Session_Registry) -> int {
+	if reg == nil do return 0
+	sync.mutex_lock(&reg.lock)
+	defer sync.mutex_unlock(&reg.lock)
+	count := 0
+	for _, s in reg.sessions {
+		if s.is_detached do count += 1
+	}
+	return count
 }
 
 // session_registry_list_detached writes IDs of detached sessions into out, returning the count.

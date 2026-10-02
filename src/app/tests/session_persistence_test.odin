@@ -7,6 +7,9 @@ import termgrid "../../terminal"
 import pty "../../platform/pty"
 import session_core "../../session_core"
 import ui "../../ui"
+import input "../../platform/input"
+import tabs "../../platform/tabs"
+import "core:sync"
 
 @(test)
 test_ui_shortcuts_detach_attach_labels :: proc(t: ^testing.T) {
@@ -101,4 +104,104 @@ test_session_detach_all_spawns_default_shell :: proc(t: ^testing.T) {
 		session_core.session_destroy(popped)
 		free(popped)
 	}
+}
+
+@(test)
+test_session_detach_metadata_capacity_and_local_modal_flow :: proc(t: ^testing.T) {
+	a := new(app.App)
+	defer free(a)
+	app.session_manager_init(&a.session_mgr, 2)
+	reg: session_core.Session_Registry
+	session_core.session_registry_init(&reg)
+	a.session_mgr.registry = &reg
+	defer session_core.session_registry_destroy(&reg)
+	defer app.session_manager_destroy(&a.session_mgr)
+	a.window.width = 800
+	a.window.height = 600
+	idx, spawned := app.session_spawn(&a.session_mgr, "/bin/sleep", {"30"}, 24, 80, nil, termgrid.Theme{})
+	testing.expect(t, spawned)
+	_, spawned = app.session_spawn(&a.session_mgr, "/bin/sleep", {"30"}, 24, 80, nil, termgrid.Theme{})
+	testing.expect(t, spawned)
+	a.session_mgr.active_idx = idx
+	pid := a.session_mgr.tabs[idx].backend.pty.pid
+	_ = app.session_set_title_override(&a.session_mgr.tabs[idx], "Deploy")
+	_, ok := app.app_dispatch_input_events(a, []input.Input_Event{{event_type = .Local, action = .Detach_Tab}})
+	testing.expect(t, ok)
+	testing.expect_value(t, session_core.session_registry_detached_count(&reg), 1)
+	_, ok = app.app_dispatch_input_events(a, []input.Input_Event{{event_type = .Local, action = .Attach_Session}})
+	testing.expect(t, ok && a.session_switcher.visible)
+	_, ok = app.app_dispatch_input_events(a, []input.Input_Event{{event_type = .Local, action = .Paste}, {event_type = .Key, kind = .Printable, rune = 'D'}})
+	testing.expect(t, ok)
+	testing.expect_value(t, a.session_switcher.query_len, 1)
+	ids: [2]string
+	_ = session_core.session_registry_list_detached(&reg, ids[:])
+	cs := session_core.session_registry_lookup(&reg, ids[0])
+	testing.expect_value(t, cs.pty_handle.pid, pid)
+	testing.expect_value(t, string(cs.title_override_buf[:cs.title_override_len]), "Deploy")
+	_, spawned = app.session_spawn(&a.session_mgr, "/bin/sleep", {"30"}, 24, 80, nil, termgrid.Theme{})
+	testing.expect(t, spawned)
+	_, attached := app.session_attach_tab(&a.session_mgr, cs)
+	testing.expect(t, !attached)
+	testing.expect(t, session_core.session_registry_lookup(&reg, ids[0]) == cs)
+	_ = app.session_close_tab(&a.session_mgr, 1)
+	attached_idx, attached_now := app.session_attach_tab(&a.session_mgr, cs)
+	testing.expect(t, attached_now)
+	testing.expect_value(t, a.session_mgr.tabs[attached_idx].backend.pty.pid, pid)
+	testing.expect_value(t, app.session_title_display(&a.session_mgr.tabs[attached_idx]), "Deploy")
+	testing.expect_value(t, a.session_mgr.tabs[attached_idx].backend.prog, "/bin/sleep")
+	testing.expect_value(t, a.session_mgr.tabs[attached_idx].backend.argv[0], "30")
+}
+
+@(test)
+test_background_output_pointer_attach_and_termination_confirmation :: proc(t: ^testing.T) {
+	a := new(app.App)
+	defer free(a)
+	app.session_manager_init(&a.session_mgr, 4)
+	reg: session_core.Session_Registry
+	session_core.session_registry_init(&reg)
+	a.session_mgr.registry = &reg
+	defer session_core.session_registry_destroy(&reg)
+	defer app.session_manager_destroy(&a.session_mgr)
+	a.window.width = 800
+	a.window.height = 600
+	_, spawned := app.session_spawn(&a.session_mgr, "/bin/sh", {"-c", "sleep 0.1; printf background-output; sleep 30"}, 24, 80, nil, termgrid.Theme{})
+	testing.expect(t, spawned)
+	_, spawned = app.session_spawn(&a.session_mgr, "/bin/sleep", {"30"}, 24, 80, nil, termgrid.Theme{})
+	testing.expect(t, spawned)
+	testing.expect(t, app.session_detach_tab(&a.session_mgr, 0))
+	ids: [2]string
+	_ = session_core.session_registry_list_detached(&reg, ids[:])
+	cs := session_core.session_registry_lookup(&reg, ids[0])
+	output_seen := false
+	for attempt in 0 ..< 100 {
+		sync.mutex_lock(&cs.lock)
+		output_seen = _row_matches(&cs.term, 0, "background-output")
+		sync.mutex_unlock(&cs.lock)
+		if output_seen do break
+		time.sleep(10 * time.Millisecond)
+	}
+	testing.expect(t, output_seen, "background PTY output must reach its terminal grid")
+	app._app_layout_ui(a)
+	badge := a.tab_bar.detached_badge_rect
+	testing.expect(t, badge.w > 0)
+	_, _ = app.app_dispatch_input_events(a, []input.Input_Event{{event_type = .Pointer, pointer = {kind = .Button_Down, button = 1, x = badge.x + 2, y = badge.y + 2}}})
+	testing.expect(t, a.session_switcher.visible)
+	row := tabs.session_switcher_row_rect(&a.session_switcher, a.session_switcher.selected_match_idx - a.session_switcher.scroll_offset)
+	_, _ = app.app_dispatch_input_events(a, []input.Input_Event{{event_type = .Pointer, pointer = {kind = .Button_Down, button = 1, x = row.x + 2, y = row.y + 2}}})
+	testing.expect(t, !a.session_switcher.visible)
+	testing.expect_value(t, session_core.session_registry_detached_count(&reg), 0)
+	b := app.app_active_backend(a)
+	app.backend_lock_render(b)
+	testing.expect(t, _row_matches(&b.front_terminal, 0, "background-output"))
+	app.backend_unlock_render(b)
+	testing.expect(t, app.session_detach_tab(&a.session_mgr, a.session_mgr.active_idx))
+	app._app_open_session_switcher(a, true)
+	_, _ = app.app_dispatch_input_events(a, []input.Input_Event{{event_type = .Key, gui = true, rune = 'x'}})
+	testing.expect(t, a.confirm_dialog.visible && a.confirm_dialog.background_session)
+	testing.expect_value(t, session_core.session_registry_detached_count(&reg), 1)
+	_, _ = app.app_dispatch_input_events(a, []input.Input_Event{{event_type = .Key, kind = .Escape}})
+	testing.expect(t, a.session_switcher.visible)
+	testing.expect_value(t, session_core.session_registry_detached_count(&reg), 1)
+	_, _ = app.app_dispatch_input_events(a, []input.Input_Event{{event_type = .Key, gui = true, rune = 'x'}, {event_type = .Key, kind = .Enter}})
+	testing.expect_value(t, session_core.session_registry_detached_count(&reg), 0)
 }
