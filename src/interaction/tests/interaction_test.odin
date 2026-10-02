@@ -20,9 +20,12 @@ test_fsm_mode_transitions_and_reset :: proc(t: ^testing.T) {
 	testing.expect(t, s.mode == .Visual, "mode must be Visual")
 	testing.expect(t, s.visual_kind == .Char, "visual kind must be Char")
 	testing.expect(t, s.viewport_flow == .Paused, "viewport flow must be Paused in Visual")
-	testing.expect(t, s.selection_active, "selection must be active in Visual")
+	testing.expect(t, !s.selection_active, "selection must be inactive by default in Visual")
 	testing.expect(t, s.selection_anchor == origin, "selection anchor must match origin")
 	testing.expect(t, s.visual_cursor == origin, "visual cursor must match origin")
+
+	inter.interaction_enter_visual(&s, .Char, origin, true)
+	testing.expect(t, s.selection_active, "selection must be active when requested")
 
 	// Enter Search
 	inter.interaction_enter_search(&s)
@@ -128,7 +131,7 @@ test_query_search_scan_and_extract :: proc(t: ^testing.T) {
 	// Selection extraction: Char mode
 	s: inter.Interaction_State
 	inter.interaction_init(&s)
-	inter.interaction_enter_visual(&s, .Char, tg.Terminal_Point{row = 0, col = 6})
+	inter.interaction_enter_visual(&s, .Char, tg.Terminal_Point{row = 0, col = 6}, true)
 	s.visual_cursor = tg.Terminal_Point{row = 0, col = 9}
 	extracted := inter.interaction_extract_selection_text(&term, &s)
 	defer delete(extracted)
@@ -181,11 +184,11 @@ test_zero_conflict_key_dispatcher :: proc(t: ^testing.T) {
 	testing.expect(t, act == .Resume_Live, "Esc in Search mode must trigger Resume_Live")
 	testing.expect(t, s.mode == .Passthrough, "Esc must return to Passthrough")
 
-	// 3. In Passthrough: Cmd+Shift+Space enters Visual mode
-	ev_cmd_v := input.Input_Event{kind = .Printable, rune = ' ', gui = true, shift = true}
+	// 3. In Passthrough: Cmd+Ctrl+Y enters Visual mode
+	ev_cmd_v := input.Input_Event{kind = .Printable, rune = 'y', gui = true, ctrl = true}
 	consumed, act = inter.interaction_dispatch_key(&s, ev_cmd_v, false)
-	testing.expect(t, consumed, "Cmd+Shift+Space must be consumed in Passthrough mode")
-	testing.expect(t, s.mode == .Visual, "Cmd+Shift+Space must enter Visual mode")
+	testing.expect(t, consumed, "Cmd+Ctrl+Y must be consumed in Passthrough mode")
+	testing.expect(t, s.mode == .Visual, "Cmd+Ctrl+Y must enter Visual mode")
 
 	// In Visual mode: Esc exits to Passthrough
 	consumed, act = inter.interaction_dispatch_key(&s, ev_esc, false)
@@ -333,7 +336,7 @@ test_visual_mode_unmapped_keys_exit_to_passthrough :: proc(t: ^testing.T) {
 	test_keys := []rune{'a', 'x', 'i', ' '}
 	for r in test_keys {
 		inter.interaction_init(&s)
-		inter.interaction_enter_visual(&s, .Char, tg.Terminal_Point{row = 3, col = 5})
+		inter.interaction_enter_visual(&s, .Char, tg.Terminal_Point{row = 3, col = 5}, true)
 		testing.expect(t, s.mode == .Visual, "must be in Visual mode")
 		testing.expect(t, s.selection_active, "selection must be active in Visual mode")
 
@@ -350,7 +353,7 @@ test_visual_mode_unmapped_keys_exit_to_passthrough :: proc(t: ^testing.T) {
 test_history_eviction_rebases_and_invalidates_document_positions :: proc(t: ^testing.T) {
 	s: inter.Interaction_State
 	inter.interaction_init(&s)
-	inter.interaction_enter_visual(&s, .Char, tg.Terminal_Point{row = 4})
+	inter.interaction_enter_visual(&s, .Char, tg.Terminal_Point{row = 4}, true)
 	s.visual_cursor.row = 7
 	s.search_active = true
 	s.search_matches[0].row = 1
@@ -369,4 +372,244 @@ test_history_eviction_rebases_and_invalidates_document_positions :: proc(t: ^tes
 	inter.interaction_on_scrollback_push(&s, 12, 12)
 	testing.expect_value(t, s.search_match_count, 0)
 	testing.expect_value(t, s.search_match_idx, 0)
+}
+
+@(test)
+test_visual_mode_exit_keys :: proc(t: ^testing.T) {
+	s: inter.Interaction_State
+
+	// Test Ctrl+C exits Visual mode without copy
+	inter.interaction_init(&s)
+	inter.interaction_enter_visual(&s, .Char, tg.Terminal_Point{row = 2, col = 3})
+	ev_ctrl_c := input.Input_Event{kind = .Printable, rune = 'c', ctrl = true}
+	consumed, act := inter.interaction_dispatch_key(&s, ev_ctrl_c, false)
+	testing.expect(t, consumed, "Ctrl+C must be consumed in Visual mode")
+	testing.expect(t, act == .Resume_Live, "Ctrl+C must trigger Resume_Live")
+	testing.expect(t, s.mode == .Passthrough, "Ctrl+C must transition to Passthrough")
+
+	// Test 'i' exits Visual mode without copy
+	inter.interaction_init(&s)
+	inter.interaction_enter_visual(&s, .Char, tg.Terminal_Point{row = 2, col = 3})
+	ev_i := input.Input_Event{kind = .Printable, rune = 'i'}
+	consumed, act = inter.interaction_dispatch_key(&s, ev_i, false)
+	testing.expect(t, consumed, "'i' must be consumed in Visual mode")
+	testing.expect(t, act == .Resume_Live, "'i' must trigger Resume_Live")
+	testing.expect(t, s.mode == .Passthrough, "'i' must transition to Passthrough")
+
+	// Test 'q' exits Visual mode without copy
+	inter.interaction_init(&s)
+	inter.interaction_enter_visual(&s, .Char, tg.Terminal_Point{row = 2, col = 3})
+	ev_q := input.Input_Event{kind = .Printable, rune = 'q'}
+	consumed, act = inter.interaction_dispatch_key(&s, ev_q, false)
+	testing.expect(t, consumed, "'q' must be consumed in Visual mode")
+	testing.expect(t, act == .Resume_Live, "'q' must trigger Resume_Live")
+	testing.expect(t, s.mode == .Passthrough, "'q' must transition to Passthrough")
+
+	// Test Cmd+Ctrl+Y toggles out of Visual mode
+	inter.interaction_init(&s)
+	inter.interaction_enter_visual(&s, .Char, tg.Terminal_Point{row = 2, col = 3})
+	ev_toggle := input.Input_Event{kind = .Printable, rune = 'y', gui = true, ctrl = true}
+	consumed, act = inter.interaction_dispatch_key(&s, ev_toggle, false)
+	testing.expect(t, consumed, "Cmd+Ctrl+Y must be consumed in Visual mode")
+	testing.expect(t, act == .Resume_Live, "Cmd+Ctrl+Y must toggle to Resume_Live")
+	testing.expect(t, s.mode == .Passthrough, "Cmd+Ctrl+Y must transition to Passthrough")
+}
+
+@(test)
+test_visual_mode_yank_and_yy_line :: proc(t: ^testing.T) {
+	s: inter.Interaction_State
+	inter.interaction_init(&s)
+	inter.interaction_enter_visual(&s, .Char, tg.Terminal_Point{row = 5, col = 10})
+
+	// First 'y' on single-cell cursor sets pending_yank
+	ev_y := input.Input_Event{kind = .Printable, rune = 'y'}
+	consumed, act := inter.interaction_dispatch_key(&s, ev_y, false)
+	testing.expect(t, consumed, "first 'y' on point must be consumed")
+	testing.expect(t, act == .None, "first 'y' must wait for second 'y'")
+	testing.expect(t, s.pending_yank, "pending_yank must be true")
+	testing.expect(t, s.mode == .Visual, "must remain in Visual mode")
+
+	// Second 'y' triggers line copy (yy)
+	consumed, act = inter.interaction_dispatch_key(&s, ev_y, false)
+	testing.expect(t, consumed, "second 'y' must be consumed")
+	testing.expect(t, act == .Copy, "second 'y' must trigger Copy action")
+	testing.expect(t, s.visual_kind == .Line, "visual_kind must be Line for yy")
+	testing.expect(t, s.mode == .Passthrough, "yy must exit to Passthrough mode")
+	testing.expect(t, !s.pending_yank, "pending_yank must be reset")
+}
+
+@(test)
+test_select_all_shortcuts_and_query :: proc(t: ^testing.T) {
+	s: inter.Interaction_State
+	inter.interaction_init(&s)
+
+	// Cmd+A in Passthrough mode
+	ev_cmd_a := input.Input_Event{kind = .Printable, rune = 'a', gui = true}
+	consumed, act := inter.interaction_dispatch_key(&s, ev_cmd_a, false)
+	testing.expect(t, consumed, "Cmd+A must be consumed in Passthrough mode")
+	testing.expect(t, act == .Select_All, "Cmd+A must trigger Select_All action")
+
+	// Cmd+A in Visual mode
+	inter.interaction_enter_visual(&s, .Char, tg.Terminal_Point{row = 2, col = 3})
+	consumed, act = inter.interaction_dispatch_key(&s, ev_cmd_a, false)
+	testing.expect(t, consumed, "Cmd+A must be consumed in Visual mode")
+	testing.expect(t, act == .Select_All, "Cmd+A must trigger Select_All action in Visual mode")
+
+	// Verify interaction_select_all bounds
+	term: tg.Terminal
+	tg.terminal_init(&term, 24, 80)
+	defer tg.terminal_destroy(&term)
+
+	inter.interaction_select_all(&term, &s)
+	testing.expect(t, s.selection_active, "selection must be active after select_all")
+	testing.expect(t, s.selection_anchor.row == 0 && s.selection_anchor.col == 0, "anchor must be top-left (0,0)")
+	testing.expect(t, s.visual_cursor.row == 23 && s.visual_cursor.col == 79, "cursor must be bottom-right (23,79)")
+}
+
+@(test)
+test_modeless_mouse_selection_and_typing_dismiss :: proc(t: ^testing.T) {
+	s: inter.Interaction_State
+	inter.interaction_init(&s)
+
+	// In Passthrough mode, typing a normal key when selection is active clears selection
+	s.selection_active = true
+	ev_type := input.Input_Event{kind = .Printable, rune = 'x'}
+	consumed, act := inter.interaction_dispatch_key(&s, ev_type, false)
+	testing.expect(t, !consumed, "typing normal key in Passthrough must not be consumed (flows to PTY)")
+	testing.expect(t, act == .None, "no action on typing")
+	testing.expect(t, !s.selection_active, "typing in Passthrough must dismiss active selection")
+
+	// Esc in Passthrough when selection is active clears selection
+	s.selection_active = true
+	ev_esc := input.Input_Event{kind = .Escape}
+	consumed, _ = inter.interaction_dispatch_key(&s, ev_esc, false)
+	testing.expect(t, consumed, "Esc in Passthrough must be consumed when selection is active")
+	testing.expect(t, !s.selection_active, "Esc must dismiss active selection")
+}
+
+@(test)
+test_decoupled_visual_navigation_and_mouse_continuation :: proc(t: ^testing.T) {
+	s: inter.Interaction_State
+	inter.interaction_init(&s)
+	s.visual_cursor = tg.Terminal_Point{row = 5, col = 10}
+
+	// a. Entering visual mode via Cmd+Ctrl+Y starts with selection_active == false
+	ev_toggle := input.Input_Event{kind = .Printable, rune = 'y', gui = true, ctrl = true}
+	consumed, act := inter.interaction_dispatch_key(&s, ev_toggle, false)
+	testing.expect(t, consumed, "Cmd+Ctrl+Y consumed")
+	testing.expect_value(t, s.mode, inter.Interaction_Mode.Visual)
+	testing.expect(t, !s.selection_active, "selection must start inactive in Visual mode")
+	testing.expect_value(t, s.visual_cursor, tg.Terminal_Point{row = 5, col = 10})
+
+	// b. Free navigation with h/j/k/l and arrow keys without selection
+	ev_h := input.Input_Event{kind = .Printable, rune = 'h'}
+	ev_j := input.Input_Event{kind = .Printable, rune = 'j'}
+	ev_k := input.Input_Event{kind = .Printable, rune = 'k'}
+	ev_l := input.Input_Event{kind = .Printable, rune = 'l'}
+	ev_arrow_right := input.Input_Event{kind = .Arrow_Right}
+
+	_, _ = inter.interaction_dispatch_key(&s, ev_l, false)
+	testing.expect_value(t, s.visual_cursor.col, 11)
+	testing.expect(t, !s.selection_active, "free navigation must not activate selection")
+
+	_, _ = inter.interaction_dispatch_key(&s, ev_arrow_right, false)
+	testing.expect_value(t, s.visual_cursor.col, 12)
+	testing.expect(t, !s.selection_active, "arrow right must not activate selection")
+
+	_, _ = inter.interaction_dispatch_key(&s, ev_j, false)
+	testing.expect_value(t, s.visual_cursor.row, 6)
+	testing.expect(t, !s.selection_active, "j must not activate selection")
+
+	_, _ = inter.interaction_dispatch_key(&s, ev_k, false)
+	testing.expect_value(t, s.visual_cursor.row, 5)
+
+	_, _ = inter.interaction_dispatch_key(&s, ev_h, false)
+	testing.expect_value(t, s.visual_cursor.col, 11)
+
+	// c. Starting selection with 'v' and expanding with 'l' or arrow keys
+	ev_v := input.Input_Event{kind = .Printable, rune = 'v'}
+	consumed, act = inter.interaction_dispatch_key(&s, ev_v, false)
+	testing.expect(t, consumed, "'v' consumed")
+	testing.expect(t, s.selection_active, "'v' must activate selection")
+	testing.expect_value(t, s.selection_anchor, tg.Terminal_Point{row = 5, col = 11})
+	testing.expect_value(t, s.visual_kind, inter.Visual_Kind.Char)
+
+	_, _ = inter.interaction_dispatch_key(&s, ev_l, false)
+	testing.expect_value(t, s.visual_cursor.col, 12)
+	testing.expect(t, s.selection_active, "selection remains active while expanding")
+
+	// f. Esc canceling selection first, then exiting visual mode on second Esc
+	ev_esc := input.Input_Event{kind = .Escape}
+	consumed, act = inter.interaction_dispatch_key(&s, ev_esc, false)
+	testing.expect(t, consumed, "first Esc consumed")
+	testing.expect(t, act == .None, "first Esc produces no exit action")
+	testing.expect(t, !s.selection_active, "first Esc must deactivate selection")
+	testing.expect_value(t, s.mode, inter.Interaction_Mode.Visual)
+
+	consumed, act = inter.interaction_dispatch_key(&s, ev_esc, false)
+	testing.expect(t, consumed, "second Esc consumed")
+	testing.expect_value(t, act, inter.Interaction_Action.Resume_Live)
+	testing.expect_value(t, s.mode, inter.Interaction_Mode.Passthrough)
+
+	// d. Mouse drag in passthrough activating visual mode with selection_active == true directly
+	cell_w := 10
+	cell_h := 20
+	ev_click := input.Input_Pointer_Event{
+		kind = .Button_Down,
+		button = 1,
+		clicks = 1,
+		x = 30, // col 3
+		y = 40, // row 2
+	}
+	_, _ = inter.interaction_dispatch_pointer(&s, ev_click, false, 24, 80, cell_w, cell_h)
+	testing.expect_value(t, s.mode, inter.Interaction_Mode.Passthrough)
+	testing.expect_value(t, s.selection_anchor, tg.Terminal_Point{row = 2, col = 3})
+
+	ev_drag := input.Input_Pointer_Event{
+		kind = .Motion,
+		primary_down = true,
+		x = 80, // col 8
+		y = 40, // row 2
+	}
+	consumed, _ = inter.interaction_dispatch_pointer(&s, ev_drag, false, 24, 80, cell_w, cell_h)
+	testing.expect(t, consumed, "drag motion consumed")
+	testing.expect_value(t, s.mode, inter.Interaction_Mode.Visual)
+	testing.expect(t, s.selection_active, "drag must activate selection directly")
+	testing.expect_value(t, s.visual_cursor, tg.Terminal_Point{row = 2, col = 8})
+
+	// e. Releasing mouse button keeping visual mode and selection active, then continuing to expand/contract with keyboard
+	ev_up := input.Input_Pointer_Event{
+		kind = .Button_Up,
+		button = 1,
+		x = 80,
+		y = 40,
+	}
+	consumed, act = inter.interaction_dispatch_pointer(&s, ev_up, false, 24, 80, cell_w, cell_h)
+	testing.expect(t, consumed, "button up consumed")
+	testing.expect_value(t, act, inter.Interaction_Action.None)
+	testing.expect_value(t, s.mode, inter.Interaction_Mode.Visual)
+	testing.expect(t, s.selection_active, "selection must remain active after mouse release")
+
+	// Keyboard continuation: expand further with arrow key
+	consumed, _ = inter.interaction_dispatch_key(&s, ev_arrow_right, false)
+	testing.expect(t, consumed, "arrow right consumed after mouse release")
+	testing.expect_value(t, s.visual_cursor.col, 9)
+	testing.expect(t, s.selection_active, "selection continues expanding seamlessly with keyboard")
+
+	// Keyboard continuation: expand with 'l'
+	consumed, _ = inter.interaction_dispatch_key(&s, ev_l, false)
+	testing.expect_value(t, s.visual_cursor.col, 10)
+	testing.expect(t, s.selection_active, "selection continues expanding seamlessly with 'l'")
+
+	// Keyboard continuation: contract with 'h'
+	consumed, _ = inter.interaction_dispatch_key(&s, ev_h, false)
+	testing.expect_value(t, s.visual_cursor.col, 9)
+	testing.expect(t, s.selection_active, "selection contracts with 'h'")
+
+	// Copy selection with 'y'
+	ev_y := input.Input_Event{kind = .Printable, rune = 'y'}
+	consumed, act = inter.interaction_dispatch_key(&s, ev_y, false)
+	testing.expect(t, consumed, "'y' consumed")
+	testing.expect_value(t, act, inter.Interaction_Action.Copy)
+	testing.expect_value(t, s.mode, inter.Interaction_Mode.Passthrough)
 }

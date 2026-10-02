@@ -210,11 +210,11 @@ _parse_int :: proc(text: string) -> (int, bool) {
 
 @(private="file")
 _parse_bool :: proc(text: string) -> (bool, bool) {
-	s := strings.trim_space(text)
-	if s == "true" || s == "1" {
+	s := strings.to_lower(strings.trim_space(text), context.temp_allocator)
+	if s == "true" || s == "1" || s == "yes" {
 		return true, true
 	}
-	if s == "false" || s == "0" {
+	if s == "false" || s == "0" || s == "no" {
 		return false, true
 	}
 	return false, false
@@ -356,6 +356,24 @@ _apply_key_value :: proc(cfg: ^Config, key: string, val_expr: ^odin_ast.Expr) {
 		if lit, ok := _expr_to_lit_text(val_expr); ok {
 			if v, vok := _parse_int(lit); vok && v > 0 {
 				cfg.tab_max_title_len = v
+			}
+		}
+	case "window_opacity", "opacity":
+		if lit, ok := _expr_to_lit_text(val_expr); ok {
+			if v, vok := _parse_f32(lit); vok {
+				cfg.window_opacity = clamp(v, 0.1, 1.0)
+			}
+		}
+	case "window_blur", "blur":
+		if lit, ok := _expr_to_lit_text(val_expr); ok {
+			if v, vok := _parse_bool(lit); vok {
+				cfg.window_blur = v
+			}
+		}
+	case "allow_screensaver", "screensaver", "enable_screensaver":
+		if lit, ok := _expr_to_lit_text(val_expr); ok {
+			if v, vok := _parse_bool(lit); vok {
+				cfg.allow_screensaver = v
 			}
 		}
 	case "ansi16":

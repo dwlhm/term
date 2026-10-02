@@ -321,3 +321,248 @@ platform_setup_metal_layer :: proc(sdl_window: ^sdl3.Window) -> bool {
 		return false
 	}
 }
+
+when ODIN_OS == .Darwin {
+	NSRect :: struct {
+		x, y:          f64,
+		width, height: f64,
+	}
+
+	_platform_find_visual_effect_view :: proc(contentView: id) -> id {
+		if contentView == nil do return nil
+		cls_vev := objc_getClass("NSVisualEffectView")
+		if cls_vev == nil do return nil
+
+		cls_v := object_getClass(contentView)
+		Get_Obj_Proc :: #type proc "c" (target: id, sel: SEL) -> id
+		sel_subviews := sel_registerName("subviews")
+		imp_subviews := class_getMethodImplementation(cls_v, sel_subviews)
+		if imp_subviews == nil do return nil
+
+		subviews := (Get_Obj_Proc(imp_subviews))(contentView, sel_subviews)
+		if subviews == nil do return nil
+
+		cls_arr := object_getClass(subviews)
+		sel_count := sel_registerName("count")
+		sel_obj_at := sel_registerName("objectAtIndex:")
+		imp_count := class_getMethodImplementation(cls_arr, sel_count)
+		imp_obj_at := class_getMethodImplementation(cls_arr, sel_obj_at)
+		if imp_count == nil || imp_obj_at == nil do return nil
+
+		Get_Count_Proc :: #type proc "c" (target: id, sel: SEL) -> uint
+		Get_Obj_At_Proc :: #type proc "c" (target: id, sel: SEL, idx: uint) -> id
+		cnt := (Get_Count_Proc(imp_count))(subviews, sel_count)
+		for i in 0..<cnt {
+			sub := (Get_Obj_At_Proc(imp_obj_at))(subviews, sel_obj_at, i)
+			if sub != nil && object_getClass(sub) == cls_vev {
+				return sub
+			}
+		}
+		return nil
+	}
+
+	_platform_remove_visual_effect_view :: proc(contentView: id) {
+		if contentView == nil do return
+		cls_vev := objc_getClass("NSVisualEffectView")
+		if cls_vev == nil do return
+
+		cls_v := object_getClass(contentView)
+		Get_Obj_Proc :: #type proc "c" (target: id, sel: SEL) -> id
+		sel_subviews := sel_registerName("subviews")
+		imp_subviews := class_getMethodImplementation(cls_v, sel_subviews)
+		if imp_subviews == nil do return
+
+		subviews := (Get_Obj_Proc(imp_subviews))(contentView, sel_subviews)
+		if subviews == nil do return
+
+		cls_arr := object_getClass(subviews)
+		sel_count := sel_registerName("count")
+		sel_obj_at := sel_registerName("objectAtIndex:")
+		imp_count := class_getMethodImplementation(cls_arr, sel_count)
+		imp_obj_at := class_getMethodImplementation(cls_arr, sel_obj_at)
+		if imp_count == nil || imp_obj_at == nil do return
+
+		Get_Count_Proc :: #type proc "c" (target: id, sel: SEL) -> uint
+		Get_Obj_At_Proc :: #type proc "c" (target: id, sel: SEL, idx: uint) -> id
+		cnt := (Get_Count_Proc(imp_count))(subviews, sel_count)
+		for i := int(cnt) - 1; i >= 0; i -= 1 {
+			sub := (Get_Obj_At_Proc(imp_obj_at))(subviews, sel_obj_at, uint(i))
+			if sub != nil && object_getClass(sub) == cls_vev {
+				sel_remove := sel_registerName("removeFromSuperview")
+				imp_remove := class_getMethodImplementation(cls_vev, sel_remove)
+				if imp_remove != nil {
+					Proc_Void :: #type proc "c" (target: id, sel: SEL)
+					(Proc_Void(imp_remove))(sub, sel_remove)
+				}
+			}
+		}
+	}
+}
+
+// platform_configure_window_vibrancy configures window translucency and AppKit vibrancy blur.
+// Zero-overhead when disabled: If opacity >= 1.0 && !blur, window remains opaque, no NSVisualEffectView is attached.
+// When opacity < 1.0 || blur: window is set non-opaque with clear background;
+// if blur == true, creates and attaches NSVisualEffectView behind the contentView.
+platform_configure_window_vibrancy :: proc(handle: ^sdl3.Window, opacity: f32, blur: bool) -> bool {
+	when ODIN_OS == .Darwin {
+		if handle == nil do return false
+		props := sdl3.GetWindowProperties(handle)
+		nswindow := id(sdl3.GetPointerProperty(props, sdl3.PROP_WINDOW_COCOA_WINDOW_POINTER, nil))
+		if nswindow == nil do return false
+		cls_win := object_getClass(nswindow)
+
+		sel_contentView := sel_registerName("contentView")
+		imp_contentView := class_getMethodImplementation(cls_win, sel_contentView)
+		if imp_contentView == nil do return false
+		Get_Obj_Proc :: #type proc "c" (target: id, sel: SEL) -> id
+		contentView := (Get_Obj_Proc(imp_contentView))(nswindow, sel_contentView)
+		if contentView == nil do return false
+		cls_view := object_getClass(contentView)
+
+		Set_Bool_Proc :: #type proc "c" (target: id, sel: SEL, val: BOOL)
+		Set_Obj_Proc  :: #type proc "c" (target: id, sel: SEL, obj: id)
+
+		cls_color := objc_getClass("NSColor")
+
+		// Zero-overhead when disabled: opacity >= 1.0 && !blur
+		if opacity >= 1.0 && !blur {
+			sel_set_opaque := sel_registerName("setOpaque:")
+			imp_set_opaque := class_getMethodImplementation(cls_win, sel_set_opaque)
+			if imp_set_opaque != nil {
+				(Set_Bool_Proc(imp_set_opaque))(nswindow, sel_set_opaque, true)
+			}
+
+			_platform_remove_visual_effect_view(contentView)
+
+			if cls_color != nil {
+				sel_window_bg := sel_registerName("windowBackgroundColor")
+				imp_window_bg := class_getMethodImplementation(object_getClass(id(cls_color)), sel_window_bg)
+				sel_set_bg_color := sel_registerName("setBackgroundColor:")
+				imp_set_bg_color := class_getMethodImplementation(cls_win, sel_set_bg_color)
+				if imp_window_bg != nil && imp_set_bg_color != nil {
+					bg_color := (Get_Obj_Proc(imp_window_bg))(id(cls_color), sel_window_bg)
+					(Set_Obj_Proc(imp_set_bg_color))(nswindow, sel_set_bg_color, bg_color)
+				}
+			}
+			return true
+		}
+
+		// When opacity < 1.0 || blur:
+		// 1. [nswindow setOpaque:NO]
+		sel_set_opaque := sel_registerName("setOpaque:")
+		imp_set_opaque := class_getMethodImplementation(cls_win, sel_set_opaque)
+		if imp_set_opaque != nil {
+			(Set_Bool_Proc(imp_set_opaque))(nswindow, sel_set_opaque, false)
+		}
+
+		// 2. [nswindow setBackgroundColor:[NSColor clearColor]]
+		if cls_color != nil {
+			sel_clear_color := sel_registerName("clearColor")
+			imp_clear_color := class_getMethodImplementation(object_getClass(id(cls_color)), sel_clear_color)
+			sel_set_bg_color := sel_registerName("setBackgroundColor:")
+			imp_set_bg_color := class_getMethodImplementation(cls_win, sel_set_bg_color)
+			if imp_clear_color != nil && imp_set_bg_color != nil {
+				clear_color := (Get_Obj_Proc(imp_clear_color))(id(cls_color), sel_clear_color)
+				(Set_Obj_Proc(imp_set_bg_color))(nswindow, sel_set_bg_color, clear_color)
+			}
+		}
+
+		// 3. Visual effect view handling
+		if blur {
+			existing_vev := _platform_find_visual_effect_view(contentView)
+			if existing_vev == nil {
+				cls_vev := objc_getClass("NSVisualEffectView")
+				if cls_vev == nil do return false
+
+				sel_alloc := sel_registerName("alloc")
+				sel_init := sel_registerName("init")
+				imp_alloc := class_getMethodImplementation(object_getClass(id(cls_vev)), sel_alloc)
+				if imp_alloc == nil do return false
+				vev := (Get_Obj_Proc(imp_alloc))(id(cls_vev), sel_alloc)
+				if vev == nil do return false
+
+				imp_init := class_getMethodImplementation(object_getClass(vev), sel_init)
+				if imp_init == nil do return false
+				vev = (Get_Obj_Proc(imp_init))(vev, sel_init)
+				if vev == nil do return false
+
+				cls_inst_vev := object_getClass(vev)
+
+				// Set frame to contentView.bounds
+				sel_bounds := sel_registerName("bounds")
+				imp_bounds := class_getMethodImplementation(cls_view, sel_bounds)
+				if imp_bounds != nil {
+					Get_Rect_Proc :: #type proc "c" (target: id, sel: SEL) -> NSRect
+					Set_Rect_Proc :: #type proc "c" (target: id, sel: SEL, frame: NSRect)
+					bounds := (Get_Rect_Proc(imp_bounds))(contentView, sel_bounds)
+					sel_set_frame := sel_registerName("setFrame:")
+					imp_set_frame := class_getMethodImplementation(cls_inst_vev, sel_set_frame)
+					if imp_set_frame != nil {
+						(Set_Rect_Proc(imp_set_frame))(vev, sel_set_frame, bounds)
+					}
+				}
+
+				// Autoresizing mask: NSViewWidthSizable (2) | NSViewHeightSizable (16) = 18
+				sel_set_autoresize := sel_registerName("setAutoresizingMask:")
+				imp_set_autoresize := class_getMethodImplementation(cls_inst_vev, sel_set_autoresize)
+				if imp_set_autoresize != nil {
+					Set_Uint_Proc :: #type proc "c" (target: id, sel: SEL, mask: uint)
+					(Set_Uint_Proc(imp_set_autoresize))(vev, sel_set_autoresize, 18)
+				}
+
+				// Material: NSVisualEffectMaterialUnderWindowBackground (21)
+				sel_set_material := sel_registerName("setMaterial:")
+				imp_set_material := class_getMethodImplementation(cls_inst_vev, sel_set_material)
+				if imp_set_material != nil {
+					Set_Int_Proc :: #type proc "c" (target: id, sel: SEL, mat: int)
+					(Set_Int_Proc(imp_set_material))(vev, sel_set_material, 21)
+				}
+
+				// Blending mode: NSVisualEffectBlendingModeBehindWindow (0)
+				sel_set_blending := sel_registerName("setBlendingMode:")
+				imp_set_blending := class_getMethodImplementation(cls_inst_vev, sel_set_blending)
+				if imp_set_blending != nil {
+					Set_Int_Proc :: #type proc "c" (target: id, sel: SEL, mode: int)
+					(Set_Int_Proc(imp_set_blending))(vev, sel_set_blending, 0)
+				}
+
+				// State: NSVisualEffectStateActive (1)
+				sel_set_state := sel_registerName("setState:")
+				imp_set_state := class_getMethodImplementation(cls_inst_vev, sel_set_state)
+				if imp_set_state != nil {
+					Set_Int_Proc :: #type proc "c" (target: id, sel: SEL, state: int)
+					(Set_Int_Proc(imp_set_state))(vev, sel_set_state, 1)
+				}
+
+				// Add subview positioned below all other subviews
+				sel_add_subview := sel_registerName("addSubview:positioned:relativeTo:")
+				imp_add_subview := class_getMethodImplementation(cls_view, sel_add_subview)
+				if imp_add_subview != nil {
+					Add_Subview_Pos_Proc :: #type proc "c" (target: id, sel: SEL, view: id, place: int, other: id)
+					(Add_Subview_Pos_Proc(imp_add_subview))(contentView, sel_add_subview, vev, -1, nil)
+				}
+			} else {
+				// Update existing view frame if needed
+				sel_bounds := sel_registerName("bounds")
+				imp_bounds := class_getMethodImplementation(cls_view, sel_bounds)
+				if imp_bounds != nil {
+					Get_Rect_Proc :: #type proc "c" (target: id, sel: SEL) -> NSRect
+					Set_Rect_Proc :: #type proc "c" (target: id, sel: SEL, frame: NSRect)
+					bounds := (Get_Rect_Proc(imp_bounds))(contentView, sel_bounds)
+					cls_inst_vev := object_getClass(existing_vev)
+					sel_set_frame := sel_registerName("setFrame:")
+					imp_set_frame := class_getMethodImplementation(cls_inst_vev, sel_set_frame)
+					if imp_set_frame != nil {
+						(Set_Rect_Proc(imp_set_frame))(existing_vev, sel_set_frame, bounds)
+					}
+				}
+			}
+		} else {
+			_platform_remove_visual_effect_view(contentView)
+		}
+
+		return true
+	} else {
+		return false
+	}
+}

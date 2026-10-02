@@ -473,12 +473,12 @@ _terminal_resize_primary :: proc(t: ^Terminal, new_rows: int, new_cols: int, all
 	for i in 0..<len(t.grid.rows) {
 	}
 	if t.grid.ext_colors != nil {
-		delete(t.grid.ext_colors)
+		delete(t.grid.ext_colors, allocator)
 	}
 	if t.grid.cells != nil {
-		delete(t.grid.cells)
+		delete(t.grid.cells, allocator)
 	}
-	delete(t.grid.rows)
+	delete(t.grid.rows, allocator)
 	t.grid.rows = new_backing
 	t.grid.cells = new_cells
 	t.grid.ext_colors = new_ext_colors

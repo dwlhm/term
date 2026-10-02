@@ -19,10 +19,26 @@ CANARY_SUFFIX :: "__"
 
 BOOTSTRAP_PREAMBLE :: "stty -echo 2>/dev/null; export PROMPT='' RPROMPT='' PS1=''; precmd_functions=(); chpwd_functions=(); precmd() {}; unsetopt zle 2>/dev/null\n"
 
+Command_Record :: struct {
+	id:           int,
+	command:      string,
+	started_at:   time.Time,
+	duration_ms:  int,
+	exit_code:    int,
+	completed:    bool,
+	total_lines:  int,
+	summary:      string,
+	output_lines: [dynamic]string,
+}
+
 // Core_Session encapsulates an isolated PTY, virtual terminal grid, VT parser, and observer port.
 // It runs a background drain thread streaming child PTY output into the virtual grid.
 Core_Session :: struct {
 	id:                      string,
+	cwd:                     string,
+	is_busy:                 bool,
+	active_cmd:              string,
+	command_history:         [dynamic]Command_Record,
 	pty_handle:              pty.Pty,
 	term:                    termgrid.Terminal,
 	vt_parser:               parser.Parser,
@@ -30,6 +46,7 @@ Core_Session :: struct {
 	mode:                    Session_Mode,
 	thread:                  ^thread.Thread,
 	is_running:              bool,
+	is_detached:             bool,
 	lock:                    sync.Mutex,
 	last_exit_code:          int,
 	command_finished_signal: sync.Cond,
@@ -73,11 +90,26 @@ session_create :: proc(id: string, cfg: Session_Config) -> (^Core_Session, bool)
 	}
 	s := new(Core_Session)
 	s.id = strings.clone(id)
+	if len(cfg.cwd) > 0 {
+		s.cwd = strings.clone(cfg.cwd)
+	} else {
+		curr_dir, err := os.get_working_directory(context.allocator)
+		if err == nil && len(curr_dir) > 0 {
+			s.cwd = curr_dir
+		} else {
+			s.cwd = strings.clone(".")
+		}
+	}
+	s.is_busy = false
+	s.active_cmd = ""
+	s.command_history = make([dynamic]Command_Record)
 	s.mode = cfg.mode
 	s.observer = cfg.observer
 
 	if !pty.pty_spawn(&s.pty_handle, r, c_cols, prog, argv, cfg.cwd) {
 		delete(s.id)
+		delete(s.cwd)
+		delete(s.command_history)
 		free(s)
 		return nil, false
 	}
@@ -116,7 +148,7 @@ session_start_drain_loop :: proc(s: ^Core_Session) {
 	if s == nil || s.thread != nil {
 		return
 	}
-	s.is_running = true
+	sync.atomic_store(&s.is_running, true)
 	s.thread = thread.create(session_drain_worker)
 	if s.thread != nil {
 		s.thread.data = s
@@ -142,7 +174,7 @@ session_drain_worker :: proc(t: ^thread.Thread) {
 					parser.parse_chunk(&s.vt_parser, &s.term, drain_buf[:n])
 
 					// Observer notifications: damage
-					if s.observer.on_damage != nil {
+					if !s.is_detached && s.observer.on_damage != nil {
 						min_r := -1
 						max_r := -1
 						for r in 0 ..< s.term.damage.row_count {
@@ -160,13 +192,13 @@ session_drain_worker :: proc(t: ^thread.Thread) {
 					}
 
 					// Observer notifications: title change
-					if s.observer.on_title_change != nil && s.term.title_dirty {
+					if !s.is_detached && s.observer.on_title_change != nil && s.term.title_dirty {
 						title := termgrid.terminal_take_title(&s.term)
 						s.observer.on_title_change(s.observer.user_data, title)
 					}
 
 					// Observer notifications: bell
-					if s.observer.on_bell != nil && s.term.bell_event {
+					if !s.is_detached && s.observer.on_bell != nil && s.term.bell_event {
 						s.term.bell_event = false
 						s.observer.on_bell(s.observer.user_data)
 					}
@@ -179,7 +211,7 @@ session_drain_worker :: proc(t: ^thread.Thread) {
 				if eof {
 					_ = pty.pty_poll_exit(&s.pty_handle)
 					s.last_exit_code = s.pty_handle.exit_code
-					if s.observer.on_exit != nil {
+					if !s.is_detached && s.observer.on_exit != nil {
 						s.observer.on_exit(s.observer.user_data, s.last_exit_code)
 					}
 					if s.has_active_command {
@@ -193,7 +225,7 @@ session_drain_worker :: proc(t: ^thread.Thread) {
 				sync.mutex_lock(&s.lock)
 				if pty.pty_poll_exit(&s.pty_handle) {
 					s.last_exit_code = s.pty_handle.exit_code
-					if s.observer.on_exit != nil {
+					if !s.is_detached && s.observer.on_exit != nil {
 						s.observer.on_exit(s.observer.user_data, s.last_exit_code)
 					}
 					if s.has_active_command {
@@ -290,6 +322,17 @@ _check_command_completion :: proc(s: ^Core_Session, chunk: []u8) {
 	}
 }
 
+// session_stop_drain_loop halts the background thread while preserving PTY fd and grid state.
+session_stop_drain_loop :: proc(s: ^Core_Session) {
+	if s == nil || s.thread == nil {
+		return
+	}
+	sync.atomic_store(&s.is_running, false)
+	thread.join(s.thread)
+	thread.destroy(s.thread)
+	s.thread = nil
+}
+
 // session_stop halts the drain thread and terminates the child process group.
 session_stop :: proc(s: ^Core_Session) {
 	if s == nil {
@@ -334,6 +377,26 @@ session_destroy :: proc(s: ^Core_Session) {
 	termgrid.terminal_destroy(&s.term)
 	parser.parser_destroy(&s.vt_parser)
 	delete(s.id)
+	if len(s.cwd) > 0 {
+		delete(s.cwd)
+		s.cwd = ""
+	}
+	if len(s.active_cmd) > 0 {
+		delete(s.active_cmd)
+		s.active_cmd = ""
+	}
+	for &rec in s.command_history {
+		delete(rec.command)
+		if len(rec.summary) > 0 {
+			delete(rec.summary)
+		}
+		for line in rec.output_lines {
+			delete(line)
+		}
+		delete(rec.output_lines)
+	}
+	delete(s.command_history)
+	s.command_history = nil
 }
 
 // session_extract_screen captures a clean 2D visual viewport snapshot from the virtual grid.
@@ -437,13 +500,123 @@ session_resize :: proc(s: ^Core_Session, rows, cols: int) -> bool {
 	return pty_ok
 }
 
+// session_filter_output_noise strips leading/trailing empty lines, compacts blank lines,
+// deduplicates consecutive identical lines, and truncates head/tail if > max_lines.
+session_filter_output_noise :: proc(lines: []string, max_lines: int = 250, allocator := context.allocator) -> (output: string, total_lines: int, truncated: bool) {
+	if len(lines) == 0 {
+		return "", 0, false
+	}
+
+	// 1. Strip leading and trailing empty lines
+	start := 0
+	for start < len(lines) && len(strings.trim_space(lines[start])) == 0 {
+		start += 1
+	}
+	if start >= len(lines) {
+		return "", 0, false
+	}
+
+	end := len(lines) - 1
+	for end >= start && len(strings.trim_space(lines[end])) == 0 {
+		end -= 1
+	}
+
+	stripped := lines[start : end + 1]
+
+	// 2. Compact runs of consecutive empty lines to at most 1 empty line
+	compacted := make([dynamic]string, context.temp_allocator)
+	prev_empty := false
+	for l in stripped {
+		is_empty := len(strings.trim_space(l)) == 0
+		if is_empty {
+			if !prev_empty {
+				append(&compacted, "")
+				prev_empty = true
+			}
+		} else {
+			append(&compacted, l)
+			prev_empty = false
+		}
+	}
+
+	// 3. Deduplicate consecutive identical lines (if repeated > 2 times, output original + [... repeated N times ...])
+	deduped := make([dynamic]string, context.temp_allocator)
+	i := 0
+	for i < len(compacted) {
+		curr := compacted[i]
+		is_empty := len(strings.trim_space(curr)) == 0
+		if is_empty {
+			append(&deduped, curr)
+			i += 1
+			continue
+		}
+
+		run_count := 1
+		for i + run_count < len(compacted) && compacted[i + run_count] == curr {
+			run_count += 1
+		}
+
+		repeat_times := run_count - 1
+		if repeat_times > 2 {
+			append(&deduped, curr)
+			marker := fmt.tprintf("[... repeated %d times ...]", repeat_times)
+			append(&deduped, marker)
+		} else {
+			for k in 0 ..< run_count {
+				append(&deduped, curr)
+			}
+		}
+		i += run_count
+	}
+
+	total_lines = len(deduped)
+
+	// 4. Head/Tail truncation: if total lines > max_lines (default 250), keep first 125 and last 125 lines
+	b := strings.builder_make(allocator)
+	if max_lines > 0 && total_lines > max_lines {
+		truncated = true
+		head_count := max_lines / 2
+		tail_count := max_lines - head_count
+		trunc_count := total_lines - (head_count + tail_count)
+
+		for j in 0 ..< head_count {
+			if j > 0 do strings.write_rune(&b, '\n')
+			strings.write_string(&b, deduped[j])
+		}
+
+		strings.write_string(&b, fmt.tprintf("\n[... %d lines truncated to save tokens ...]\n", trunc_count))
+
+		tail_start := total_lines - tail_count
+		for j in tail_start ..< total_lines {
+			strings.write_string(&b, deduped[j])
+			if j < total_lines - 1 do strings.write_rune(&b, '\n')
+		}
+	} else {
+		truncated = false
+		for j in 0 ..< total_lines {
+			if j > 0 do strings.write_rune(&b, '\n')
+			strings.write_string(&b, deduped[j])
+		}
+	}
+
+	output = strings.to_string(b)
+	return output, total_lines, truncated
+}
+
 // session_run_command executes a command synchronously, detecting completion via OSC 133 or canary sentinel.
-session_run_command :: proc(s: ^Core_Session, command: string, timeout_ms: int = 30000, allocator := context.allocator) -> (output: string, exit_code: int, completed: bool) {
+session_run_command :: proc(s: ^Core_Session, command: string, timeout_ms: int = 30000, allocator := context.allocator) -> (output: string, exit_code: int, completed: bool, total_lines: int, truncated: bool) {
 	if s == nil {
-		return "", -1, false
+		return "", -1, false, 0, false
 	}
 
 	sync.mutex_lock(&s.lock)
+
+	start_time := time.now()
+	s.is_busy = true
+	if len(s.active_cmd) > 0 {
+		delete(s.active_cmd)
+	}
+	s.active_cmd = strings.clone(command)
 
 	// Record start document position
 	sb_len := termgrid.scrollback_len(&s.term.scrollback)
@@ -499,8 +672,7 @@ session_run_command :: proc(s: ^Core_Session, command: string, timeout_ms: int =
 	// Adjust start_doc_row if scrollback evicted rows
 	clamped_start := clamp(start_doc_row, 0, total_rows - 1)
 
-	out_b := strings.builder_make(allocator)
-	line_count := 0
+	raw_lines := make([dynamic]string, context.allocator)
 
 	for r := clamped_start; r < total_rows; r += 1 {
 		last_col := -1
@@ -544,20 +716,259 @@ session_run_command :: proc(s: ^Core_Session, command: string, timeout_ms: int =
 			break
 		}
 
-		// Skip echoed command line or prompt containing unexpanded canary prefix
-		if strings.contains(line, command) || strings.contains(line, CANARY_PREFIX) {
+		// Skip unexpanded canary prefix
+		if strings.contains(line, CANARY_PREFIX) {
 			continue
 		}
 
-		if line_count > 0 {
-			strings.write_rune(&out_b, '\n')
+		append(&raw_lines, strings.clone(line, context.allocator))
+	}
+
+	duration_ms := int(time.duration_milliseconds(time.diff(start_time, time.now())))
+
+	summary_str := ""
+	for l in raw_lines {
+		trimmed := strings.trim_space(l)
+		if len(trimmed) > 0 {
+			max_len := min(len(trimmed), 80)
+			summary_str = strings.clone(trimmed[:max_len], context.allocator)
+			break
 		}
-		strings.write_string(&out_b, line)
-		line_count += 1
+	}
+
+	rec: Command_Record
+	rec.id = s.cmd_seq
+	rec.command = strings.clone(command, context.allocator)
+	rec.started_at = start_time
+	rec.duration_ms = duration_ms
+	rec.exit_code = exit_code
+	rec.completed = completed
+	rec.total_lines = len(raw_lines)
+	rec.summary = summary_str
+	rec.output_lines = raw_lines
+	append(&s.command_history, rec)
+
+	output, total_lines, truncated = session_filter_output_noise(raw_lines[:], 250, allocator)
+
+	s.is_busy = false
+	if len(s.active_cmd) > 0 {
+		delete(s.active_cmd)
+		s.active_cmd = ""
 	}
 
 	sync.mutex_unlock(&s.lock)
 
-	output = strings.trim_right_space(strings.to_string(out_b))
-	return output, exit_code, completed
+	return output, exit_code, completed, total_lines, truncated
+}
+
+// session_get_command_output retrieves buffered raw output lines with offset, limit, and grep filtering.
+session_get_command_output :: proc(s: ^Core_Session, cmd_id: int, offset: int, limit: int, grep_filter: string, allocator := context.allocator) -> (output: string, total_matched: int, total_lines: int, ok: bool) {
+	if s == nil {
+		return "", 0, 0, false
+	}
+	sync.mutex_lock(&s.lock)
+	defer sync.mutex_unlock(&s.lock)
+
+	if len(s.command_history) == 0 {
+		return "", 0, 0, false
+	}
+
+	rec_idx := -1
+	if cmd_id <= 0 {
+		rec_idx = len(s.command_history) - 1
+	} else {
+		for i in 0 ..< len(s.command_history) {
+			if s.command_history[i].id == cmd_id {
+				rec_idx = i
+				break
+			}
+		}
+	}
+
+	if rec_idx == -1 {
+		return "", 0, 0, false
+	}
+
+	rec := &s.command_history[rec_idx]
+	total_lines = len(rec.output_lines)
+
+	eff_limit := limit if limit > 0 else 200
+
+	if len(grep_filter) > 0 {
+		matched := make([dynamic]string, context.temp_allocator)
+		grep_lower := strings.to_lower(grep_filter, context.temp_allocator)
+		for line in rec.output_lines {
+			line_lower := strings.to_lower(line, context.temp_allocator)
+			if strings.contains(line_lower, grep_lower) {
+				append(&matched, line)
+			}
+		}
+		total_matched = len(matched)
+		start := clamp(offset, 0, total_matched)
+		end := min(start + eff_limit, total_matched)
+
+		b := strings.builder_make(allocator)
+		for i in start ..< end {
+			if i > start do strings.write_rune(&b, '\n')
+			strings.write_string(&b, matched[i])
+		}
+		output = strings.to_string(b)
+		return output, total_matched, total_lines, true
+	} else {
+		total_matched = total_lines
+		start := clamp(offset, 0, total_matched)
+		end := min(start + eff_limit, total_matched)
+
+		b := strings.builder_make(allocator)
+		for i in start ..< end {
+			if i > start do strings.write_rune(&b, '\n')
+			strings.write_string(&b, rec.output_lines[i])
+		}
+		output = strings.to_string(b)
+		return output, total_matched, total_lines, true
+	}
+}
+
+// Session_Registry provides thread-safe storage and tracking for persistent Core_Session instances.
+Session_Registry :: struct {
+	sessions:       map[string]^Core_Session,
+	detached_order: [dynamic]string,
+	lock:           sync.Mutex,
+}
+
+// session_registry_init initializes the registry map and dynamic tracking slice.
+session_registry_init :: proc(reg: ^Session_Registry) {
+	if reg == nil do return
+	reg.sessions = make(map[string]^Core_Session)
+	reg.detached_order = make([dynamic]string)
+}
+
+// session_registry_destroy frees all tracked sessions and internal structures.
+session_registry_destroy :: proc(reg: ^Session_Registry) {
+	if reg == nil do return
+	sync.mutex_lock(&reg.lock)
+	defer sync.mutex_unlock(&reg.lock)
+
+	for _, s in reg.sessions {
+		session_destroy(s)
+		free(s)
+	}
+	delete(reg.sessions)
+	reg.sessions = nil
+	for id in reg.detached_order {
+		delete(id)
+	}
+	delete(reg.detached_order)
+	reg.detached_order = nil
+}
+
+// session_registry_register registers a Core_Session into the registry thread-safely.
+session_registry_register :: proc(reg: ^Session_Registry, session: ^Core_Session) -> bool {
+	if reg == nil || session == nil || len(session.id) == 0 {
+		return false
+	}
+	sync.mutex_lock(&reg.lock)
+	defer sync.mutex_unlock(&reg.lock)
+
+	if session.id in reg.sessions {
+		return false
+	}
+	reg.sessions[session.id] = session
+	if session.is_detached {
+		append(&reg.detached_order, strings.clone(session.id))
+	}
+	return true
+}
+
+// session_registry_unregister removes and returns a session by ID without destroying it.
+session_registry_unregister :: proc(reg: ^Session_Registry, id: string) -> ^Core_Session {
+	if reg == nil || len(id) == 0 {
+		return nil
+	}
+	sync.mutex_lock(&reg.lock)
+	defer sync.mutex_unlock(&reg.lock)
+
+	s, ok := reg.sessions[id]
+	if !ok do return nil
+	delete_key(&reg.sessions, id)
+
+	for i := 0; i < len(reg.detached_order); i += 1 {
+		if reg.detached_order[i] == id {
+			delete(reg.detached_order[i])
+			ordered_remove(&reg.detached_order, i)
+			break
+		}
+	}
+	return s
+}
+
+// session_registry_lookup returns an active session by ID without unregistering it.
+session_registry_lookup :: proc(reg: ^Session_Registry, id: string) -> ^Core_Session {
+	if reg == nil || len(id) == 0 {
+		return nil
+	}
+	sync.mutex_lock(&reg.lock)
+	defer sync.mutex_unlock(&reg.lock)
+
+	s, ok := reg.sessions[id]
+	return s if ok else nil
+}
+
+// session_registry_list_detached writes IDs of detached sessions into out, returning the count.
+session_registry_list_detached :: proc(reg: ^Session_Registry, out: []string) -> int {
+	if reg == nil || len(out) == 0 {
+		return 0
+	}
+	sync.mutex_lock(&reg.lock)
+	defer sync.mutex_unlock(&reg.lock)
+
+	count := 0
+	for i := len(reg.detached_order) - 1; i >= 0 && count < len(out); i -= 1 {
+		id := reg.detached_order[i]
+		if s, ok := reg.sessions[id]; ok && s.is_detached {
+			out[count] = s.id
+			count += 1
+		}
+	}
+	return count
+}
+
+// session_registry_pop_latest_detached unregisters and returns the most recently detached session.
+session_registry_pop_latest_detached :: proc(reg: ^Session_Registry) -> ^Core_Session {
+	if reg == nil {
+		return nil
+	}
+	sync.mutex_lock(&reg.lock)
+	defer sync.mutex_unlock(&reg.lock)
+
+	for len(reg.detached_order) > 0 {
+		id := pop(&reg.detached_order)
+		defer delete(id)
+		if s, ok := reg.sessions[id]; ok {
+			delete_key(&reg.sessions, id)
+			s.is_detached = false
+			return s
+		}
+	}
+	return nil
+}
+
+@(private="file")
+_global_session_registry: Session_Registry
+@(private="file")
+_global_session_registry_init_once: bool
+@(private="file")
+_global_session_registry_lock: sync.Mutex
+
+// session_registry_default returns the singleton session registry instance.
+session_registry_default :: proc() -> ^Session_Registry {
+	if !sync.atomic_load(&_global_session_registry_init_once) {
+		sync.mutex_lock(&_global_session_registry_lock)
+		if !_global_session_registry_init_once {
+			session_registry_init(&_global_session_registry)
+			sync.atomic_store(&_global_session_registry_init_once, true)
+		}
+		sync.mutex_unlock(&_global_session_registry_lock)
+	}
+	return &_global_session_registry
 }

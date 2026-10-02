@@ -123,7 +123,16 @@ CURSOR_OVERLAY_B :: 1.0
 //
 // Guarantees: never mutates Damage, never touches terminal state, never
 // allocates. Returns true iff a quad was staged.
-cursor_overlay_draw :: proc(r: ^Renderer, o: ^Cursor_Overlay, scrollback_offset: int = 0) -> bool {
+cursor_overlay_draw :: proc(
+	r: ^Renderer,
+	o: ^Cursor_Overlay,
+	scrollback_offset: int = 0,
+	offset_x: f32 = 0,
+	offset_y: f32 = 0,
+	pane_rows: int = 0,
+	pane_cols: int = 0,
+	clip_rect: [4]f32 = {},
+) -> bool {
 	if r == nil {
 		return false
 	}
@@ -134,13 +143,13 @@ cursor_overlay_draw :: proc(r: ^Renderer, o: ^Cursor_Overlay, scrollback_offset:
 	if !o.blink_on || !o.visible {
 		return false
 	}
-	rows := int(r.rows)
-	cols := int(r.cols)
+	rows := pane_rows if pane_rows > 0 else int(r.rows)
+	cols := pane_cols if pane_cols > 0 else int(r.cols)
 	if rows <= 0 || cols <= 0 {
 		return false
 	}
 	viewport_row := o.row + scrollback_offset
-	if viewport_row < 0 || viewport_row >= rows || o.col < 0 || o.col >= cols {
+	if viewport_row < 0 || o.col < 0 || viewport_row >= rows || o.col >= cols {
 		return false
 	}
 	inst := &r.instances
@@ -154,8 +163,8 @@ cursor_overlay_draw :: proc(r: ^Renderer, o: ^Cursor_Overlay, scrollback_offset:
 	if u64(slot) >= u64(len(inst.instance_data)) {
 		return false
 	}
-	x := r.pad_x + f32(o.col) * r.cell_width
-	y := r.pad_y + f32(viewport_row) * r.cell_height
+	x := r.pad_x + offset_x + f32(o.col) * r.cell_width
+	y := r.pad_y + offset_y + f32(viewport_row) * r.cell_height
 	w := r.cell_width
 	h := r.cell_height
 
@@ -168,6 +177,28 @@ cursor_overlay_draw :: proc(r: ^Renderer, o: ^Cursor_Overlay, scrollback_offset:
 		bar_w := max(f32(2.0), math.floor(r.cell_width * 0.15))
 		w = bar_w
 	case: // 0, 1, 2: Block
+	}
+
+	if clip_rect[2] > clip_rect[0] && clip_rect[3] > clip_rect[1] {
+		if x < clip_rect[0] {
+			dx := clip_rect[0] - x
+			w -= dx
+			x = clip_rect[0]
+		}
+		if x + w > clip_rect[2] {
+			w = max(f32(0), clip_rect[2] - x)
+		}
+		if y < clip_rect[1] {
+			dy := clip_rect[1] - y
+			h -= dy
+			y = clip_rect[1]
+		}
+		if y + h > clip_rect[3] {
+			h = max(f32(0), clip_rect[3] - y)
+		}
+		if w <= 0 || h <= 0 {
+			return false
+		}
 	}
 
 	instance.instance_renderer_fill_bg(

@@ -13,14 +13,15 @@ interaction_init :: proc(s: ^Interaction_State) {
 }
 
 // interaction_enter_visual transitions the state into Visual mode with the specified kind and origin point.
-interaction_enter_visual :: proc(s: ^Interaction_State, kind: Visual_Kind, origin: termgrid.Terminal_Point) {
+interaction_enter_visual :: proc(s: ^Interaction_State, kind: Visual_Kind, origin: termgrid.Terminal_Point, active_selection: bool = false) {
 	if s == nil do return
 	s.mode = .Visual
 	s.visual_kind = kind
 	s.viewport_flow = .Paused
 	s.selection_anchor = origin
 	s.visual_cursor = origin
-	s.selection_active = true
+	s.selection_active = active_selection
+	s.pending_yank = false
 }
 
 // interaction_enter_search transitions the state into Search mode.
@@ -40,6 +41,7 @@ interaction_exit_to_passthrough :: proc(s: ^Interaction_State) -> (snap_to_live:
 	s.mode = .Passthrough
 	s.selection_active = false
 	s.search_active = false
+	s.pending_yank = false
 	interaction_resume_viewport(s)
 	return was_paused
 }

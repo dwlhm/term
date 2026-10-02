@@ -82,6 +82,7 @@ Frontend :: struct {
 	gpu_backend:              ^gpu.Gpu_Backend_VTable,
 	device:                   gpu.Gpu_Device,
 	queue:                    gpu.Gpu_Queue,
+	scrollbar:                termgrid.Scrollbar,
 	surface:                  gpu.Gpu_Surface,
 	instance:                 rawptr,
 	executable_path:          string,
@@ -248,6 +249,10 @@ frontend_init :: proc(
 			fmt.eprintf("frontend_init: request_device failed\n")
 			return 0, 0, 0, 0, false
 		}
+
+		opacity: f32 = cfg.window_opacity if cfg != nil else 1.0
+		blur: bool = cfg.window_blur if cfg != nil else false
+		frontend_apply_vibrancy(f, opacity, blur)
 	} else {
 		#panic("Unsupported platform: Term currently only supports macOS (Metal)")
 	}
@@ -436,7 +441,7 @@ _frontend_debug_dump_grid :: proc(t: ^termgrid.Terminal) {
 }
 
 // frontend_render stages the cursor and presents a frame from the Render_State snapshot.
-frontend_render :: proc(f: ^Frontend, state: ^Render_State) -> bool {
+frontend_render :: proc(f: ^Frontend, state: ^Render_State, panes: []render.Pane_Viewport = nil) -> bool {
 	if f == nil || state == nil || state.terminal == nil {
 		return false
 	}
@@ -447,25 +452,38 @@ frontend_render :: proc(f: ^Frontend, state: ^Render_State) -> bool {
 		return true
 	}
 
+	active_offset_x, active_offset_y: f32
+	active_rows, active_cols := state.terminal.grid.row_count, state.terminal.grid.col_count
+	active_clip: [4]f32
+	for p in panes {
+		if p.is_active {
+			active_offset_x = p.x-f.renderer.pad_x
+			active_offset_y = p.y-f.renderer.pad_y
+			active_rows = p.rows
+			active_cols = p.cols
+			active_clip = p.clip_rect
+			break
+		}
+	}
 	// Stage cursor overlay before frame acquisition
 	if state.cursor != nil && state.view != nil {
-		_ = render.cursor_overlay_draw(&f.renderer, state.cursor, state.view.scrollback_offset)
+		_ = render.cursor_overlay_draw(&f.renderer, state.cursor, state.view.scrollback_offset, active_offset_x, active_offset_y, active_rows, active_cols, active_clip)
 	}
 
 	// Stage interaction overlay before frame acquisition
 	if state.interaction != nil && state.view != nil && state.terminal != nil {
-		_ = render.interaction_overlay_draw(&f.renderer, state.interaction, state.view, state.terminal)
+		_ = render.interaction_overlay_draw(&f.renderer, state.interaction, state.view, state.terminal, active_offset_x, active_offset_y, active_rows, active_cols, active_clip)
 	}
 
 	// Stage scrollbar overlay before frame acquisition
-	if state.terminal != nil {
+	if state.terminal != nil && (panes == nil || len(panes) <= 1) {
 		total_lines := termgrid.scrollback_len(&state.terminal.scrollback) + state.terminal.grid.row_count
 		visible_lines := state.terminal.grid.row_count
 		offset := state.view.scrollback_offset if state.view != nil else 0
 		viewport_w := f32(f.renderer.surface_w)
 		viewport_h := f32(f.renderer.surface_h)
-		termgrid.scrollbar_update(&state.terminal.scrollbar, total_lines, visible_lines, offset, viewport_w, viewport_h)
-		_ = render.scrollbar_overlay_draw(&f.renderer, &state.terminal.scrollbar)
+		termgrid.scrollbar_update(&f.scrollbar, total_lines, visible_lines, offset, viewport_w, viewport_h)
+		_ = render.scrollbar_overlay_draw(&f.renderer, &f.scrollbar)
 	}
 
 	dbg_dmg, dbg_total := 0, 0
@@ -477,7 +495,9 @@ frontend_render :: proc(f: ^Frontend, state: ^Render_State) -> bool {
 	now := platform.platform_ticks_to_ns(platform.platform_now())
 	now_ns := u64(now)
 	frame_ok := false
-	if state.synchronized_output {
+	if panes != nil && len(panes) > 1 {
+		frame_ok = render.renderer_frame_panes(&f.renderer, panes)
+	} else if state.synchronized_output {
 		if now_ns - state.sync_output_start_ns < APP_SYNC_OUTPUT_TIMEOUT_NS {
 			// Skip calling renderer_frame for this frame (synchronized output in progress)
 		} else {
@@ -628,7 +648,7 @@ frontend_apply_zoom :: proc(
 		termgrid.terminal_resize(terminal, rows, cols)
 		if f.use_pinnacle { pinnacle_app.resize_terminal_adapter(&f.p_term_adapter, i32(rows), i32(cols)) } else { render.renderer_resize_grid(&f.renderer, terminal, i32(rows), i32(cols)) }
 	}
-	pty.pty_set_winsize(pty_ptr, rows, cols)
+	if terminal != nil do pty.pty_set_winsize(pty_ptr, rows, cols)
 	if pixel_w > 0 && pixel_h > 0 {
 		render.renderer_resize(&f.renderer, u32(pixel_w), u32(pixel_h))
 	}
@@ -686,6 +706,20 @@ frontend_apply_theme :: proc(f: ^Frontend, theme: termgrid.Theme) {
 		return
 	}
 	f.renderer.theme = theme
+}
+
+// frontend_apply_vibrancy configures window opacity and blur vibrancy dynamically.
+frontend_apply_vibrancy :: proc(f: ^Frontend, opacity: f32, blur: bool) {
+	if f == nil do return
+	if f.window.handle != nil {
+		win.window_configure_vibrancy(&f.window, opacity, blur)
+	}
+	when ODIN_OS == .Darwin {
+		if rawptr(f.surface) != nil {
+			metal_surf := (^metal_backend.Metal_Surface)(rawptr(f.surface))
+			metal_backend.configure_surface_vibrancy(metal_surf, opacity, blur)
+		}
+	}
 }
 
 // _frontend_clipboard_write_cb writes text to the system clipboard via SDL.

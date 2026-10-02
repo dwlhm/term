@@ -81,6 +81,23 @@ Term includes a dedicated, standalone headless Model Context Protocol ([MCP](htt
 
 ---
 
+## Documentation
+
+Term provides a modular documentation suite detailing installation, architecture, daily usage, declarative configuration, headless MCP automation, and empirical benchmarks:
+
+| Document | Description | Target Audience |
+|---|---|---|
+| **[Documentation Index](docs/README.md)** | Master documentation index, architectural invariants, and documentation map. | All users & contributors |
+| **[Getting Started](docs/getting-started.md)** | Installation, prerequisites, building debug/release binaries, macOS app bundling, DMG creation, and test suites. | New users & builders |
+| **[User Guide](docs/user-guide.md)** | Daily workflows, keyboard shortcuts, multi-tab lifecycle, session switcher modal, selection models, and search overlay. | End users |
+| **[Configuration Guide](docs/configuration.md)** | Declarative Odin AST configuration format, full options reference, color palettes, and custom keybindings. | Power users & customizers |
+| **[Architecture Specification](docs/architecture.md)** | System architecture, hexagonal core, Ports and Adapters, PTY lifecycle, scalar VT parser, 32-bit ARGB TrueColor, and Metal renderer. | Systems engineers |
+| **[MCP Server Specification](docs/mcp-server.md)** | Standalone headless MCP server guide, JSON-RPC 2.0 stdio protocol, 7 MECE automation tools, and AI agent integration. | AI tool builders & integrators |
+| **[Benchmark Report](docs/benchmarks.md)** | Empirical microbenchmarks, comparative evaluations (Term vs. Alacritty vs. Ghostty), video telemetry, and MCP latency tests. | Performance evaluators |
+| **[Developer Guide](docs/developer-guide.md)** | Contributing guidelines, coding conventions, architectural invariants, diagnostic probes, profiling, and test workflows. | Contributors & developers |
+
+---
+
 ## Benchmarks & Verification
 
 All architectural decisions are documented with empirical benchmarks in [LAPORAN.md](file:///Users/dwlhm/project/term/LAPORAN.md), external comparative throughput and latency evaluations against Alacritty and Ghostty in [COMPARATIVE_BENCHMARKS.md](file:///Users/dwlhm/project/term/COMPARATIVE_BENCHMARKS.md), and comprehensive headless agent server evaluations in [MCP_BENCHMARKS.md](file:///Users/dwlhm/project/term/MCP_BENCHMARKS.md). Key findings include:
@@ -191,7 +208,7 @@ term/
 │       ├── OFL-MapleMono.txt
 │       └── OFL-SymbolsNerdFont.txt
 ├── bin/                     # Output binaries (term, Term.app, term-mcp, benchmarks)
-├── docs/                    # Architectural notes, research records, and historical archives
+├── docs/                    # Modular documentation suite (Architecture, User Guide, Config, MCP, Benchmarks)
 ├── scripts/                 # Packaging, comparative benchmark suites, and utility scripts
 │   └── bundle_frameworks.sh # Standalone dylib relocation and codesigning automation
 ├── src/

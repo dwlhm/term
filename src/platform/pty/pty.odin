@@ -255,6 +255,9 @@ pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string, c
 		   strings.has_prefix(entry, "OPENTUI_FORCE_UNICODE=") {
 			continue
 		}
+		if strings.has_prefix(entry, "COLUMNS=") || strings.has_prefix(entry, "LINES=") {
+			continue
+		}
 		if has_cwd && strings.has_prefix(entry, "PWD=") {
 			continue
 		}
@@ -316,6 +319,18 @@ pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string, c
 		append(&c_env_allocated, cs)
 		append(&c_env, cs)
 	}
+
+	cols_str := fmt.aprintf("COLUMNS=%d", ncols)
+	cols_cs := strings.clone_to_cstring(cols_str)
+	delete(cols_str)
+	append(&c_env_allocated, cols_cs)
+	append(&c_env, cols_cs)
+
+	lines_str := fmt.aprintf("LINES=%d", r)
+	lines_cs := strings.clone_to_cstring(lines_str)
+	delete(lines_str)
+	append(&c_env_allocated, lines_cs)
+	append(&c_env, lines_cs)
 
 	append(&c_env, nil)
 	has_slash := strings.contains(prog, "/")
@@ -391,6 +406,7 @@ pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string, c
 	p.exit_code = 0
 	p.rows = r
 	p.cols = ncols
+	pty_set_winsize(p, r, ncols)
 	return true
 }
 

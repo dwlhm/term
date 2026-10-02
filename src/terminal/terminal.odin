@@ -540,7 +540,7 @@ terminal_put_ascii_span :: proc(t: ^Terminal, text: []u8) -> int {
 				phys_row.ext.colors[col + i] = clr
 			}
 		}
-	} else if len(phys_row.ext.colors) > col {
+	} else if len(phys_row.ext.colors) > 0 {
 		for i in 0 ..< span_len {
 			if col + i < len(phys_row.ext.colors) {
 				phys_row.ext.colors[col + i] = {}
@@ -1068,7 +1068,8 @@ _terminal_erase_row :: proc(t: ^Terminal, phys: int, blank: Semantic_Cell) {
 		for i in 0..<len(t.grid.rows[phys].ext.colors) {
 			t.grid.rows[phys].ext.colors[i] = clr
 		}
-	} else if len(t.grid.rows[phys].ext.colors) > 0 {
+	} else {
+		t.grid.rows[phys].ext.channels = {}
 		for i in 0..<len(t.grid.rows[phys].ext.colors) {
 			t.grid.rows[phys].ext.colors[i] = {}
 		}
@@ -1128,10 +1129,15 @@ terminal_erase_line :: proc(t: ^Terminal, mode: Erase_Mode) {
 				t.grid.rows[phys].ext.colors[c] = clr
 			}
 		}
-	} else if len(t.grid.rows[phys].ext.colors) > 0 {
-		for c in start..=end {
-			if c < len(t.grid.rows[phys].ext.colors) {
-				t.grid.rows[phys].ext.colors[c] = {}
+	} else {
+		if mode == .Entire {
+			t.grid.rows[phys].ext.channels = {}
+		}
+		if len(t.grid.rows[phys].ext.colors) > 0 {
+			for c in start..=end {
+				if c < len(t.grid.rows[phys].ext.colors) {
+					t.grid.rows[phys].ext.colors[c] = {}
+				}
 			}
 		}
 	}

@@ -178,6 +178,7 @@ test_s15_resize_noop :: proc(t: ^testing.T) {
 	defer free(a)
 	_bare_app(a)
 	defer _bare_destroy(a)
+	defer _s15_renderer_teardown(a)
 
 	px_w := i32(APP_TEST_COLS * app.APP_CELL_W)
 	px_h := i32(APP_TEST_ROWS * app.APP_CELL_H)

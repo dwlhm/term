@@ -1,5 +1,8 @@
 package main
 
+import "base:runtime"
+import "core:fmt"
+import "core:sync"
 import posix "core:sys/posix"
 import "core:strings"
 import "core:time"
@@ -7,6 +10,7 @@ import config "../config"
 import i18n "../i18n"
 import termgrid "../terminal"
 import pty "../platform/pty"
+import session_core "../session_core"
 import ui "../ui"
 
 MAX_TABS: int : 32
@@ -39,15 +43,26 @@ Tab_Session :: struct {
 	exit_signal:           i32,
 	has_bell:              bool,
 	terminate_t0:          time.Time,
+	tree:                  Pane_Tree,
 	backend:               Backend,
 }
 
 // Session_Manager manages the collection of concurrent tab sessions.
 Session_Manager :: struct {
-	tabs:       [dynamic]Tab_Session,
-	active_idx: int,
-	next_id:    u32,
-	max_tabs:   int,
+	tabs:                 [dynamic]Tab_Session,
+	active_idx:           int,
+	next_id:              u32,
+	max_tabs:             int,
+	registry:             ^session_core.Session_Registry,
+	default_rows:         int,
+	default_cols:         int,
+	default_config:       ^config.Config,
+	default_theme:        termgrid.Theme,
+	clipboard_user_data:  rawptr,
+	clipboard_write_cb:   Clipboard_Write_Proc,
+	clipboard_read_cb:    Clipboard_Read_Proc,
+	notify_data_ready_cb: proc(user_data: rawptr),
+	notify_user_data:     rawptr,
 }
 
 // _damage_cells counts dirty cells in the live damage state.
@@ -158,12 +173,113 @@ session_manager_init :: proc(sm: ^Session_Manager, max_tabs: int = MAX_TABS) {
 	sm.active_idx = -1
 	sm.next_id = 1
 	sm.max_tabs = max_tabs if max_tabs > 0 else MAX_TABS
+	sm.registry = session_core.session_registry_default()
+	sm.default_rows = 24
+	sm.default_cols = 80
+}
+
+// _collect_leaves_slice gathers all leaf nodes in depth-first traversal order into out.
+_collect_leaves_slice :: proc(node: ^Pane_Node, out: []^Pane_Node, count: ^int) {
+	if node == nil do return
+	if node.kind == .Leaf {
+		if count^ < len(out) {
+			out[count^] = node
+			count^ += 1
+		}
+		return
+	}
+	_collect_leaves_slice(node.first, out, count)
+	_collect_leaves_slice(node.second, out, count)
+}
+
+// tab_leaf_panes gathers all leaf nodes of the tab's pane tree into out_leaves.
+tab_leaf_panes :: proc(tab: ^Tab_Session, out_leaves: []^Pane_Node) -> int {
+	if tab == nil || tab.tree.root == nil do return 0
+	count := 0
+	_collect_leaves_slice(tab.tree.root, out_leaves, &count)
+	return count
+}
+
+// tab_active_pane returns the currently focused leaf pane node of the tab.
+tab_active_pane :: proc(tab: ^Tab_Session) -> ^Pane_Node {
+	if tab == nil do return nil
+	if tab.tree.focused_pane_id != 0 {
+		if node := pane_tree_find_pane(&tab.tree, tab.tree.focused_pane_id); node != nil {
+			return node
+		}
+	}
+	if tab.tree.root != nil {
+		return _pane_find_first_leaf(tab.tree.root)
+	}
+	return nil
+}
+
+// tab_active_backend returns the backend associated with the tab's active pane,
+// falling back to &tab.backend.
+tab_active_backend :: proc(tab: ^Tab_Session) -> ^Backend {
+	if tab == nil do return nil
+	pane := tab_active_pane(tab)
+	if pane != nil && pane.backend != nil {
+		return pane.backend
+	}
+	return &tab.backend
+}
+
+// _tab_rebase_tree adjusts internal pointers within tab.tree after Tab_Session memory moves.
+_tab_rebase_tree :: proc(tab: ^Tab_Session, old_nodes_base: rawptr, old_backend: ^Backend) {
+	if tab == nil || old_nodes_base == nil do return
+	new_nodes_base := rawptr(&tab.tree.nodes[0])
+	if old_nodes_base == new_nodes_base && old_backend == &tab.backend do return
+
+	delta := int(uintptr(new_nodes_base)) - int(uintptr(old_nodes_base))
+
+	rebase_node_ptr :: proc(ptr: ^Pane_Node, delta: int) -> ^Pane_Node {
+		if ptr == nil do return nil
+		return (^Pane_Node)(uintptr(int(uintptr(ptr)) + delta))
+	}
+
+	if tab.tree.root != nil {
+		tab.tree.root = rebase_node_ptr(tab.tree.root, delta)
+	}
+	if tab.tree.divider_hover != nil {
+		tab.tree.divider_hover = rebase_node_ptr(tab.tree.divider_hover, delta)
+	}
+
+	for i in 0 ..< MAX_PANE_NODES {
+		if !tab.tree.node_in_use[i] do continue
+		node := &tab.tree.nodes[i]
+		if node.parent != nil do node.parent = rebase_node_ptr(node.parent, delta)
+		if node.first != nil do node.first = rebase_node_ptr(node.first, delta)
+		if node.second != nil do node.second = rebase_node_ptr(node.second, delta)
+		if old_backend != nil && node.backend == old_backend {
+			node.backend = &tab.backend
+		}
+	}
 }
 
 // session_destroy dismantles an individual tab session and its PTY/terminal resources.
 session_destroy :: proc(s: ^Tab_Session) {
 	if s == nil do return
-	backend_destroy(&s.backend)
+	leaves: [MAX_PANE_NODES]^Pane_Node
+	count := tab_leaf_panes(s, leaves[:])
+	destroyed_tab_backend := false
+	for i in 0 ..< count {
+		leaf := leaves[i]
+		if leaf.backend != nil {
+			if leaf.backend == &s.backend {
+				destroyed_tab_backend = true
+			}
+			backend_destroy(leaf.backend)
+			if leaf.backend != &s.backend {
+				free(leaf.backend)
+			}
+			leaf.backend = nil
+		}
+	}
+	pane_tree_destroy(&s.tree)
+	if !destroyed_tab_backend && s.backend.pty.master >= 0 {
+		backend_destroy(&s.backend)
+	}
 	s.status = .Exited
 }
 
@@ -191,6 +307,11 @@ session_spawn :: proc(
 	// Max Tab Guard
 	if len(sm.tabs) >= sm.max_tabs do return -1, false
 
+	sm.default_rows = rows
+	sm.default_cols = cols
+	sm.default_config = cfg
+	sm.default_theme = theme
+
 	resize(&sm.tabs, len(sm.tabs) + 1)
 	new_idx := len(sm.tabs) - 1
 	tab := &sm.tabs[new_idx]
@@ -205,7 +326,23 @@ session_spawn :: proc(
 		return -1, false
 	}
 	tab.status = .Running
-	_ = backend_start_thread(&tab.backend)
+	if sm.notify_data_ready_cb != nil {
+		backend_set_notify_data_ready(&tab.backend, sm.notify_user_data, sm.notify_data_ready_cb)
+	}
+	if sm.clipboard_read_cb != nil || sm.clipboard_write_cb != nil {
+		backend_set_clipboard_callbacks(&tab.backend, sm.clipboard_user_data, sm.clipboard_write_cb, sm.clipboard_read_cb)
+	}
+	if !backend_start_thread(&tab.backend) {
+		fmt.eprintln("tab spawn failed: backend worker could not start")
+		backend_destroy(&tab.backend)
+		ordered_remove(&sm.tabs, new_idx)
+		return -1, false
+	}
+	_ = pane_tree_init(&tab.tree, &tab.backend)
+	if tab.tree.root != nil {
+		tab.tree.root.rows = rows
+		tab.tree.root.cols = cols
+	}
 	_ = session_refresh_title(tab)
 
 	if sm.active_idx < 0 {
@@ -219,8 +356,16 @@ session_close_tab :: proc(sm: ^Session_Manager, idx: int) -> bool {
 	if sm == nil || idx < 0 || idx >= len(sm.tabs) do return false
 	s := &sm.tabs[idx]
 
-	// Kirim sinyal SIGHUP ke child process group jika proses masih running
-	if s.backend.pty.pid > 1 && s.backend.pty.state == .Running {
+	// Send SIGHUP to child process group of all running leaf panes
+	leaves: [MAX_PANE_NODES]^Pane_Node
+	leaf_count := tab_leaf_panes(s, leaves[:])
+	for i in 0 ..< leaf_count {
+		leaf := leaves[i]
+		if leaf.backend != nil && leaf.backend.pty.pid > 1 && leaf.backend.pty.state == .Running {
+			posix.kill(posix.pid_t(-leaf.backend.pty.pid), .SIGHUP)
+		}
+	}
+	if leaf_count == 0 && s.backend.pty.pid > 1 && s.backend.pty.state == .Running {
 		posix.kill(posix.pid_t(-s.backend.pty.pid), .SIGHUP)
 	}
 
@@ -237,7 +382,19 @@ session_close_tab :: proc(sm: ^Session_Manager, idx: int) -> bool {
 	}
 
 	session_destroy(s)
+
+	old_nodes: [MAX_TABS]rawptr
+	old_backends: [MAX_TABS]^Backend
+	for i in (idx + 1) ..< len(sm.tabs) {
+		old_nodes[i] = &sm.tabs[i].tree.nodes[0]
+		old_backends[i] = &sm.tabs[i].backend
+	}
+
 	ordered_remove(&sm.tabs, idx)
+
+	for i in idx ..< len(sm.tabs) {
+		_tab_rebase_tree(&sm.tabs[i], old_nodes[i + 1], old_backends[i + 1])
+	}
 
 	for i in 0 ..< len(sm.tabs) {
 		for j in 0 ..< threaded_count {
@@ -257,11 +414,250 @@ session_close_tab :: proc(sm: ^Session_Manager, idx: int) -> bool {
 	}
 
 	if sm.active_idx >= 0 && sm.active_idx < len(sm.tabs) {
-		termgrid.damage_mark_all(&sm.tabs[sm.active_idx].backend.terminal.damage, nil)
-		sm.tabs[sm.active_idx].backend.view_generation += 1
+		active_b := tab_active_backend(&sm.tabs[sm.active_idx])
+		termgrid.damage_mark_all(&active_b.terminal.damage, nil)
+		active_b.view_generation += 1
 	}
 
 	return true
+}
+
+// session_detach_tab detaches the tab at idx without killing child process or sending SIGHUP.
+// Grid and child process state are preserved in a Core_Session registered into Session_Registry.
+// If all tabs become detached, a fresh default shell tab is spawned so the window stays usable.
+session_detach_tab :: proc(sm: ^Session_Manager, idx: int) -> bool {
+	if sm == nil || idx < 0 || idx >= len(sm.tabs) do return false
+	s := &sm.tabs[idx]
+
+	if s.tree.node_count != 1 || tab_active_backend(s) != &s.backend {
+		fmt.eprintln("detach rejected: only an embedded singleton terminal can detach")
+		return false
+	}
+
+	// 1. Pause other threaded backends safely before mutating sm.tabs array
+	threaded_ids: [MAX_TABS]u32
+	threaded_count := 0
+	for i in 0 ..< len(sm.tabs) {
+		if i != idx && backend_is_threaded(&sm.tabs[i].backend) {
+			backend_stop_thread(&sm.tabs[i].backend)
+			if threaded_count < MAX_TABS {
+				threaded_ids[threaded_count] = sm.tabs[i].id
+				threaded_count += 1
+			}
+		}
+	}
+
+	// 2. Stop thread on tab to be detached and clean up leaf panes
+	if backend_is_threaded(&s.backend) {
+		backend_stop_thread(&s.backend)
+	}
+	leaves: [MAX_PANE_NODES]^Pane_Node
+	leaf_count := tab_leaf_panes(s, leaves[:])
+	for i in 0 ..< leaf_count {
+		leaf := leaves[i]
+		if leaf.backend != nil && leaf.backend != &s.backend {
+			if backend_is_threaded(leaf.backend) {
+				backend_stop_thread(leaf.backend)
+			}
+			backend_destroy(leaf.backend)
+			free(leaf.backend)
+			leaf.backend = nil
+		}
+	}
+	pane_tree_destroy(&s.tree)
+
+	// 3. Move PTY, terminal grid, and parser into persistent Core_Session
+	cs := new(session_core.Core_Session)
+	cs.id = fmt.aprintf("session_%d", s.id)
+	cs.pty_handle = s.backend.pty
+	cs.term = s.backend.terminal
+	cs.vt_parser = s.backend.parser
+	cs.mode = s.backend.session_mode
+	cs.is_detached = true
+
+	// Clear backend handles so session_destroy does not close PTY or free grid memory
+	s.backend.pty.master = -1
+	s.backend.pty.pid = -1
+	s.backend.terminal.grid.cells = nil
+	s.backend.terminal.alt_grid.cells = nil
+	s.backend.terminal.scrollback.cells = nil
+	s.backend.terminal.grapheme_store = {}
+	if s.backend.drain_buf != nil {
+		delete(s.backend.drain_buf, runtime.heap_allocator())
+		s.backend.drain_buf = nil
+	}
+	delete(s.backend.cwd)
+	s.backend.cwd = ""
+	termgrid.terminal_destroy(&s.backend.front_terminal)
+
+	// Launch background drain loop on persistent session (idle zero work)
+	session_core.session_start_drain_loop(cs)
+
+	// Store in Session_Registry
+	reg := sm.registry if sm.registry != nil else session_core.session_registry_default()
+	if reg != nil {
+		session_core.session_registry_register(reg, cs)
+	}
+
+	// 4. Remove tab from sm.tabs
+	old_nodes: [MAX_TABS]rawptr
+	old_backends: [MAX_TABS]^Backend
+	for i in (idx + 1) ..< len(sm.tabs) {
+		old_nodes[i] = &sm.tabs[i].tree.nodes[0]
+		old_backends[i] = &sm.tabs[i].backend
+	}
+
+	ordered_remove(&sm.tabs, idx)
+
+	for i in idx ..< len(sm.tabs) {
+		_tab_rebase_tree(&sm.tabs[i], old_nodes[i + 1], old_backends[i + 1])
+	}
+
+	// 5. Restart other paused worker threads
+	for i in 0 ..< len(sm.tabs) {
+		for j in 0 ..< threaded_count {
+			if sm.tabs[i].id == threaded_ids[j] {
+				_ = backend_start_thread(&sm.tabs[i].backend)
+				break
+			}
+		}
+	}
+
+	// 6. Adjust active index
+	if len(sm.tabs) == 0 {
+		sm.active_idx = -1
+	} else if idx < sm.active_idx {
+		sm.active_idx -= 1
+	} else if idx == sm.active_idx {
+		sm.active_idx = min(idx, len(sm.tabs) - 1)
+	}
+
+	// 7. If sm.tabs is empty, spawn fresh default shell tab so window stays usable
+	if len(sm.tabs) == 0 {
+		shell, shell_allocated := _resolve_shell()
+		defer if shell_allocated do delete(shell)
+		shell_argv := _resolve_shell_argv(shell)
+		rows := sm.default_rows > 0 ? sm.default_rows : 24
+		cols := sm.default_cols > 0 ? sm.default_cols : 80
+		new_idx, spawn_ok := session_spawn(sm, shell, shell_argv, rows, cols, sm.default_config, sm.default_theme)
+		if spawn_ok {
+			sm.active_idx = new_idx
+			new_b := tab_active_backend(&sm.tabs[new_idx])
+			if sm.notify_data_ready_cb != nil {
+				backend_set_notify_data_ready(new_b, sm.notify_user_data, sm.notify_data_ready_cb)
+			}
+			if sm.clipboard_read_cb != nil || sm.clipboard_write_cb != nil {
+				backend_set_clipboard_callbacks(new_b, sm.clipboard_user_data, sm.clipboard_write_cb, sm.clipboard_read_cb)
+			}
+		}
+	}
+
+	// 8. Mark damage on active tab
+	if sm.active_idx >= 0 && sm.active_idx < len(sm.tabs) {
+		active_b := tab_active_backend(&sm.tabs[sm.active_idx])
+		termgrid.damage_mark_all(&active_b.terminal.damage, nil)
+		active_b.view_generation += 1
+	}
+
+	return true
+}
+
+// session_attach_tab re-attaches a persistent Core_Session into a new tab in sm.tabs.
+// Connects backend, starts worker thread, synchronizes virtual grid to front terminal,
+// marks damage for immediate display, and returns the new tab index.
+session_attach_tab :: proc(sm: ^Session_Manager, persistent_session: ^session_core.Core_Session) -> (int, bool) {
+	if sm == nil || persistent_session == nil {
+		return -1, false
+	}
+	if len(sm.tabs) >= sm.max_tabs {
+		return -1, false
+	}
+
+	// 1. Stop background drain thread on persistent_session
+	session_core.session_stop_drain_loop(persistent_session)
+	persistent_session.is_detached = false
+
+	// Unregister from registry if registered
+	reg := sm.registry if sm.registry != nil else session_core.session_registry_default()
+	if reg != nil {
+		_ = session_core.session_registry_unregister(reg, persistent_session.id)
+	}
+
+	// 2. Pause other threaded backends safely before mutating sm.tabs
+	threaded_ids: [MAX_TABS]u32
+	threaded_count := 0
+	for i in 0 ..< len(sm.tabs) {
+		if backend_is_threaded(&sm.tabs[i].backend) {
+			backend_stop_thread(&sm.tabs[i].backend)
+			if threaded_count < MAX_TABS {
+				threaded_ids[threaded_count] = sm.tabs[i].id
+				threaded_count += 1
+			}
+		}
+	}
+
+	// 3. Allocate new tab slot
+	resize(&sm.tabs, len(sm.tabs) + 1)
+	new_idx := len(sm.tabs) - 1
+	tab := &sm.tabs[new_idx]
+	tab.id = sm.next_id
+	sm.next_id += 1
+	tab.status = .Running
+	tab.title_len = session_sanitize_title(tab.title_buf[:], i18n.i18n_get().tab_untitled)
+
+	// 4. Initialize backend transferring ownership from persistent_session
+	b := &tab.backend
+	if !backend_init_from_core_session(b, persistent_session, sm.default_config, sm.default_theme) {
+		ordered_remove(&sm.tabs, new_idx)
+		for i in 0 ..< len(sm.tabs) {
+			for j in 0 ..< threaded_count {
+				if sm.tabs[i].id == threaded_ids[j] {
+					_ = backend_start_thread(&sm.tabs[i].backend)
+					break
+				}
+			}
+		}
+		return -1, false
+	}
+
+	// Free persistent_session wrapper
+	delete(persistent_session.id)
+	free(persistent_session)
+
+	_ = pane_tree_init(&tab.tree, &tab.backend)
+	if tab.tree.root != nil {
+		tab.tree.root.rows = b.terminal.grid.row_count
+		tab.tree.root.cols = b.terminal.grid.col_count
+	}
+
+	// Wire notification & clipboard callbacks
+	if sm.notify_data_ready_cb != nil {
+		backend_set_notify_data_ready(b, sm.notify_user_data, sm.notify_data_ready_cb)
+	}
+	if sm.clipboard_read_cb != nil || sm.clipboard_write_cb != nil {
+		backend_set_clipboard_callbacks(b, sm.clipboard_user_data, sm.clipboard_write_cb, sm.clipboard_read_cb)
+	}
+
+	// 5. Connect backend and start worker thread
+	_ = backend_start_thread(b)
+	_ = session_refresh_title(tab)
+
+	// 6. Resume other tabs' worker threads
+	for i in 0 ..< len(sm.tabs) {
+		if i == new_idx do continue
+		for j in 0 ..< threaded_count {
+			if sm.tabs[i].id == threaded_ids[j] {
+				_ = backend_start_thread(&sm.tabs[i].backend)
+				break
+			}
+		}
+	}
+
+	if sm.active_idx < 0 {
+		sm.active_idx = new_idx
+	}
+
+	return new_idx, true
 }
 
 // session_reorder_tab moves the tab at from_idx to to_idx by rotating the
@@ -290,6 +686,13 @@ session_reorder_tab :: proc(sm: ^Session_Manager, from_idx, to_idx: int) -> bool
 		}
 	}
 
+	old_nodes: [MAX_TABS]rawptr
+	old_backends: [MAX_TABS]^Backend
+	for i in 0 ..< n {
+		old_nodes[i] = &sm.tabs[i].tree.nodes[0]
+		old_backends[i] = &sm.tabs[i].backend
+	}
+
 	// Tab_Session embeds a large Backend, so the scratch slot is heap-allocated
 	// to avoid a multi-megabyte stack temporary while keeping sm.tabs in place.
 	moved := new(Tab_Session, context.allocator)
@@ -305,6 +708,17 @@ session_reorder_tab :: proc(sm: ^Session_Manager, from_idx, to_idx: int) -> bool
 		}
 	}
 	sm.tabs[to_idx] = moved^
+
+	if from_idx < to_idx {
+		for i in from_idx ..< to_idx {
+			_tab_rebase_tree(&sm.tabs[i], old_nodes[i + 1], old_backends[i + 1])
+		}
+	} else {
+		for i := from_idx; i > to_idx; i -= 1 {
+			_tab_rebase_tree(&sm.tabs[i], old_nodes[i - 1], old_backends[i - 1])
+		}
+	}
+	_tab_rebase_tree(&sm.tabs[to_idx], old_nodes[from_idx], old_backends[from_idx])
 
 	for i in 0 ..< n {
 		for j in 0 ..< threaded_count {
@@ -353,24 +767,20 @@ session_switch_tab :: proc(sm: ^Session_Manager, idx: int) -> bool {
 	if sm == nil || idx < 0 || idx >= len(sm.tabs) do return false
 	if idx == sm.active_idx do return true
 
-	target_rows := 0
-	target_cols := 0
-	if sm.active_idx >= 0 && sm.active_idx < len(sm.tabs) {
-		prev := &sm.tabs[sm.active_idx]
-		target_rows = prev.backend.terminal.grid.row_count
-		target_cols = prev.backend.terminal.grid.col_count
-	}
-
 	sm.active_idx = idx
 	s := &sm.tabs[idx]
+	curr_b := tab_active_backend(s)
 
-	if target_rows > 0 && target_cols > 0 && (s.backend.terminal.grid.row_count != target_rows || s.backend.terminal.grid.col_count != target_cols) {
-		termgrid.terminal_resize(&s.backend.terminal, target_rows, target_cols)
-		pty.pty_set_winsize(&s.backend.pty, target_rows, target_cols)
+	if curr_b != nil {
+		if !backend_is_threaded(curr_b) {
+			termgrid.damage_mark_all(&curr_b.terminal.damage, nil)
+		} else {
+			sync.mutex_lock(&curr_b.swap_mutex)
+			termgrid.damage_mark_all(&curr_b.front_terminal.damage, nil)
+			sync.mutex_unlock(&curr_b.swap_mutex)
+		}
+		curr_b.view_generation += 1
 	}
-
-	termgrid.damage_mark_all(&s.backend.terminal.damage, nil)
-	s.backend.view_generation += 1
 	return true
 }
 
@@ -383,21 +793,88 @@ session_poll_all :: proc(sm: ^Session_Manager, max_chunk_budget: int = 65536) ->
 		s := &sm.tabs[idx]
 		switch s.status {
 		case .Running, .Terminating:
-			if s.backend.pty.master >= 0 && !backend_is_threaded(&s.backend) {
-				backend_drain_pty(&s.backend)
-				if idx == sm.active_idx && _damage_cells(&s.backend.terminal) > 0 {
-					any_damaged = true
+			leaves: [MAX_PANE_NODES]^Pane_Node
+			leaf_count := tab_leaf_panes(s, leaves[:])
+			if leaf_count == 0 {
+				if s.backend.pty.master >= 0 && !backend_is_threaded(&s.backend) {
+					backend_drain_pty(&s.backend)
+					if idx == sm.active_idx && _damage_cells(&s.backend.terminal) > 0 {
+						any_damaged = true
+					}
 				}
-			}
-			if session_refresh_title(s) do any_damaged = true
-			if s.backend.terminal.bell_event {
-				s.has_bell = true
-			}
-			if pty.pty_poll_exit(&s.backend.pty) {
-				_ = session_close_tab(sm, idx)
-				any_damaged = true
+				if session_refresh_title(s) do any_damaged = true
+				if s.backend.terminal.bell_event {
+					s.has_bell = true
+				}
+				if backend_snapshot_exited(&s.backend) {
+					_ = session_close_tab(sm, idx)
+					any_damaged = true
+					continue
+				}
+				idx += 1
 				continue
 			}
+
+			tab_closed := false
+			for i in 0 ..< leaf_count {
+				leaf := leaves[i]
+				b := leaf.backend
+				if b == nil do continue
+
+				if b.pty.master >= 0 && !backend_is_threaded(b) {
+					backend_drain_pty(b)
+					if idx == sm.active_idx && _damage_cells(&b.terminal) > 0 {
+						any_damaged = true
+					}
+				}
+				if backend_is_threaded(b) do backend_lock_render(b)
+				snapshot := &b.front_terminal if backend_is_threaded(b) else &b.terminal
+				if idx == sm.active_idx && _damage_cells(snapshot) > 0 do any_damaged = true
+				if snapshot.bell_event {
+					s.has_bell = true
+					leaf.has_bell = true
+				}
+				if backend_is_threaded(b) do backend_unlock_render(b)
+				if backend_snapshot_exited(b) {
+					if leaf.backend != nil {
+						backend_destroy(leaf.backend)
+						if leaf.backend != &s.backend {
+							free(leaf.backend)
+						}
+						leaf.backend = nil
+					}
+					closed_last := pane_tree_close(&s.tree, leaf.id)
+					if closed_last {
+						_ = session_close_tab(sm, idx)
+						any_damaged = true
+						tab_closed = true
+						break
+					} else {
+						// Invalidate dispatched dimensions on remaining leaves so _app_layout_ui re-dispatches full dimensions
+						leaves_rem: [MAX_PANE_NODES]^Pane_Node
+						rem_count := tab_leaf_panes(s, leaves_rem[:])
+						for k in 0 ..< rem_count {
+							if leaves_rem[k] != nil {
+								leaves_rem[k].dispatched_rows = 0
+								leaves_rem[k].dispatched_cols = 0
+							}
+						}
+						active_b := tab_active_backend(s)
+						if active_b != nil {
+							if backend_is_threaded(active_b) do backend_lock_render(active_b)
+							current := &active_b.front_terminal if backend_is_threaded(active_b) else &active_b.terminal
+							termgrid.damage_mark_all(&current.damage, nil)
+							if backend_is_threaded(active_b) do backend_unlock_render(active_b)
+						}
+						any_damaged = true
+						break
+					}
+				}
+			}
+
+			if tab_closed do continue
+
+			if session_refresh_title(s) do any_damaged = true
 			idx += 1
 
 		case .Exited, .Spawning, .Unresponsive, .Error_Spawn:
@@ -480,12 +957,15 @@ session_update_title :: proc(s: ^Tab_Session, fresh_osc: string, cwd, foreground
 		candidate = string(s.title_override_buf[:s.title_override_len])
 	}
 
-	// Priority 2: Foreground process name via pty.pty_foreground_name(&s.backend.pty, foreground[:])
+	b := tab_active_backend(s)
+	if b == nil do b = &s.backend
+
+	// Priority 2: Foreground process name via pty.pty_foreground_name(&b.pty, foreground[:])
 	if len(candidate) == 0 {
 		fg_name := foreground
 		if len(fg_name) == 0 {
 			fg_buf: [128]u8
-			fn := pty.pty_foreground_name(&s.backend.pty, fg_buf[:])
+			fn := pty.pty_foreground_name(&b.pty, fg_buf[:])
 			if fn > 0 {
 				fg_name = string(fg_buf[:fn])
 			}
@@ -495,17 +975,17 @@ session_update_title :: proc(s: ^Tab_Session, fresh_osc: string, cwd, foreground
 		}
 	}
 
-	// Priority 3: When at shell prompt (no active foreground child), use the shell process name or directory basename from s.backend.cwd
+	// Priority 3: When at shell prompt (no active foreground child), use the shell process name or directory basename from b.cwd
 	if len(candidate) == 0 {
-		dir := cwd if len(cwd) > 0 else s.backend.cwd
+		dir := cwd if len(cwd) > 0 else b.cwd
 		if len(dir) > 0 {
 			base := _path_basename(dir)
 			if len(base) > 0 && base != "." {
 				candidate = base
 			}
 		}
-		if len(candidate) == 0 && len(s.backend.prog) > 0 {
-			shell_base := _path_basename(s.backend.prog)
+		if len(candidate) == 0 && len(b.prog) > 0 {
+			shell_base := _path_basename(b.prog)
 			if len(shell_base) > 0 && shell_base != "." {
 				candidate = shell_base
 			}
@@ -532,18 +1012,20 @@ session_update_title :: proc(s: ^Tab_Session, fresh_osc: string, cwd, foreground
 
 session_refresh_title :: proc(s: ^Tab_Session) -> bool {
 	if s == nil do return false
+	b := tab_active_backend(s)
+	if b == nil do b = &s.backend
 	osc: [128]u8
 	raw_cwd: [256]u8
 	cwd: [128]u8
 	foreground: [128]u8
 	native_cwd: [4096]u8
-	on, cn, fresh := backend_title_metadata(&s.backend, osc[:], raw_cwd[:])
+	on, cn, fresh := backend_title_metadata(b, osc[:], raw_cwd[:])
 	dn := session_decode_cwd(cwd[:], string(raw_cwd[:cn]))
 	if dn == 0 {
-		n := pty.pty_working_directory(&s.backend.pty, native_cwd[:])
+		n := pty.pty_working_directory(&b.pty, native_cwd[:])
 		dn = session_decode_cwd(cwd[:], string(native_cwd[:n]))
 	}
-	if dn == 0 do dn = session_sanitize_title(cwd[:], s.backend.cwd)
-	fn := pty.pty_foreground_name(&s.backend.pty, foreground[:])
+	if dn == 0 do dn = session_sanitize_title(cwd[:], b.cwd)
+	fn := pty.pty_foreground_name(&b.pty, foreground[:])
 	return session_update_title(s, string(osc[:on]), string(cwd[:dn]), string(foreground[:fn]), fresh)
 }

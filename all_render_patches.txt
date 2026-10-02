@@ -1,0 +1,4504 @@
+[3fc25680-539c-43da-aa22-242f91054802] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Derive cell_width and cell_height from rasterizer metrics if <= 0
+--- REPLACEMENT:
+	// Initialize font rasterizer
+	font_error: Font_Error
+	if !font_rasterizer_init(&r.rasterizer, font_path, pixel_size, &font_error, allocator) {
+		// Font loading failed, but we continue with an uninitialized rasterizer
+		// The atlas will have no prewarmed glyphs
+	}
+
+	if r.cell_width <= 0 && r.rasterizer.metrics.cell_width > 0 {
+		r.cell_width = r.rasterizer.metrics.cell_width
+	}
+	if r.cell_height <= 0 && r.rasterizer.metrics.cell_height > 0 {
+		r.cell_height = r.rasterizer.metrics.cell_height
+	}
+
+	// Initialize font atlas (prewarms pinned glyphs)
+--- TARGET:
+	// Initialize font rasterizer
+	font_error: Font_Error
+	if !font_rasterizer_init(&r.rasterizer, font_path, pixel_size, &font_error, allocator) {
+		// Font loading failed, but we continue with an uninitialized rasterizer
+		// The atlas will have no prewarmed glyphs
+	}
+
+	// Initialize font atlas (prewarms pinned glyphs)
+====================================================
+
+[3fc25680-539c-43da-aa22-242f91054802] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Pass derived r.cell_width and r.cell_height to compute_tile_init and fullscreen_init
+--- REPLACEMENT:
+	tile.compute_tile_init(
+		&r.compute_tiles, backend, device, queue, rows, cols,
+		r.cell_width, r.cell_height, format, r.atlas.gpu_view,
+		string(TILE_COMPUTE_WGSL), string(TILE_BLIT_WGSL),
+		tile.TILE_W_DEFAULT, tile.TILE_H_DEFAULT, allocator,
+	)
+
+	// Phase 15: fullscreen fragment sibling path (best-effort; failure
+	// leaves fullscreen unavailable and the instance default untouched).
+	fullscreen.fullscreen_init(
+		&r.fullscreen, backend, device, queue, rows, cols,
+		r.cell_width, r.cell_height, format, r.atlas.gpu_view,
+		string(FULLSCREEN_WGSL), allocator,
+	)
+--- TARGET:
+	tile.compute_tile_init(
+		&r.compute_tiles, backend, device, queue, rows, cols,
+		cell_width, cell_height, format, r.atlas.gpu_view,
+		string(TILE_COMPUTE_WGSL), string(TILE_BLIT_WGSL),
+		tile.TILE_W_DEFAULT, tile.TILE_H_DEFAULT, allocator,
+	)
+
+	// Phase 15: fullscreen fragment sibling path (best-effort; failure
+	// leaves fullscreen unavailable and the instance default untouched).
+	fullscreen.fullscreen_init(
+		&r.fullscreen, backend, device, queue, rows, cols,
+		cell_width, cell_height, format, r.atlas.gpu_view,
+		string(FULLSCREEN_WGSL), allocator,
+	)
+====================================================
+
+[0381e462-459c-43c3-bc45-496cf5046dec] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Add pad_x and pad_y fields to Renderer struct
+--- REPLACEMENT:
+	cell_width:  f32,
+	cell_height: f32,
+	pad_x:       f32,
+	pad_y:       f32,
+	screen_w:   f32,
+--- TARGET:
+	cell_width:  f32,
+	cell_height: f32,
+	screen_w:   f32,
+====================================================
+
+[0381e462-459c-43c3-bc45-496cf5046dec] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Set r.pad_x = 6.0 and r.pad_y = 4.0 in renderer_init
+--- REPLACEMENT:
+	r.cell_width  = cell_width
+	r.cell_height = cell_height
+	r.pad_x       = 6.0
+	r.pad_y       = 4.0
+	r.screen_w    = screen_w
+--- TARGET:
+	r.cell_width  = cell_width
+	r.cell_height = cell_height
+	r.screen_w    = screen_w
+====================================================
+
+[0381e462-459c-43c3-bc45-496cf5046dec] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Offset x and y by pad_x and pad_y in _prepare_instances
+--- REPLACEMENT:
+		x := r.pad_x + f32(col) * cell_w
+		y := r.pad_y + f32(row) * cell_h
+--- TARGET:
+		x := f32(col) * cell_w
+		y := f32(row) * cell_h
+====================================================
+
+[0381e462-459c-43c3-bc45-496cf5046dec] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Offset x and y by pad_x and pad_y in Pass 1 of _prepare_instances_v2
+--- REPLACEMENT:
+		x := r.pad_x + f32(col) * cell_w
+		y := r.pad_y + f32(row) * cell_h
+--- TARGET:
+		x := f32(col) * cell_w
+		y := f32(row) * cell_h
+====================================================
+
+[0381e462-459c-43c3-bc45-496cf5046dec] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Offset x and y by pad_x and pad_y in Pass 2 of _prepare_instances_v2
+--- REPLACEMENT:
+		x := r.pad_x + f32(col) * cell_w
+		y := r.pad_y + f32(row) * cell_h
+--- TARGET:
+		x := f32(col) * cell_w
+		y := f32(row) * cell_h
+====================================================
+
+[99d311ee-1f89-4ab5-b960-237b587e7a9d] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Add _ for emit_emoji in lines 775 and 795
+--- REPLACEMENT:
+		emit_bg, _, _ := render_cell_expand_instance(
+			cells[idx], lut, atlas, x, y, cell_w, cell_h,
+			&inst.instance_data[bg_count], nil,
+		)
+		if emit_bg {
+			bg_count += 1
+		}
+	}
+
+	// Pass 2: glyphs, packed from index bg_count.
+	for idx in 0..<len(cells) {
+		glyph_idx := bg_count + glyph_count
+		if glyph_idx >= inst.max_instances {
+			break
+		}
+		row := i32(idx) / cols
+		col := i32(idx) % cols
+		x := r.pad_x + f32(col) * cell_w
+		y := r.pad_y + f32(row) * cell_h
+
+		_, emit_glyph, _ := render_cell_expand_instance(
+			cells[idx], lut, atlas, x, y, cell_w, cell_h,
+			nil, &inst.instance_data[glyph_idx],
+		)
+		if emit_glyph {
+			glyph_count += 1
+		}
+--- TARGET:
+		emit_bg, _ := render_cell_expand_instance(
+			cells[idx], lut, atlas, x, y, cell_w, cell_h,
+			&inst.instance_data[bg_count], nil,
+		)
+		if emit_bg {
+			bg_count += 1
+		}
+	}
+
+	// Pass 2: glyphs, packed from index bg_count.
+	for idx in 0..<len(cells) {
+		glyph_idx := bg_count + glyph_count
+		if glyph_idx >= inst.max_instances {
+			break
+		}
+		row := i32(idx) / cols
+		col := i32(idx) % cols
+		x := r.pad_x + f32(col) * cell_w
+		y := r.pad_y + f32(row) * cell_h
+
+		_, emit_glyph := render_cell_expand_instance(
+			cells[idx], lut, atlas, x, y, cell_w, cell_h,
+			nil, &inst.instance_data[glyph_idx],
+		)
+		if emit_glyph {
+			glyph_count += 1
+		}
+====================================================
+
+[99d311ee-1f89-4ab5-b960-237b587e7a9d] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Load shaders/emoji.wgsl after GLYPH_WGSL
+--- REPLACEMENT:
+BG_WGSL :: #load("shaders/bg.wgsl")
+GLYPH_WGSL :: #load("shaders/glyph.wgsl")
+EMOJI_WGSL :: #load("shaders/emoji.wgsl")
+--- TARGET:
+BG_WGSL :: #load("shaders/bg.wgsl")
+GLYPH_WGSL :: #load("shaders/glyph.wgsl")
+====================================================
+
+[99d311ee-1f89-4ab5-b960-237b587e7a9d] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Add emoji_atlas: Emoji_Atlas after atlas: Atlas
+--- REPLACEMENT:
+	// Sub-systems
+	atlas:       Atlas,
+	emoji_atlas: Emoji_Atlas,
+	compiled:    Compiled_Frame,
+--- TARGET:
+	// Sub-systems
+	atlas:      Atlas,
+	compiled:   Compiled_Frame,
+====================================================
+
+[99d311ee-1f89-4ab5-b960-237b587e7a9d] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Initialize emoji_atlas after atlas_upload_gpu
+--- REPLACEMENT:
+	// Upload atlas to GPU
+	atlas_upload_gpu(&r.atlas, backend, device, queue)
+
+	when ODIN_OS == .Darwin {
+		emoji_size := r.cell_height * 0.85
+		_ = emoji_atlas_init(&r.emoji_atlas, emoji_size, 1.0)
+	}
+--- TARGET:
+	// Upload atlas to GPU
+	atlas_upload_gpu(&r.atlas, backend, device, queue)
+====================================================
+
+[99d311ee-1f89-4ab5-b960-237b587e7a9d] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Upload emoji atlas and initialize emoji pipeline on Darwin
+--- REPLACEMENT:
+	if !ok {
+		renderer_destroy(r, allocator)
+		return false
+	}
+
+	when ODIN_OS == .Darwin {
+		if rawptr(r.emoji_atlas.ct_font) != nil {
+			emoji_atlas_upload_gpu(&r.emoji_atlas, backend, device, queue)
+			instance_renderer_init_emoji(
+				&r.instances,
+				r.emoji_atlas.gpu_texture,
+				r.emoji_atlas.gpu_view,
+				string(EMOJI_WGSL),
+				format,
+				allocator,
+			)
+		}
+	}
+--- TARGET:
+	if !ok {
+		renderer_destroy(r, allocator)
+		return false
+	}
+====================================================
+
+[6837d6f9-22ee-4112-a76b-0c871e7f968e] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Change instance_renderer_init_emoji to instance.instance_renderer_init_emoji
+--- REPLACEMENT:
+			instance.instance_renderer_init_emoji(
+				&r.instances,
+				r.emoji_atlas.gpu_texture,
+				r.emoji_atlas.gpu_view,
+				string(EMOJI_WGSL),
+				format,
+				allocator,
+			)
+--- TARGET:
+			instance_renderer_init_emoji(
+				&r.instances,
+				r.emoji_atlas.gpu_texture,
+				r.emoji_atlas.gpu_view,
+				string(EMOJI_WGSL),
+				format,
+				allocator,
+			)
+====================================================
+
+[6837d6f9-22ee-4112-a76b-0c871e7f968e] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Update _prepare_instances_v2 signature and pass 2 emoji routing
+--- REPLACEMENT:
+_prepare_instances_v2 :: proc(r: ^Renderer, lut: ^Style_LUT) -> (bg_count: u32, glyph_count: u32, emoji_count: u32) {
+	cells := r.compiled_v2.cells
+	cols := r.cols
+	cell_w := r.cell_width
+	cell_h := r.cell_height
+	atlas := &r.atlas
+	inst := &r.instances
+
+	bg_count = 0
+	glyph_count = 0
+	emoji_count = 0
+
+	// Pass 1: backgrounds, densely packed from index 0.
+	for idx in 0..<len(cells) {
+		if bg_count >= inst.max_instances {
+			break
+		}
+		row := i32(idx) / cols
+		col := i32(idx) % cols
+		x := r.pad_x + f32(col) * cell_w
+		y := r.pad_y + f32(row) * cell_h
+
+		emit_bg, _, _ := render_cell_expand_instance(
+			cells[idx], lut, atlas, x, y, cell_w, cell_h,
+			&inst.instance_data[bg_count], nil,
+		)
+		if emit_bg {
+			bg_count += 1
+		}
+	}
+
+	// Pass 2: glyphs and emojis
+	for idx in 0..<len(cells) {
+		glyph_idx := bg_count + glyph_count
+		if glyph_idx >= inst.max_instances {
+			break
+		}
+		row := i32(idx) / cols
+		col := i32(idx) % cols
+		x := r.pad_x + f32(col) * cell_w
+		y := r.pad_y + f32(row) * cell_h
+
+		emoji_inst_ptr: ^instance.Instance_Data = nil
+		when ODIN_OS == .Darwin {
+			if emoji_count < inst.max_instances && inst.emoji_data != nil {
+				emoji_inst_ptr = &inst.emoji_data[emoji_count]
+			}
+		}
+
+		_, emit_glyph, emit_emoji := render_cell_expand_instance(
+			cells[idx], lut, atlas, x, y, cell_w, cell_h,
+			nil, &inst.instance_data[glyph_idx],
+			emoji_inst_ptr,
+			when ODIN_OS == .Darwin { &r.emoji_atlas } else { nil },
+		)
+		if emit_emoji {
+			emoji_count += 1
+		} else if emit_glyph {
+			glyph_count += 1
+		}
+	}
+
+	return bg_count, glyph_count, emoji_count
+}
+--- TARGET:
+_prepare_instances_v2 :: proc(r: ^Renderer, lut: ^Style_LUT) -> (bg_count: u32, glyph_count: u32) {
+	cells := r.compiled_v2.cells
+	cols := r.cols
+	cell_w := r.cell_width
+	cell_h := r.cell_height
+	atlas := &r.atlas
+	inst := &r.instances
+
+	bg_count = 0
+	glyph_count = 0
+
+	// Pass 1: backgrounds, densely packed from index 0.
+	for idx in 0..<len(cells) {
+		if bg_count >= inst.max_instances {
+			break
+		}
+		row := i32(idx) / cols
+		col := i32(idx) % cols
+		x := r.pad_x + f32(col) * cell_w
+		y := r.pad_y + f32(row) * cell_h
+
+		emit_bg, _, _ := render_cell_expand_instance(
+			cells[idx], lut, atlas, x, y, cell_w, cell_h,
+			&inst.instance_data[bg_count], nil,
+		)
+		if emit_bg {
+			bg_count += 1
+		}
+	}
+
+	// Pass 2: glyphs, packed from index bg_count.
+	for idx in 0..<len(cells) {
+		glyph_idx := bg_count + glyph_count
+		if glyph_idx >= inst.max_instances {
+			break
+		}
+		row := i32(idx) / cols
+		col := i32(idx) % cols
+		x := r.pad_x + f32(col) * cell_w
+		y := r.pad_y + f32(row) * cell_h
+
+		_, emit_glyph, _ := render_cell_expand_instance(
+			cells[idx], lut, atlas, x, y, cell_w, cell_h,
+			nil, &inst.instance_data[glyph_idx],
+		)
+		if emit_glyph {
+			glyph_count += 1
+		}
+	}
+
+	return bg_count, glyph_count
+}
+====================================================
+
+[6837d6f9-22ee-4112-a76b-0c871e7f968e] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Test when ODIN_OS == .Darwin do &r.emoji_atlas else do nil
+--- REPLACEMENT:
+		emoji_inst_ptr: ^instance.Instance_Data = nil
+		when ODIN_OS == .Darwin {
+			if emoji_count < inst.max_instances && inst.emoji_data != nil {
+				emoji_inst_ptr = &inst.emoji_data[emoji_count]
+			}
+		}
+
+		_, emit_glyph, emit_emoji := render_cell_expand_instance(
+			cells[idx], lut, atlas, x, y, cell_w, cell_h,
+			nil, &inst.instance_data[glyph_idx],
+			emoji_inst_ptr,
+			when ODIN_OS == .Darwin do &r.emoji_atlas else do nil,
+		)
+--- TARGET:
+		emoji_inst_ptr: ^instance.Instance_Data = nil
+		when ODIN_OS == .Darwin {
+			if emoji_count < inst.max_instances && inst.emoji_data != nil {
+				emoji_inst_ptr = &inst.emoji_data[emoji_count]
+			}
+		}
+
+		_, emit_glyph, emit_emoji := render_cell_expand_instance(
+			cells[idx], lut, atlas, x, y, cell_w, cell_h,
+			nil, &inst.instance_data[glyph_idx],
+			emoji_inst_ptr,
+			when ODIN_OS == .Darwin { &r.emoji_atlas } else { nil },
+		)
+====================================================
+
+[6837d6f9-22ee-4112-a76b-0c871e7f968e] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Use emoji_atlas_ptr variable initialized to nil and set under when ODIN_OS == .Darwin
+--- REPLACEMENT:
+		emoji_inst_ptr: ^instance.Instance_Data = nil
+		emoji_atlas_ptr: ^Emoji_Atlas = nil
+		when ODIN_OS == .Darwin {
+			if emoji_count < inst.max_instances && inst.emoji_data != nil {
+				emoji_inst_ptr = &inst.emoji_data[emoji_count]
+			}
+			emoji_atlas_ptr = &r.emoji_atlas
+		}
+
+		_, emit_glyph, emit_emoji := render_cell_expand_instance(
+			cells[idx], lut, atlas, x, y, cell_w, cell_h,
+			nil, &inst.instance_data[glyph_idx],
+			emoji_inst_ptr,
+			emoji_atlas_ptr,
+		)
+--- TARGET:
+		emoji_inst_ptr: ^instance.Instance_Data = nil
+		when ODIN_OS == .Darwin {
+			if emoji_count < inst.max_instances && inst.emoji_data != nil {
+				emoji_inst_ptr = &inst.emoji_data[emoji_count]
+			}
+		}
+
+		_, emit_glyph, emit_emoji := render_cell_expand_instance(
+			cells[idx], lut, atlas, x, y, cell_w, cell_h,
+			nil, &inst.instance_data[glyph_idx],
+			emoji_inst_ptr,
+			when ODIN_OS == .Darwin do &r.emoji_atlas else do nil,
+		)
+====================================================
+
+[6837d6f9-22ee-4112-a76b-0c871e7f968e] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Add when ODIN_OS == .Darwin { emoji_atlas_destroy(&r.emoji_atlas) } in renderer_destroy
+--- REPLACEMENT:
+	dirty_upload_destroy(&r.dirty, allocator)
+	upload_ring_destroy(&r.upload_ring, allocator)
+	instance.instance_renderer_destroy(&r.instances, allocator)
+	when ODIN_OS == .Darwin {
+		emoji_atlas_destroy(&r.emoji_atlas)
+	}
+--- TARGET:
+	dirty_upload_destroy(&r.dirty, allocator)
+	upload_ring_destroy(&r.upload_ring, allocator)
+	instance.instance_renderer_destroy(&r.instances, allocator)
+====================================================
+
+[6837d6f9-22ee-4112-a76b-0c871e7f968e] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Add when ODIN_OS == .Darwin emoji atlas upload after atlas upload
+--- REPLACEMENT:
+	if atlas_changed {
+		atlas_upload_gpu(&r.atlas, r.backend, r.device, r.queue)
+		r.full_redraw_pending = true
+	}
+	when ODIN_OS == .Darwin {
+		if r.emoji_atlas.gpu_dirty {
+			emoji_atlas_upload_gpu(&r.emoji_atlas, r.backend, r.device, r.queue)
+		}
+	}
+--- TARGET:
+	if atlas_changed {
+		atlas_upload_gpu(&r.atlas, r.backend, r.device, r.queue)
+		r.full_redraw_pending = true
+	}
+====================================================
+
+[6837d6f9-22ee-4112-a76b-0c871e7f968e] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Add emoji_count parameter and Darwin emoji drawing pass in _draw_instance_buffer
+--- REPLACEMENT:
+_draw_instance_buffer :: proc(
+	r: ^Renderer,
+	frame: ^Render_Frame_Transaction,
+	buffer: gpu.Gpu_Buffer,
+	bg_count: u32,
+	glyph_count: u32,
+	glyph_offset: u64,
+	emoji_count: u32 = 0,
+) -> bool {
+	if r == nil || frame == nil || frame.state != .Acquired || rawptr(frame.encoder) == nil {
+		return false
+	}
+	pass := r.backend.begin_render_pass(frame.encoder, frame.view, _renderer_theme_clear_color(r.theme), .Clear)
+	if rawptr(pass) == nil { return false }
+	frame.pass = pass
+	ok := true
+	if bg_count > 0 || glyph_count > 0 {
+		ok = rawptr(buffer) != nil && rawptr(r.instances.bg_pipeline) != nil && rawptr(r.instances.glyph_pipeline) != nil &&
+			rawptr(r.instances.bind_group_bg) != nil && rawptr(r.instances.bind_group_glyph) != nil
+	}
+	if ok {
+		r.backend.render_set_pipeline(pass, r.instances.bg_pipeline)
+		r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_bg)
+		r.backend.render_set_vertex_buffer(pass, 0, buffer, 0)
+		r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, bg_count)
+
+		r.backend.render_set_pipeline(pass, r.instances.glyph_pipeline)
+		r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_glyph)
+		r.backend.render_set_vertex_buffer(pass, 0, buffer, glyph_offset)
+		r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, glyph_count)
+
+		when ODIN_OS == .Darwin {
+			if emoji_count > 0 && rawptr(r.instances.emoji_pipeline) != nil && rawptr(r.instances.emoji_buffer) != nil && r.instances.emoji_data != nil {
+				r.backend.write_buffer(r.queue, r.instances.emoji_buffer, 0, raw_data(r.instances.emoji_data), uint(emoji_count) * instance.INSTANCE_STRIDE)
+				r.backend.render_set_pipeline(pass, r.instances.emoji_pipeline)
+				r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_emoji)
+				r.backend.render_set_vertex_buffer(pass, 0, r.instances.emoji_buffer, 0)
+				r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, emoji_count)
+			}
+		}
+	}
+	if ok { ok = _draw_cursor_overlay(r, frame) }
+	r.backend.end_render_pass(pass)
+	frame.pass = gpu.Gpu_RenderPassEncoder(nil)
+	if !ok { return false }
+	frame.state = .Encoded
+	return true
+}
+--- TARGET:
+_draw_instance_buffer :: proc(
+	r: ^Renderer,
+	frame: ^Render_Frame_Transaction,
+	buffer: gpu.Gpu_Buffer,
+	bg_count: u32,
+	glyph_count: u32,
+	glyph_offset: u64,
+) -> bool {
+	if r == nil || frame == nil || frame.state != .Acquired || rawptr(frame.encoder) == nil {
+		return false
+	}
+	pass := r.backend.begin_render_pass(frame.encoder, frame.view, _renderer_theme_clear_color(r.theme), .Clear)
+	if rawptr(pass) == nil { return false }
+	frame.pass = pass
+	ok := true
+	if bg_count > 0 || glyph_count > 0 {
+		ok = rawptr(buffer) != nil && rawptr(r.instances.bg_pipeline) != nil && rawptr(r.instances.glyph_pipeline) != nil &&
+			rawptr(r.instances.bind_group_bg) != nil && rawptr(r.instances.bind_group_glyph) != nil
+	}
+	if ok {
+		r.backend.render_set_pipeline(pass, r.instances.bg_pipeline)
+		r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_bg)
+		r.backend.render_set_vertex_buffer(pass, 0, buffer, 0)
+		r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, bg_count)
+
+		r.backend.render_set_pipeline(pass, r.instances.glyph_pipeline)
+		r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_glyph)
+		r.backend.render_set_vertex_buffer(pass, 0, buffer, glyph_offset)
+		r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, glyph_count)
+	}
+	if ok { ok = _draw_cursor_overlay(r, frame) }
+	r.backend.end_render_pass(pass)
+	frame.pass = gpu.Gpu_RenderPassEncoder(nil)
+	if !ok { return false }
+	frame.state = .Encoded
+	return true
+}
+====================================================
+
+[6837d6f9-22ee-4112-a76b-0c871e7f968e] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Update bg_count, glyph_count to bg_count, glyph_count, emoji_count and pass emoji_count to _draw_instance_buffer
+--- REPLACEMENT:
+	bg_count, glyph_count, emoji_count := _prepare_instances_v2(r, lut)
+	frame, ok := _renderer_surface_begin(r)
+	if !ok { return _renderer_frame_failed(r, terminal, journal, &frame, .Instance) }
+	if !_renderer_upload_instances(r, bg_count + glyph_count, &frame) {
+		return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+	}
+	if !_draw_instance_buffer(r, &frame, frame.cursor_buffer, bg_count, glyph_count, u64(bg_count) * instance.INSTANCE_STRIDE, emoji_count) {
+		return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+	}
+--- TARGET:
+	bg_count, glyph_count := _prepare_instances_v2(r, lut)
+	frame, ok := _renderer_surface_begin(r)
+	if !ok { return _renderer_frame_failed(r, terminal, journal, &frame, .Instance) }
+	if !_renderer_upload_instances(r, bg_count + glyph_count, &frame) {
+		return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+	}
+	if !_draw_instance_buffer(r, &frame, frame.cursor_buffer, bg_count, glyph_count, u64(bg_count) * instance.INSTANCE_STRIDE) {
+		return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+	}
+====================================================
+
+[6837d6f9-22ee-4112-a76b-0c871e7f968e] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Change uint(emoji_count) to u64(emoji_count) in write_buffer call
+--- REPLACEMENT:
+		when ODIN_OS == .Darwin {
+			if emoji_count > 0 && rawptr(r.instances.emoji_pipeline) != nil && rawptr(r.instances.emoji_buffer) != nil && r.instances.emoji_data != nil {
+				r.backend.write_buffer(r.queue, r.instances.emoji_buffer, 0, raw_data(r.instances.emoji_data), u64(emoji_count) * instance.INSTANCE_STRIDE)
+				r.backend.render_set_pipeline(pass, r.instances.emoji_pipeline)
+				r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_emoji)
+				r.backend.render_set_vertex_buffer(pass, 0, r.instances.emoji_buffer, 0)
+				r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, emoji_count)
+			}
+		}
+--- TARGET:
+		when ODIN_OS == .Darwin {
+			if emoji_count > 0 && rawptr(r.instances.emoji_pipeline) != nil && rawptr(r.instances.emoji_buffer) != nil && r.instances.emoji_data != nil {
+				r.backend.write_buffer(r.queue, r.instances.emoji_buffer, 0, raw_data(r.instances.emoji_data), uint(emoji_count) * instance.INSTANCE_STRIDE)
+				r.backend.render_set_pipeline(pass, r.instances.emoji_pipeline)
+				r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_emoji)
+				r.backend.render_set_vertex_buffer(pass, 0, r.instances.emoji_buffer, 0)
+				r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, emoji_count)
+			}
+		}
+====================================================
+
+[e220628c-1a73-43e9-a421-40534585f9c2] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Add emoji_atlas ownership transfer to old and candidate in renderer_rebuild_font
+--- REPLACEMENT:
+	old := &old_storage[0]
+	old.atlas = r.atlas
+	when ODIN_OS == .Darwin {
+		old.emoji_atlas = r.emoji_atlas
+	}
+	old.compiled = r.compiled
+	old.compiled_v2 = r.compiled_v2
+	old.dirty = r.dirty
+	old.upload_ring = r.upload_ring
+	old.instances = r.instances
+	old.rasterizer = r.rasterizer
+	old.fallback = r.fallback
+	old.shape_cache = r.shape_cache
+	old.fallback_counters = r.fallback_counters
+	old.raster = r.raster
+	old.raster_counters = r.raster_counters
+	old.backend = r.backend
+	old.device = r.device
+	old.queue = r.queue
+
+	new_cell_width := candidate.cell_width
+	new_cell_height := candidate.cell_height
+	r.atlas = candidate.atlas
+	when ODIN_OS == .Darwin {
+		r.emoji_atlas = candidate.emoji_atlas
+		candidate.emoji_atlas = Emoji_Atlas{}
+	}
+	r.compiled = candidate.compiled
+--- TARGET:
+	old := &old_storage[0]
+	old.atlas = r.atlas
+	old.compiled = r.compiled
+	old.compiled_v2 = r.compiled_v2
+	old.dirty = r.dirty
+	old.upload_ring = r.upload_ring
+	old.instances = r.instances
+	old.rasterizer = r.rasterizer
+	old.fallback = r.fallback
+	old.shape_cache = r.shape_cache
+	old.fallback_counters = r.fallback_counters
+	old.raster = r.raster
+	old.raster_counters = r.raster_counters
+	old.backend = r.backend
+	old.device = r.device
+	old.queue = r.queue
+
+	new_cell_width := candidate.cell_width
+	new_cell_height := candidate.cell_height
+	r.atlas = candidate.atlas
+	r.compiled = candidate.compiled
+====================================================
+
+[e220628c-1a73-43e9-a421-40534585f9c2] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Update Darwin emoji block in _draw_instance_buffer to remove r.backend.write_buffer
+--- REPLACEMENT:
+		when ODIN_OS == .Darwin {
+			if emoji_count > 0 && rawptr(r.instances.emoji_pipeline) != nil && rawptr(r.instances.emoji_buffer) != nil {
+				r.backend.render_set_pipeline(pass, r.instances.emoji_pipeline)
+				r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_emoji)
+				r.backend.render_set_vertex_buffer(pass, 0, r.instances.emoji_buffer, 0)
+				r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, emoji_count)
+			}
+		}
+--- TARGET:
+		when ODIN_OS == .Darwin {
+			if emoji_count > 0 && rawptr(r.instances.emoji_pipeline) != nil && rawptr(r.instances.emoji_buffer) != nil && r.instances.emoji_data != nil {
+				r.backend.write_buffer(r.queue, r.instances.emoji_buffer, 0, raw_data(r.instances.emoji_data), u64(emoji_count) * instance.INSTANCE_STRIDE)
+				r.backend.render_set_pipeline(pass, r.instances.emoji_pipeline)
+				r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_emoji)
+				r.backend.render_set_vertex_buffer(pass, 0, r.instances.emoji_buffer, 0)
+				r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, emoji_count)
+			}
+		}
+====================================================
+
+[e220628c-1a73-43e9-a421-40534585f9c2] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Add has_emojis check for dirty_upload and emoji buffer write before _renderer_surface_begin
+--- REPLACEMENT:
+	has_emojis := false
+	when ODIN_OS == .Darwin {
+		has_emojis = len(r.emoji_atlas.glyphs) > 0
+	}
+	if !force_full && !has_emojis && len(journal.scroll_ops) == 0 && r.dirty.mirror != nil && !r.cursor_staged {
+		if !r.dirty.armed {
+			dirty_upload_rebase(&r.dirty, r, lut)
+		}
+		ranges: [DIRTY_UPLOAD_MAX_RANGES]Dirty_Upload_Range
+		_, _, fell_back := dirty_upload_frame(&r.dirty, r, terminal, journal, lut, &ranges)
+		if !fell_back {
+			n := u32(int(r.rows) * int(r.cols))
+			frame, ok := _renderer_surface_begin(r)
+			if !ok { return _renderer_frame_failed(r, terminal, journal, &frame, .Instance) }
+			if !_draw_instance_buffer(r, &frame, r.dirty.buffer, n, n, u64(n) * instance.INSTANCE_STRIDE) {
+				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+			}
+			if !_renderer_surface_commit(r, &frame) {
+				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+			}
+			_renderer_frame_published(r)
+			return true
+		}
+	}
+
+	r.dirty.armed = false
+	render_compile_full_v2(&r.compiled_v2, terminal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster, view)
+	bg_count, glyph_count, emoji_count := _prepare_instances_v2(r, lut)
+	when ODIN_OS == .Darwin {
+		if emoji_count > 0 && rawptr(r.instances.emoji_buffer) != nil && r.instances.emoji_data != nil {
+			r.backend.write_buffer(r.queue, r.instances.emoji_buffer, 0, raw_data(r.instances.emoji_data), u64(emoji_count) * instance.INSTANCE_STRIDE)
+		}
+	}
+	frame, ok := _renderer_surface_begin(r)
+--- TARGET:
+	if !force_full && len(journal.scroll_ops) == 0 && r.dirty.mirror != nil && !r.cursor_staged {
+		if !r.dirty.armed {
+			dirty_upload_rebase(&r.dirty, r, lut)
+		}
+		ranges: [DIRTY_UPLOAD_MAX_RANGES]Dirty_Upload_Range
+		_, _, fell_back := dirty_upload_frame(&r.dirty, r, terminal, journal, lut, &ranges)
+		if !fell_back {
+			n := u32(int(r.rows) * int(r.cols))
+			frame, ok := _renderer_surface_begin(r)
+			if !ok { return _renderer_frame_failed(r, terminal, journal, &frame, .Instance) }
+			if !_draw_instance_buffer(r, &frame, r.dirty.buffer, n, n, u64(n) * instance.INSTANCE_STRIDE) {
+				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+			}
+			if !_renderer_surface_commit(r, &frame) {
+				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+			}
+			_renderer_frame_published(r)
+			return true
+		}
+	}
+
+	r.dirty.armed = false
+	render_compile_full_v2(&r.compiled_v2, terminal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster, view)
+	bg_count, glyph_count, emoji_count := _prepare_instances_v2(r, lut)
+	frame, ok := _renderer_surface_begin(r)
+====================================================
+
+[bb18f116-a1cd-496b-895b-457a928e130c] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Add store parameter and pass to render_cell_expand_instance
+--- REPLACEMENT:
+_prepare_instances_v2 :: proc(r: ^Renderer, lut: ^Style_LUT, store: ^termgrid.Grapheme_Store = nil) -> (bg_count: u32, glyph_count: u32, emoji_count: u32) {
+	cells := r.compiled_v2.cells
+	cols := r.cols
+	cell_w := r.cell_width
+	cell_h := r.cell_height
+	atlas := &r.atlas
+	inst := &r.instances
+
+	bg_count = 0
+	glyph_count = 0
+	emoji_count = 0
+
+	// Pass 1: backgrounds, densely packed from index 0.
+	for idx in 0..<len(cells) {
+		if bg_count >= inst.max_instances {
+			break
+		}
+		row := i32(idx) / cols
+		col := i32(idx) % cols
+		x := r.pad_x + f32(col) * cell_w
+		y := r.pad_y + f32(row) * cell_h
+
+		emit_bg, _, _ := render_cell_expand_instance(
+			cells[idx], lut, atlas, x, y, cell_w, cell_h,
+			&inst.instance_data[bg_count], nil,
+		)
+		if emit_bg {
+			bg_count += 1
+		}
+	}
+
+	// Pass 2: glyphs and emojis
+	for idx in 0..<len(cells) {
+		glyph_idx := bg_count + glyph_count
+		if glyph_idx >= inst.max_instances {
+			break
+		}
+		row := i32(idx) / cols
+		col := i32(idx) % cols
+		x := r.pad_x + f32(col) * cell_w
+		y := r.pad_y + f32(row) * cell_h
+
+		emoji_inst_ptr: ^instance.Instance_Data = nil
+		emoji_atlas_ptr: ^Emoji_Atlas = nil
+		when ODIN_OS == .Darwin {
+			if emoji_count < inst.max_instances && inst.emoji_data != nil {
+				emoji_inst_ptr = &inst.emoji_data[emoji_count]
+			}
+			emoji_atlas_ptr = &r.emoji_atlas
+		}
+
+		_, emit_glyph, emit_emoji := render_cell_expand_instance(
+			cells[idx], lut, atlas, x, y, cell_w, cell_h,
+			nil, &inst.instance_data[glyph_idx],
+			emoji_inst_ptr,
+			emoji_atlas_ptr,
+			store,
+		)
+--- TARGET:
+_prepare_instances_v2 :: proc(r: ^Renderer, lut: ^Style_LUT) -> (bg_count: u32, glyph_count: u32, emoji_count: u32) {
+	cells := r.compiled_v2.cells
+	cols := r.cols
+	cell_w := r.cell_width
+	cell_h := r.cell_height
+	atlas := &r.atlas
+	inst := &r.instances
+
+	bg_count = 0
+	glyph_count = 0
+	emoji_count = 0
+
+	// Pass 1: backgrounds, densely packed from index 0.
+	for idx in 0..<len(cells) {
+		if bg_count >= inst.max_instances {
+			break
+		}
+		row := i32(idx) / cols
+		col := i32(idx) % cols
+		x := r.pad_x + f32(col) * cell_w
+		y := r.pad_y + f32(row) * cell_h
+
+		emit_bg, _, _ := render_cell_expand_instance(
+			cells[idx], lut, atlas, x, y, cell_w, cell_h,
+			&inst.instance_data[bg_count], nil,
+		)
+		if emit_bg {
+			bg_count += 1
+		}
+	}
+
+	// Pass 2: glyphs and emojis
+	for idx in 0..<len(cells) {
+		glyph_idx := bg_count + glyph_count
+		if glyph_idx >= inst.max_instances {
+			break
+		}
+		row := i32(idx) / cols
+		col := i32(idx) % cols
+		x := r.pad_x + f32(col) * cell_w
+		y := r.pad_y + f32(row) * cell_h
+
+		emoji_inst_ptr: ^instance.Instance_Data = nil
+		emoji_atlas_ptr: ^Emoji_Atlas = nil
+		when ODIN_OS == .Darwin {
+			if emoji_count < inst.max_instances && inst.emoji_data != nil {
+				emoji_inst_ptr = &inst.emoji_data[emoji_count]
+			}
+			emoji_atlas_ptr = &r.emoji_atlas
+		}
+
+		_, emit_glyph, emit_emoji := render_cell_expand_instance(
+			cells[idx], lut, atlas, x, y, cell_w, cell_h,
+			nil, &inst.instance_data[glyph_idx],
+			emoji_inst_ptr,
+			emoji_atlas_ptr,
+		)
+====================================================
+
+[bb18f116-a1cd-496b-895b-457a928e130c] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Pass store to _prepare_instances_v2 and upload emoji atlas immediately if dirty
+--- REPLACEMENT:
+	r.dirty.armed = false
+	render_compile_full_v2(&r.compiled_v2, terminal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster, view)
+	bg_count, glyph_count, emoji_count := _prepare_instances_v2(r, lut, &terminal.grapheme_store)
+	when ODIN_OS == .Darwin {
+		if r.emoji_atlas.gpu_dirty {
+			emoji_atlas_upload_gpu(&r.emoji_atlas, r.backend, r.device, r.queue)
+		}
+		if emoji_count > 0 && rawptr(r.instances.emoji_buffer) != nil && r.instances.emoji_data != nil {
+			r.backend.write_buffer(r.queue, r.instances.emoji_buffer, 0, raw_data(r.instances.emoji_data), u64(emoji_count) * instance.INSTANCE_STRIDE)
+		}
+	}
+--- TARGET:
+	r.dirty.armed = false
+	render_compile_full_v2(&r.compiled_v2, terminal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster, view)
+	bg_count, glyph_count, emoji_count := _prepare_instances_v2(r, lut)
+	when ODIN_OS == .Darwin {
+		if emoji_count > 0 && rawptr(r.instances.emoji_buffer) != nil && r.instances.emoji_data != nil {
+			r.backend.write_buffer(r.queue, r.instances.emoji_buffer, 0, raw_data(r.instances.emoji_data), u64(emoji_count) * instance.INSTANCE_STRIDE)
+		}
+	}
+====================================================
+
+[b3345d44-b3d3-4206-8a38-4abab0868d21] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Add interaction_staged, interaction_slot_start, and interaction_quad_count to Renderer struct
+--- REPLACEMENT:
+	frame_prepared:         bool,
+	cursor_staged:          bool, // cursor_overlay_draw staged the reserved instance
+	interaction_staged:     bool, // interaction_overlay_draw staged quads
+	interaction_slot_start: u32,  // starting instance slot for interaction quads
+	interaction_quad_count: int,  // count of staged interaction quads
+	device:                 gpu.Gpu_Device,
+--- TARGET:
+	frame_prepared:  bool,
+	cursor_staged: bool, // cursor_overlay_draw staged the reserved instance
+	device:        gpu.Gpu_Device,
+====================================================
+
+[b3345d44-b3d3-4206-8a38-4abab0868d21] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Add view.selection.block to hash computation
+--- REPLACEMENT:
+	h = mix(h, u64(view.scrollback_offset))
+	h = mix(h, view.selection.active ? u64(1) : u64(0))
+	h = mix(h, view.selection.block ? u64(1) : u64(0))
+	h = mix(h, u64(view.selection.anchor.row))
+--- TARGET:
+	h = mix(h, u64(view.scrollback_offset))
+	h = mix(h, view.selection.active ? u64(1) : u64(0))
+	h = mix(h, u64(view.selection.anchor.row))
+====================================================
+
+[b3345d44-b3d3-4206-8a38-4abab0868d21] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Reset interaction_staged, interaction_slot_start, and interaction_quad_count on frame publication
+--- REPLACEMENT:
+	r.first_frame_pending = false
+	r.full_redraw_pending = false
+	r.cursor_staged = false
+	r.interaction_staged = false
+	r.interaction_slot_start = 0
+	r.interaction_quad_count = 0
+	r.last_view = view
+--- TARGET:
+	r.first_frame_pending = false
+	r.full_redraw_pending = false
+	r.cursor_staged = false
+	r.last_view = view
+====================================================
+
+[e099651d-8c09-4d76-9d95-8fb01babb1a1] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Replace Darwin-specific ct_font check with has_font check
+--- REPLACEMENT:
+	if r.emoji_atlas.has_font {
+		emoji_atlas_upload_gpu(&r.emoji_atlas, backend, device, queue)
+		instance.instance_renderer_init_emoji(
+			&r.instances,
+			r.emoji_atlas.gpu_texture,
+			r.emoji_atlas.gpu_view,
+			string(EMOJI_WGSL),
+			format,
+			allocator,
+		)
+	}
+--- TARGET:
+	when ODIN_OS == .Darwin {
+		if rawptr(r.emoji_atlas.ct_font) != nil {
+			emoji_atlas_upload_gpu(&r.emoji_atlas, backend, device, queue)
+			instance.instance_renderer_init_emoji(
+				&r.instances,
+				r.emoji_atlas.gpu_texture,
+				r.emoji_atlas.gpu_view,
+				string(EMOJI_WGSL),
+				format,
+				allocator,
+			)
+		}
+	}
+====================================================
+
+[e099651d-8c09-4d76-9d95-8fb01babb1a1] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Replace Darwin-specific block with has_font check
+--- REPLACEMENT:
+		if r.emoji_atlas.has_font {
+			if emoji_count < inst.max_instances && inst.emoji_data != nil {
+				emoji_inst_ptr = &inst.emoji_data[emoji_count]
+			}
+			emoji_atlas_ptr = &r.emoji_atlas
+		}
+--- TARGET:
+		when ODIN_OS == .Darwin {
+			if emoji_count < inst.max_instances && inst.emoji_data != nil {
+				emoji_inst_ptr = &inst.emoji_data[emoji_count]
+			}
+			emoji_atlas_ptr = &r.emoji_atlas
+		}
+====================================================
+
+[d199cad0-7a9a-4ebb-a74a-ddf9576911a1] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Add h = mix(h, view.visual_mode ? u64(1) : u64(0)) to _renderer_view_fingerprint
+--- REPLACEMENT:
+	h = mix(h, u64(view.selection.focus.row))
+	h = mix(h, u64(view.selection.focus.col))
+	h = mix(h, view.visual_mode ? u64(1) : u64(0))
+	return h
+--- TARGET:
+	h = mix(h, u64(view.selection.focus.row))
+	h = mix(h, u64(view.selection.focus.col))
+	return h
+====================================================
+
+[d199cad0-7a9a-4ebb-a74a-ddf9576911a1] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Add _renderer_visual_background_color and update _renderer_theme_clear_color to support visual_mode parameter
+--- REPLACEMENT:
+_renderer_visual_background_color :: proc(base_bg: u32) -> u32 {
+	a := (base_bg >> 24) & 0xFF
+	r := (base_bg >> 16) & 0xFF
+	g := (base_bg >> 8) & 0xFF
+	b := base_bg & 0xFF
+
+	new_r := u32((int(r) * 65 + 0x18 * 35) / 100)
+	new_g := u32((int(g) * 65 + 0x28 * 35) / 100)
+	new_b := u32((int(b) * 65 + 0x55 * 35) / 100)
+
+	return (a << 24) | (new_r << 16) | (new_g << 8) | new_b
+}
+
+_renderer_theme_clear_color :: proc(theme: termgrid.Theme, visual_mode: bool = false) -> [4]f64 {
+	argb := theme.background
+	if visual_mode {
+		argb = _renderer_visual_background_color(theme.background)
+	}
+	return [4]f64{
+		f64((argb >> 16) & 0xFF) / 255.0,
+		f64((argb >> 8) & 0xFF) / 255.0,
+		f64(argb & 0xFF) / 255.0,
+		f64((argb >> 24) & 0xFF) / 255.0,
+	}
+}
+--- TARGET:
+_renderer_theme_clear_color :: proc(theme: termgrid.Theme) -> [4]f64 {
+	argb := theme.background
+	return [4]f64{
+		f64((argb >> 16) & 0xFF) / 255.0,
+		f64((argb >> 8) & 0xFF) / 255.0,
+		f64(argb & 0xFF) / 255.0,
+		f64((argb >> 24) & 0xFF) / 255.0,
+	}
+}
+====================================================
+
+[d199cad0-7a9a-4ebb-a74a-ddf9576911a1] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Add visual_mode: bool = false parameter to _draw_instance_buffer and pass to _renderer_theme_clear_color
+--- REPLACEMENT:
+_draw_instance_buffer :: proc(
+	r: ^Renderer,
+	frame: ^Render_Frame_Transaction,
+	buffer: gpu.Gpu_Buffer,
+	bg_count: u32,
+	glyph_count: u32,
+	glyph_offset: u64,
+	emoji_count: u32 = 0,
+	visual_mode: bool = false,
+) -> bool {
+	if r == nil || frame == nil || frame.state != .Acquired || rawptr(frame.encoder) == nil {
+		return false
+	}
+	pass := r.backend.begin_render_pass(frame.encoder, frame.view, _renderer_theme_clear_color(r.theme, visual_mode), .Clear)
+--- TARGET:
+_draw_instance_buffer :: proc(
+	r: ^Renderer,
+	frame: ^Render_Frame_Transaction,
+	buffer: gpu.Gpu_Buffer,
+	bg_count: u32,
+	glyph_count: u32,
+	glyph_offset: u64,
+	emoji_count: u32 = 0,
+) -> bool {
+	if r == nil || frame == nil || frame.state != .Acquired || rawptr(frame.encoder) == nil {
+		return false
+	}
+	pass := r.backend.begin_render_pass(frame.encoder, frame.view, _renderer_theme_clear_color(r.theme), .Clear)
+====================================================
+
+[d199cad0-7a9a-4ebb-a74a-ddf9576911a1] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Set lut.bg_r5g6b5[0] based on is_visual and pass is_visual to _draw_instance_buffer
+--- REPLACEMENT:
+	if _style_lut_needs_rebuild(lut, &terminal.grid.style_table) {
+		style_lut_rebuild(lut, &terminal.grid.style_table)
+	}
+
+	is_visual := view != nil && view.visual_mode
+	if is_visual {
+		lut.bg_r5g6b5[0] = color_to_r5g6b5(_renderer_visual_background_color(terminal.grid.style_table.theme.background))
+	} else {
+		lut.bg_r5g6b5[0] = color_to_r5g6b5(terminal.grid.style_table.theme.background)
+	}
+
+	has_emojis := false
+	when ODIN_OS == .Darwin {
+		has_emojis = len(r.emoji_atlas.glyphs) > 0
+	}
+	if !force_full && !has_emojis && len(journal.scroll_ops) == 0 && r.dirty.mirror != nil && !r.cursor_staged {
+		if !r.dirty.armed {
+			dirty_upload_rebase(&r.dirty, r, lut)
+		}
+		ranges: [DIRTY_UPLOAD_MAX_RANGES]Dirty_Upload_Range
+		_, _, fell_back := dirty_upload_frame(&r.dirty, r, terminal, journal, lut, &ranges)
+		if !fell_back {
+			n := u32(int(r.rows) * int(r.cols))
+			frame, ok := _renderer_surface_begin(r)
+			if !ok { return _renderer_frame_failed(r, terminal, journal, &frame, .Instance) }
+			if !_draw_instance_buffer(r, &frame, r.dirty.buffer, n, n, u64(n) * instance.INSTANCE_STRIDE) {
+				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+			}
+			if !_renderer_surface_commit(r, &frame) {
+				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+			}
+			_renderer_frame_published(r)
+			return true
+		}
+	}
+
+	r.dirty.armed = false
+	render_compile_full_v2(&r.compiled_v2, terminal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster, view)
+	bg_count, glyph_count, emoji_count := _prepare_instances_v2(r, lut, &terminal.grapheme_store)
+	when ODIN_OS == .Darwin {
+		if r.emoji_atlas.gpu_dirty {
+			emoji_atlas_upload_gpu(&r.emoji_atlas, r.backend, r.device, r.queue)
+		}
+		if emoji_count > 0 && rawptr(r.instances.emoji_buffer) != nil && r.instances.emoji_data != nil {
+			r.backend.write_buffer(r.queue, r.instances.emoji_buffer, 0, raw_data(r.instances.emoji_data), u64(emoji_count) * instance.INSTANCE_STRIDE)
+		}
+	}
+	frame, ok := _renderer_surface_begin(r)
+	if !ok { return _renderer_frame_failed(r, terminal, journal, &frame, .Instance) }
+	if !_renderer_upload_instances(r, bg_count + glyph_count, &frame) {
+		return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+	}
+	if !_draw_instance_buffer(r, &frame, frame.cursor_buffer, bg_count, glyph_count, u64(bg_count) * instance.INSTANCE_STRIDE, emoji_count, is_visual) {
+--- TARGET:
+	if _style_lut_needs_rebuild(lut, &terminal.grid.style_table) {
+		style_lut_rebuild(lut, &terminal.grid.style_table)
+	}
+
+	has_emojis := false
+	when ODIN_OS == .Darwin {
+		has_emojis = len(r.emoji_atlas.glyphs) > 0
+	}
+	if !force_full && !has_emojis && len(journal.scroll_ops) == 0 && r.dirty.mirror != nil && !r.cursor_staged {
+		if !r.dirty.armed {
+			dirty_upload_rebase(&r.dirty, r, lut)
+		}
+		ranges: [DIRTY_UPLOAD_MAX_RANGES]Dirty_Upload_Range
+		_, _, fell_back := dirty_upload_frame(&r.dirty, r, terminal, journal, lut, &ranges)
+		if !fell_back {
+			n := u32(int(r.rows) * int(r.cols))
+			frame, ok := _renderer_surface_begin(r)
+			if !ok { return _renderer_frame_failed(r, terminal, journal, &frame, .Instance) }
+			if !_draw_instance_buffer(r, &frame, r.dirty.buffer, n, n, u64(n) * instance.INSTANCE_STRIDE) {
+				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+			}
+			if !_renderer_surface_commit(r, &frame) {
+				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+			}
+			_renderer_frame_published(r)
+			return true
+		}
+	}
+
+	r.dirty.armed = false
+	render_compile_full_v2(&r.compiled_v2, terminal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster, view)
+	bg_count, glyph_count, emoji_count := _prepare_instances_v2(r, lut, &terminal.grapheme_store)
+	when ODIN_OS == .Darwin {
+		if r.emoji_atlas.gpu_dirty {
+			emoji_atlas_upload_gpu(&r.emoji_atlas, r.backend, r.device, r.queue)
+		}
+		if emoji_count > 0 && rawptr(r.instances.emoji_buffer) != nil && r.instances.emoji_data != nil {
+			r.backend.write_buffer(r.queue, r.instances.emoji_buffer, 0, raw_data(r.instances.emoji_data), u64(emoji_count) * instance.INSTANCE_STRIDE)
+		}
+	}
+	frame, ok := _renderer_surface_begin(r)
+	if !ok { return _renderer_frame_failed(r, terminal, journal, &frame, .Instance) }
+	if !_renderer_upload_instances(r, bg_count + glyph_count, &frame) {
+		return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+	}
+	if !_draw_instance_buffer(r, &frame, frame.cursor_buffer, bg_count, glyph_count, u64(bg_count) * instance.INSTANCE_STRIDE, emoji_count) {
+====================================================
+
+[fd348d32-df04-4e35-8d6a-ef2c4c80533f] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Add ligature_cache field to Renderer struct
+--- REPLACEMENT:
+	instances:  instance.Instance_Renderer,
+	rasterizer: Font_Rasterizer,
+	ligature_cache: Ligature_Cache,
+--- TARGET:
+	instances:  instance.Instance_Renderer,
+	rasterizer: Font_Rasterizer,
+====================================================
+
+[fd348d32-df04-4e35-8d6a-ef2c4c80533f] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Call ligature_cache_init in renderer_init
+--- REPLACEMENT:
+	// Initialize compiled frame buffer
+	render_compiler_init(&r.compiled, rows, cols, allocator)
+	ligature_cache_init(&r.ligature_cache)
+--- TARGET:
+	// Initialize compiled frame buffer
+	render_compiler_init(&r.compiled, rows, cols, allocator)
+====================================================
+
+[fd348d32-df04-4e35-8d6a-ef2c4c80533f] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Rasterize ligature slot if invalid in _prepare_instances
+--- REPLACEMENT:
+		// Glyph instance (skip spaces)
+		if codepoint != 0x20 && glyph_count < inst.max_instances {
+			slot_idx, slot := atlas_get_slot(atlas, codepoint)
+			fg_r, fg_g, fg_b := instance.unpack_r5g6b5(fg_packed)
+
+			if !slot.valid && codepoint >= CONTENT_LIGATURE_BASE && codepoint < 0x1FFFFF {
+				_atlas_rasterize_into_slot(atlas, &r.rasterizer, codepoint, slot_idx)
+			}
+
+			if slot.valid {
+--- TARGET:
+		// Glyph instance (skip spaces)
+		if codepoint != 0x20 && glyph_count < inst.max_instances {
+			slot_idx, slot := atlas_get_slot(atlas, codepoint)
+			fg_r, fg_g, fg_b := instance.unpack_r5g6b5(fg_packed)
+
+			if slot.valid {
+====================================================
+
+[097f3038-7262-4a62-9158-0692d09c13b4] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Calculate grid_limit with 1 instance margin and use it for bg_count, glyph_count, and glyph_idx limits
+--- REPLACEMENT:
+	bg_count = 0
+	glyph_count = 0
+	grid_limit := inst.max_instances > 1 ? inst.max_instances - 1 : 0
+
+	for idx in 0..<len(cells) {
+		row := i32(idx) / cols
+		col := i32(idx) % cols
+
+		codepoint, fg_packed, bg_packed, flags := render_cell_unpack(cells[idx])
+
+		x := r.pad_x + f32(col) * cell_w
+		y := r.pad_y + f32(row) * cell_h
+
+		// Skip fully empty cells (space with black background)
+		if codepoint == 0x20 && bg_packed == 0x0000 {
+			continue
+		}
+
+		// Background instance
+		if bg_count < grid_limit {
+			bg_r, bg_g, bg_b := instance.unpack_r5g6b5(bg_packed)
+			instance.instance_renderer_fill_bg(inst, bg_count, x, y, cell_w, cell_h, bg_r, bg_g, bg_b)
+			bg_count += 1
+		}
+
+		// Glyph instance (skip spaces)
+		if codepoint != 0x20 && glyph_count < grid_limit {
+			slot_idx, slot := atlas_get_slot(atlas, codepoint)
+			fg_r, fg_g, fg_b := instance.unpack_r5g6b5(fg_packed)
+
+			if !slot.valid && codepoint >= CONTENT_LIGATURE_BASE && codepoint < 0x1FFFFF {
+				_atlas_rasterize_into_slot(atlas, &r.rasterizer, codepoint, slot_idx)
+			}
+
+			if slot.valid {
+				glyph_idx := bg_count + glyph_count
+				if glyph_idx < grid_limit {
+					instance.instance_renderer_fill_glyph(
+						inst, glyph_idx, x, y, cell_w, cell_h,
+						slot.u0, slot.v0, slot.u1, slot.v1,
+						fg_r, fg_g, fg_b,
+					)
+					glyph_count += 1
+				}
+			}
+		}
+--- TARGET:
+	bg_count = 0
+	glyph_count = 0
+
+	for idx in 0..<len(cells) {
+		row := i32(idx) / cols
+		col := i32(idx) % cols
+
+		codepoint, fg_packed, bg_packed, flags := render_cell_unpack(cells[idx])
+
+		x := r.pad_x + f32(col) * cell_w
+		y := r.pad_y + f32(row) * cell_h
+
+		// Skip fully empty cells (space with black background)
+		if codepoint == 0x20 && bg_packed == 0x0000 {
+			continue
+		}
+
+		// Background instance
+		if bg_count < inst.max_instances {
+			bg_r, bg_g, bg_b := instance.unpack_r5g6b5(bg_packed)
+			instance.instance_renderer_fill_bg(inst, bg_count, x, y, cell_w, cell_h, bg_r, bg_g, bg_b)
+			bg_count += 1
+		}
+
+		// Glyph instance (skip spaces)
+		if codepoint != 0x20 && glyph_count < inst.max_instances {
+			slot_idx, slot := atlas_get_slot(atlas, codepoint)
+			fg_r, fg_g, fg_b := instance.unpack_r5g6b5(fg_packed)
+
+			if !slot.valid && codepoint >= CONTENT_LIGATURE_BASE && codepoint < 0x1FFFFF {
+				_atlas_rasterize_into_slot(atlas, &r.rasterizer, codepoint, slot_idx)
+			}
+
+			if slot.valid {
+				glyph_idx := bg_count + glyph_count
+				if glyph_idx < inst.max_instances {
+					instance.instance_renderer_fill_glyph(
+						inst, glyph_idx, x, y, cell_w, cell_h,
+						slot.u0, slot.v0, slot.u1, slot.v1,
+						fg_r, fg_g, fg_b,
+					)
+					glyph_count += 1
+				}
+			}
+		}
+====================================================
+
+[097f3038-7262-4a62-9158-0692d09c13b4] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Calculate grid_limit and use it in Pass 1 and Pass 2 of _prepare_instances_v2
+--- REPLACEMENT:
+	bg_count = 0
+	glyph_count = 0
+	emoji_count = 0
+	grid_limit := inst.max_instances > 1 ? inst.max_instances - 1 : 0
+
+	// Pass 1: backgrounds, densely packed from index 0.
+	for idx in 0..<len(cells) {
+		if bg_count >= grid_limit {
+			break
+		}
+		row := i32(idx) / cols
+		col := i32(idx) % cols
+		x := r.pad_x + f32(col) * cell_w
+		y := r.pad_y + f32(row) * cell_h
+
+		emit_bg, _, _ := render_cell_expand_instance(
+			cells[idx], lut, atlas, x, y, cell_w, cell_h,
+			&inst.instance_data[bg_count], nil,
+		)
+		if emit_bg {
+			bg_count += 1
+		}
+	}
+
+	// Pass 2: glyphs and emojis
+	for idx in 0..<len(cells) {
+		glyph_idx := bg_count + glyph_count
+		if glyph_idx >= grid_limit {
+			break
+		}
+		row := i32(idx) / cols
+		col := i32(idx) % cols
+		x := r.pad_x + f32(col) * cell_w
+		y := r.pad_y + f32(row) * cell_h
+
+		emoji_inst_ptr: ^instance.Instance_Data = nil
+		emoji_atlas_ptr: ^Emoji_Atlas = nil
+		if r.emoji_atlas.has_font {
+			if emoji_count < grid_limit && inst.emoji_data != nil {
+				emoji_inst_ptr = &inst.emoji_data[emoji_count]
+			}
+			emoji_atlas_ptr = &r.emoji_atlas
+		}
+--- TARGET:
+	bg_count = 0
+	glyph_count = 0
+	emoji_count = 0
+
+	// Pass 1: backgrounds, densely packed from index 0.
+	for idx in 0..<len(cells) {
+		if bg_count >= inst.max_instances {
+			break
+		}
+		row := i32(idx) / cols
+		col := i32(idx) % cols
+		x := r.pad_x + f32(col) * cell_w
+		y := r.pad_y + f32(row) * cell_h
+
+		emit_bg, _, _ := render_cell_expand_instance(
+			cells[idx], lut, atlas, x, y, cell_w, cell_h,
+			&inst.instance_data[bg_count], nil,
+		)
+		if emit_bg {
+			bg_count += 1
+		}
+	}
+
+	// Pass 2: glyphs and emojis
+	for idx in 0..<len(cells) {
+		glyph_idx := bg_count + glyph_count
+		if glyph_idx >= inst.max_instances {
+			break
+		}
+		row := i32(idx) / cols
+		col := i32(idx) % cols
+		x := r.pad_x + f32(col) * cell_w
+		y := r.pad_y + f32(row) * cell_h
+
+		emoji_inst_ptr: ^instance.Instance_Data = nil
+		emoji_atlas_ptr: ^Emoji_Atlas = nil
+		if r.emoji_atlas.has_font {
+			if emoji_count < inst.max_instances && inst.emoji_data != nil {
+				emoji_inst_ptr = &inst.emoji_data[emoji_count]
+			}
+			emoji_atlas_ptr = &r.emoji_atlas
+		}
+====================================================
+
+[e2b7a106-71f2-47de-932b-a81a7ee6b439] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Update _prepare_instances_v2 and _draw_instance_buffer in renderer.odin
+--- REPLACEMENT:
+// _prepare_instances_v2 fills instance data from V2 compiled cells via the
+// pre-resolved Style_LUT. No per-cell style_table_get, color conversion, or atlas rasterize.
+// Three passes partition the staging buffer as [bg 0..bg_count), [glyph bg_count..bg_count+glyph_count),
+// and [decor bg_count+glyph_count..bg_count+glyph_count+decor_count), matching the draw offsets below.
+// Writes are capped at max_instances.
+_prepare_instances_v2 :: proc(
+	r: ^Renderer,
+	lut: ^Style_LUT,
+	store: ^termgrid.Grapheme_Store = nil,
+) -> (bg_count: u32, glyph_count: u32, emoji_count: u32, decor_count: u32) {
+	cells := r.compiled_v2.cells
+	cols := r.cols
+	cell_w := r.cell_width
+	cell_h := r.cell_height
+	atlas := &r.atlas
+	inst := &r.instances
+
+	bg_count = 0
+	glyph_count = 0
+	emoji_count = 0
+	decor_count = 0
+	grid_limit := inst.max_instances > 1 ? inst.max_instances - 1 : 0
+
+	// Pass 1: backgrounds, densely packed from index 0.
+	for idx in 0..<len(cells) {
+		if bg_count >= grid_limit {
+			break
+		}
+		row := i32(idx) / cols
+		col := i32(idx) % cols
+		x := r.pad_x + f32(col) * cell_w
+		y := r.pad_y + f32(row) * cell_h
+
+		emit_bg, _, _, _ := render_cell_expand_instance(
+			cells[idx], lut, atlas, x, y, cell_w, cell_h,
+			&inst.instance_data[bg_count], nil,
+		)
+		if emit_bg {
+			bg_count += 1
+		}
+	}
+
+	// Pass 2: glyphs and emojis
+	for idx in 0..<len(cells) {
+		glyph_idx := bg_count + glyph_count
+		if glyph_idx >= grid_limit {
+			break
+		}
+		row := i32(idx) / cols
+		col := i32(idx) % cols
+		x := r.pad_x + f32(col) * cell_w
+		y := r.pad_y + f32(row) * cell_h
+
+		emoji_inst_ptr: ^instance.Instance_Data = nil
+		emoji_atlas_ptr: ^Emoji_Atlas = nil
+		if r.emoji_atlas.has_font {
+			if emoji_count < grid_limit && inst.emoji_data != nil {
+				emoji_inst_ptr = &inst.emoji_data[emoji_count]
+			}
+			emoji_atlas_ptr = &r.emoji_atlas
+		}
+
+		_, emit_glyph, emit_emoji, _ := render_cell_expand_instance(
+			cells[idx], lut, atlas, x, y, cell_w, cell_h,
+			nil, &inst.instance_data[glyph_idx],
+			emoji_inst_ptr,
+			emoji_atlas_ptr,
+			store,
+		)
+		if emit_emoji {
+			emoji_count += 1
+		} else if emit_glyph {
+			glyph_count += 1
+		}
+	}
+
+	// Pass 3: decorations (underline, strikethrough)
+	for idx in 0..<len(cells) {
+		decor_idx := bg_count + glyph_count + decor_count
+		if decor_idx >= grid_limit {
+			break
+		}
+		row := i32(idx) / cols
+		col := i32(idx) % cols
+		x := r.pad_x + f32(col) * cell_w
+		y := r.pad_y + f32(row) * cell_h
+
+		_, _, _, emit_decor := render_cell_expand_instance(
+			cells[idx], lut, atlas, x, y, cell_w, cell_h,
+			nil, nil, nil, nil, nil,
+			&inst.instance_data[decor_idx],
+		)
+		if emit_decor {
+			decor_count += 1
+		}
+	}
+
+	return bg_count, glyph_count, emoji_count, decor_count
+}
+
+// _draw_cursor_overlay appends the staged cursor draw to the active instance
+// render pass. It performs no upload, acquisition, submission, or present.
+_draw_cursor_overlay :: proc(r: ^Renderer, frame: ^Render_Frame_Transaction) -> bool {
+	if r == nil || frame == nil || !r.cursor_staged { return true }
+	if r.backend == nil || rawptr(frame.pass) == nil ||
+		rawptr(r.instances.bg_pipeline) == nil || rawptr(r.instances.bind_group_bg) == nil ||
+		rawptr(frame.cursor_buffer) == nil {
+		return false
+	}
+	r.backend.render_set_pipeline(frame.pass, r.instances.bg_pipeline)
+	r.backend.render_set_bind_group(frame.pass, 0, r.instances.bind_group_bg)
+	r.backend.render_set_vertex_buffer(frame.pass, 0, frame.cursor_buffer, frame.cursor_offset)
+	r.backend.render_draw(frame.pass, instance.QUAD_VERTEX_COUNT, 1)
+	return true
+}
+
+_renderer_frame_published :: proc(r: ^Renderer, view: ^termgrid.Terminal_View = nil) {
+	if r == nil { return }
+	r.first_frame_pending = false
+	r.full_redraw_pending = false
+	r.cursor_staged = false
+	r.interaction_staged = false
+	r.interaction_slot_start = 0
+	r.interaction_quad_count = 0
+	r.last_view = view
+	r.last_view_fingerprint = _renderer_view_fingerprint(view)
+	r.last_view_valid = true
+}
+
+// _draw_instance_buffer encodes bg, glyph, and optional cursor draws into the
+// transaction's single render pass. It does not finish, submit, present, or
+// release the acquired surface.
+_draw_instance_buffer :: proc(
+	r: ^Renderer,
+	frame: ^Render_Frame_Transaction,
+	buffer: gpu.Gpu_Buffer,
+	bg_count: u32,
+	glyph_count: u32,
+	glyph_offset: u64,
+	emoji_count: u32 = 0,
+	visual_mode: bool = false,
+	decor_count: u32 = 0,
+	decor_offset: u64 = 0,
+) -> bool {
+	if r == nil || frame == nil || frame.state != .Acquired || rawptr(frame.encoder) == nil {
+		return false
+	}
+	pass := r.backend.begin_render_pass(frame.encoder, frame.view, _renderer_theme_clear_color(r.theme, visual_mode), .Clear)
+	if rawptr(pass) == nil { return false }
+	frame.pass = pass
+	ok := true
+	if bg_count > 0 || glyph_count > 0 || decor_count > 0 {
+		ok = rawptr(buffer) != nil && rawptr(r.instances.bg_pipeline) != nil && rawptr(r.instances.glyph_pipeline) != nil &&
+			rawptr(r.instances.bind_group_bg) != nil && rawptr(r.instances.bind_group_glyph) != nil
+	}
+	if ok {
+		r.backend.render_set_pipeline(pass, r.instances.bg_pipeline)
+		r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_bg)
+		r.backend.render_set_vertex_buffer(pass, 0, buffer, 0)
+		r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, bg_count)
+
+		if decor_count > 0 {
+			r.backend.render_set_pipeline(pass, r.instances.bg_pipeline)
+			r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_bg)
+			r.backend.render_set_vertex_buffer(pass, 0, buffer, decor_offset)
+			r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, decor_count)
+		}
+
+		r.backend.render_set_pipeline(pass, r.instances.glyph_pipeline)
+		r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_glyph)
+		r.backend.render_set_vertex_buffer(pass, 0, buffer, glyph_offset)
+		r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, glyph_count)
+
+		when ODIN_OS == .Darwin {
+			if emoji_count > 0 && rawptr(r.instances.emoji_pipeline) != nil && rawptr(r.instances.emoji_buffer) != nil {
+				r.backend.render_set_pipeline(pass, r.instances.emoji_pipeline)
+				r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_emoji)
+				r.backend.render_set_vertex_buffer(pass, 0, r.instances.emoji_buffer, 0)
+				r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, emoji_count)
+			}
+		}
+	}
+	if ok { ok = _draw_cursor_overlay(r, frame) }
+	r.backend.end_render_pass(pass)
+	frame.pass = gpu.Gpu_RenderPassEncoder(nil)
+	if !ok { return false }
+	frame.state = .Encoded
+	return true
+}
+--- TARGET:
+// _prepare_instances_v2 fills instance data from V2 compiled cells via the
+// pre-resolved Style_LUT. No per-cell style_table_get, color conversion, or atlas rasterize.
+// Two passes partition the staging buffer as [bg 0..bg_count), [glyph bg_count..bg_count+glyph_count),
+// matching the draw offsets below. Writes are capped at max_instances.
+_prepare_instances_v2 :: proc(r: ^Renderer, lut: ^Style_LUT, store: ^termgrid.Grapheme_Store = nil) -> (bg_count: u32, glyph_count: u32, emoji_count: u32) {
+	cells := r.compiled_v2.cells
+	cols := r.cols
+	cell_w := r.cell_width
+	cell_h := r.cell_height
+	atlas := &r.atlas
+	inst := &r.instances
+
+	bg_count = 0
+	glyph_count = 0
+	emoji_count = 0
+	grid_limit := inst.max_instances > 1 ? inst.max_instances - 1 : 0
+
+	// Pass 1: backgrounds, densely packed from index 0.
+	for idx in 0..<len(cells) {
+		if bg_count >= grid_limit {
+			break
+		}
+		row := i32(idx) / cols
+		col := i32(idx) % cols
+		x := r.pad_x + f32(col) * cell_w
+		y := r.pad_y + f32(row) * cell_h
+
+		emit_bg, _, _ := render_cell_expand_instance(
+			cells[idx], lut, atlas, x, y, cell_w, cell_h,
+			&inst.instance_data[bg_count], nil,
+		)
+		if emit_bg {
+			bg_count += 1
+		}
+	}
+
+	// Pass 2: glyphs and emojis
+	for idx in 0..<len(cells) {
+		glyph_idx := bg_count + glyph_count
+		if glyph_idx >= grid_limit {
+			break
+		}
+		row := i32(idx) / cols
+		col := i32(idx) % cols
+		x := r.pad_x + f32(col) * cell_w
+		y := r.pad_y + f32(row) * cell_h
+
+		emoji_inst_ptr: ^instance.Instance_Data = nil
+		emoji_atlas_ptr: ^Emoji_Atlas = nil
+		if r.emoji_atlas.has_font {
+			if emoji_count < grid_limit && inst.emoji_data != nil {
+				emoji_inst_ptr = &inst.emoji_data[emoji_count]
+			}
+			emoji_atlas_ptr = &r.emoji_atlas
+		}
+
+		_, emit_glyph, emit_emoji := render_cell_expand_instance(
+			cells[idx], lut, atlas, x, y, cell_w, cell_h,
+			nil, &inst.instance_data[glyph_idx],
+			emoji_inst_ptr,
+			emoji_atlas_ptr,
+			store,
+		)
+		if emit_emoji {
+			emoji_count += 1
+		} else if emit_glyph {
+			glyph_count += 1
+		}
+	}
+
+	return bg_count, glyph_count, emoji_count
+}
+
+// _draw_cursor_overlay appends the staged cursor draw to the active instance
+// render pass. It performs no upload, acquisition, submission, or present.
+_draw_cursor_overlay :: proc(r: ^Renderer, frame: ^Render_Frame_Transaction) -> bool {
+	if r == nil || frame == nil || !r.cursor_staged { return true }
+	if r.backend == nil || rawptr(frame.pass) == nil ||
+		rawptr(r.instances.bg_pipeline) == nil || rawptr(r.instances.bind_group_bg) == nil ||
+		rawptr(frame.cursor_buffer) == nil {
+		return false
+	}
+	r.backend.render_set_pipeline(frame.pass, r.instances.bg_pipeline)
+	r.backend.render_set_bind_group(frame.pass, 0, r.instances.bind_group_bg)
+	r.backend.render_set_vertex_buffer(frame.pass, 0, frame.cursor_buffer, frame.cursor_offset)
+	r.backend.render_draw(frame.pass, instance.QUAD_VERTEX_COUNT, 1)
+	return true
+}
+
+_renderer_frame_published :: proc(r: ^Renderer, view: ^termgrid.Terminal_View = nil) {
+	if r == nil { return }
+	r.first_frame_pending = false
+	r.full_redraw_pending = false
+	r.cursor_staged = false
+	r.interaction_staged = false
+	r.interaction_slot_start = 0
+	r.interaction_quad_count = 0
+	r.last_view = view
+	r.last_view_fingerprint = _renderer_view_fingerprint(view)
+	r.last_view_valid = true
+}
+
+// _draw_instance_buffer encodes bg, glyph, and optional cursor draws into the
+// transaction's single render pass. It does not finish, submit, present, or
+// release the acquired surface.
+_draw_instance_buffer :: proc(
+	r: ^Renderer,
+	frame: ^Render_Frame_Transaction,
+	buffer: gpu.Gpu_Buffer,
+	bg_count: u32,
+	glyph_count: u32,
+	glyph_offset: u64,
+	emoji_count: u32 = 0,
+	visual_mode: bool = false,
+) -> bool {
+	if r == nil || frame == nil || frame.state != .Acquired || rawptr(frame.encoder) == nil {
+		return false
+	}
+	pass := r.backend.begin_render_pass(frame.encoder, frame.view, _renderer_theme_clear_color(r.theme, visual_mode), .Clear)
+	if rawptr(pass) == nil { return false }
+	frame.pass = pass
+	ok := true
+	if bg_count > 0 || glyph_count > 0 {
+		ok = rawptr(buffer) != nil && rawptr(r.instances.bg_pipeline) != nil && rawptr(r.instances.glyph_pipeline) != nil &&
+			rawptr(r.instances.bind_group_bg) != nil && rawptr(r.instances.bind_group_glyph) != nil
+	}
+	if ok {
+		r.backend.render_set_pipeline(pass, r.instances.bg_pipeline)
+		r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_bg)
+		r.backend.render_set_vertex_buffer(pass, 0, buffer, 0)
+		r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, bg_count)
+
+		r.backend.render_set_pipeline(pass, r.instances.glyph_pipeline)
+		r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_glyph)
+		r.backend.render_set_vertex_buffer(pass, 0, buffer, glyph_offset)
+		r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, glyph_count)
+
+		when ODIN_OS == .Darwin {
+			if emoji_count > 0 && rawptr(r.instances.emoji_pipeline) != nil && rawptr(r.instances.emoji_buffer) != nil {
+				r.backend.render_set_pipeline(pass, r.instances.emoji_pipeline)
+				r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_emoji)
+				r.backend.render_set_vertex_buffer(pass, 0, r.instances.emoji_buffer, 0)
+				r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, emoji_count)
+			}
+		}
+	}
+	if ok { ok = _draw_cursor_overlay(r, frame) }
+	r.backend.end_render_pass(pass)
+	frame.pass = gpu.Gpu_RenderPassEncoder(nil)
+	if !ok { return false }
+	frame.state = .Encoded
+	return true
+}
+====================================================
+
+[e2b7a106-71f2-47de-932b-a81a7ee6b439] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Update _prepare_instances_v2 and _draw_instance_buffer call sites in renderer_frame_v2
+--- REPLACEMENT:
+	bg_count, glyph_count, emoji_count, decor_count := _prepare_instances_v2(r, lut, &terminal.grapheme_store)
+	when ODIN_OS == .Darwin {
+		if r.emoji_atlas.gpu_dirty {
+			emoji_atlas_upload_gpu(&r.emoji_atlas, r.backend, r.device, r.queue)
+		}
+		if emoji_count > 0 && rawptr(r.instances.emoji_buffer) != nil && r.instances.emoji_data != nil {
+			r.backend.write_buffer(r.queue, r.instances.emoji_buffer, 0, raw_data(r.instances.emoji_data), u64(emoji_count) * instance.INSTANCE_STRIDE)
+		}
+	}
+	frame, ok := _renderer_surface_begin(r)
+	if !ok { return _renderer_frame_failed(r, terminal, journal, &frame, .Instance) }
+	if !_renderer_upload_instances(r, bg_count + glyph_count + decor_count, &frame) {
+		return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+	}
+	decor_offset := u64(bg_count + glyph_count) * instance.INSTANCE_STRIDE
+	if !_draw_instance_buffer(r, &frame, frame.cursor_buffer, bg_count, glyph_count, u64(bg_count) * instance.INSTANCE_STRIDE, emoji_count, is_visual, decor_count, decor_offset) {
+		return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+	}
+--- TARGET:
+	bg_count, glyph_count, emoji_count := _prepare_instances_v2(r, lut, &terminal.grapheme_store)
+	when ODIN_OS == .Darwin {
+		if r.emoji_atlas.gpu_dirty {
+			emoji_atlas_upload_gpu(&r.emoji_atlas, r.backend, r.device, r.queue)
+		}
+		if emoji_count > 0 && rawptr(r.instances.emoji_buffer) != nil && r.instances.emoji_data != nil {
+			r.backend.write_buffer(r.queue, r.instances.emoji_buffer, 0, raw_data(r.instances.emoji_data), u64(emoji_count) * instance.INSTANCE_STRIDE)
+		}
+	}
+	frame, ok := _renderer_surface_begin(r)
+	if !ok { return _renderer_frame_failed(r, terminal, journal, &frame, .Instance) }
+	if !_renderer_upload_instances(r, bg_count + glyph_count, &frame) {
+		return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+	}
+	if !_draw_instance_buffer(r, &frame, frame.cursor_buffer, bg_count, glyph_count, u64(bg_count) * instance.INSTANCE_STRIDE, emoji_count, is_visual) {
+		return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+	}
+====================================================
+
+[8eaa533b-aa1f-467f-8e6d-59a431da34dc] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Add ui fields to Render_Frame_Transaction, Renderer, and define RENDER_MAX_UI_INSTANCES
+--- REPLACEMENT:
+// Render_Frame_Transaction owns one acquired surface and one shared encoder.
+// cursor_buffer/cursor_offset identify the optional cursor instance appended
+// to the same upload-ring submission as legacy instance data.
+Render_Frame_Transaction :: struct {
+	state:         Render_Frame_State,
+	texture:       gpu.Gpu_Texture,
+	view:          gpu.Gpu_TextureView,
+	format:        gpu.Gpu_Format,
+	encoder:       gpu.Gpu_CommandEncoder,
+	pass:          gpu.Gpu_RenderPassEncoder,
+	cursor_buffer: gpu.Gpu_Buffer,
+	cursor_offset: u64,
+	ui_bg_offset:    u64,
+	ui_bg_count:     u32,
+	ui_glyph_offset: u64,
+	ui_glyph_count:  u32,
+	upload:        Upload_Ring_Frame,
+	upload_committed: bool,
+	command_buffer: rawptr,
+	encoder_released: bool,
+	command_released: bool,
+}
+
+// Renderer is the top-level render state.
+Renderer :: struct {
+	// Sub-systems
+	atlas:       Atlas,
+	emoji_atlas: Emoji_Atlas,
+	compiled:    Compiled_Frame,
+	compiled_v2: Compiled_Frame_V2,
+	dirty:      Dirty_Upload,
+	style_lut:  Style_LUT,
+	upload_ring: Upload_Ring,
+	unlock_cb:   proc(data: rawptr),
+	unlock_data: rawptr,
+	instances:  instance.Instance_Renderer,
+	rasterizer: Font_Rasterizer,
+	ligature_cache: Ligature_Cache,
+
+	// Phase 11: fallback chain (slot 0 aliases rasterizer), shape cache,
+	// and slow-path counters.
+	fallback:          Fallback_Chain,
+	shape_cache:       Shape_Cache,
+	fallback_counters: Fallback_Counters,
+
+	// Phase 12: async raster queue (single worker) and its counters.
+	raster:          Raster_Queue,
+	raster_counters: Raster_Counters,
+
+	// Configuration
+	rows:       i32,
+	cols:       i32,
+	cell_width:  f32,
+	cell_height: f32,
+	pad_x:       f32,
+	pad_y:       f32,
+	screen_w:   f32,
+	screen_h:   f32,
+	format:     gpu.Gpu_Format,
+	theme:      termgrid.Theme,
+
+	// Surface
+	surface:    gpu.Gpu_Surface,
+	surface_w:  u32,
+	surface_h:  u32,
+
+	// State
+	frame_count:     u64,
+	last_dirty:      bool,  // whether the last frame had damage
+	frame_prepared:         bool,
+	cursor_staged:          bool, // cursor_overlay_draw staged the reserved instance
+	ui_staged:              bool,
+	ui_bg_count:            u32,
+	ui_glyph_count:         u32,
+	ui_bg_data:             [RENDER_MAX_UI_INSTANCES]instance.Instance_Data,
+	ui_glyph_data:          [RENDER_MAX_UI_INSTANCES]instance.Instance_Data,
+	interaction_staged:     bool, // interaction_overlay_draw staged quads
+	interaction_slot_start: u32,  // starting instance slot for interaction quads
+	interaction_quad_count: int,  // count of staged interaction quads
+	device:                 gpu.Gpu_Device,
+	queue:       gpu.Gpu_Queue,
+	backend:     ^gpu.Gpu_Backend_VTable,
+
+	// Phase 14: tiled compute sibling path (instance stays default).
+	strategy:      Render_Strategy,
+	compute_tiles: tile.Compute_Tile_Renderer,
+	tile_map:      tile.Tile_Map,
+
+	// Phase 15: fullscreen fragment sibling path (instance stays default).
+	fullscreen: fullscreen.Fullscreen_Renderer,
+
+	// Phase 16: adaptive strategy state (online submit-ns rings + pin).
+	strategy_state: Strategy_State,
+	fallback_pending: bool,
+	first_frame_pending: bool,
+	full_redraw_pending: bool,
+	last_view:           ^termgrid.Terminal_View,
+	last_view_fingerprint: u64,
+	last_view_valid:     bool,
+}
+
+// RENDER_MAX_INSTANCES is the maximum number of instances per draw call.
+RENDER_MAX_INSTANCES :: 16384
+RENDER_MAX_UI_INSTANCES :: 512
+--- TARGET:
+// Render_Frame_Transaction owns one acquired surface and one shared encoder.
+// cursor_buffer/cursor_offset identify the optional cursor instance appended
+// to the same upload-ring submission as legacy instance data.
+Render_Frame_Transaction :: struct {
+	state:         Render_Frame_State,
+	texture:       gpu.Gpu_Texture,
+	view:          gpu.Gpu_TextureView,
+	format:        gpu.Gpu_Format,
+	encoder:       gpu.Gpu_CommandEncoder,
+	pass:          gpu.Gpu_RenderPassEncoder,
+	cursor_buffer: gpu.Gpu_Buffer,
+	cursor_offset: u64,
+	upload:        Upload_Ring_Frame,
+	upload_committed: bool,
+	command_buffer: rawptr,
+	encoder_released: bool,
+	command_released: bool,
+}
+
+// Renderer is the top-level render state.
+Renderer :: struct {
+	// Sub-systems
+	atlas:       Atlas,
+	emoji_atlas: Emoji_Atlas,
+	compiled:    Compiled_Frame,
+	compiled_v2: Compiled_Frame_V2,
+	dirty:      Dirty_Upload,
+	style_lut:  Style_LUT,
+	upload_ring: Upload_Ring,
+	unlock_cb:   proc(data: rawptr),
+	unlock_data: rawptr,
+	instances:  instance.Instance_Renderer,
+	rasterizer: Font_Rasterizer,
+	ligature_cache: Ligature_Cache,
+
+	// Phase 11: fallback chain (slot 0 aliases rasterizer), shape cache,
+	// and slow-path counters.
+	fallback:          Fallback_Chain,
+	shape_cache:       Shape_Cache,
+	fallback_counters: Fallback_Counters,
+
+	// Phase 12: async raster queue (single worker) and its counters.
+	raster:          Raster_Queue,
+	raster_counters: Raster_Counters,
+
+	// Configuration
+	rows:       i32,
+	cols:       i32,
+	cell_width:  f32,
+	cell_height: f32,
+	pad_x:       f32,
+	pad_y:       f32,
+	screen_w:   f32,
+	screen_h:   f32,
+	format:     gpu.Gpu_Format,
+	theme:      termgrid.Theme,
+
+	// Surface
+	surface:    gpu.Gpu_Surface,
+	surface_w:  u32,
+	surface_h:  u32,
+
+	// State
+	frame_count:     u64,
+	last_dirty:      bool,  // whether the last frame had damage
+	frame_prepared:         bool,
+	cursor_staged:          bool, // cursor_overlay_draw staged the reserved instance
+	interaction_staged:     bool, // interaction_overlay_draw staged quads
+	interaction_slot_start: u32,  // starting instance slot for interaction quads
+	interaction_quad_count: int,  // count of staged interaction quads
+	device:                 gpu.Gpu_Device,
+	queue:       gpu.Gpu_Queue,
+	backend:     ^gpu.Gpu_Backend_VTable,
+
+	// Phase 14: tiled compute sibling path (instance stays default).
+	strategy:      Render_Strategy,
+	compute_tiles: tile.Compute_Tile_Renderer,
+	tile_map:      tile.Tile_Map,
+
+	// Phase 15: fullscreen fragment sibling path (instance stays default).
+	fullscreen: fullscreen.Fullscreen_Renderer,
+
+	// Phase 16: adaptive strategy state (online submit-ns rings + pin).
+	strategy_state: Strategy_State,
+	fallback_pending: bool,
+	first_frame_pending: bool,
+	full_redraw_pending: bool,
+	last_view:           ^termgrid.Terminal_View,
+	last_view_fingerprint: u64,
+	last_view_valid:     bool,
+}
+
+// RENDER_MAX_INSTANCES is the maximum number of instances per draw call.
+RENDER_MAX_INSTANCES :: 16384
+====================================================
+
+[8eaa533b-aa1f-467f-8e6d-59a431da34dc] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Add if r.ui_staged { return true } in _renderer_has_pending_work
+--- REPLACEMENT:
+	if r.first_frame_pending || r.full_redraw_pending || r.atlas.gpu_dirty || r.fallback_pending ||
+		_renderer_view_changed(r, view) || r.ui_staged {
+		return true
+	}
+--- TARGET:
+	if r.first_frame_pending || r.full_redraw_pending || r.atlas.gpu_dirty || r.fallback_pending ||
+		_renderer_view_changed(r, view) {
+		return true
+	}
+====================================================
+
+[8eaa533b-aa1f-467f-8e6d-59a431da34dc] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Update _renderer_upload_instances with UI instances support
+--- REPLACEMENT:
+_renderer_upload_instances :: proc(r: ^Renderer, base_count: u32, frame: ^Render_Frame_Transaction) -> bool {
+	if r == nil || frame == nil { return false }
+	count := u64(base_count)
+	cursor_count: u64 = 0
+	if r.cursor_staged { cursor_count = 1 }
+	ui_bg_count: u64 = 0
+	ui_glyph_count: u64 = 0
+	if r.ui_staged {
+		ui_bg_count = u64(r.ui_bg_count)
+		ui_glyph_count = u64(r.ui_glyph_count)
+	}
+	total := count + cursor_count + ui_bg_count + ui_glyph_count
+	byte_count := total * instance.INSTANCE_STRIDE
+	upload := upload_ring_begin(&r.upload_ring)
+	if !upload.reserved { return false }
+	frame.upload = upload
+	staging := upload_ring_get_staging(&r.upload_ring, upload)
+	if byte_count > u64(len(staging)) || count > u64(len(r.instances.instance_data)) {
+		upload_ring_abort(&r.upload_ring, &frame.upload)
+		return false
+	}
+	if count > 0 {
+		mem.copy(raw_data(staging[:int(count * instance.INSTANCE_STRIDE)]), raw_data(r.instances.instance_data), int(count * instance.INSTANCE_STRIDE))
+	}
+	frame.cursor_buffer = gpu.Gpu_Buffer(nil)
+	frame.cursor_offset = 0
+	frame.ui_bg_offset = 0
+	frame.ui_bg_count = 0
+	frame.ui_glyph_offset = 0
+	frame.ui_glyph_count = 0
+
+	offset := int(count * instance.INSTANCE_STRIDE)
+	if cursor_count > 0 {
+		slot := r.instances.max_instances - 1
+		if slot >= u32(len(r.instances.instance_data)) {
+			upload_ring_abort(&r.upload_ring, &frame.upload)
+			return false
+		}
+		mem.copy(raw_data(staging[offset:]), &r.instances.instance_data[slot], int(instance.INSTANCE_STRIDE))
+		frame.cursor_offset = u64(offset)
+		offset += int(instance.INSTANCE_STRIDE)
+	}
+	if ui_bg_count > 0 {
+		frame.ui_bg_offset = u64(offset)
+		frame.ui_bg_count = u32(ui_bg_count)
+		ui_bg_bytes := int(ui_bg_count * instance.INSTANCE_STRIDE)
+		mem.copy(raw_data(staging[offset:]), raw_data(r.ui_bg_data[:]), ui_bg_bytes)
+		offset += ui_bg_bytes
+	}
+	if ui_glyph_count > 0 {
+		frame.ui_glyph_offset = u64(offset)
+		frame.ui_glyph_count = u32(ui_glyph_count)
+		ui_glyph_bytes := int(ui_glyph_count * instance.INSTANCE_STRIDE)
+		mem.copy(raw_data(staging[offset:]), raw_data(r.ui_glyph_data[:]), ui_glyph_bytes)
+		offset += ui_glyph_bytes
+	}
+	if !upload_ring_write(&r.upload_ring, &frame.upload, byte_count) {
+		upload_ring_abort(&r.upload_ring, &frame.upload)
+		return false
+	}
+	buffer := upload_ring_get_buffer(&r.upload_ring, frame.upload.slot)
+	if rawptr(buffer) == nil && total > 0 { return false }
+	frame.cursor_buffer = buffer
+	return true
+}
+--- TARGET:
+_renderer_upload_instances :: proc(r: ^Renderer, base_count: u32, frame: ^Render_Frame_Transaction) -> bool {
+	if r == nil || frame == nil { return false }
+	count := u64(base_count)
+	cursor_count: u64 = 0
+	if r.cursor_staged { cursor_count = 1 }
+	total := count + cursor_count
+	byte_count := total * instance.INSTANCE_STRIDE
+	upload := upload_ring_begin(&r.upload_ring)
+	if !upload.reserved { return false }
+	frame.upload = upload
+	staging := upload_ring_get_staging(&r.upload_ring, upload)
+	if byte_count > u64(len(staging)) || count > u64(len(r.instances.instance_data)) {
+		upload_ring_abort(&r.upload_ring, &frame.upload)
+		return false
+	}
+	if count > 0 {
+		mem.copy(raw_data(staging[:int(count * instance.INSTANCE_STRIDE)]), raw_data(r.instances.instance_data), int(count * instance.INSTANCE_STRIDE))
+	}
+	frame.cursor_buffer = gpu.Gpu_Buffer(nil)
+	frame.cursor_offset = 0
+	if cursor_count > 0 {
+		slot := r.instances.max_instances - 1
+		if slot >= u32(len(r.instances.instance_data)) {
+			upload_ring_abort(&r.upload_ring, &frame.upload)
+			return false
+		}
+		offset := int(count * instance.INSTANCE_STRIDE)
+		mem.copy(raw_data(staging[offset:]), &r.instances.instance_data[slot], int(instance.INSTANCE_STRIDE))
+		frame.cursor_offset = u64(offset)
+	}
+	if !upload_ring_write(&r.upload_ring, &frame.upload, byte_count) {
+		upload_ring_abort(&r.upload_ring, &frame.upload)
+		return false
+	}
+	buffer := upload_ring_get_buffer(&r.upload_ring, frame.upload.slot)
+	if rawptr(buffer) == nil && total > 0 { return false }
+	frame.cursor_buffer = buffer
+	return true
+}
+====================================================
+
+[8eaa533b-aa1f-467f-8e6d-59a431da34dc] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Reset ui staging in _renderer_frame_published and draw UI bg and glyph pipelines in _draw_instance_buffer
+--- REPLACEMENT:
+_renderer_frame_published :: proc(r: ^Renderer, view: ^termgrid.Terminal_View = nil) {
+	if r == nil { return }
+	r.first_frame_pending = false
+	r.full_redraw_pending = false
+	r.cursor_staged = false
+	r.ui_staged = false
+	r.ui_bg_count = 0
+	r.ui_glyph_count = 0
+	r.interaction_staged = false
+	r.interaction_slot_start = 0
+	r.interaction_quad_count = 0
+	r.last_view = view
+	r.last_view_fingerprint = _renderer_view_fingerprint(view)
+	r.last_view_valid = true
+}
+
+// _draw_instance_buffer encodes bg, glyph, and optional cursor draws into the
+// transaction's single render pass. It does not finish, submit, present, or
+// release the acquired surface.
+_draw_instance_buffer :: proc(
+	r: ^Renderer,
+	frame: ^Render_Frame_Transaction,
+	buffer: gpu.Gpu_Buffer,
+	bg_count: u32,
+	glyph_count: u32,
+	glyph_offset: u64,
+	emoji_count: u32 = 0,
+	visual_mode: bool = false,
+	decor_count: u32 = 0,
+	decor_offset: u64 = 0,
+) -> bool {
+	if r == nil || frame == nil || frame.state != .Acquired || rawptr(frame.encoder) == nil {
+		return false
+	}
+	pass := r.backend.begin_render_pass(frame.encoder, frame.view, _renderer_theme_clear_color(r.theme, visual_mode), .Clear)
+	if rawptr(pass) == nil { return false }
+	frame.pass = pass
+	ok := true
+	if bg_count > 0 || glyph_count > 0 || decor_count > 0 {
+		ok = rawptr(buffer) != nil && rawptr(r.instances.bg_pipeline) != nil && rawptr(r.instances.glyph_pipeline) != nil &&
+			rawptr(r.instances.bind_group_bg) != nil && rawptr(r.instances.bind_group_glyph) != nil
+	}
+	if ok {
+		r.backend.render_set_pipeline(pass, r.instances.bg_pipeline)
+		r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_bg)
+		r.backend.render_set_vertex_buffer(pass, 0, buffer, 0)
+		r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, bg_count)
+
+		if decor_count > 0 {
+			r.backend.render_set_pipeline(pass, r.instances.bg_pipeline)
+			r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_bg)
+			r.backend.render_set_vertex_buffer(pass, 0, buffer, decor_offset)
+			r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, decor_count)
+		}
+
+		r.backend.render_set_pipeline(pass, r.instances.glyph_pipeline)
+		r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_glyph)
+		r.backend.render_set_vertex_buffer(pass, 0, buffer, glyph_offset)
+		r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, glyph_count)
+
+		when ODIN_OS == .Darwin {
+			if emoji_count > 0 && rawptr(r.instances.emoji_pipeline) != nil && rawptr(r.instances.emoji_buffer) != nil {
+				r.backend.render_set_pipeline(pass, r.instances.emoji_pipeline)
+				r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_emoji)
+				r.backend.render_set_vertex_buffer(pass, 0, r.instances.emoji_buffer, 0)
+				r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, emoji_count)
+			}
+		}
+	}
+	if ok { ok = _draw_cursor_overlay(r, frame) }
+	if ok && frame.ui_bg_count > 0 {
+		r.backend.render_set_pipeline(pass, r.instances.bg_pipeline)
+		r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_bg)
+		r.backend.render_set_vertex_buffer(pass, 0, buffer, frame.ui_bg_offset)
+		r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, frame.ui_bg_count)
+	}
+	if ok && frame.ui_glyph_count > 0 {
+		r.backend.render_set_pipeline(pass, r.instances.glyph_pipeline)
+		r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_glyph)
+		r.backend.render_set_vertex_buffer(pass, 0, buffer, frame.ui_glyph_offset)
+		r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, frame.ui_glyph_count)
+	}
+	r.backend.end_render_pass(pass)
+	frame.pass = gpu.Gpu_RenderPassEncoder(nil)
+	if !ok { return false }
+	frame.state = .Encoded
+	return true
+}
+--- TARGET:
+_renderer_frame_published :: proc(r: ^Renderer, view: ^termgrid.Terminal_View = nil) {
+	if r == nil { return }
+	r.first_frame_pending = false
+	r.full_redraw_pending = false
+	r.cursor_staged = false
+	r.interaction_staged = false
+	r.interaction_slot_start = 0
+	r.interaction_quad_count = 0
+	r.last_view = view
+	r.last_view_fingerprint = _renderer_view_fingerprint(view)
+	r.last_view_valid = true
+}
+
+// _draw_instance_buffer encodes bg, glyph, and optional cursor draws into the
+// transaction's single render pass. It does not finish, submit, present, or
+// release the acquired surface.
+_draw_instance_buffer :: proc(
+	r: ^Renderer,
+	frame: ^Render_Frame_Transaction,
+	buffer: gpu.Gpu_Buffer,
+	bg_count: u32,
+	glyph_count: u32,
+	glyph_offset: u64,
+	emoji_count: u32 = 0,
+	visual_mode: bool = false,
+	decor_count: u32 = 0,
+	decor_offset: u64 = 0,
+) -> bool {
+	if r == nil || frame == nil || frame.state != .Acquired || rawptr(frame.encoder) == nil {
+		return false
+	}
+	pass := r.backend.begin_render_pass(frame.encoder, frame.view, _renderer_theme_clear_color(r.theme, visual_mode), .Clear)
+	if rawptr(pass) == nil { return false }
+	frame.pass = pass
+	ok := true
+	if bg_count > 0 || glyph_count > 0 || decor_count > 0 {
+		ok = rawptr(buffer) != nil && rawptr(r.instances.bg_pipeline) != nil && rawptr(r.instances.glyph_pipeline) != nil &&
+			rawptr(r.instances.bind_group_bg) != nil && rawptr(r.instances.bind_group_glyph) != nil
+	}
+	if ok {
+		r.backend.render_set_pipeline(pass, r.instances.bg_pipeline)
+		r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_bg)
+		r.backend.render_set_vertex_buffer(pass, 0, buffer, 0)
+		r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, bg_count)
+
+		if decor_count > 0 {
+			r.backend.render_set_pipeline(pass, r.instances.bg_pipeline)
+			r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_bg)
+			r.backend.render_set_vertex_buffer(pass, 0, buffer, decor_offset)
+			r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, decor_count)
+		}
+
+		r.backend.render_set_pipeline(pass, r.instances.glyph_pipeline)
+		r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_glyph)
+		r.backend.render_set_vertex_buffer(pass, 0, buffer, glyph_offset)
+		r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, glyph_count)
+
+		when ODIN_OS == .Darwin {
+			if emoji_count > 0 && rawptr(r.instances.emoji_pipeline) != nil && rawptr(r.instances.emoji_buffer) != nil {
+				r.backend.render_set_pipeline(pass, r.instances.emoji_pipeline)
+				r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_emoji)
+				r.backend.render_set_vertex_buffer(pass, 0, r.instances.emoji_buffer, 0)
+				r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, emoji_count)
+			}
+		}
+	}
+	if ok { ok = _draw_cursor_overlay(r, frame) }
+	r.backend.end_render_pass(pass)
+	frame.pass = gpu.Gpu_RenderPassEncoder(nil)
+	if !ok { return false }
+	frame.state = .Encoded
+	return true
+}
+====================================================
+
+[8eaa533b-aa1f-467f-8e6d-59a431da34dc] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Add !r.ui_staged condition to dirty upload branch in _renderer_frame_v2_journal
+--- REPLACEMENT:
+	if !force_full && !has_emojis && len(journal.scroll_ops) == 0 && r.dirty.mirror != nil && !r.cursor_staged && !r.ui_staged {
+--- TARGET:
+	if !force_full && !has_emojis && len(journal.scroll_ops) == 0 && r.dirty.mirror != nil && !r.cursor_staged {
+====================================================
+
+[8f5423ad-7fe0-4082-ab4e-43f48b106e46] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Add interaction_offset and interaction_count fields to Render_Frame_Transaction
+--- REPLACEMENT:
+	cursor_buffer: gpu.Gpu_Buffer,
+	cursor_offset: u64,
+	interaction_offset: u64,
+	interaction_count:  u32,
+	ui_bg_offset:    u64,
+	ui_bg_count:     u32,
+	ui_glyph_offset: u64,
+	ui_glyph_count:  u32,
+--- TARGET:
+	cursor_buffer: gpu.Gpu_Buffer,
+	cursor_offset: u64,
+	ui_bg_offset:    u64,
+	ui_bg_count:     u32,
+	ui_glyph_offset: u64,
+	ui_glyph_count:  u32,
+====================================================
+
+[8f5423ad-7fe0-4082-ab4e-43f48b106e46] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Add interaction_staged check to _renderer_has_pending_work
+--- REPLACEMENT:
+	if r.first_frame_pending || r.full_redraw_pending || r.atlas.gpu_dirty || r.fallback_pending ||
+		_renderer_view_changed(r, view) || r.ui_staged || r.interaction_staged {
+--- TARGET:
+	if r.first_frame_pending || r.full_redraw_pending || r.atlas.gpu_dirty || r.fallback_pending ||
+		_renderer_view_changed(r, view) || r.ui_staged {
+====================================================
+
+[8f5423ad-7fe0-4082-ab4e-43f48b106e46] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Add !r.interaction_staged to dirty upload check
+--- REPLACEMENT:
+	if !force_full && !has_emojis && len(journal.scroll_ops) == 0 && r.dirty.mirror != nil && !r.cursor_staged && !r.ui_staged && !r.interaction_staged {
+--- TARGET:
+	if !force_full && !has_emojis && len(journal.scroll_ops) == 0 && r.dirty.mirror != nil && !r.cursor_staged && !r.ui_staged {
+====================================================
+
+[8f5423ad-7fe0-4082-ab4e-43f48b106e46] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Update _renderer_upload_instances to stage interaction instance quads
+--- REPLACEMENT:
+	cursor_count: u64 = 0
+	if r.cursor_staged { cursor_count = 1 }
+	interaction_count: u64 = 0
+	if r.interaction_staged && r.interaction_quad_count > 0 { interaction_count = u64(r.interaction_quad_count) }
+	ui_bg_count: u64 = 0
+	ui_glyph_count: u64 = 0
+	if r.ui_staged {
+		ui_bg_count = u64(r.ui_bg_count)
+		ui_glyph_count = u64(r.ui_glyph_count)
+	}
+	total := count + cursor_count + interaction_count + ui_bg_count + ui_glyph_count
+	byte_count := total * instance.INSTANCE_STRIDE
+	upload := upload_ring_begin(&r.upload_ring)
+	if !upload.reserved { return false }
+	frame.upload = upload
+	staging := upload_ring_get_staging(&r.upload_ring, upload)
+	if byte_count > u64(len(staging)) || count > u64(len(r.instances.instance_data)) {
+		upload_ring_abort(&r.upload_ring, &frame.upload)
+		return false
+	}
+	if count > 0 {
+		mem.copy(raw_data(staging[:int(count * instance.INSTANCE_STRIDE)]), raw_data(r.instances.instance_data), int(count * instance.INSTANCE_STRIDE))
+	}
+	frame.cursor_buffer = gpu.Gpu_Buffer(nil)
+	frame.cursor_offset = 0
+	frame.interaction_offset = 0
+	frame.interaction_count = 0
+	frame.ui_bg_offset = 0
+	frame.ui_bg_count = 0
+	frame.ui_glyph_offset = 0
+	frame.ui_glyph_count = 0
+
+	offset := int(count * instance.INSTANCE_STRIDE)
+	if cursor_count > 0 {
+		slot := r.instances.max_instances - 1
+		if slot >= u32(len(r.instances.instance_data)) {
+			upload_ring_abort(&r.upload_ring, &frame.upload)
+			return false
+		}
+		mem.copy(raw_data(staging[offset:]), &r.instances.instance_data[slot], int(instance.INSTANCE_STRIDE))
+		frame.cursor_offset = u64(offset)
+		offset += int(instance.INSTANCE_STRIDE)
+	}
+	if interaction_count > 0 {
+		slot := r.interaction_slot_start
+		if int(slot) + int(interaction_count) <= len(r.instances.instance_data) {
+			frame.interaction_offset = u64(offset)
+			frame.interaction_count = u32(interaction_count)
+			bytes := int(interaction_count * instance.INSTANCE_STRIDE)
+			mem.copy(raw_data(staging[offset:]), &r.instances.instance_data[slot], bytes)
+			offset += bytes
+		}
+	}
+	if ui_bg_count > 0 {
+--- TARGET:
+	cursor_count: u64 = 0
+	if r.cursor_staged { cursor_count = 1 }
+	ui_bg_count: u64 = 0
+	ui_glyph_count: u64 = 0
+	if r.ui_staged {
+		ui_bg_count = u64(r.ui_bg_count)
+		ui_glyph_count = u64(r.ui_glyph_count)
+	}
+	total := count + cursor_count + ui_bg_count + ui_glyph_count
+	byte_count := total * instance.INSTANCE_STRIDE
+	upload := upload_ring_begin(&r.upload_ring)
+	if !upload.reserved { return false }
+	frame.upload = upload
+	staging := upload_ring_get_staging(&r.upload_ring, upload)
+	if byte_count > u64(len(staging)) || count > u64(len(r.instances.instance_data)) {
+		upload_ring_abort(&r.upload_ring, &frame.upload)
+		return false
+	}
+	if count > 0 {
+		mem.copy(raw_data(staging[:int(count * instance.INSTANCE_STRIDE)]), raw_data(r.instances.instance_data), int(count * instance.INSTANCE_STRIDE))
+	}
+	frame.cursor_buffer = gpu.Gpu_Buffer(nil)
+	frame.cursor_offset = 0
+	frame.ui_bg_offset = 0
+	frame.ui_bg_count = 0
+	frame.ui_glyph_offset = 0
+	frame.ui_glyph_count = 0
+
+	offset := int(count * instance.INSTANCE_STRIDE)
+	if cursor_count > 0 {
+		slot := r.instances.max_instances - 1
+		if slot >= u32(len(r.instances.instance_data)) {
+			upload_ring_abort(&r.upload_ring, &frame.upload)
+			return false
+		}
+		mem.copy(raw_data(staging[offset:]), &r.instances.instance_data[slot], int(instance.INSTANCE_STRIDE))
+		frame.cursor_offset = u64(offset)
+		offset += int(instance.INSTANCE_STRIDE)
+	}
+	if ui_bg_count > 0 {
+====================================================
+
+[8f5423ad-7fe0-4082-ab4e-43f48b106e46] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Add interaction quad draw call before glyphs in _draw_instance_buffer
+--- REPLACEMENT:
+		if decor_count > 0 {
+			r.backend.render_set_pipeline(pass, r.instances.bg_pipeline)
+			r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_bg)
+			r.backend.render_set_vertex_buffer(pass, 0, buffer, decor_offset)
+			r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, decor_count)
+		}
+
+		if ok && frame.interaction_count > 0 {
+			r.backend.render_set_pipeline(pass, r.instances.bg_pipeline)
+			r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_bg)
+			r.backend.render_set_vertex_buffer(pass, 0, buffer, frame.interaction_offset)
+			r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, frame.interaction_count)
+		}
+
+		r.backend.render_set_pipeline(pass, r.instances.glyph_pipeline)
+--- TARGET:
+		if decor_count > 0 {
+			r.backend.render_set_pipeline(pass, r.instances.bg_pipeline)
+			r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_bg)
+			r.backend.render_set_vertex_buffer(pass, 0, buffer, decor_offset)
+			r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, decor_count)
+		}
+
+		r.backend.render_set_pipeline(pass, r.instances.glyph_pipeline)
+====================================================
+
+[bd9c4e1b-c6ca-4168-9f09-c3a3a9cf71e1] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Update force_full, un-armed rebase compilation, and full_redraw_pending clear
+--- REPLACEMENT:
+	has_damage := _renderer_journal_has_damage(journal)
+	force_full := r.full_redraw_pending || view_changed || (view != nil && (view.scrollback_offset != 0 || view.selection.active)) || len(journal.scroll_ops) > 0
+	if !has_damage && force_full {
+		r.last_dirty = true
+	} else if !has_damage && r.last_dirty {
+		r.last_dirty = false
+	} else if !has_damage {
+		return false
+	} else {
+		r.last_dirty = true
+	}
+	if r.backend == nil || rawptr(r.device) == nil || rawptr(r.queue) == nil ||
+		rawptr(r.instances.bg_pipeline) == nil || rawptr(r.instances.glyph_pipeline) == nil || lut == nil {
+		return _renderer_frame_unavailable(r, terminal, journal, .Instance)
+	}
+	if _style_lut_needs_rebuild(lut, &terminal.grid.style_table) {
+		style_lut_rebuild(lut, &terminal.grid.style_table)
+	}
+
+	is_visual := view != nil && view.visual_mode
+	if is_visual {
+		lut.bg_r5g6b5[0] = color_to_r5g6b5(_renderer_visual_background_color(terminal.grid.style_table.theme.background))
+	} else {
+		lut.bg_r5g6b5[0] = color_to_r5g6b5(terminal.grid.style_table.theme.background)
+	}
+
+	has_emojis := false
+	when ODIN_OS == .Darwin {
+		has_emojis = len(r.emoji_atlas.glyphs) > 0
+	}
+	if !force_full && !has_emojis && len(journal.scroll_ops) == 0 && r.dirty.mirror != nil && !r.cursor_staged && !r.ui_staged && !r.interaction_staged {
+		if !r.dirty.armed {
+			render_compile_full_v2(&r.compiled_v2, terminal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster, view)
+			dirty_upload_rebase(&r.dirty, r, lut)
+		}
+		ranges: [DIRTY_UPLOAD_MAX_RANGES]Dirty_Upload_Range
+		_, _, fell_back := dirty_upload_frame(&r.dirty, r, terminal, journal, lut, &ranges)
+		if !fell_back {
+			n := u32(int(r.rows) * int(r.cols))
+			frame, ok := _renderer_surface_begin(r)
+			if !ok { return _renderer_frame_failed(r, terminal, journal, &frame, .Instance) }
+			if !_draw_instance_buffer(r, &frame, r.dirty.buffer, n, n, u64(n) * instance.INSTANCE_STRIDE) {
+				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+			}
+			if !_renderer_surface_commit(r, &frame) {
+				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+			}
+			_renderer_frame_published(r)
+			return true
+		}
+	}
+
+	r.dirty.armed = false
+	render_compile_full_v2(&r.compiled_v2, terminal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster, view)
+	bg_count, glyph_count, emoji_count, decor_count := _prepare_instances_v2(r, lut, &terminal.grapheme_store)
+	when ODIN_OS == .Darwin {
+		if r.emoji_atlas.gpu_dirty {
+			emoji_atlas_upload_gpu(&r.emoji_atlas, r.backend, r.device, r.queue)
+		}
+		if emoji_count > 0 && rawptr(r.instances.emoji_buffer) != nil && r.instances.emoji_data != nil {
+			r.backend.write_buffer(r.queue, r.instances.emoji_buffer, 0, raw_data(r.instances.emoji_data), u64(emoji_count) * instance.INSTANCE_STRIDE)
+		}
+	}
+	frame, ok := _renderer_surface_begin(r)
+	if !ok { return _renderer_frame_failed(r, terminal, journal, &frame, .Instance) }
+	if !_renderer_upload_instances(r, bg_count + glyph_count + decor_count, &frame) {
+		return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+	}
+	decor_offset := u64(bg_count + glyph_count) * instance.INSTANCE_STRIDE
+	if !_draw_instance_buffer(r, &frame, frame.cursor_buffer, bg_count, glyph_count, u64(bg_count) * instance.INSTANCE_STRIDE, emoji_count, is_visual, decor_count, decor_offset) {
+		return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+	}
+	if !_renderer_surface_commit(r, &frame) {
+		return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+	}
+	r.full_redraw_pending = false
+	_renderer_frame_published(r, view)
+	return true
+--- TARGET:
+	has_damage := _renderer_journal_has_damage(journal)
+	force_full := view_changed || (view != nil && (view.scrollback_offset != 0 || view.selection.active)) || len(journal.scroll_ops) > 0
+	if !has_damage && force_full {
+		r.last_dirty = true
+	} else if !has_damage && r.last_dirty {
+		r.last_dirty = false
+	} else if !has_damage {
+		return false
+	} else {
+		r.last_dirty = true
+	}
+	if r.backend == nil || rawptr(r.device) == nil || rawptr(r.queue) == nil ||
+		rawptr(r.instances.bg_pipeline) == nil || rawptr(r.instances.glyph_pipeline) == nil || lut == nil {
+		return _renderer_frame_unavailable(r, terminal, journal, .Instance)
+	}
+	if _style_lut_needs_rebuild(lut, &terminal.grid.style_table) {
+		style_lut_rebuild(lut, &terminal.grid.style_table)
+	}
+
+	is_visual := view != nil && view.visual_mode
+	if is_visual {
+		lut.bg_r5g6b5[0] = color_to_r5g6b5(_renderer_visual_background_color(terminal.grid.style_table.theme.background))
+	} else {
+		lut.bg_r5g6b5[0] = color_to_r5g6b5(terminal.grid.style_table.theme.background)
+	}
+
+	has_emojis := false
+	when ODIN_OS == .Darwin {
+		has_emojis = len(r.emoji_atlas.glyphs) > 0
+	}
+	if !force_full && !has_emojis && len(journal.scroll_ops) == 0 && r.dirty.mirror != nil && !r.cursor_staged && !r.ui_staged && !r.interaction_staged {
+		if !r.dirty.armed {
+			dirty_upload_rebase(&r.dirty, r, lut)
+		}
+		ranges: [DIRTY_UPLOAD_MAX_RANGES]Dirty_Upload_Range
+		_, _, fell_back := dirty_upload_frame(&r.dirty, r, terminal, journal, lut, &ranges)
+		if !fell_back {
+			n := u32(int(r.rows) * int(r.cols))
+			frame, ok := _renderer_surface_begin(r)
+			if !ok { return _renderer_frame_failed(r, terminal, journal, &frame, .Instance) }
+			if !_draw_instance_buffer(r, &frame, r.dirty.buffer, n, n, u64(n) * instance.INSTANCE_STRIDE) {
+				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+			}
+			if !_renderer_surface_commit(r, &frame) {
+				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+			}
+			_renderer_frame_published(r)
+			return true
+		}
+	}
+
+	r.dirty.armed = false
+	render_compile_full_v2(&r.compiled_v2, terminal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster, view)
+	bg_count, glyph_count, emoji_count, decor_count := _prepare_instances_v2(r, lut, &terminal.grapheme_store)
+	when ODIN_OS == .Darwin {
+		if r.emoji_atlas.gpu_dirty {
+			emoji_atlas_upload_gpu(&r.emoji_atlas, r.backend, r.device, r.queue)
+		}
+		if emoji_count > 0 && rawptr(r.instances.emoji_buffer) != nil && r.instances.emoji_data != nil {
+			r.backend.write_buffer(r.queue, r.instances.emoji_buffer, 0, raw_data(r.instances.emoji_data), u64(emoji_count) * instance.INSTANCE_STRIDE)
+		}
+	}
+	frame, ok := _renderer_surface_begin(r)
+	if !ok { return _renderer_frame_failed(r, terminal, journal, &frame, .Instance) }
+	if !_renderer_upload_instances(r, bg_count + glyph_count + decor_count, &frame) {
+		return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+	}
+	decor_offset := u64(bg_count + glyph_count) * instance.INSTANCE_STRIDE
+	if !_draw_instance_buffer(r, &frame, frame.cursor_buffer, bg_count, glyph_count, u64(bg_count) * instance.INSTANCE_STRIDE, emoji_count, is_visual, decor_count, decor_offset) {
+		return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+	}
+	if !_renderer_surface_commit(r, &frame) {
+		return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+	}
+	_renderer_frame_published(r, view)
+	return true
+====================================================
+
+[1448e677-19cd-49ca-a5a8-acacd0f58bb0] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Pass r.backend to atlas_destroy and emoji_atlas_destroy
+--- REPLACEMENT:
+	atlas_destroy(&r.atlas, r.backend, allocator)
+	render_compiler_destroy(&r.compiled, allocator)
+	render_compiler_destroy_v2(&r.compiled_v2, allocator)
+	if rawptr(r.dirty.buffer) != nil && r.backend != nil {
+		r.backend.destroy_buffer(r.dirty.buffer)
+		r.dirty.buffer = gpu.Gpu_Buffer(nil)
+	}
+	dirty_upload_destroy(&r.dirty, allocator)
+	upload_ring_destroy(&r.upload_ring, allocator)
+	instance.instance_renderer_destroy(&r.instances, allocator)
+	when ODIN_OS == .Darwin {
+		emoji_atlas_destroy(&r.emoji_atlas, r.backend)
+	}
+--- TARGET:
+	atlas_destroy(&r.atlas, allocator)
+	render_compiler_destroy(&r.compiled, allocator)
+	render_compiler_destroy_v2(&r.compiled_v2, allocator)
+	if rawptr(r.dirty.buffer) != nil && r.backend != nil {
+		r.backend.destroy_buffer(r.dirty.buffer)
+		r.dirty.buffer = gpu.Gpu_Buffer(nil)
+	}
+	dirty_upload_destroy(&r.dirty, allocator)
+	upload_ring_destroy(&r.upload_ring, allocator)
+	instance.instance_renderer_destroy(&r.instances, allocator)
+	when ODIN_OS == .Darwin {
+		emoji_atlas_destroy(&r.emoji_atlas)
+	}
+====================================================
+
+[1448e677-19cd-49ca-a5a8-acacd0f58bb0] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Add poll_device call after release_surface_texture
+--- REPLACEMENT:
+	frame.state = .Presented
+	r.backend.release_surface_texture(frame.texture, frame.view)
+	frame.texture = gpu.Gpu_Texture(nil)
+	frame.view = gpu.Gpu_TextureView(nil)
+	frame.state = .Released
+
+	if r.backend != nil && r.backend.poll_device != nil && rawptr(r.device) != nil {
+		_ = r.backend.poll_device(r.device, false)
+	}
+
+	return true
+--- TARGET:
+	frame.state = .Presented
+	r.backend.release_surface_texture(frame.texture, frame.view)
+	frame.texture = gpu.Gpu_Texture(nil)
+	frame.view = gpu.Gpu_TextureView(nil)
+	frame.state = .Released
+	return true
+====================================================
+
+[8e7d869a-def8-44f5-aee6-204852db79cd] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Remove the _renderer_wait_for_gpu call from renderer_resize
+--- REPLACEMENT:
+renderer_resize :: proc(r: ^Renderer, new_width_px: u32, new_height_px: u32) {
+--- TARGET:
+renderer_resize :: proc(r: ^Renderer, new_width_px: u32, new_height_px: u32) {
+	if !_renderer_wait_for_gpu(r) {
+		return
+	}
+====================================================
+
+[9ece0965-19f1-4ba4-9063-8ee922056fbc] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Add scrollbar_offset and scrollbar_count to Render_Frame_Transaction
+--- REPLACEMENT:
+	interaction_offset: u64,
+	interaction_count:  u32,
+	scrollbar_offset:   u64,
+	scrollbar_count:    u32,
+	ui_bg_offset:    u64,
+	ui_bg_count:     u32,
+--- TARGET:
+	interaction_offset: u64,
+	interaction_count:  u32,
+	ui_bg_offset:    u64,
+	ui_bg_count:     u32,
+====================================================
+
+[9ece0965-19f1-4ba4-9063-8ee922056fbc] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Add scrollbar_staged, scrollbar_count, scrollbar_data to Renderer
+--- REPLACEMENT:
+	interaction_staged:     bool, // interaction_overlay_draw staged quads
+	interaction_slot_start: u32,  // starting instance slot for interaction quads
+	interaction_quad_count: int,  // count of staged interaction quads
+	scrollbar_staged:       bool, // scrollbar_overlay_draw staged quads
+	scrollbar_count:        u32,  // count of staged scrollbar quads
+	scrollbar_data:         [2]instance.Instance_Data,
+	device:                 gpu.Gpu_Device,
+--- TARGET:
+	interaction_staged:     bool, // interaction_overlay_draw staged quads
+	interaction_slot_start: u32,  // starting instance slot for interaction quads
+	interaction_quad_count: int,  // count of staged interaction quads
+	device:                 gpu.Gpu_Device,
+====================================================
+
+[9ece0965-19f1-4ba4-9063-8ee922056fbc] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Add scrollbar instance handling in _renderer_upload_instances
+--- REPLACEMENT:
+	interaction_count: u64 = 0
+	if r.interaction_staged && r.interaction_quad_count > 0 { interaction_count = u64(r.interaction_quad_count) }
+	scrollbar_count: u64 = 0
+	if r.scrollbar_staged && r.scrollbar_count > 0 { scrollbar_count = u64(r.scrollbar_count) }
+	ui_bg_count: u64 = 0
+	ui_glyph_count: u64 = 0
+	if r.ui_staged {
+		ui_bg_count = u64(r.ui_bg_count)
+		ui_glyph_count = u64(r.ui_glyph_count)
+	}
+	total := count + cursor_count + interaction_count + scrollbar_count + ui_bg_count + ui_glyph_count
+	byte_count := total * instance.INSTANCE_STRIDE
+	upload := upload_ring_begin(&r.upload_ring)
+	if !upload.reserved { return false }
+	frame.upload = upload
+	staging := upload_ring_get_staging(&r.upload_ring, upload)
+	if byte_count > u64(len(staging)) || count > u64(len(r.instances.instance_data)) {
+		upload_ring_abort(&r.upload_ring, &frame.upload)
+		return false
+	}
+	if count > 0 {
+		mem.copy(raw_data(staging[:int(count * instance.INSTANCE_STRIDE)]), raw_data(r.instances.instance_data), int(count * instance.INSTANCE_STRIDE))
+	}
+	frame.cursor_buffer = gpu.Gpu_Buffer(nil)
+	frame.cursor_offset = 0
+	frame.interaction_offset = 0
+	frame.interaction_count = 0
+	frame.scrollbar_offset = 0
+	frame.scrollbar_count = 0
+	frame.ui_bg_offset = 0
+	frame.ui_bg_count = 0
+	frame.ui_glyph_offset = 0
+	frame.ui_glyph_count = 0
+
+	offset := int(count * instance.INSTANCE_STRIDE)
+	if cursor_count > 0 {
+		slot := r.instances.max_instances - 1
+		if slot >= u32(len(r.instances.instance_data)) {
+			upload_ring_abort(&r.upload_ring, &frame.upload)
+			return false
+		}
+		mem.copy(raw_data(staging[offset:]), &r.instances.instance_data[slot], int(instance.INSTANCE_STRIDE))
+		frame.cursor_offset = u64(offset)
+		offset += int(instance.INSTANCE_STRIDE)
+	}
+	if interaction_count > 0 {
+		slot := r.interaction_slot_start
+		if int(slot) + int(interaction_count) <= len(r.instances.instance_data) {
+			frame.interaction_offset = u64(offset)
+			frame.interaction_count = u32(interaction_count)
+			bytes := int(interaction_count * instance.INSTANCE_STRIDE)
+			mem.copy(raw_data(staging[offset:]), &r.instances.instance_data[slot], bytes)
+			offset += bytes
+		}
+	}
+	if scrollbar_count > 0 {
+		frame.scrollbar_offset = u64(offset)
+		frame.scrollbar_count = u32(scrollbar_count)
+		bytes := int(scrollbar_count * instance.INSTANCE_STRIDE)
+		mem.copy(raw_data(staging[offset:]), raw_data(r.scrollbar_data[:]), bytes)
+		offset += bytes
+	}
+--- TARGET:
+	interaction_count: u64 = 0
+	if r.interaction_staged && r.interaction_quad_count > 0 { interaction_count = u64(r.interaction_quad_count) }
+	ui_bg_count: u64 = 0
+	ui_glyph_count: u64 = 0
+	if r.ui_staged {
+		ui_bg_count = u64(r.ui_bg_count)
+		ui_glyph_count = u64(r.ui_glyph_count)
+	}
+	total := count + cursor_count + interaction_count + ui_bg_count + ui_glyph_count
+	byte_count := total * instance.INSTANCE_STRIDE
+	upload := upload_ring_begin(&r.upload_ring)
+	if !upload.reserved { return false }
+	frame.upload = upload
+	staging := upload_ring_get_staging(&r.upload_ring, upload)
+	if byte_count > u64(len(staging)) || count > u64(len(r.instances.instance_data)) {
+		upload_ring_abort(&r.upload_ring, &frame.upload)
+		return false
+	}
+	if count > 0 {
+		mem.copy(raw_data(staging[:int(count * instance.INSTANCE_STRIDE)]), raw_data(r.instances.instance_data), int(count * instance.INSTANCE_STRIDE))
+	}
+	frame.cursor_buffer = gpu.Gpu_Buffer(nil)
+	frame.cursor_offset = 0
+	frame.interaction_offset = 0
+	frame.interaction_count = 0
+	frame.ui_bg_offset = 0
+	frame.ui_bg_count = 0
+	frame.ui_glyph_offset = 0
+	frame.ui_glyph_count = 0
+
+	offset := int(count * instance.INSTANCE_STRIDE)
+	if cursor_count > 0 {
+		slot := r.instances.max_instances - 1
+		if slot >= u32(len(r.instances.instance_data)) {
+			upload_ring_abort(&r.upload_ring, &frame.upload)
+			return false
+		}
+		mem.copy(raw_data(staging[offset:]), &r.instances.instance_data[slot], int(instance.INSTANCE_STRIDE))
+		frame.cursor_offset = u64(offset)
+		offset += int(instance.INSTANCE_STRIDE)
+	}
+	if interaction_count > 0 {
+		slot := r.interaction_slot_start
+		if int(slot) + int(interaction_count) <= len(r.instances.instance_data) {
+			frame.interaction_offset = u64(offset)
+			frame.interaction_count = u32(interaction_count)
+			bytes := int(interaction_count * instance.INSTANCE_STRIDE)
+			mem.copy(raw_data(staging[offset:]), &r.instances.instance_data[slot], bytes)
+			offset += bytes
+		}
+	}
+====================================================
+
+[9ece0965-19f1-4ba4-9063-8ee922056fbc] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Reset r.scrollbar_staged and r.scrollbar_count in _renderer_frame_published
+--- REPLACEMENT:
+	r.interaction_staged = false
+	r.interaction_slot_start = 0
+	r.interaction_quad_count = 0
+	r.scrollbar_staged = false
+	r.scrollbar_count = 0
+	r.last_view = view
+--- TARGET:
+	r.interaction_staged = false
+	r.interaction_slot_start = 0
+	r.interaction_quad_count = 0
+	r.last_view = view
+====================================================
+
+[9ece0965-19f1-4ba4-9063-8ee922056fbc] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Add draw call for frame.scrollbar_count in _draw_instance_buffer
+--- REPLACEMENT:
+	if ok { ok = _draw_cursor_overlay(r, frame) }
+	if ok && frame.scrollbar_count > 0 {
+		r.backend.render_set_pipeline(pass, r.instances.bg_pipeline)
+		r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_bg)
+		r.backend.render_set_vertex_buffer(pass, 0, buffer, frame.scrollbar_offset)
+		r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, frame.scrollbar_count)
+	}
+	if ok && frame.ui_bg_count > 0 {
+--- TARGET:
+	if ok { ok = _draw_cursor_overlay(r, frame) }
+	if ok && frame.ui_bg_count > 0 {
+====================================================
+
+[aa11417e-1f84-48fa-877b-3eda82b47820] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Add BG_MSL and GLYPH_MSL declarations
+--- REPLACEMENT:
+BG_WGSL :: #load("shaders/bg.wgsl")
+GLYPH_WGSL :: #load("shaders/glyph.wgsl")
+EMOJI_WGSL :: #load("shaders/emoji.wgsl")
+
+BG_MSL :: #load("shaders/msl_spike/bg.msl")
+GLYPH_MSL :: #load("shaders/msl_spike/glyph.msl")
+--- TARGET:
+BG_WGSL :: #load("shaders/bg.wgsl")
+GLYPH_WGSL :: #load("shaders/glyph.wgsl")
+EMOJI_WGSL :: #load("shaders/emoji.wgsl")
+====================================================
+
+[aa11417e-1f84-48fa-877b-3eda82b47820] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Pass BG_MSL and GLYPH_MSL instead of WGSL
+--- REPLACEMENT:
+		format,
+		string(BG_MSL),
+		string(GLYPH_MSL),
+		screen_w,
+--- TARGET:
+		format,
+		string(BG_WGSL),
+		string(GLYPH_WGSL),
+		screen_w,
+====================================================
+
+[e10e0a1e-a448-4f00-ab74-bcfd048d6d5d] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Add EMOJI_MSL after GLYPH_MSL
+--- REPLACEMENT:
+BG_MSL :: #load("shaders/msl_spike/bg.msl")
+GLYPH_MSL :: #load("shaders/msl_spike/glyph.msl")
+EMOJI_MSL :: #load("shaders/msl_spike/emoji.msl")
+--- TARGET:
+BG_MSL :: #load("shaders/msl_spike/bg.msl")
+GLYPH_MSL :: #load("shaders/msl_spike/glyph.msl")
+====================================================
+
+[e10e0a1e-a448-4f00-ab74-bcfd048d6d5d] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Change EMOJI_WGSL to EMOJI_MSL in instance_renderer_init_emoji call
+--- REPLACEMENT:
+	if r.emoji_atlas.has_font {
+		emoji_atlas_upload_gpu(&r.emoji_atlas, backend, device, queue)
+		instance.instance_renderer_init_emoji(
+			&r.instances,
+			r.emoji_atlas.gpu_texture,
+			r.emoji_atlas.gpu_view,
+			string(EMOJI_MSL),
+			format,
+			allocator,
+		)
+	}
+--- TARGET:
+	if r.emoji_atlas.has_font {
+		emoji_atlas_upload_gpu(&r.emoji_atlas, backend, device, queue)
+		instance.instance_renderer_init_emoji(
+			&r.instances,
+			r.emoji_atlas.gpu_texture,
+			r.emoji_atlas.gpu_view,
+			string(EMOJI_WGSL),
+			format,
+			allocator,
+		)
+	}
+====================================================
+
+[44da75b0-4b61-455c-9ad3-aa90510f6384] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Update dirty upload guard, upload cursor overlay quad if cursor staged, invoke unlock_cb early in both dirty and full branches
+--- REPLACEMENT:
+	if !force_full && !has_emojis && len(journal.scroll_ops) == 0 && r.dirty.mirror != nil && !r.ui_staged && !r.interaction_staged {
+		if !r.dirty.armed {
+			render_compile_full_v2(&r.compiled_v2, terminal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster, view)
+			dirty_upload_rebase(&r.dirty, r, lut)
+		}
+		ranges: [DIRTY_UPLOAD_MAX_RANGES]Dirty_Upload_Range
+		_, _, fell_back := dirty_upload_frame(&r.dirty, r, terminal, journal, lut, &ranges)
+		if !fell_back {
+			if r.unlock_cb != nil {
+				r.unlock_cb(r.unlock_data)
+			}
+			n := u32(int(r.rows) * int(r.cols))
+			frame, ok := _renderer_surface_begin(r)
+			if !ok { return _renderer_frame_failed(r, terminal, journal, &frame, .Instance) }
+			if r.cursor_staged && !_renderer_upload_instances(r, 0, &frame) {
+				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+			}
+			if !_draw_instance_buffer(r, &frame, r.dirty.buffer, n, n, u64(n) * instance.INSTANCE_STRIDE) {
+				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+			}
+			if !_renderer_surface_commit(r, &frame) {
+				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+			}
+			_renderer_frame_published(r, view)
+			return true
+		}
+	}
+
+	r.dirty.armed = false
+	render_compile_full_v2(&r.compiled_v2, terminal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster, view)
+	bg_count, glyph_count, emoji_count, decor_count := _prepare_instances_v2(r, lut, &terminal.grapheme_store)
+	if r.unlock_cb != nil {
+		r.unlock_cb(r.unlock_data)
+	}
+--- TARGET:
+	if !force_full && !has_emojis && len(journal.scroll_ops) == 0 && r.dirty.mirror != nil && !r.cursor_staged && !r.ui_staged && !r.interaction_staged {
+		if !r.dirty.armed {
+			render_compile_full_v2(&r.compiled_v2, terminal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster, view)
+			dirty_upload_rebase(&r.dirty, r, lut)
+		}
+		ranges: [DIRTY_UPLOAD_MAX_RANGES]Dirty_Upload_Range
+		_, _, fell_back := dirty_upload_frame(&r.dirty, r, terminal, journal, lut, &ranges)
+		if !fell_back {
+			n := u32(int(r.rows) * int(r.cols))
+			frame, ok := _renderer_surface_begin(r)
+			if !ok { return _renderer_frame_failed(r, terminal, journal, &frame, .Instance) }
+			if !_draw_instance_buffer(r, &frame, r.dirty.buffer, n, n, u64(n) * instance.INSTANCE_STRIDE) {
+				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+			}
+			if !_renderer_surface_commit(r, &frame) {
+				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+			}
+			_renderer_frame_published(r)
+			return true
+		}
+	}
+
+	r.dirty.armed = false
+	render_compile_full_v2(&r.compiled_v2, terminal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster, view)
+	bg_count, glyph_count, emoji_count, decor_count := _prepare_instances_v2(r, lut, &terminal.grapheme_store)
+====================================================
+
+[d5a090a3-1204-48f7-b97d-d4361922cc6e] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+In the force_full path, after emoji atlas upload, add main atlas GPU upload guard before surface begin. Also in the dirty_upload fast path, after emoji atlas upload, add main atlas GPU upload guard.
+--- REPLACEMENT:
+		when ODIN_OS == .Darwin {
+			if r.emoji_atlas.gpu_dirty {
+				emoji_atlas_upload_gpu(&r.emoji_atlas, r.backend, r.device, r.queue)
+			}
+		}
+		if r.atlas.gpu_dirty {
+			atlas_upload_gpu(&r.atlas, r.backend, r.device, r.queue)
+		}
+		n := u32(int(r.rows) * int(r.cols))
+--- TARGET:
+		when ODIN_OS == .Darwin {
+			if r.emoji_atlas.gpu_dirty {
+				emoji_atlas_upload_gpu(&r.emoji_atlas, r.backend, r.device, r.queue)
+			}
+		}
+		n := u32(int(r.rows) * int(r.cols))
+====================================================
+
+[d5a090a3-1204-48f7-b97d-d4361922cc6e] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Add atlas.gpu_dirty upload guard in dirty_upload fast path, right after the emoji atlas block and before surface begin.
+--- REPLACEMENT:
+		when ODIN_OS == .Darwin {
+			if r.emoji_atlas.gpu_dirty {
+				emoji_atlas_upload_gpu(&r.emoji_atlas, r.backend, r.device, r.queue)
+			}
+		}
+		if r.atlas.gpu_dirty {
+			atlas_upload_gpu(&r.atlas, r.backend, r.device, r.queue)
+		}
+		n := u32(int(r.rows) * int(r.cols))
+--- TARGET:
+		when ODIN_OS == .Darwin {
+			if r.emoji_atlas.gpu_dirty {
+				emoji_atlas_upload_gpu(&r.emoji_atlas, r.backend, r.device, r.queue)
+			}
+		}
+		n := u32(int(r.rows) * int(r.cols))
+====================================================
+
+[d5a090a3-1204-48f7-b97d-d4361922cc6e] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+In dirty_upload fast path: add atlas.gpu_dirty GPU upload after emoji atlas block, before surface begin.
+--- REPLACEMENT:
+			when ODIN_OS == .Darwin {
+				if r.emoji_atlas.gpu_dirty {
+					emoji_atlas_upload_gpu(&r.emoji_atlas, r.backend, r.device, r.queue)
+				}
+			}
+			if r.atlas.gpu_dirty {
+				atlas_upload_gpu(&r.atlas, r.backend, r.device, r.queue)
+			}
+			n := u32(int(r.rows) * int(r.cols))
+--- TARGET:
+			when ODIN_OS == .Darwin {
+				if r.emoji_atlas.gpu_dirty {
+					emoji_atlas_upload_gpu(&r.emoji_atlas, r.backend, r.device, r.queue)
+				}
+			}
+			n := u32(int(r.rows) * int(r.cols))
+====================================================
+
+[d5a090a3-1204-48f7-b97d-d4361922cc6e] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+In force_full path: insert atlas.gpu_dirty upload guard between the when ODIN_OS block and _renderer_surface_begin.
+--- REPLACEMENT:
+	when ODIN_OS == .Darwin {
+		if r.emoji_atlas.gpu_dirty {
+			emoji_atlas_upload_gpu(&r.emoji_atlas, r.backend, r.device, r.queue)
+		}
+		if emoji_count > 0 && rawptr(r.instances.emoji_buffer) != nil && r.instances.emoji_data != nil {
+			r.backend.write_buffer(r.queue, r.instances.emoji_buffer, 0, raw_data(r.instances.emoji_data), u64(emoji_count) * instance.INSTANCE_STRIDE)
+		}
+	}
+	if r.atlas.gpu_dirty {
+		atlas_upload_gpu(&r.atlas, r.backend, r.device, r.queue)
+	}
+	frame, ok := _renderer_surface_begin(r)
+--- TARGET:
+	when ODIN_OS == .Darwin {
+		if r.emoji_atlas.gpu_dirty {
+			emoji_atlas_upload_gpu(&r.emoji_atlas, r.backend, r.device, r.queue)
+		}
+		if emoji_count > 0 && rawptr(r.instances.emoji_buffer) != nil && r.instances.emoji_data != nil {
+			r.backend.write_buffer(r.queue, r.instances.emoji_buffer, 0, raw_data(r.instances.emoji_data), u64(emoji_count) * instance.INSTANCE_STRIDE)
+		}
+	}
+	frame, ok := _renderer_surface_begin(r)
+====================================================
+
+[9fbc6632-e5bc-4f0b-875e-41010b5fc71b] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Add last_is_alt_screen: bool to Renderer struct in renderer.odin
+--- REPLACEMENT:
+	last_view:           ^termgrid.Terminal_View,
+	last_view_fingerprint: u64,
+	last_view_valid:     bool,
+	last_is_alt_screen:  bool,
+}
+--- TARGET:
+	last_view:           ^termgrid.Terminal_View,
+	last_view_fingerprint: u64,
+	last_view_valid:     bool,
+}
+====================================================
+
+[9fbc6632-e5bc-4f0b-875e-41010b5fc71b] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Update _renderer_frame_v2_journal with alt-screen transition tracking, 100% active dirty upload, and RGBA atlas upload & emoji_count = n
+--- REPLACEMENT:
+	force_full := r.full_redraw_pending || view_changed || (view != nil && (view.scrollback_offset != 0 || view.selection.active)) || len(journal.scroll_ops) > 0
+	alt_screen_changed := r.last_is_alt_screen != terminal.is_alt_screen
+	if alt_screen_changed {
+		r.last_is_alt_screen = terminal.is_alt_screen
+		r.dirty.armed = false
+		force_full = true
+	}
+	if !has_damage && force_full {
+		r.last_dirty = true
+	} else if !has_damage && r.last_dirty {
+		r.last_dirty = false
+	} else if !has_damage {
+		return false
+	} else {
+		r.last_dirty = true
+	}
+	if r.backend == nil || rawptr(r.device) == nil || rawptr(r.queue) == nil ||
+		rawptr(r.instances.bg_pipeline) == nil || rawptr(r.instances.glyph_pipeline) == nil || lut == nil {
+		return _renderer_frame_unavailable(r, terminal, journal, .Instance)
+	}
+	if _style_lut_needs_rebuild(lut, &terminal.grid.style_table) {
+		style_lut_rebuild(lut, &terminal.grid.style_table)
+	}
+
+	is_visual := view != nil && view.visual_mode
+	if is_visual {
+		lut.bg_r5g6b5[0] = color_to_r5g6b5(_renderer_visual_background_color(terminal.grid.style_table.theme.background))
+	} else {
+		lut.bg_r5g6b5[0] = color_to_r5g6b5(terminal.grid.style_table.theme.background)
+	}
+
+	if !force_full && len(journal.scroll_ops) == 0 && r.dirty.mirror != nil && !r.ui_staged && !r.interaction_staged {
+		if !r.dirty.armed {
+			render_compile_full_v2(&r.compiled_v2, terminal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster, view)
+			dirty_upload_rebase(&r.dirty, r, lut, &terminal.grapheme_store)
+		}
+		ranges: [DIRTY_UPLOAD_MAX_RANGES]Dirty_Upload_Range
+		_, _, fell_back := dirty_upload_frame(&r.dirty, r, terminal, journal, lut, &ranges)
+		if !fell_back {
+			if r.unlock_cb != nil {
+				r.unlock_cb(r.unlock_data)
+			}
+			when ODIN_OS == .Darwin {
+				if r.emoji_atlas.gpu_dirty {
+					emoji_atlas_upload_gpu(&r.emoji_atlas, r.backend, r.device, r.queue)
+				}
+			}
+			n := u32(int(r.rows) * int(r.cols))
+			frame, ok := _renderer_surface_begin(r)
+			if !ok { return _renderer_frame_failed(r, terminal, journal, &frame, .Instance) }
+			if r.cursor_staged && !_renderer_upload_instances(r, 0, &frame) {
+				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+			}
+			if !_draw_instance_buffer(r, &frame, r.dirty.buffer, n, n, u64(n) * instance.INSTANCE_STRIDE, emoji_count = n) {
+				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+			}
+			if !_renderer_surface_commit(r, &frame) {
+				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+			}
+			_renderer_frame_published(r, view)
+			return true
+		}
+	}
+--- TARGET:
+	force_full := r.full_redraw_pending || view_changed || (view != nil && (view.scrollback_offset != 0 || view.selection.active)) || len(journal.scroll_ops) > 0
+	if !has_damage && force_full {
+		r.last_dirty = true
+	} else if !has_damage && r.last_dirty {
+		r.last_dirty = false
+	} else if !has_damage {
+		return false
+	} else {
+		r.last_dirty = true
+	}
+	if r.backend == nil || rawptr(r.device) == nil || rawptr(r.queue) == nil ||
+		rawptr(r.instances.bg_pipeline) == nil || rawptr(r.instances.glyph_pipeline) == nil || lut == nil {
+		return _renderer_frame_unavailable(r, terminal, journal, .Instance)
+	}
+	if _style_lut_needs_rebuild(lut, &terminal.grid.style_table) {
+		style_lut_rebuild(lut, &terminal.grid.style_table)
+	}
+
+	is_visual := view != nil && view.visual_mode
+	if is_visual {
+		lut.bg_r5g6b5[0] = color_to_r5g6b5(_renderer_visual_background_color(terminal.grid.style_table.theme.background))
+	} else {
+		lut.bg_r5g6b5[0] = color_to_r5g6b5(terminal.grid.style_table.theme.background)
+	}
+
+	has_emojis := false
+	when ODIN_OS == .Darwin {
+		has_emojis = len(r.emoji_atlas.glyphs) > 0
+	}
+	if !force_full && !has_emojis && len(journal.scroll_ops) == 0 && r.dirty.mirror != nil && !r.ui_staged && !r.interaction_staged {
+		if !r.dirty.armed {
+			render_compile_full_v2(&r.compiled_v2, terminal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster, view)
+			dirty_upload_rebase(&r.dirty, r, lut)
+		}
+		ranges: [DIRTY_UPLOAD_MAX_RANGES]Dirty_Upload_Range
+		_, _, fell_back := dirty_upload_frame(&r.dirty, r, terminal, journal, lut, &ranges)
+		if !fell_back {
+			if r.unlock_cb != nil {
+				r.unlock_cb(r.unlock_data)
+			}
+			n := u32(int(r.rows) * int(r.cols))
+			frame, ok := _renderer_surface_begin(r)
+			if !ok { return _renderer_frame_failed(r, terminal, journal, &frame, .Instance) }
+			if r.cursor_staged && !_renderer_upload_instances(r, 0, &frame) {
+				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+			}
+			if !_draw_instance_buffer(r, &frame, r.dirty.buffer, n, n, u64(n) * instance.INSTANCE_STRIDE) {
+				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+			}
+			if !_renderer_surface_commit(r, &frame) {
+				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+			}
+			_renderer_frame_published(r, view)
+			return true
+		}
+	}
+====================================================
+
+[d56fe791-0120-445f-a5ac-fc3b596eebcf] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Add terminal and view parameters and pass direct_color in _prepare_instances_v2
+--- REPLACEMENT:
+_prepare_instances_v2 :: proc(
+	r: ^Renderer,
+	lut: ^Style_LUT,
+	store: ^termgrid.Grapheme_Store = nil,
+	terminal: ^termgrid.Terminal = nil,
+	view: ^termgrid.Terminal_View = nil,
+) -> (bg_count: u32, glyph_count: u32, emoji_count: u32, decor_count: u32) {
+	cells := r.compiled_v2.cells
+	cols := r.cols
+	cell_w := r.cell_width
+	cell_h := r.cell_height
+	atlas := &r.atlas
+	inst := &r.instances
+
+	bg_count = 0
+	glyph_count = 0
+	emoji_count = 0
+	decor_count = 0
+	grid_limit := inst.max_instances > 1 ? inst.max_instances - 1 : 0
+
+	// Pass 1: backgrounds, densely packed from index 0.
+	for idx in 0..<len(cells) {
+		if bg_count >= grid_limit {
+			break
+		}
+		row := i32(idx) / cols
+		col := i32(idx) % cols
+		x := r.pad_x + f32(col) * cell_w
+		y := r.pad_y + f32(row) * cell_h
+
+		dc := termgrid.terminal_view_get_direct_color(terminal, view, int(row), int(col))
+		emit_bg, _, _, _ := render_cell_expand_instance(
+			cells[idx], lut, atlas, x, y, cell_w, cell_h,
+			&inst.instance_data[bg_count], nil,
+			direct_color = dc,
+		)
+		if emit_bg {
+			bg_count += 1
+		}
+	}
+
+	// Pass 2: glyphs and emojis
+	for idx in 0..<len(cells) {
+		glyph_idx := bg_count + glyph_count
+		if glyph_idx >= grid_limit {
+			break
+		}
+		row := i32(idx) / cols
+		col := i32(idx) % cols
+		x := r.pad_x + f32(col) * cell_w
+		y := r.pad_y + f32(row) * cell_h
+
+		emoji_inst_ptr: ^instance.Instance_Data = nil
+		emoji_atlas_ptr: ^Emoji_Atlas = nil
+		if r.emoji_atlas.has_font {
+			if emoji_count < grid_limit && inst.emoji_data != nil {
+				emoji_inst_ptr = &inst.emoji_data[emoji_count]
+			}
+			emoji_atlas_ptr = &r.emoji_atlas
+		}
+
+		dc := termgrid.terminal_view_get_direct_color(terminal, view, int(row), int(col))
+		_, emit_glyph, emit_emoji, _ := render_cell_expand_instance(
+			cells[idx], lut, atlas, x, y, cell_w, cell_h,
+			nil, &inst.instance_data[glyph_idx],
+			emoji_inst_ptr,
+			emoji_atlas_ptr,
+			store,
+			direct_color = dc,
+		)
+		if emit_emoji {
+			emoji_count += 1
+		} else if emit_glyph {
+			glyph_count += 1
+		}
+	}
+
+	// Pass 3: decorations (underline, strikethrough)
+	for idx in 0..<len(cells) {
+		decor_idx := bg_count + glyph_count + decor_count
+		if decor_idx >= grid_limit {
+			break
+		}
+		row := i32(idx) / cols
+		col := i32(idx) % cols
+		x := r.pad_x + f32(col) * cell_w
+		y := r.pad_y + f32(row) * cell_h
+
+		dc := termgrid.terminal_view_get_direct_color(terminal, view, int(row), int(col))
+		_, _, _, emit_decor := render_cell_expand_instance(
+			cells[idx], lut, atlas, x, y, cell_w, cell_h,
+			nil, nil, nil, nil, nil,
+			&inst.instance_data[decor_idx],
+			direct_color = dc,
+		)
+		if emit_decor {
+			decor_count += 1
+		}
+	}
+
+	return bg_count, glyph_count, emoji_count, decor_count
+}
+--- TARGET:
+_prepare_instances_v2 :: proc(
+	r: ^Renderer,
+	lut: ^Style_LUT,
+	store: ^termgrid.Grapheme_Store = nil,
+) -> (bg_count: u32, glyph_count: u32, emoji_count: u32, decor_count: u32) {
+	cells := r.compiled_v2.cells
+	cols := r.cols
+	cell_w := r.cell_width
+	cell_h := r.cell_height
+	atlas := &r.atlas
+	inst := &r.instances
+
+	bg_count = 0
+	glyph_count = 0
+	emoji_count = 0
+	decor_count = 0
+	grid_limit := inst.max_instances > 1 ? inst.max_instances - 1 : 0
+
+	// Pass 1: backgrounds, densely packed from index 0.
+	for idx in 0..<len(cells) {
+		if bg_count >= grid_limit {
+			break
+		}
+		row := i32(idx) / cols
+		col := i32(idx) % cols
+		x := r.pad_x + f32(col) * cell_w
+		y := r.pad_y + f32(row) * cell_h
+
+		emit_bg, _, _, _ := render_cell_expand_instance(
+			cells[idx], lut, atlas, x, y, cell_w, cell_h,
+			&inst.instance_data[bg_count], nil,
+		)
+		if emit_bg {
+			bg_count += 1
+		}
+	}
+
+	// Pass 2: glyphs and emojis
+	for idx in 0..<len(cells) {
+		glyph_idx := bg_count + glyph_count
+		if glyph_idx >= grid_limit {
+			break
+		}
+		row := i32(idx) / cols
+		col := i32(idx) % cols
+		x := r.pad_x + f32(col) * cell_w
+		y := r.pad_y + f32(row) * cell_h
+
+		emoji_inst_ptr: ^instance.Instance_Data = nil
+		emoji_atlas_ptr: ^Emoji_Atlas = nil
+		if r.emoji_atlas.has_font {
+			if emoji_count < grid_limit && inst.emoji_data != nil {
+				emoji_inst_ptr = &inst.emoji_data[emoji_count]
+			}
+			emoji_atlas_ptr = &r.emoji_atlas
+		}
+
+		_, emit_glyph, emit_emoji, _ := render_cell_expand_instance(
+			cells[idx], lut, atlas, x, y, cell_w, cell_h,
+			nil, &inst.instance_data[glyph_idx],
+			emoji_inst_ptr,
+			emoji_atlas_ptr,
+			store,
+		)
+		if emit_emoji {
+			emoji_count += 1
+		} else if emit_glyph {
+			glyph_count += 1
+		}
+	}
+
+	// Pass 3: decorations (underline, strikethrough)
+	for idx in 0..<len(cells) {
+		decor_idx := bg_count + glyph_count + decor_count
+		if decor_idx >= grid_limit {
+			break
+		}
+		row := i32(idx) / cols
+		col := i32(idx) % cols
+		x := r.pad_x + f32(col) * cell_w
+		y := r.pad_y + f32(row) * cell_h
+
+		_, _, _, emit_decor := render_cell_expand_instance(
+			cells[idx], lut, atlas, x, y, cell_w, cell_h,
+			nil, nil, nil, nil, nil,
+			&inst.instance_data[decor_idx],
+		)
+		if emit_decor {
+			decor_count += 1
+		}
+	}
+
+	return bg_count, glyph_count, emoji_count, decor_count
+}
+====================================================
+
+[d56fe791-0120-445f-a5ac-fc3b596eebcf] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Pass terminal and view to dirty upload and instance preparation procs
+--- REPLACEMENT:
+			render_compile_full_v2(&r.compiled_v2, terminal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster, view)
+			dirty_upload_rebase(&r.dirty, r, lut, &terminal.grapheme_store, terminal, view)
+		}
+		ranges: [DIRTY_UPLOAD_MAX_RANGES]Dirty_Upload_Range
+		_, _, fell_back := dirty_upload_frame(&r.dirty, r, terminal, journal, lut, &ranges, view)
+		if !fell_back {
+			if r.unlock_cb != nil {
+				r.unlock_cb(r.unlock_data)
+			}
+			when ODIN_OS == .Darwin {
+				if r.emoji_atlas.gpu_dirty {
+					emoji_atlas_upload_gpu(&r.emoji_atlas, r.backend, r.device, r.queue)
+				}
+			}
+			if r.atlas.gpu_dirty {
+				atlas_upload_gpu(&r.atlas, r.backend, r.device, r.queue)
+			}
+			n := u32(int(r.rows) * int(r.cols))
+			frame, ok := _renderer_surface_begin(r)
+			if !ok { return _renderer_frame_failed(r, terminal, journal, &frame, .Instance) }
+			if r.cursor_staged && !_renderer_upload_instances(r, 0, &frame) {
+				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+			}
+			if !_draw_instance_buffer(r, &frame, r.dirty.buffer, n, n, u64(n) * instance.INSTANCE_STRIDE, emoji_count = n) {
+				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+			}
+			if !_renderer_surface_commit(r, &frame) {
+				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+			}
+			_renderer_frame_published(r, view)
+			return true
+		}
+	}
+
+	r.dirty.armed = false
+	render_compile_full_v2(&r.compiled_v2, terminal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster, view)
+	bg_count, glyph_count, emoji_count, decor_count := _prepare_instances_v2(r, lut, &terminal.grapheme_store, terminal, view)
+--- TARGET:
+			render_compile_full_v2(&r.compiled_v2, terminal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster, view)
+			dirty_upload_rebase(&r.dirty, r, lut, &terminal.grapheme_store)
+		}
+		ranges: [DIRTY_UPLOAD_MAX_RANGES]Dirty_Upload_Range
+		_, _, fell_back := dirty_upload_frame(&r.dirty, r, terminal, journal, lut, &ranges)
+		if !fell_back {
+			if r.unlock_cb != nil {
+				r.unlock_cb(r.unlock_data)
+			}
+			when ODIN_OS == .Darwin {
+				if r.emoji_atlas.gpu_dirty {
+					emoji_atlas_upload_gpu(&r.emoji_atlas, r.backend, r.device, r.queue)
+				}
+			}
+			if r.atlas.gpu_dirty {
+				atlas_upload_gpu(&r.atlas, r.backend, r.device, r.queue)
+			}
+			n := u32(int(r.rows) * int(r.cols))
+			frame, ok := _renderer_surface_begin(r)
+			if !ok { return _renderer_frame_failed(r, terminal, journal, &frame, .Instance) }
+			if r.cursor_staged && !_renderer_upload_instances(r, 0, &frame) {
+				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+			}
+			if !_draw_instance_buffer(r, &frame, r.dirty.buffer, n, n, u64(n) * instance.INSTANCE_STRIDE, emoji_count = n) {
+				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+			}
+			if !_renderer_surface_commit(r, &frame) {
+				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
+			}
+			_renderer_frame_published(r, view)
+			return true
+		}
+	}
+
+	r.dirty.armed = false
+	render_compile_full_v2(&r.compiled_v2, terminal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster, view)
+	bg_count, glyph_count, emoji_count, decor_count := _prepare_instances_v2(r, lut, &terminal.grapheme_store)
+====================================================
+
+[9fb1c4f3-c400-4b13-8e0e-8cd767b0f57b] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Add Pane_Viewport struct and _prepare_pane_instances_v2 after _prepare_instances_v2
+--- REPLACEMENT:
+	return bg_count, glyph_count, emoji_count, decor_count
+}
+
+// Pane_Viewport defines one viewport within a multi-pane layout to be rendered.
+Pane_Viewport :: struct {
+	terminal:   ^termgrid.Terminal,
+	view:       ^termgrid.Terminal_View,
+	x, y:       f32,
+	w, h:       f32,
+	rows, cols: int,
+	dim_factor: f32, // 1.0 for active focused pane, 0.75-0.80 for inactive
+	is_active:  bool,
+}
+
+// _prepare_pane_instances_v2 fills instance data from multiple panes with viewport offsets and inactive dimming.
+_prepare_pane_instances_v2 :: proc(
+	r:              ^Renderer,
+	lut:            ^Style_LUT,
+	panes:          []Pane_Viewport,
+	compiled_panes: []Compiled_Frame_V2,
+) -> (bg_count: u32, glyph_count: u32, emoji_count: u32, decor_count: u32) {
+	cell_w := r.cell_width
+	cell_h := r.cell_height
+	atlas := &r.atlas
+	inst := &r.instances
+
+	bg_count = 0
+	glyph_count = 0
+	emoji_count = 0
+	decor_count = 0
+	grid_limit := inst.max_instances > 1 ? inst.max_instances - 1 : 0
+
+	// Pass 1: backgrounds across all panes
+	for i in 0 ..< len(panes) {
+		p := &panes[i]
+		if p.terminal == nil || i >= len(compiled_panes) do continue
+		cells := compiled_panes[i].cells
+		cols := i32(p.cols)
+		dim := p.dim_factor
+
+		for idx in 0 ..< len(cells) {
+			if bg_count >= grid_limit do break
+			row := i32(idx) / cols
+			col := i32(idx) % cols
+			x := p.x + f32(col) * cell_w
+			y := p.y + f32(row) * cell_h
+
+			dc := termgrid.terminal_view_get_direct_color(p.terminal, p.view, int(row), int(col))
+			emit_bg, _, _, _ := render_cell_expand_instance(
+				cells[idx], lut, atlas, x, y, cell_w, cell_h,
+				&inst.instance_data[bg_count], nil,
+				direct_color = dc,
+			)
+			if emit_bg {
+				if dim < 1.0 {
+					inst.instance_data[bg_count].r *= dim
+					inst.instance_data[bg_count].g *= dim
+					inst.instance_data[bg_count].b *= dim
+				}
+				bg_count += 1
+			}
+		}
+	}
+
+	// Pass 2: glyphs and emojis across all panes
+	for i in 0 ..< len(panes) {
+		p := &panes[i]
+		if p.terminal == nil || i >= len(compiled_panes) do continue
+		cells := compiled_panes[i].cells
+		cols := i32(p.cols)
+		dim := p.dim_factor
+
+		for idx in 0 ..< len(cells) {
+			glyph_idx := bg_count + glyph_count
+			if glyph_idx >= grid_limit do break
+			row := i32(idx) / cols
+			col := i32(idx) % cols
+			x := p.x + f32(col) * cell_w
+			y := p.y + f32(row) * cell_h
+
+			emoji_inst_ptr: ^instance.Instance_Data = nil
+			emoji_atlas_ptr: ^Emoji_Atlas = nil
+			if r.emoji_atlas.has_font {
+				if emoji_count < grid_limit && inst.emoji_data != nil {
+					emoji_inst_ptr = &inst.emoji_data[emoji_count]
+				}
+				emoji_atlas_ptr = &r.emoji_atlas
+			}
+
+			dc := termgrid.terminal_view_get_direct_color(p.terminal, p.view, int(row), int(col))
+			_, emit_glyph, emit_emoji, _ := render_cell_expand_instance(
+				cells[idx], lut, atlas, x, y, cell_w, cell_h,
+				nil, &inst.instance_data[glyph_idx],
+				emoji_inst_ptr,
+				emoji_atlas_ptr,
+				&p.terminal.grapheme_store,
+				direct_color = dc,
+			)
+			if emit_emoji {
+				if dim < 1.0 && emoji_inst_ptr != nil {
+					emoji_inst_ptr.r *= dim
+					emoji_inst_ptr.g *= dim
+					emoji_inst_ptr.b *= dim
+				}
+				emoji_count += 1
+			} else if emit_glyph {
+				if dim < 1.0 {
+					inst.instance_data[glyph_idx].r *= dim
+					inst.instance_data[glyph_idx].g *= dim
+					inst.instance_data[glyph_idx].b *= dim
+				}
+				glyph_count += 1
+			}
+		}
+	}
+
+	// Pass 3: decorations across all panes
+	for i in 0 ..< len(panes) {
+		p := &panes[i]
+		if p.terminal == nil || i >= len(compiled_panes) do continue
+		cells := compiled_panes[i].cells
+		cols := i32(p.cols)
+		dim := p.dim_factor
+
+		for idx in 0 ..< len(cells) {
+			decor_idx := bg_count + glyph_count + decor_count
+			if decor_idx >= grid_limit do break
+			row := i32(idx) / cols
+			col := i32(idx) % cols
+			x := p.x + f32(col) * cell_w
+			y := p.y + f32(row) * cell_h
+
+			dc := termgrid.terminal_view_get_direct_color(p.terminal, p.view, int(row), int(col))
+			_, _, _, emit_decor := render_cell_expand_instance(
+				cells[idx], lut, atlas, x, y, cell_w, cell_h,
+				nil, nil, nil, nil, nil,
+				&inst.instance_data[decor_idx],
+				direct_color = dc,
+			)
+			if emit_decor {
+				if dim < 1.0 {
+					inst.instance_data[decor_idx].r *= dim
+					inst.instance_data[decor_idx].g *= dim
+					inst.instance_data[decor_idx].b *= dim
+				}
+				decor_count += 1
+			}
+		}
+	}
+
+	return bg_count, glyph_count, emoji_count, decor_count
+}
+
+// _draw_cursor_overlay appends the staged cursor draw to the active instance
+
+--- TARGET:
+	return bg_count, glyph_count, emoji_count, decor_count
+}
+
+// _draw_cursor_overlay appends the staged cursor draw to the active instance
+
+====================================================
+
+[9fb1c4f3-c400-4b13-8e0e-8cd767b0f57b] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Add renderer_frame_panes after renderer_frame_v2
+--- REPLACEMENT:
+	return _renderer_frame_v2_journal(r, terminal, &journal, lut, view, view_changed)
+}
+
+// renderer_frame_panes renders multiple pane viewports in a single GPU pass.
+renderer_frame_panes :: proc(
+	r:     ^Renderer,
+	panes: []Pane_Viewport,
+	lut:   ^Style_LUT = nil,
+) -> bool {
+	if r == nil || len(panes) == 0 {
+		return false
+	}
+	r.frame_count += 1
+	lut_ptr := lut != nil ? lut : &r.style_lut
+
+	active_term: ^termgrid.Terminal = nil
+	for p in panes {
+		if p.is_active && p.terminal != nil {
+			active_term = p.terminal
+			break
+		}
+	}
+	if active_term == nil && len(panes) > 0 {
+		active_term = panes[0].terminal
+	}
+	if active_term != nil {
+		if _style_lut_needs_rebuild(lut_ptr, &active_term.grid.style_table) {
+			_style_lut_rebuild(lut_ptr, &active_term.grid.style_table)
+		}
+		lut_ptr.bg_r5g6b5[0] = color_to_r5g6b5(active_term.grid.style_table.theme.background)
+	}
+
+	compiled_panes := make([]Compiled_Frame_V2, len(panes), context.temp_allocator)
+	for i in 0 ..< len(panes) {
+		p := &panes[i]
+		if p.terminal == nil || p.rows <= 0 || p.cols <= 0 do continue
+		render_compiler_init_v2(&compiled_panes[i], i32(p.rows), i32(p.cols), context.temp_allocator)
+		render_compile_full_v2(&compiled_panes[i], p.terminal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster, p.view)
+	}
+
+	r.dirty.armed = false
+	bg_count, glyph_count, emoji_count, decor_count := _prepare_pane_instances_v2(r, lut_ptr, panes, compiled_panes)
+
+	if r.unlock_cb != nil {
+		r.unlock_cb(r.unlock_data)
+	}
+	when ODIN_OS == .Darwin {
+		if r.emoji_atlas.gpu_dirty {
+			emoji_atlas_upload_gpu(&r.emoji_atlas, r.backend, r.device, r.queue)
+		}
+		if emoji_count > 0 && rawptr(r.instances.emoji_buffer) != nil && r.instances.emoji_data != nil {
+			r.backend.write_buffer(r.queue, r.instances.emoji_buffer, 0, raw_data(r.instances.emoji_data), u64(emoji_count) * instance.INSTANCE_STRIDE)
+		}
+	}
+	if r.atlas.gpu_dirty {
+		atlas_upload_gpu(&r.atlas, r.backend, r.device, r.queue)
+	}
+
+	frame, ok := _renderer_surface_begin(r)
+	if !ok {
+		return false
+	}
+	if !_renderer_upload_instances(r, bg_count + glyph_count + decor_count, &frame) {
+		_renderer_surface_abort(r, &frame)
+		return false
+	}
+	decor_offset := u64(bg_count + glyph_count) * instance.INSTANCE_STRIDE
+	if !_draw_instance_buffer(r, &frame, frame.cursor_buffer, bg_count, glyph_count, u64(bg_count) * instance.INSTANCE_STRIDE, emoji_count, false, decor_count, decor_offset) {
+		_renderer_surface_abort(r, &frame)
+		return false
+	}
+	if !_renderer_surface_commit(r, &frame) {
+		return false
+	}
+	r.full_redraw_pending = false
+	_renderer_frame_published(r, nil)
+	return true
+}
+
+// renderer_set_strategy selects the frame path. Switching to Compute_Tiles
+
+--- TARGET:
+	return _renderer_frame_v2_journal(r, terminal, &journal, lut, view, view_changed)
+}
+
+// renderer_set_strategy selects the frame path. Switching to Compute_Tiles
+
+====================================================
+
+[9fb1c4f3-c400-4b13-8e0e-8cd767b0f57b] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Replace _style_lut_rebuild with style_lut_rebuild
+--- REPLACEMENT:
+		if _style_lut_needs_rebuild(lut_ptr, &active_term.grid.style_table) {
+			style_lut_rebuild(lut_ptr, &active_term.grid.style_table)
+		}
+--- TARGET:
+		if _style_lut_needs_rebuild(lut_ptr, &active_term.grid.style_table) {
+			_style_lut_rebuild(lut_ptr, &active_term.grid.style_table)
+		}
+====================================================
+
+[c241bd2f-68aa-45df-b641-3f457879784f] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Call renderer_prepare_frame in renderer_frame_panes to drain async raster completions and update atlas
+--- REPLACEMENT:
+		lut_ptr.bg_r5g6b5[0] = color_to_r5g6b5(active_term.grid.style_table.theme.background)
+	}
+
+	if !r.frame_prepared {
+		renderer_prepare_frame(r, active_term)
+	}
+	r.frame_prepared = false
+
+	compiled_panes := make([]Compiled_Frame_V2, len(panes), context.temp_allocator)
+--- TARGET:
+		lut_ptr.bg_r5g6b5[0] = color_to_r5g6b5(active_term.grid.style_table.theme.background)
+	}
+
+	compiled_panes := make([]Compiled_Frame_V2, len(panes), context.temp_allocator)
+====================================================
+
+[c241bd2f-68aa-45df-b641-3f457879784f] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Add clip_rect and apply _clip_instance_rect in _prepare_pane_instances_v2
+--- REPLACEMENT:
+// Pane_Viewport defines one viewport within a multi-pane layout to be rendered.
+Pane_Viewport :: struct {
+	terminal:   ^termgrid.Terminal,
+	view:       ^termgrid.Terminal_View,
+	x, y:       f32,
+	w, h:       f32,
+	clip_rect:  [4]f32, // [min_x, min_y, max_x, max_y] physical pixels; if clip_rect[2] <= clip_rect[0], no clipping
+	rows, cols: int,
+	dim_factor: f32, // 1.0 for active focused pane, 0.75-0.80 for inactive
+	is_active:  bool,
+}
+
+// _clip_instance_rect clips an instance quad to [clip_min_x, clip_min_y, clip_max_x, clip_max_y].
+// Adjusts UV coordinates for textured glyphs/emojis proportionally. Returns false if fully outside.
+_clip_instance_rect :: #force_inline proc(
+	inst: ^instance.Instance_Data,
+	clip: [4]f32,
+	is_textured: bool = false,
+) -> bool {
+	if inst == nil do return false
+	min_x := clip[0]
+	min_y := clip[1]
+	max_x := clip[2]
+	max_y := clip[3]
+	if max_x <= min_x || max_y <= min_y do return true // No clipping requested
+
+	x0 := inst.x
+	y0 := inst.y
+	x1 := inst.x + inst.cw
+	y1 := inst.y + inst.ch
+
+	// Fully out of bounds
+	if x1 <= min_x || x0 >= max_x || y1 <= min_y || y0 >= max_y {
+		return false
+	}
+
+	orig_cw := inst.cw
+	orig_ch := inst.ch
+
+	// Clip left
+	if x0 < min_x {
+		dx := min_x - x0
+		inst.x = min_x
+		inst.cw -= dx
+		if is_textured && orig_cw > 0 {
+			inst.u0 += (inst.u1 - inst.u0) * (dx / orig_cw)
+		}
+	}
+
+	// Clip right
+	if inst.x + inst.cw > max_x {
+		new_cw := max(f32(0), max_x - inst.x)
+		if is_textured && inst.cw > 0 {
+			inst.u1 = inst.u0 + (inst.u1 - inst.u0) * (new_cw / inst.cw)
+		}
+		inst.cw = new_cw
+	}
+
+	// Clip top
+	if y0 < min_y {
+		dy := min_y - y0
+		inst.y = min_y
+		inst.ch -= dy
+		if is_textured && orig_ch > 0 {
+			inst.v0 += (inst.v1 - inst.v0) * (dy / orig_ch)
+		}
+	}
+
+	// Clip bottom
+	if inst.y + inst.ch > max_y {
+		new_ch := max(f32(0), max_y - inst.y)
+		if is_textured && inst.ch > 0 {
+			inst.v1 = inst.v0 + (inst.v1 - inst.v0) * (new_ch / inst.ch)
+		}
+		inst.ch = new_ch
+	}
+
+	return inst.cw > 0 && inst.ch > 0
+}
+
+// _prepare_pane_instances_v2 fills instance data from multiple panes with viewport offsets and inactive dimming.
+_prepare_pane_instances_v2 :: proc(
+	r:              ^Renderer,
+	lut:            ^Style_LUT,
+	panes:          []Pane_Viewport,
+	compiled_panes: []Compiled_Frame_V2,
+) -> (bg_count: u32, glyph_count: u32, emoji_count: u32, decor_count: u32) {
+	cell_w := r.cell_width
+	cell_h := r.cell_height
+	atlas := &r.atlas
+	inst := &r.instances
+
+	bg_count = 0
+	glyph_count = 0
+	emoji_count = 0
+	decor_count = 0
+	grid_limit := inst.max_instances > 1 ? inst.max_instances - 1 : 0
+
+	// Pass 1: backgrounds across all panes
+	for i in 0 ..< len(panes) {
+		p := &panes[i]
+		if p.terminal == nil || i >= len(compiled_panes) do continue
+		cells := compiled_panes[i].cells
+		cols := i32(p.cols)
+		dim := p.dim_factor
+		clip := p.clip_rect
+		if clip[2] <= clip[0] && p.w > 0 && p.h > 0 {
+			clip = [4]f32{p.x, p.y, p.x + p.w, p.y + p.h}
+		}
+
+		for idx in 0 ..< len(cells) {
+			if bg_count >= grid_limit do break
+			row := i32(idx) / cols
+			col := i32(idx) % cols
+			x := p.x + f32(col) * cell_w
+			y := p.y + f32(row) * cell_h
+
+			dc := termgrid.terminal_view_get_direct_color(p.terminal, p.view, int(row), int(col))
+			emit_bg, _, _, _ := render_cell_expand_instance(
+				cells[idx], lut, atlas, x, y, cell_w, cell_h,
+				&inst.instance_data[bg_count], nil,
+				direct_color = dc,
+			)
+			if emit_bg {
+				if _clip_instance_rect(&inst.instance_data[bg_count], clip, false) {
+					if dim < 1.0 {
+						inst.instance_data[bg_count].r *= dim
+						inst.instance_data[bg_count].g *= dim
+						inst.instance_data[bg_count].b *= dim
+					}
+					bg_count += 1
+				}
+			}
+		}
+	}
+
+	// Pass 2: glyphs and emojis across all panes
+	for i in 0 ..< len(panes) {
+		p := &panes[i]
+		if p.terminal == nil || i >= len(compiled_panes) do continue
+		cells := compiled_panes[i].cells
+		cols := i32(p.cols)
+		dim := p.dim_factor
+		clip := p.clip_rect
+		if clip[2] <= clip[0] && p.w > 0 && p.h > 0 {
+			clip = [4]f32{p.x, p.y, p.x + p.w, p.y + p.h}
+		}
+
+		for idx in 0 ..< len(cells) {
+			glyph_idx := bg_count + glyph_count
+			if glyph_idx >= grid_limit do break
+			row := i32(idx) / cols
+			col := i32(idx) % cols
+			x := p.x + f32(col) * cell_w
+			y := p.y + f32(row) * cell_h
+
+			emoji_inst_ptr: ^instance.Instance_Data = nil
+			emoji_atlas_ptr: ^Emoji_Atlas = nil
+			if r.emoji_atlas.has_font {
+				if emoji_count < grid_limit && inst.emoji_data != nil {
+					emoji_inst_ptr = &inst.emoji_data[emoji_count]
+				}
+				emoji_atlas_ptr = &r.emoji_atlas
+			}
+
+			dc := termgrid.terminal_view_get_direct_color(p.terminal, p.view, int(row), int(col))
+			_, emit_glyph, emit_emoji, _ := render_cell_expand_instance(
+				cells[idx], lut, atlas, x, y, cell_w, cell_h,
+				nil, &inst.instance_data[glyph_idx],
+				emoji_inst_ptr,
+				emoji_atlas_ptr,
+				&p.terminal.grapheme_store,
+				direct_color = dc,
+			)
+			if emit_emoji {
+				if emoji_inst_ptr != nil && _clip_instance_rect(emoji_inst_ptr, clip, true) {
+					if dim < 1.0 {
+						emoji_inst_ptr.r *= dim
+						emoji_inst_ptr.g *= dim
+						emoji_inst_ptr.b *= dim
+					}
+					emoji_count += 1
+				}
+			} else if emit_glyph {
+				if _clip_instance_rect(&inst.instance_data[glyph_idx], clip, true) {
+					if dim < 1.0 {
+						inst.instance_data[glyph_idx].r *= dim
+						inst.instance_data[glyph_idx].g *= dim
+						inst.instance_data[glyph_idx].b *= dim
+					}
+					glyph_count += 1
+				}
+			}
+		}
+	}
+
+	// Pass 3: decorations across all panes
+	for i in 0 ..< len(panes) {
+		p := &panes[i]
+		if p.terminal == nil || i >= len(compiled_panes) do continue
+		cells := compiled_panes[i].cells
+		cols := i32(p.cols)
+		dim := p.dim_factor
+		clip := p.clip_rect
+		if clip[2] <= clip[0] && p.w > 0 && p.h > 0 {
+			clip = [4]f32{p.x, p.y, p.x + p.w, p.y + p.h}
+		}
+
+		for idx in 0 ..< len(cells) {
+			decor_idx := bg_count + glyph_count + decor_count
+			if decor_idx >= grid_limit do break
+			row := i32(idx) / cols
+			col := i32(idx) % cols
+			x := p.x + f32(col) * cell_w
+			y := p.y + f32(row) * cell_h
+
+			dc := termgrid.terminal_view_get_direct_color(p.terminal, p.view, int(row), int(col))
+			_, _, _, emit_decor := render_cell_expand_instance(
+				cells[idx], lut, atlas, x, y, cell_w, cell_h,
+				nil, nil, nil, nil, nil,
+				&inst.instance_data[decor_idx],
+				direct_color = dc,
+			)
+			if emit_decor {
+				if _clip_instance_rect(&inst.instance_data[decor_idx], clip, false) {
+					if dim < 1.0 {
+						inst.instance_data[decor_idx].r *= dim
+						inst.instance_data[decor_idx].g *= dim
+						inst.instance_data[decor_idx].b *= dim
+					}
+					decor_count += 1
+				}
+			}
+		}
+	}
+
+	return bg_count, glyph_count, emoji_count, decor_count
+}
+--- TARGET:
+// Pane_Viewport defines one viewport within a multi-pane layout to be rendered.
+Pane_Viewport :: struct {
+	terminal:   ^termgrid.Terminal,
+	view:       ^termgrid.Terminal_View,
+	x, y:       f32,
+	w, h:       f32,
+	rows, cols: int,
+	dim_factor: f32, // 1.0 for active focused pane, 0.75-0.80 for inactive
+	is_active:  bool,
+}
+
+// _prepare_pane_instances_v2 fills instance data from multiple panes with viewport offsets and inactive dimming.
+_prepare_pane_instances_v2 :: proc(
+	r:              ^Renderer,
+	lut:            ^Style_LUT,
+	panes:          []Pane_Viewport,
+	compiled_panes: []Compiled_Frame_V2,
+) -> (bg_count: u32, glyph_count: u32, emoji_count: u32, decor_count: u32) {
+	cell_w := r.cell_width
+	cell_h := r.cell_height
+	atlas := &r.atlas
+	inst := &r.instances
+
+	bg_count = 0
+	glyph_count = 0
+	emoji_count = 0
+	decor_count = 0
+	grid_limit := inst.max_instances > 1 ? inst.max_instances - 1 : 0
+
+	// Pass 1: backgrounds across all panes
+	for i in 0 ..< len(panes) {
+		p := &panes[i]
+		if p.terminal == nil || i >= len(compiled_panes) do continue
+		cells := compiled_panes[i].cells
+		cols := i32(p.cols)
+		dim := p.dim_factor
+
+		for idx in 0 ..< len(cells) {
+			if bg_count >= grid_limit do break
+			row := i32(idx) / cols
+			col := i32(idx) % cols
+			x := p.x + f32(col) * cell_w
+			y := p.y + f32(row) * cell_h
+
+			dc := termgrid.terminal_view_get_direct_color(p.terminal, p.view, int(row), int(col))
+			emit_bg, _, _, _ := render_cell_expand_instance(
+				cells[idx], lut, atlas, x, y, cell_w, cell_h,
+				&inst.instance_data[bg_count], nil,
+				direct_color = dc,
+			)
+			if emit_bg {
+				if dim < 1.0 {
+					inst.instance_data[bg_count].r *= dim
+					inst.instance_data[bg_count].g *= dim
+					inst.instance_data[bg_count].b *= dim
+				}
+				bg_count += 1
+			}
+		}
+	}
+
+	// Pass 2: glyphs and emojis across all panes
+	for i in 0 ..< len(panes) {
+		p := &panes[i]
+		if p.terminal == nil || i >= len(compiled_panes) do continue
+		cells := compiled_panes[i].cells
+		cols := i32(p.cols)
+		dim := p.dim_factor
+
+		for idx in 0 ..< len(cells) {
+			glyph_idx := bg_count + glyph_count
+			if glyph_idx >= grid_limit do break
+			row := i32(idx) / cols
+			col := i32(idx) % cols
+			x := p.x + f32(col) * cell_w
+			y := p.y + f32(row) * cell_h
+
+			emoji_inst_ptr: ^instance.Instance_Data = nil
+			emoji_atlas_ptr: ^Emoji_Atlas = nil
+			if r.emoji_atlas.has_font {
+				if emoji_count < grid_limit && inst.emoji_data != nil {
+					emoji_inst_ptr = &inst.emoji_data[emoji_count]
+				}
+				emoji_atlas_ptr = &r.emoji_atlas
+			}
+
+			dc := termgrid.terminal_view_get_direct_color(p.terminal, p.view, int(row), int(col))
+			_, emit_glyph, emit_emoji, _ := render_cell_expand_instance(
+				cells[idx], lut, atlas, x, y, cell_w, cell_h,
+				nil, &inst.instance_data[glyph_idx],
+				emoji_inst_ptr,
+				emoji_atlas_ptr,
+				&p.terminal.grapheme_store,
+				direct_color = dc,
+			)
+			if emit_emoji {
+				if dim < 1.0 && emoji_inst_ptr != nil {
+					emoji_inst_ptr.r *= dim
+					emoji_inst_ptr.g *= dim
+					emoji_inst_ptr.b *= dim
+				}
+				emoji_count += 1
+			} else if emit_glyph {
+				if dim < 1.0 {
+					inst.instance_data[glyph_idx].r *= dim
+					inst.instance_data[glyph_idx].g *= dim
+					inst.instance_data[glyph_idx].b *= dim
+				}
+				glyph_count += 1
+			}
+		}
+	}
+
+	// Pass 3: decorations across all panes
+	for i in 0 ..< len(panes) {
+		p := &panes[i]
+		if p.terminal == nil || i >= len(compiled_panes) do continue
+		cells := compiled_panes[i].cells
+		cols := i32(p.cols)
+		dim := p.dim_factor
+
+		for idx in 0 ..< len(cells) {
+			decor_idx := bg_count + glyph_count + decor_count
+			if decor_idx >= grid_limit do break
+			row := i32(idx) / cols
+			col := i32(idx) % cols
+			x := p.x + f32(col) * cell_w
+			y := p.y + f32(row) * cell_h
+
+			dc := termgrid.terminal_view_get_direct_color(p.terminal, p.view, int(row), int(col))
+			_, _, _, emit_decor := render_cell_expand_instance(
+				cells[idx], lut, atlas, x, y, cell_w, cell_h,
+				nil, nil, nil, nil, nil,
+				&inst.instance_data[decor_idx],
+				direct_color = dc,
+			)
+			if emit_decor {
+				if dim < 1.0 {
+					inst.instance_data[decor_idx].r *= dim
+					inst.instance_data[decor_idx].g *= dim
+					inst.instance_data[decor_idx].b *= dim
+				}
+				decor_count += 1
+			}
+		}
+	}
+
+	return bg_count, glyph_count, emoji_count, decor_count
+}
+====================================================
+
+[91443316-418e-4719-88d8-89fb836f8499] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Replace unlock_cb invocation with safe clear and call
+--- REPLACEMENT:
+	if r.unlock_cb != nil {
+		cb := r.unlock_cb
+		data := r.unlock_data
+		r.unlock_cb = nil
+		r.unlock_data = nil
+		cb(data)
+	}
+--- TARGET:
+	if r.unlock_cb != nil {
+		r.unlock_cb(r.unlock_data)
+	}
+====================================================
+
+[91443316-418e-4719-88d8-89fb836f8499] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Replace unlock_cb invocation with safe clear and call
+--- REPLACEMENT:
+			if r.unlock_cb != nil {
+				cb := r.unlock_cb
+				data := r.unlock_data
+				r.unlock_cb = nil
+				r.unlock_data = nil
+				cb(data)
+			}
+--- TARGET:
+			if r.unlock_cb != nil {
+				r.unlock_cb(r.unlock_data)
+			}
+====================================================
+
+[91443316-418e-4719-88d8-89fb836f8499] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Replace unlock_cb invocation with safe clear and call
+--- REPLACEMENT:
+	if r.unlock_cb != nil {
+		cb := r.unlock_cb
+		data := r.unlock_data
+		r.unlock_cb = nil
+		r.unlock_data = nil
+		cb(data)
+	}
+--- TARGET:
+	if r.unlock_cb != nil {
+		r.unlock_cb(r.unlock_data)
+	}
+====================================================
+
+[91443316-418e-4719-88d8-89fb836f8499] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Replace unlock_cb invocation with safe clear and call
+--- REPLACEMENT:
+	if r.unlock_cb != nil {
+		cb := r.unlock_cb
+		data := r.unlock_data
+		r.unlock_cb = nil
+		r.unlock_data = nil
+		cb(data)
+	}
+--- TARGET:
+	if r.unlock_cb != nil {
+		r.unlock_cb(r.unlock_data)
+	}
+====================================================
+
+[01dc892c-1363-40f6-809c-10459cefec75] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Clear damage on rendered panes before returning true
+--- REPLACEMENT:
+	if !_renderer_surface_commit(r, &frame) {
+		return false
+	}
+	for i in 0 ..< len(panes) {
+		p := &panes[i]
+		if p.terminal != nil {
+			termgrid.terminal_clear_damage(p.terminal)
+		}
+	}
+	r.full_redraw_pending = false
+	_renderer_frame_published(r, nil)
+	return true
+--- TARGET:
+	if !_renderer_surface_commit(r, &frame) {
+		return false
+	}
+	r.full_redraw_pending = false
+	_renderer_frame_published(r, nil)
+	return true
+====================================================
+
+[b7d306c3-800a-4607-b677-cffbb5eda4ae] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Call termgrid.damage_journal_destroy(journal) before unlock_cb on fast path
+--- REPLACEMENT:
+		if !fell_back {
+			termgrid.damage_journal_destroy(journal)
+			if r.unlock_cb != nil {
+				cb := r.unlock_cb
+				data := r.unlock_data
+				r.unlock_cb = nil
+				r.unlock_data = nil
+				cb(data)
+			}
+--- TARGET:
+		if !fell_back {
+			if r.unlock_cb != nil {
+				cb := r.unlock_cb
+				data := r.unlock_data
+				r.unlock_cb = nil
+				r.unlock_data = nil
+				cb(data)
+			}
+====================================================
+
+[b7d306c3-800a-4607-b677-cffbb5eda4ae] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Call termgrid.damage_journal_destroy(journal) before unlock_cb on full path
+--- REPLACEMENT:
+	bg_count, glyph_count, emoji_count, decor_count := _prepare_instances_v2(r, lut, &terminal.grapheme_store, terminal, view)
+	termgrid.damage_journal_destroy(journal)
+	if r.unlock_cb != nil {
+--- TARGET:
+	bg_count, glyph_count, emoji_count, decor_count := _prepare_instances_v2(r, lut, &terminal.grapheme_store, terminal, view)
+	if r.unlock_cb != nil {
+====================================================
+
+[b7d306c3-800a-4607-b677-cffbb5eda4ae] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Move termgrid.damage_journal_destroy(journal) inside if r.unlock_cb != nil on fast path
+--- REPLACEMENT:
+		if !fell_back {
+			if r.unlock_cb != nil {
+				termgrid.damage_journal_destroy(journal)
+				cb := r.unlock_cb
+				data := r.unlock_data
+				r.unlock_cb = nil
+				r.unlock_data = nil
+				cb(data)
+			}
+--- TARGET:
+		if !fell_back {
+			termgrid.damage_journal_destroy(journal)
+			if r.unlock_cb != nil {
+				cb := r.unlock_cb
+				data := r.unlock_data
+				r.unlock_cb = nil
+				r.unlock_data = nil
+				cb(data)
+			}
+====================================================
+
+[b7d306c3-800a-4607-b677-cffbb5eda4ae] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Move termgrid.damage_journal_destroy(journal) inside if r.unlock_cb != nil on full path
+--- REPLACEMENT:
+	bg_count, glyph_count, emoji_count, decor_count := _prepare_instances_v2(r, lut, &terminal.grapheme_store, terminal, view)
+	if r.unlock_cb != nil {
+		termgrid.damage_journal_destroy(journal)
+		cb := r.unlock_cb
+		data := r.unlock_data
+		r.unlock_cb = nil
+		r.unlock_data = nil
+		cb(data)
+	}
+--- TARGET:
+	bg_count, glyph_count, emoji_count, decor_count := _prepare_instances_v2(r, lut, &terminal.grapheme_store, terminal, view)
+	termgrid.damage_journal_destroy(journal)
+	if r.unlock_cb != nil {
+		cb := r.unlock_cb
+		data := r.unlock_data
+		r.unlock_cb = nil
+		r.unlock_data = nil
+		cb(data)
+	}
+====================================================
+
+[dd1b0730-c94d-4acf-895d-dc50f0b8ea5f] PATCH TO /Users/dwlhm/project/term/src/render/renderer.odin
+Move damage clearing before unlock_cb, set r.full_redraw_pending = true on _renderer_surface_commit failure, and remove old damage clear loop
+--- REPLACEMENT:
+	r.dirty.armed = false
+	bg_count, glyph_count, emoji_count, decor_count := _prepare_pane_instances_v2(r, lut_ptr, panes, compiled_panes)
+
+	for i in 0 ..< len(panes) {
+		p := &panes[i]
+		if p.terminal != nil {
+			termgrid.terminal_clear_damage(p.terminal)
+		}
+	}
+
+	if r.unlock_cb != nil {
+		cb := r.unlock_cb
+		data := r.unlock_data
+		r.unlock_cb = nil
+		r.unlock_data = nil
+		cb(data)
+	}
+	when ODIN_OS == .Darwin {
+		if r.emoji_atlas.gpu_dirty {
+			emoji_atlas_upload_gpu(&r.emoji_atlas, r.backend, r.device, r.queue)
+		}
+		if emoji_count > 0 && rawptr(r.instances.emoji_buffer) != nil && r.instances.emoji_data != nil {
+			r.backend.write_buffer(r.queue, r.instances.emoji_buffer, 0, raw_data(r.instances.emoji_data), u64(emoji_count) * instance.INSTANCE_STRIDE)
+		}
+	}
+	if r.atlas.gpu_dirty {
+		atlas_upload_gpu(&r.atlas, r.backend, r.device, r.queue)
+	}
+
+	frame, ok := _renderer_surface_begin(r)
+	if !ok {
+		return false
+	}
+	if !_renderer_upload_instances(r, bg_count + glyph_count + decor_count, &frame) {
+		_renderer_surface_abort(r, &frame)
+		return false
+	}
+	decor_offset := u64(bg_count + glyph_count) * instance.INSTANCE_STRIDE
+	if !_draw_instance_buffer(r, &frame, frame.cursor_buffer, bg_count, glyph_count, u64(bg_count) * instance.INSTANCE_STRIDE, emoji_count, false, decor_count, decor_offset) {
+		_renderer_surface_abort(r, &frame)
+		return false
+	}
+	if !_renderer_surface_commit(r, &frame) {
+		r.full_redraw_pending = true
+		return false
+	}
+	r.full_redraw_pending = false
+	_renderer_frame_published(r, nil)
+	return true
+--- TARGET:
+	r.dirty.armed = false
+	bg_count, glyph_count, emoji_count, decor_count := _prepare_pane_instances_v2(r, lut_ptr, panes, compiled_panes)
+
+	if r.unlock_cb != nil {
+		cb := r.unlock_cb
+		data := r.unlock_data
+		r.unlock_cb = nil
+		r.unlock_data = nil
+		cb(data)
+	}
+	when ODIN_OS == .Darwin {
+		if r.emoji_atlas.gpu_dirty {
+			emoji_atlas_upload_gpu(&r.emoji_atlas, r.backend, r.device, r.queue)
+		}
+		if emoji_count > 0 && rawptr(r.instances.emoji_buffer) != nil && r.instances.emoji_data != nil {
+			r.backend.write_buffer(r.queue, r.instances.emoji_buffer, 0, raw_data(r.instances.emoji_data), u64(emoji_count) * instance.INSTANCE_STRIDE)
+		}
+	}
+	if r.atlas.gpu_dirty {
+		atlas_upload_gpu(&r.atlas, r.backend, r.device, r.queue)
+	}
+
+	frame, ok := _renderer_surface_begin(r)
+	if !ok {
+		return false
+	}
+	if !_renderer_upload_instances(r, bg_count + glyph_count + decor_count, &frame) {
+		_renderer_surface_abort(r, &frame)
+		return false
+	}
+	decor_offset := u64(bg_count + glyph_count) * instance.INSTANCE_STRIDE
+	if !_draw_instance_buffer(r, &frame, frame.cursor_buffer, bg_count, glyph_count, u64(bg_count) * instance.INSTANCE_STRIDE, emoji_count, false, decor_count, decor_offset) {
+		_renderer_surface_abort(r, &frame)
+		return false
+	}
+	if !_renderer_surface_commit(r, &frame) {
+		return false
+	}
+	for i in 0 ..< len(panes) {
+		p := &panes[i]
+		if p.terminal != nil {
+			termgrid.terminal_clear_damage(p.terminal)
+		}
+	}
+	r.full_redraw_pending = false
+	_renderer_frame_published(r, nil)
+	return true
+====================================================
+

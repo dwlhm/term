@@ -325,3 +325,47 @@ test_cursor_draw_styles_bar_and_underline :: proc(t: ^testing.T) {
 	testing.expect_value(t, block_quad.ch, r.cell_height)
 }
 
+@(test)
+test_cursor_draw_pane_bounds_and_clip_rect :: proc(t: ^testing.T) {
+	r := _cursor_draw_renderer(CURSOR_DRAW_ROWS, CURSOR_DRAW_COLS, CURSOR_DRAW_MAX)
+	defer delete(r.instances.instance_data)
+
+	o: render.Cursor_Overlay
+	_cursor_draw_lit(&o, 10, 20)
+
+	// 1. Within renderer bounds (24x80), but outside pane bounds (8x15)
+	drew := render.cursor_overlay_draw(&r, &o, 0, 0, 0, 8, 15)
+	testing.expect(t, !drew, "cursor outside pane_rows/pane_cols must return false")
+	testing.expect(t, !r.cursor_staged, "cursor outside pane bounds must not be staged")
+
+	// 2. Inside pane bounds (12x25)
+	drew = render.cursor_overlay_draw(&r, &o, 0, 0, 0, 12, 25)
+	testing.expect(t, drew, "cursor within pane bounds must draw")
+	testing.expect(t, r.cursor_staged, "cursor within pane bounds must stage quad")
+
+	slot := r.instances.max_instances - 1
+	quad := r.instances.instance_data[slot]
+	orig_x := f32(20 * CURSOR_DRAW_CW)
+	orig_y := f32(10 * CURSOR_DRAW_CH)
+	testing.expect_value(t, quad.x, orig_x)
+	testing.expect_value(t, quad.y, orig_y)
+	testing.expect_value(t, quad.cw, f32(CURSOR_DRAW_CW))
+	testing.expect_value(t, quad.ch, f32(CURSOR_DRAW_CH))
+
+	// 3. Test clip_rect completely outside
+	clip_outside := [4]f32{0, 0, 50, 50}
+	drew = render.cursor_overlay_draw(&r, &o, 0, 0, 0, 12, 25, clip_outside)
+	testing.expect(t, !drew, "cursor outside clip_rect must return false")
+
+	// 4. Test clip_rect partial clipping on all 4 sides
+	clip_partial := [4]f32{orig_x + 2, orig_y + 3, orig_x + 6, orig_y + 12}
+	drew = render.cursor_overlay_draw(&r, &o, 0, 0, 0, 12, 25, clip_partial)
+	testing.expect(t, drew, "partially visible cursor quad must draw")
+	clipped_quad := r.instances.instance_data[slot]
+	testing.expect_value(t, clipped_quad.x, orig_x + 2)
+	testing.expect_value(t, clipped_quad.y, orig_y + 3)
+	testing.expect_value(t, clipped_quad.cw, f32(4))
+	testing.expect_value(t, clipped_quad.ch, f32(9))
+}
+
+

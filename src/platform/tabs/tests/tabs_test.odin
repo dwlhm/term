@@ -52,3 +52,27 @@ test_tabs_lifecycle :: proc(t: ^testing.T) {
 	testing.expect(t, state.scroll_offset <= state.scroll_max)
 	_ = scrolled
 }
+
+@(test)
+test_tabs_detached_badge :: proc(t: ^testing.T) {
+	state: tabs.Tab_Bar_State
+	tabs.tabs_init(&state)
+	state.detached_count = 2
+
+	rects: [4]tabs.Rect_f32
+	titles := []string{"Tab 1"}
+	_ = tabs.tabs_layout(&state, 800, 1, rects[:], 0, titles)
+
+	testing.expect(t, state.detached_badge_rect.w > 0, "detached badge must have width when detached_count > 0")
+	testing.expect_value(t, state.detached_badge_rect.h, tabs.TAB_BAR_HEIGHT)
+
+	// Hit test detached badge
+	consumed, action, _ := tabs.tabs_dispatch_pointer(
+		&state, 1, rects[:],
+		state.detached_badge_rect.x + state.detached_badge_rect.w * 0.5,
+		tabs.TAB_BAR_HEIGHT * 0.5,
+		true, 1, 1,
+	)
+	testing.expect_value(t, consumed, true)
+	testing.expect_value(t, action, tabs.Tab_Action.Open_Session_Switcher)
+}

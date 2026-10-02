@@ -1,5 +1,6 @@
 package config_tests
 
+import "core:fmt"
 import "core:testing"
 import config ".."
 import termgrid "../../terminal"
@@ -27,6 +28,9 @@ test_config_default :: proc(t: ^testing.T) {
 	testing.expect_value(t, cfg.padding_x, 6)
 	testing.expect_value(t, cfg.padding_y, 4)
 	testing.expect_value(t, cfg.locale, "")
+	testing.expect_value(t, cfg.window_opacity, f32(1.0))
+	testing.expect_value(t, cfg.window_blur, false)
+	testing.expect_value(t, cfg.allow_screensaver, true)
 }
 
 @(test)
@@ -212,3 +216,77 @@ locale = "id"
 	testing.expect(t, ok, "locale config must parse successfully")
 	testing.expect_value(t, cfg.locale, "id")
 }
+
+@(test)
+test_parse_config_window_opacity_and_blur :: proc(t: ^testing.T) {
+	src := `
+window_opacity = 0.85
+window_blur = true
+`
+	cfg, ok, _ := config.parse_config(src)
+	defer config.config_destroy(&cfg)
+
+	testing.expect(t, ok, "window_opacity and blur must parse successfully")
+	testing.expect_value(t, cfg.window_opacity, f32(0.85))
+	testing.expect_value(t, cfg.window_blur, true)
+}
+
+@(test)
+test_parse_config_window_opacity_clamping :: proc(t: ^testing.T) {
+	src_low := `window_opacity = 0.05`
+	cfg_low, ok_low, _ := config.parse_config(src_low)
+	defer config.config_destroy(&cfg_low)
+	testing.expect(t, ok_low)
+	testing.expect_value(t, cfg_low.window_opacity, f32(0.1))
+
+	src_high := `window_opacity = 1.5`
+	cfg_high, ok_high, _ := config.parse_config(src_high)
+	defer config.config_destroy(&cfg_high)
+	testing.expect(t, ok_high)
+	testing.expect_value(t, cfg_high.window_opacity, f32(1.0))
+}
+
+@(test)
+test_parse_config_window_blur_boolean_variants :: proc(t: ^testing.T) {
+	cases := []struct {
+		val:      string,
+		expected: bool,
+	}{
+		{"true", true},
+		{"yes", true},
+		{"1", true},
+		{"false", false},
+		{"no", false},
+		{"0", false},
+	}
+
+	for c in cases {
+		src := fmt.tprintf("window_blur = %s", c.val)
+		cfg, ok, _ := config.parse_config(src)
+		testing.expect(t, ok)
+		testing.expect_value(t, cfg.window_blur, c.expected)
+		config.config_destroy(&cfg)
+	}
+}
+
+@(test)
+test_parse_config_screensaver :: proc(t: ^testing.T) {
+	src_false := `allow_screensaver = false`
+	cfg_false, ok_false, _ := config.parse_config(src_false)
+	defer config.config_destroy(&cfg_false)
+	testing.expect(t, ok_false)
+	testing.expect_value(t, cfg_false.allow_screensaver, false)
+
+	src_alias := `screensaver = false`
+	cfg_alias, ok_alias, _ := config.parse_config(src_alias)
+	defer config.config_destroy(&cfg_alias)
+	testing.expect(t, ok_alias)
+	testing.expect_value(t, cfg_alias.allow_screensaver, false)
+
+	src_true := `enable_screensaver = true`
+	cfg_true, ok_true, _ := config.parse_config(src_true)
+	defer config.config_destroy(&cfg_true)
+	testing.expect(t, ok_true)
+	testing.expect_value(t, cfg_true.allow_screensaver, true)
+}
+

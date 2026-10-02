@@ -21,6 +21,9 @@ Tab_Overflow_State :: platform_tabs.Tab_Overflow_State
 Tab_Overflow_Action :: platform_tabs.Tab_Overflow_Action
 Tab_Info :: platform_tabs.Tab_Info
 UI_Tab_Info :: platform_tabs.UI_Tab_Info
+Session_Switcher_Item :: platform_tabs.Session_Switcher_Item
+Session_Switcher_State :: platform_tabs.Session_Switcher_State
+Session_Switcher_Action :: platform_tabs.Session_Switcher_Action
 
 TAB_MENU_ITEM_COUNT :: platform_tabs.TAB_MENU_ITEM_COUNT
 TAB_OVERFLOW_WIDTH :: platform_tabs.TAB_OVERFLOW_WIDTH

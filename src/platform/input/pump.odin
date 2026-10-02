@@ -52,7 +52,7 @@ INPUT_DEFAULT_CELL_H :: 16
 // KEYDOWN feeds non-printable keys plus Ctrl/Alt combos with Shift/Alt/Ctrl
 // flags from the SDL keymod. Key repeat is treated as a normal press (see
 // input_translate_sdl). Unknown event types are ignored.
-window_poll_input :: proc(w: ^win.Window, out: []Input_Event, max: int, first_ev: ^sdl3.Event = nil) -> int {
+window_poll_input :: proc(w: ^win.Window, out: []Input_Event, max: int, first_ev: ^sdl3.Event = nil, resized_out: ^bool = nil) -> int {
 	if w == nil {
 		return 0
 	}
@@ -61,6 +61,7 @@ window_poll_input :: proc(w: ^win.Window, out: []Input_Event, max: int, first_ev
 		return 0
 	}
 	count := 0
+	any_resized := false
 	if first_ev != nil {
 		n, quit, resized := _window_translate_input_event(w, first_ev^, out[count:cap])
 		count += n
@@ -71,6 +72,7 @@ window_poll_input :: proc(w: ^win.Window, out: []Input_Event, max: int, first_ev
 			win.window_restore_unified_titlebar(w)
 		}
 		if resized {
+			any_resized = true
 			win.window_update_pixel_size(w)
 		}
 	}
@@ -85,8 +87,12 @@ window_poll_input :: proc(w: ^win.Window, out: []Input_Event, max: int, first_ev
 			win.window_restore_unified_titlebar(w)
 		}
 		if resized {
+			any_resized = true
 			win.window_update_pixel_size(w)
 		}
+	}
+	if resized_out != nil {
+		resized_out^ = any_resized
 	}
 	return count
 }
@@ -396,6 +402,16 @@ _translate_key :: proc(key: sdl3.Keycode, mod: sdl3.Keymod, out: []Input_Event) 
 	is_reload := (gui || ctrl) && shift && key == sdl3.K_R
 	if is_reload {
 		out[0] = Input_Event{event_type = .Local, action = .Reload_Config, ctrl = ctrl, gui = gui, shift = shift}
+		return true
+	}
+	is_detach := gui && alt && !ctrl && !shift && key == sdl3.K_B
+	if is_detach {
+		out[0] = Input_Event{event_type = .Local, action = .Detach_Tab, ctrl = ctrl, gui = gui, shift = shift, alt = alt}
+		return true
+	}
+	is_attach := gui && !ctrl && !alt && !shift && key == sdl3.K_O
+	if is_attach {
+		out[0] = Input_Event{event_type = .Local, action = .Attach_Session, ctrl = ctrl, gui = gui, shift = shift}
 		return true
 	}
 	if (ctrl || gui) && shift && key == sdl3.K_EQUALS {

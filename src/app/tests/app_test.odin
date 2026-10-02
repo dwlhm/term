@@ -254,6 +254,7 @@ test_app_frame_drain_parse_exit :: proc(t: ^testing.T) {
 	defer free(a)
 	_bare_app(a)
 	defer _bare_destroy(a)
+	defer _s15_renderer_teardown(a)
 	if !_dummy_window(t, &a.window, "app-test-drain", APP_TEST_COLS * app.APP_CELL_W, APP_TEST_ROWS * app.APP_CELL_H) {
 		testing.expect(t, true, "SKIP: dummy video unavailable after retries; infra flake, not a code defect")
 		return
@@ -751,24 +752,26 @@ test_app_interaction_dispatch_integration :: proc(t: ^testing.T) {
 	// Put initial text into terminal
 	termgrid.terminal_put_string(&b.terminal, "apple banana cherry\r\n")
 
-	// 2. Dispatch Cmd+Shift+Space to enter Visual Mode
+	// 2. Dispatch Cmd+Ctrl+Y to enter Visual Mode
 	enter_visual_ev := app.UI_Event{
 		type = .Input,
 		input = input.Input_Event{
 			event_type = .Key,
 			kind       = .Printable,
-			rune       = ' ',
+			rune       = 'y',
 			gui        = true,
-			shift      = true,
+			ctrl       = true,
 		},
 	}
 	app.backend_handle_ui_event(b, enter_visual_ev)
 
 	testing.expect_value(t, b.interaction.mode, interaction.Interaction_Mode.Visual)
-	testing.expect(t, b.interaction.selection_active, "selection must be active in visual mode")
-	testing.expect(t, b.view.selection.active, "view selection active must mirror interaction")
+	testing.expect(t, !b.interaction.selection_active, "selection must be inactive on enter visual mode")
+	testing.expect(t, !b.view.selection.active, "view selection active must mirror interaction")
+	hud_nav := app.app_compute_hud_title(&b.interaction)
+	testing.expect_value(t, hud_nav, "[ VISUAL NAV ]")
 
-	// 3. Dispatch visual navigation 'l' (cursor right)
+	// 3. Dispatch visual navigation 'l' (cursor right) without selection
 	col_before := b.interaction.visual_cursor.col
 	nav_ev := app.UI_Event{
 		type = .Input,
@@ -778,6 +781,25 @@ test_app_interaction_dispatch_integration :: proc(t: ^testing.T) {
 			rune       = 'l',
 		},
 	}
+	app.backend_handle_ui_event(b, nav_ev)
+	testing.expect_value(t, b.interaction.visual_cursor.col, col_before + 1)
+	testing.expect(t, !b.interaction.selection_active, "selection remains inactive during navigation")
+
+	// Activate selection with 'v'
+	v_ev := app.UI_Event{
+		type = .Input,
+		input = input.Input_Event{
+			event_type = .Key,
+			kind       = .Printable,
+			rune       = 'v',
+		},
+	}
+	app.backend_handle_ui_event(b, v_ev)
+	testing.expect(t, b.interaction.selection_active, "selection is now active after 'v'")
+	testing.expect(t, b.view.selection.active, "view selection is active")
+
+	// Expand selection with 'l'
+	col_before = b.interaction.visual_cursor.col
 	app.backend_handle_ui_event(b, nav_ev)
 	testing.expect_value(t, b.interaction.visual_cursor.col, col_before + 1)
 	testing.expect_value(t, b.view.selection.focus.col, col_before + 1)
@@ -864,6 +886,7 @@ test_app_search_and_tab_sync :: proc(t: ^testing.T) {
 
 	active_b := app.app_active_backend(a)
 	testing.expect(t, active_b != nil, "active backend must exist")
+	app.backend_stop_thread(active_b) // This contract test exercises synchronous dependency dispatch.
 	termgrid.terminal_put_string(&active_b.terminal, "hello search world hello\r\n")
 
 	// 1. Dispatch Cmd+F -> opens search bar, enters search mode

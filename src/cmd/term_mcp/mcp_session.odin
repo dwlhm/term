@@ -56,6 +56,11 @@ mcp_session_resize :: proc(s: ^Mcp_Session, rows, cols: int) -> bool {
 }
 
 // mcp_session_run_command executes a command synchronously, detecting completion via OSC 133 or canary sentinel.
-mcp_session_run_command :: proc(s: ^Mcp_Session, command: string, timeout_ms: int = 30000, allocator := context.allocator) -> (output: string, exit_code: int, completed: bool) {
+mcp_session_run_command :: proc(s: ^Mcp_Session, command: string, timeout_ms: int = 30000, allocator := context.allocator) -> (output: string, exit_code: int, completed: bool, total_lines: int, truncated: bool) {
 	return session_core.session_run_command(s, command, timeout_ms, allocator)
+}
+
+// mcp_session_get_command_output retrieves buffered raw output lines with offset, limit, and grep filtering.
+mcp_session_get_command_output :: proc(s: ^Mcp_Session, cmd_id: int, offset: int, limit: int, grep_filter: string, allocator := context.allocator) -> (output: string, total_matched: int, total_lines: int, ok: bool) {
+	return session_core.session_get_command_output(s, cmd_id, offset, limit, grep_filter, allocator)
 }

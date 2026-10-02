@@ -76,8 +76,10 @@ Metal_ComputePassEncoder :: struct {
 }
 
 Metal_Surface :: struct {
-	layer:        ^CA.MetalLayer,
-	cur_drawable: ^CA.MetalDrawable,
+	layer:          ^CA.MetalLayer,
+	cur_drawable:   ^CA.MetalDrawable,
+	window_opacity: f32,
+	window_blur:    bool,
 }
 
 // Global active handles for queue submission and presentation coordination
@@ -179,6 +181,8 @@ metal_backend_vtable :: proc() -> ^gpu.Gpu_Backend_VTable {
 create_surface :: proc(layer: ^CA.MetalLayer) -> ^Metal_Surface {
 	surf := new(Metal_Surface)
 	surf.layer = layer
+	surf.window_opacity = 1.0
+	surf.window_blur = false
 	if layer != nil {
 		top_left := _create_ns_string("topLeft")
 		if top_left != nil {
@@ -187,6 +191,19 @@ create_surface :: proc(layer: ^CA.MetalLayer) -> ^Metal_Surface {
 		}
 	}
 	return surf
+}
+
+configure_surface_vibrancy :: proc(surf: ^Metal_Surface, opacity: f32, blur: bool) {
+	if surf == nil do return
+	surf.window_opacity = opacity
+	surf.window_blur = blur
+	if surf.layer != nil {
+		if opacity < 1.0 || blur {
+			surf.layer->setOpaque(NS.BOOL(false))
+		} else {
+			surf.layer->setOpaque(NS.BOOL(true))
+		}
+	}
 }
 
 destroy_surface :: proc(surf: ^Metal_Surface) {
@@ -263,6 +280,12 @@ _metal_configure_surface :: proc(surface: rawptr, device: gpu.Gpu_Device, format
 	if top_left != nil {
 		intrinsics.objc_send(nil, surf.layer, "setContentsGravity:", top_left)
 		top_left->release()
+	}
+
+	if surf.window_opacity < 1.0 || surf.window_blur {
+		surf.layer->setOpaque(NS.BOOL(false))
+	} else {
+		surf.layer->setOpaque(NS.BOOL(true))
 	}
 
 	_active_surface = surf
@@ -751,7 +774,11 @@ _metal_begin_render_pass :: proc(
 			switch load_op {
 			case .Clear:
 				color_attach->setLoadAction(MTL.LoadAction.Clear)
-				color_attach->setClearColor(MTL.ClearColor{clear_color[0], clear_color[1], clear_color[2], clear_color[3]})
+				alpha := clear_color[3]
+				if _active_surface != nil && _active_surface.window_opacity > 0 {
+					alpha *= f64(_active_surface.window_opacity)
+				}
+				color_attach->setClearColor(MTL.ClearColor{clear_color[0], clear_color[1], clear_color[2], alpha})
 			case .Load:
 				color_attach->setLoadAction(MTL.LoadAction.Load)
 			case .Undefined:

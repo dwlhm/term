@@ -9,6 +9,7 @@ import "core:time"
 import posix "core:sys/posix"
 
 import mcp "../"
+import session_core "../../../session_core"
 
 @test
 test_mcp_protocol_parse :: proc(t: ^testing.T) {
@@ -48,7 +49,7 @@ test_mcp_initialize_and_tools_list :: proc(t: ^testing.T) {
 
 	tools_arr, has_tools := obj["tools"].(json.Array)
 	testing.expect(t, has_tools, "tools must be an array")
-	testing.expect(t, len(tools_arr) == 7, "must contain exactly 7 core tools")
+	testing.expect(t, len(tools_arr) == 12, "must contain exactly 12 tools")
 
 	expected_tools := []string{
 		"terminal_create_session",
@@ -58,6 +59,11 @@ test_mcp_initialize_and_tools_list :: proc(t: ^testing.T) {
 		"terminal_send_key",
 		"terminal_get_screen",
 		"terminal_resize",
+		"terminal_list_sessions",
+		"terminal_switch_session",
+		"terminal_list_commands",
+		"terminal_get_output",
+		"terminal_run_parallel",
 	}
 
 	for expected in expected_tools {
@@ -155,15 +161,17 @@ test_mcp_run_command_echo :: proc(t: ^testing.T) {
 	testing.expect(t, ok, "session creation should succeed")
 
 	// Run simple command
-	output, exit_code, completed := mcp.mcp_session_run_command(s, "echo hello", 10000)
+	output, exit_code, completed, total_lines, truncated := mcp.mcp_session_run_command(s, "echo hello", 10000)
 	defer delete(output)
 	testing.expect(t, completed, "command should complete")
 	testing.expect(t, exit_code == 0, "exit code must be 0")
 	testing.expect(t, strings.contains(output, "hello"), "output should contain hello")
 	testing.expect(t, !strings.contains(output, "\x1b["), "output must not contain escape codes")
+	testing.expect(t, total_lines >= 1, "total_lines should be at least 1")
+	testing.expect(t, !truncated, "should not be truncated")
 
 	// Run false to verify non-zero exit code
-	false_out, false_code, false_done := mcp.mcp_session_run_command(s, "false", 10000)
+	false_out, false_code, false_done, _, _ := mcp.mcp_session_run_command(s, "false", 10000)
 	defer delete(false_out)
 	testing.expect(t, false_done, "false command should complete")
 	testing.expect(t, false_code != 0, "false exit code must be non-zero")
@@ -181,7 +189,7 @@ test_mcp_screen_extraction :: proc(t: ^testing.T) {
 	testing.expect(t, ok, "session creation should succeed")
 
 	// Run a command that outputs distinct text
-	cmd_out, _, completed := mcp.mcp_session_run_command(s, "echo 'TERM_MCP_TEST_SCREEN_OK'", 10000)
+	cmd_out, _, completed, _, _ := mcp.mcp_session_run_command(s, "echo 'TERM_MCP_TEST_SCREEN_OK'", 10000)
 	defer delete(cmd_out)
 	testing.expect(t, completed, "command should complete")
 
@@ -231,6 +239,10 @@ test_mcp_tool_dispatch_e2e :: proc(t: ^testing.T) {
 	if is_run_obj {
 		out_str := run_obj["output"].(json.String)
 		testing.expect(t, strings.contains(out_str, "dispatch_ok"), "output must contain dispatch_ok")
+		_, has_tot := run_obj["total_lines"]
+		testing.expect(t, has_tot, "response must contain total_lines")
+		_, has_trunc := run_obj["truncated"]
+		testing.expect(t, has_trunc, "response must contain truncated")
 	}
 
 	// 3. Dispatch terminal_get_screen
@@ -325,4 +337,182 @@ test_mcp_tool_dispatch_e2e :: proc(t: ^testing.T) {
 	defer json.destroy_value(val_close_inter)
 	close_inter_res, _, _ := mcp.tools_dispatch_call(&sm, "terminal_close_session", val_close_inter)
 	delete(close_inter_res)
+}
+
+@test
+test_mcp_auto_routing_and_persistence :: proc(t: ^testing.T) {
+	sm: mcp.Session_Manager
+	mcp.session_manager_init(&sm)
+	defer mcp.session_manager_destroy_all(&sm)
+
+	// 1. Calling terminal_run_command with no session_id should auto-create "default"
+	run_args_json := `{"command":"export PERSISTENT_VAR=xyz123 && echo $PERSISTENT_VAR"}`
+	val_args, _ := json.parse_string(run_args_json, parse_integers = true)
+	defer json.destroy_value(val_args)
+
+	res1, err1, _ := mcp.tools_dispatch_call(&sm, "terminal_run_command", val_args)
+	defer delete(res1)
+	testing.expect(t, !err1, "first auto run should succeed")
+
+	parsed1, _ := json.parse_string(res1, parse_integers = true)
+	defer json.destroy_value(parsed1)
+	obj1 := parsed1.(json.Object)
+	testing.expect(t, strings.contains(obj1["output"].(json.String), "xyz123"), "output should show persistent variable")
+	testing.expect(t, obj1["session_id"].(json.String) == "default", "first session must be 'default'")
+
+	// 2. Second command without session_id must reuse "default" and retain environment
+	run2_args_json := `{"command":"echo persistent_$PERSISTENT_VAR"}`
+	val2, _ := json.parse_string(run2_args_json, parse_integers = true)
+	defer json.destroy_value(val2)
+
+	res2, err2, _ := mcp.tools_dispatch_call(&sm, "terminal_run_command", val2)
+	defer delete(res2)
+	testing.expect(t, !err2, "second auto run should succeed")
+
+	parsed2, _ := json.parse_string(res2, parse_integers = true)
+	defer json.destroy_value(parsed2)
+	obj2 := parsed2.(json.Object)
+	testing.expect(t, strings.contains(obj2["output"].(json.String), "persistent_xyz123"), "environment must persist across calls")
+
+	// 3. Mark default session as busy, auto-route should spawn a new session inheriting cwd
+	def_s, _ := mcp.session_manager_get(&sm, "default")
+	def_s.is_busy = true
+
+	route_id, new_s, route_ok := mcp.session_manager_route_auto(&sm)
+	testing.expect(t, route_ok, "auto-routing should spawn when active is busy")
+	testing.expect(t, route_id != "default", "routed session must be different from busy session")
+	testing.expect(t, new_s != nil, "new session pointer should not be nil")
+	testing.expect(t, new_s.cwd == def_s.cwd, "new session must inherit parent cwd")
+
+	// Unbusy
+	def_s.is_busy = false
+}
+
+@test
+test_mcp_output_noise_filtering :: proc(t: ^testing.T) {
+	// 1. Blank line stripping and compaction
+	raw_lines := []string{
+		"",
+		"   ",
+		"line 1",
+		"",
+		"    ",
+		"",
+		"line 2",
+		"",
+		"  ",
+	}
+
+	out, total, trunc := session_core.session_filter_output_noise(raw_lines, 250)
+	defer delete(out)
+
+	testing.expect(t, !trunc, "should not be truncated")
+	testing.expect(t, total == 3, "should be 3 lines: line 1, empty line, line 2")
+	expected := "line 1\n\nline 2"
+	testing.expect(t, out == expected, fmt.tprintf("expected '%s', got '%s'", expected, out))
+
+	// 2. Dedup consecutive identical lines
+	dedup_lines := []string{
+		"header",
+		"dup error",
+		"dup error",
+		"dup error",
+		"dup error",
+		"dup error",
+		"footer",
+	}
+	out_d, total_d, _ := session_core.session_filter_output_noise(dedup_lines, 250)
+	defer delete(out_d)
+	testing.expect(t, strings.contains(out_d, "[... repeated 4 times ...]"), "must contain repeated marker")
+	testing.expect(t, total_d == 4, "deduped lines count must be 4")
+
+	// 3. Head/Tail Truncation
+	many_lines := make([]string, 300, context.temp_allocator)
+	for i in 0 ..< 300 {
+		many_lines[i] = fmt.tprintf("entry %d", i)
+	}
+	out_t, total_t, trunc_t := session_core.session_filter_output_noise(many_lines, 250)
+	defer delete(out_t)
+	testing.expect(t, trunc_t, "should be truncated")
+	testing.expect(t, total_t == 300, "total_lines should reflect 300")
+	testing.expect(t, strings.contains(out_t, "[... 50 lines truncated to save tokens ...]"), "must contain truncation marker")
+	testing.expect(t, strings.contains(out_t, "entry 0"), "head must contain entry 0")
+	testing.expect(t, strings.contains(out_t, "entry 299"), "tail must contain entry 299")
+}
+
+@test
+test_mcp_list_commands_and_get_output :: proc(t: ^testing.T) {
+	sm: mcp.Session_Manager
+	mcp.session_manager_init(&sm)
+	defer mcp.session_manager_destroy_all(&sm)
+
+	// Run command
+	run_json := `{"command":"echo line_alpha && echo line_beta_needle && echo line_gamma"}`
+	val_run, _ := json.parse_string(run_json, parse_integers = true)
+	defer json.destroy_value(val_run)
+
+	res_run, err_run, _ := mcp.tools_dispatch_call(&sm, "terminal_run_command", val_run)
+	delete(res_run)
+	testing.expect(t, !err_run, "run command should succeed")
+
+	// List commands
+	list_res, list_err, _ := mcp.tools_dispatch_call(&sm, "terminal_list_commands", nil)
+	defer delete(list_res)
+	testing.expect(t, !list_err, "list commands should succeed")
+	parsed_list, _ := json.parse_string(list_res, parse_integers = true)
+	defer json.destroy_value(parsed_list)
+	list_obj := parsed_list.(json.Object)
+	cmds_arr := list_obj["commands"].(json.Array)
+	testing.expect(t, len(cmds_arr) == 1, "must have 1 command recorded")
+
+	// Get output without filter
+	get_res, get_err, _ := mcp.tools_dispatch_call(&sm, "terminal_get_output", nil)
+	defer delete(get_res)
+	testing.expect(t, !get_err, "get output should succeed")
+	testing.expect(t, strings.contains(get_res, "line_alpha"), "output must contain line_alpha")
+
+	// Get output with grep
+	grep_json := `{"grep":"needle"}`
+	val_grep, _ := json.parse_string(grep_json, parse_integers = true)
+	defer json.destroy_value(val_grep)
+
+	grep_res, grep_err, _ := mcp.tools_dispatch_call(&sm, "terminal_get_output", val_grep)
+	defer delete(grep_res)
+	testing.expect(t, !grep_err, "grep output should succeed")
+	parsed_grep, _ := json.parse_string(grep_res, parse_integers = true)
+	defer json.destroy_value(parsed_grep)
+	grep_obj := parsed_grep.(json.Object)
+	testing.expect(t, grep_obj["total_matched"].(json.Integer) == 1, "matched count must be 1")
+	testing.expect(t, strings.contains(grep_obj["output"].(json.String), "line_beta_needle"), "must match needle")
+	testing.expect(t, !strings.contains(grep_obj["output"].(json.String), "line_alpha"), "must not contain non-matching lines")
+}
+
+@test
+test_mcp_run_parallel :: proc(t: ^testing.T) {
+	sm: mcp.Session_Manager
+	mcp.session_manager_init(&sm)
+	defer mcp.session_manager_destroy_all(&sm)
+
+	par_json := `{"commands":["echo p1_result","echo p2_result","echo p3_result"]}`
+	val_par, _ := json.parse_string(par_json, parse_integers = true)
+	defer json.destroy_value(val_par)
+
+	res_par, err_par, _ := mcp.tools_dispatch_call(&sm, "terminal_run_parallel", val_par)
+	defer delete(res_par)
+	testing.expect(t, !err_par, "parallel command should succeed")
+
+	parsed_par, parse_err := json.parse_string(res_par, parse_integers = true)
+	testing.expect(t, parse_err == .None, "parallel response must be valid JSON")
+	defer json.destroy_value(parsed_par)
+
+	par_obj := parsed_par.(json.Object)
+	res_arr, has_res := par_obj["results"].(json.Array)
+	testing.expect(t, has_res, "results must be an array")
+	testing.expect(t, len(res_arr) == 3, "must have 3 results")
+
+	for item in res_arr {
+		item_obj := item.(json.Object)
+		testing.expect(t, item_obj["exit_code"].(json.Integer) == 0, "exit code must be 0")
+		testing.expect(t, item_obj["completed"].(json.Boolean) == true, "completed must be true")
+	}
 }

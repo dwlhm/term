@@ -5,6 +5,7 @@ package window
 
 import "base:runtime"
 import "core:c"
+import "core:fmt"
 import "core:strings"
 import "vendor:sdl3"
 
@@ -24,15 +25,26 @@ Window :: struct {
 	title:   string,
 	is_open: bool,
 	paste_shadow_text: string, // owned clipboard text awaiting SDL's TEXT_INPUT shadow
+	resize_cursors: [2]^sdl3.Cursor,
+	resize_cursor_attempted: [2]bool,
+	cursor_error_reported: bool,
 	_title_buf: [256]u8, // buffer for C string title
 }
 
 // window_init initializes SDL3 and creates a window.
 // Returns true on success.
-window_init :: proc(w: ^Window, title: string, width, height: i32) -> bool {
+window_init :: proc(w: ^Window, title: string, width, height: i32, allow_screensaver: bool = true) -> bool {
 	// Initialize SDL3 video subsystem
 	if !sdl3.Init(sdl3.INIT_VIDEO) {
 		return false
+	}
+
+	// Modern terminals allow display sleep/screensaver by default.
+	// SDL disables screensaver by default, so we explicitly enable it unless configured otherwise.
+	if allow_screensaver {
+		_ = sdl3.EnableScreenSaver()
+	} else {
+		_ = sdl3.DisableScreenSaver()
 	}
 
 	// Disable macOS Press and Hold so key repeat is enabled for terminal use
@@ -82,6 +94,16 @@ window_init :: proc(w: ^Window, title: string, width, height: i32) -> bool {
 
 // window_destroy closes the window and shuts down SDL3.
 window_destroy :: proc(w: ^Window) {
+	if w == nil do return
+	if w.handle != nil do _ = window_set_pointer_cursor(w, .Default)
+	for &cursor in w.resize_cursors {
+		if cursor != nil {
+			sdl3.DestroyCursor(cursor)
+			cursor = nil
+		}
+	}
+	w.resize_cursor_attempted = {}
+	w.cursor_error_reported = false
 	if len(w.paste_shadow_text) > 0 {
 		delete(w.paste_shadow_text)
 		w.paste_shadow_text = ""
@@ -93,6 +115,46 @@ window_destroy :: proc(w: ^Window) {
 	}
 	w.is_open = false
 	sdl3.Quit()
+}
+
+// Pointer_Cursor is window-owned presentation feedback, independent of terminal input.
+Pointer_Cursor :: enum {
+	Default,
+	Resize_EW,
+	Resize_NS,
+}
+
+_window_report_cursor_failure :: proc(w: ^Window) {
+	if !w.cursor_error_reported {
+		fmt.eprintf("window cursor unavailable: %s\n", sdl3.GetError())
+		w.cursor_error_reported = true
+	}
+}
+
+// Main-thread only. The native default is borrowed; resize handles are cached and owned.
+window_set_pointer_cursor :: proc(w: ^Window, shape: Pointer_Cursor) -> bool {
+	if w == nil || w.handle == nil do return false
+	cursor := sdl3.GetDefaultCursor()
+	if shape != .Default {
+		idx := 0 if shape == .Resize_EW else 1
+		if !w.resize_cursor_attempted[idx] {
+			w.resize_cursor_attempted[idx] = true
+			kind := sdl3.SystemCursor.EW_RESIZE if shape == .Resize_EW else sdl3.SystemCursor.NS_RESIZE
+			w.resize_cursors[idx] = sdl3.CreateSystemCursor(kind)
+			if w.resize_cursors[idx] == nil do _window_report_cursor_failure(w)
+		}
+		if w.resize_cursors[idx] != nil do cursor = w.resize_cursors[idx]
+	}
+	if cursor == nil {
+		_window_report_cursor_failure(w)
+		return false
+	}
+	if sdl3.GetCursor() == cursor do return true
+	if sdl3.SetCursor(cursor) do return true
+	_window_report_cursor_failure(w)
+	fallback := sdl3.GetDefaultCursor()
+	if fallback != nil && sdl3.GetCursor() != fallback do _ = sdl3.SetCursor(fallback)
+	return false
 }
 
 // window_capture_mouse enables or releases SDL's global mouse capture.
@@ -298,4 +360,11 @@ window_clear_drag_region :: proc(w: ^Window) -> bool {
 window_restore_unified_titlebar :: proc(w: ^Window) -> bool {
 	if w == nil || w.handle == nil do return false
 	return platform_restore_unified_titlebar(w.handle)
+}
+
+// window_configure_vibrancy configures window translucency and platform-specific vibrancy blur.
+// On macOS, sets window opacity and attaches or detaches NSVisualEffectView.
+window_configure_vibrancy :: proc(w: ^Window, opacity: f32, blur: bool) -> bool {
+	if w == nil || w.handle == nil do return false
+	return platform_configure_window_vibrancy(w.handle, opacity, blur)
 }

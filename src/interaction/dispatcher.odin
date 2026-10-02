@@ -6,7 +6,7 @@ import termgrid "../terminal"
 
 // interaction_dispatch_key routes keyboard input through the modal FSM.
 // Passthrough mode passes standard typing and control keys straight through to the PTY
-// while intercepting dedicated GUI shortcuts (Cmd+F, Cmd+Shift+Space, Cmd+C, Cmd+V).
+// while intercepting dedicated GUI shortcuts (Cmd+F, Cmd+Ctrl+Y, Cmd+A, Cmd+C, Cmd+V).
 // Visual and Search modes consume all relevant keystrokes for modal interaction.
 interaction_dispatch_key :: proc(s: ^Interaction_State, ev: input.Input_Event, is_alt_screen: bool) -> (consumed: bool, action: Interaction_Action) {
 	if s == nil do return false, .None
@@ -16,9 +16,12 @@ interaction_dispatch_key :: proc(s: ^Interaction_State, ev: input.Input_Event, i
 	case .Passthrough:
 		// GUI shortcuts have top priority
 		if ev.gui {
-			if ev.shift && ev.rune == ' ' {
-				interaction_enter_visual(s, .Char, s.visual_cursor)
+			if ev.ctrl && (ev.rune == 'y' || ev.rune == 'Y') {
+				interaction_enter_visual(s, .Char, s.visual_cursor, false)
 				return true, .None
+			}
+			if !ev.ctrl && !ev.alt && (ev.rune == 'a' || ev.rune == 'A') {
+				return true, .Select_All
 			}
 			if ev.rune == 'f' || ev.rune == 'F' {
 				interaction_enter_search(s)
@@ -26,6 +29,7 @@ interaction_dispatch_key :: proc(s: ^Interaction_State, ev: input.Input_Event, i
 			}
 			if ev.rune == 'c' || ev.rune == 'C' {
 				if s.selection_active {
+					s.selection_active = false
 					return true, .Copy
 				}
 			}
@@ -33,34 +37,113 @@ interaction_dispatch_key :: proc(s: ^Interaction_State, ev: input.Input_Event, i
 				return true, .Paste
 			}
 		}
+
+		if s.selection_active {
+			if ev.kind == .Escape {
+				s.selection_active = false
+				return true, .None
+			}
+			if !ev.gui {
+				// Typing in shell dismisses active selection
+				s.selection_active = false
+			}
+		}
+
 		// Normal typing, Esc, Ctrl keys flow straight to PTY
 		return false, .None
 
 	case .Visual:
-		// Esc or 'q' exits Visual back to Live Passthrough
-		if ev.kind == .Escape || (!ev.ctrl && !ev.gui && (ev.rune == 'q' || ev.rune == 'Q')) {
+		is_y_key := !ev.ctrl && !ev.gui && (ev.rune == 'y' || ev.rune == 'Y')
+		if s.pending_yank && !is_y_key {
+			s.pending_yank = false
+		}
+
+		// Select All in Visual mode
+		if ev.gui && !ev.ctrl && !ev.alt && (ev.rune == 'a' || ev.rune == 'A') {
+			return true, .Select_All
+		}
+
+		// Escape: cancel selection if active; exit to passthrough if inactive
+		if ev.kind == .Escape {
+			if s.selection_active {
+				s.selection_active = false
+				return true, .None
+			} else {
+				_ = interaction_exit_to_passthrough(s)
+				return true, .Resume_Live
+			}
+		}
+
+		// Exit to normal mode without copying:
+		// Ctrl+C, i/I, q/Q, or Cmd+Ctrl+Y (toggle out)
+		if (ev.ctrl && !ev.gui && (ev.rune == 'c' || ev.rune == 'C')) ||
+		   (!ev.ctrl && !ev.gui && (ev.rune == 'i' || ev.rune == 'I')) ||
+		   (!ev.ctrl && !ev.gui && (ev.rune == 'q' || ev.rune == 'Q')) ||
+		   (ev.gui && ev.ctrl && (ev.rune == 'y' || ev.rune == 'Y')) {
 			_ = interaction_exit_to_passthrough(s)
 			return true, .Resume_Live
 		}
 
-		// Yank / Copy: 'y', Enter, or Cmd+C
-		if (!ev.ctrl && !ev.gui && ev.rune == 'y') || ev.kind == .Enter || (ev.gui && (ev.rune == 'c' || ev.rune == 'C')) {
-			_ = interaction_exit_to_passthrough(s)
-			return true, .Copy
+		// Copy: Cmd+C or Enter
+		if ev.kind == .Enter || (ev.gui && (ev.rune == 'c' || ev.rune == 'C')) {
+			if s.selection_active {
+				_ = interaction_exit_to_passthrough(s)
+				return true, .Copy
+			} else {
+				_ = interaction_exit_to_passthrough(s)
+				return true, .Resume_Live
+			}
 		}
 
-		// Visual sub-kind switches
+		// Yank / Copy: 'y' or 'yy'
+		if is_y_key {
+			if s.pending_yank {
+				s.pending_yank = false
+				s.visual_kind = .Line
+				s.selection_anchor = s.visual_cursor
+				_ = interaction_exit_to_passthrough(s)
+				return true, .Copy
+			} else {
+				if s.selection_active && (s.selection_anchor != s.visual_cursor || s.visual_kind != .Char) {
+					_ = interaction_exit_to_passthrough(s)
+					return true, .Copy
+				} else {
+					s.pending_yank = true
+					return true, .None
+				}
+			}
+		}
+
+		// Visual sub-kind switches / selection activation
 		if ev.ctrl && (ev.rune == 'v' || ev.rune == 'V') {
-			s.visual_kind = .Block
+			if s.selection_active && s.visual_kind == .Block {
+				s.selection_active = false
+			} else {
+				s.selection_active = true
+				s.selection_anchor = s.visual_cursor
+				s.visual_kind = .Block
+			}
 			return true, .None
 		}
 		if !ev.ctrl && !ev.gui {
 			if ev.rune == 'v' && !ev.shift {
-				s.visual_kind = .Char
+				if s.selection_active && s.visual_kind == .Char {
+					s.selection_active = false
+				} else {
+					s.selection_active = true
+					s.selection_anchor = s.visual_cursor
+					s.visual_kind = .Char
+				}
 				return true, .None
 			}
 			if ev.rune == 'V' || (ev.shift && ev.rune == 'v') {
-				s.visual_kind = .Line
+				if s.selection_active && s.visual_kind == .Line {
+					s.selection_active = false
+				} else {
+					s.selection_active = true
+					s.selection_anchor = s.visual_cursor
+					s.visual_kind = .Line
+				}
 				return true, .None
 			}
 			if ev.rune == '/' {
@@ -178,15 +261,16 @@ interaction_dispatch_pointer :: proc(s: ^Interaction_State, ev: input.Input_Poin
 			}
 			clicks := ev.clicks == 0 ? 1 : ev.clicks
 			if clicks >= 3 {
-				interaction_enter_visual(s, .Line, pt)
+				interaction_enter_visual(s, .Line, pt, true)
 				return true, .None
 			} else if clicks == 2 {
-				interaction_enter_visual(s, .Char, pt)
+				interaction_enter_visual(s, .Char, pt, true)
 				return true, .None
 			} else {
 				if s.mode == .Visual {
 					s.selection_anchor = pt
 					s.visual_cursor = pt
+					s.selection_active = false
 					return true, .None
 				}
 				s.selection_anchor = pt
@@ -198,11 +282,12 @@ interaction_dispatch_pointer :: proc(s: ^Interaction_State, ev: input.Input_Poin
 	case .Motion:
 		if ev.primary_down {
 			if s.mode == .Passthrough {
-				interaction_enter_visual(s, .Char, s.selection_anchor)
+				interaction_enter_visual(s, .Char, s.selection_anchor, true)
 				s.visual_cursor = pt
 				return true, .None
 			}
 			if s.mode == .Visual {
+				s.selection_active = true
 				s.visual_cursor = pt
 				return true, .None
 			}

@@ -190,13 +190,13 @@ public struct TelemetryStats {
         let safeMinFps = minFps.isInfinite ? 0.0 : minFps
         let dropRate = totalFrames > 0 ? (Double(droppedFrames) / Double(totalFrames)) * 100.0 : 0.0
         
-        var report = "=== Video & TrueColor Telemetry Summary ===\n"
-        report += String(format: "Target FPS:       %.1f\n", targetFps)
-        report += String(format: "Total Frames:     %llu\n", totalFrames)
-        report += String(format: "Dropped Frames:   %llu (%.2f%%)\n", droppedFrames, dropRate)
-        report += String(format: "Mean FPS:         %.2f\n", meanFps)
-        report += String(format: "Min FPS:          %.2f\n", safeMinFps)
-        report += String(format: "Max FPS:          %.2f\n", maxFps)
+        var report = "=== Video & TrueColor Telemetry Summary ===\u{1b}[K\n"
+        report += String(format: "Target FPS:       %.1f\u{1b}[K\n", targetFps)
+        report += String(format: "Total Frames:     %llu\u{1b}[K\n", totalFrames)
+        report += String(format: "Dropped Frames:   %llu (%.2f%%)\u{1b}[K\n", droppedFrames, dropRate)
+        report += String(format: "Mean FPS:         %.2f\u{1b}[K\n", meanFps)
+        report += String(format: "Min FPS:          %.2f\u{1b}[K\n", safeMinFps)
+        report += String(format: "Max FPS:          %.2f\u{1b}[K\n", maxFps)
         return report
     }
 }
@@ -607,7 +607,7 @@ public final class SignalHandler: @unchecked Sendable {
     public static func restoreTerminal() {
         if !isRestored {
             isRestored = true
-            let resetSeq = "\u{1b}[?25h\u{1b}[0m\n"
+            let resetSeq = "\u{1b}[?25h\u{1b}[0m\u{1b}[J\n"
             resetSeq.utf8CString.withUnsafeBufferPointer { buf in
                 _ = Darwin.write(STDOUT_FILENO, buf.baseAddress!, buf.count - 1)
             }
@@ -753,6 +753,10 @@ public final class Engine {
         
         SignalHandler.clear()
         SignalHandler.restoreTerminal()
+        let eraseSeq = "\u{1b}[0m\u{1b}[J"
+        eraseSeq.utf8CString.withUnsafeBufferPointer { buf in
+            _ = Darwin.write(STDOUT_FILENO, buf.baseAddress!, buf.count - 1)
+        }
         print("\n" + box.stats.summaryReport())
     }
 }

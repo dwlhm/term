@@ -492,3 +492,187 @@ test_render_cell_direct_color :: proc(t: ^testing.T) {
 	testing.expect(t, abs(glyph.b - want_fg_b) < 0.001, "glyph.b must match direct ARGB")
 }
 
+@(test)
+test_prepare_pane_instances_v2_dimming :: proc(t: ^testing.T) {
+	lut := _test_lut()
+	r := new(render.Renderer)
+	defer free(r)
+	r.cell_width = 8.0
+	r.cell_height = 16.0
+	r.atlas = _test_atlas()
+	max_inst: u32 = 128
+	r.instances.max_instances = max_inst
+	r.instances.instance_data = make([]instance.Instance_Data, int(max_inst))
+	defer delete(r.instances.instance_data)
+
+	// Two dummy terminals
+	t1, t2: termgrid.Terminal
+	defer termgrid.terminal_destroy(&t1)
+	defer termgrid.terminal_destroy(&t2)
+	termgrid.terminal_init(&t1, 2, 2)
+	termgrid.terminal_init(&t2, 2, 2)
+
+	style := termgrid.Style{fg = 0xFFFF0000, bg = 0xFF0000FF}
+	_ = termgrid.style_table_insert(&t1.grid.style_table, style)
+	_ = termgrid.style_table_insert(&t2.grid.style_table, style)
+
+	// Set a character with style 1 (red fg, blue bg) in both terminals
+	termgrid.grid_set_cell(&t1.grid, 0, 0, termgrid.Semantic_Cell{content = 'A', style = 1, width = 1})
+	termgrid.grid_set_cell(&t2.grid, 0, 0, termgrid.Semantic_Cell{content = 'B', style = 1, width = 1})
+
+	panes := []render.Pane_Viewport{
+		{
+			terminal   = &t1,
+			x          = 0,
+			y          = 28,
+			w          = 400,
+			h          = 300,
+			rows       = 2,
+			cols       = 2,
+			dim_factor = 1.0,
+			is_active  = true,
+		},
+		{
+			terminal   = &t2,
+			x          = 400,
+			y          = 28,
+			w          = 400,
+			h          = 300,
+			rows       = 2,
+			cols       = 2,
+			dim_factor = 0.75,
+			is_active  = false,
+		},
+	}
+
+	compiled_panes := make([]render.Compiled_Frame_V2, 2)
+	defer {
+		for &cf in compiled_panes do render.render_compiler_destroy_v2(&cf)
+		delete(compiled_panes)
+	}
+	render.render_compiler_init_v2(&compiled_panes[0], 2, 2)
+	render.render_compiler_init_v2(&compiled_panes[1], 2, 2)
+	render.render_compile_full_v2(&compiled_panes[0], &t1)
+	render.render_compile_full_v2(&compiled_panes[1], &t2)
+
+	bg_count, glyph_count, _, _ := render._prepare_pane_instances_v2(r, &lut, panes, compiled_panes)
+	testing.expect(t, bg_count >= 2, "must have at least 2 backgrounds")
+	testing.expect(t, glyph_count >= 2, "must have at least 2 glyphs")
+
+	// Pane 1 background: active (offset x=0, y=28, 100% color)
+	bg1 := r.instances.instance_data[1]
+	testing.expect_value(t, bg1.x, f32(0))
+	testing.expect_value(t, bg1.y, f32(28))
+
+	// Pane 2 background: inactive (offset x=400, y=28, 75% dimmed color)
+	bg2 := r.instances.instance_data[3]
+	testing.expect_value(t, bg2.x, f32(400))
+	testing.expect_value(t, bg2.y, f32(28))
+	testing.expect(t, abs(bg2.b - bg1.b * 0.75) < 0.01, "inactive bg.b must be dimmed to 75%")
+
+	// Pane 1 glyph: active (offset x=0, y=28, 100% color)
+	g1 := r.instances.instance_data[bg_count]
+	testing.expect_value(t, g1.x, f32(0))
+	testing.expect_value(t, g1.y, f32(28))
+
+	// Pane 2 glyph: inactive (offset x=400, y=28, 75% dimmed color)
+	g2 := r.instances.instance_data[bg_count + 1]
+	testing.expect_value(t, g2.x, f32(400))
+	testing.expect_value(t, g2.y, f32(28))
+	testing.expect(t, abs(g2.r - g1.r * 0.75) < 0.01, "inactive glyph.r must be dimmed to 75%")
+}
+
+@(test)
+test_pane_viewport_clipping :: proc(t: ^testing.T) {
+	clip := [4]f32{10, 10, 100, 100}
+
+	// 1. Instance completely inside
+	inst_inside := instance.Instance_Data{x = 20, y = 20, cw = 10, ch = 20, u0 = 0.1, u1 = 0.9}
+	ok := render._clip_instance_rect(&inst_inside, clip, true)
+	testing.expect(t, ok, "inside quad must stay valid")
+	testing.expect_value(t, inst_inside.cw, f32(10))
+	testing.expect_value(t, inst_inside.ch, f32(20))
+
+	// 2. Wide instance extending past right boundary (x = 95, cw = 20, boundary at 100)
+	inst_right := instance.Instance_Data{x = 95, y = 20, cw = 20, ch = 20, u0 = 0.0, u1 = 1.0}
+	ok = render._clip_instance_rect(&inst_right, clip, true)
+	testing.expect(t, ok, "partially visible quad must stay valid")
+	testing.expect_value(t, inst_right.cw, f32(5))
+	testing.expect(t, abs(inst_right.u1 - 0.25) < 0.001, "u1 must be scaled to 5/20 = 0.25")
+
+	// 3. Instance completely outside to the right (x = 105, cw = 20)
+	inst_outside := instance.Instance_Data{x = 105, y = 20, cw = 20, ch = 20}
+	ok = render._clip_instance_rect(&inst_outside, clip, false)
+	testing.expect(t, !ok, "outside quad must be dropped")
+}
+
+
+@(test)
+test_pane_style_ids_are_terminal_local :: proc(t: ^testing.T) {
+	r := new(render.Renderer)
+	defer free(r)
+	r.cell_width, r.cell_height = 8, 16
+	r.atlas = _test_atlas()
+	r.instances.max_instances = 16
+	r.instances.instance_data = make([]instance.Instance_Data, 16)
+	defer delete(r.instances.instance_data)
+	terms := make([]termgrid.Terminal, 2)
+	defer delete(terms)
+	compiled := make([]render.Compiled_Frame_V2, 2)
+	defer delete(compiled)
+	defer {
+		for i in 0 ..< len(terms) {
+			render.render_compiler_destroy_v2(&compiled[i])
+			termgrid.terminal_destroy(&terms[i])
+		}
+	}
+	colors := [2]u32{0xFFFF0000, 0xFF00FF00}
+	panes := make([]render.Pane_Viewport, 2)
+	defer delete(panes)
+	for i in 0 ..< len(terms) {
+		termgrid.terminal_init(&terms[i], 1, 1)
+		id := termgrid.style_table_insert(&terms[i].grid.style_table, termgrid.Style{fg = colors[i], bg = colors[i]})
+		termgrid.grid_set_cell(&terms[i].grid, 0, 0, termgrid.Semantic_Cell{content = 'A', style = id, width = 1})
+		render.render_compiler_init_v2(&compiled[i], 1, 1)
+		render.render_compile_full_v2(&compiled[i], &terms[i])
+		panes[i] = render.Pane_Viewport{terminal = &terms[i], x = f32(i)*8, w = 8, h = 16, rows = 1, cols = 1, dim_factor = 1}
+	}
+	lut: render.Style_LUT
+	bg, glyph, _, _ := render._prepare_pane_instances_v2(r, &lut, panes, compiled)
+	testing.expect_value(t, bg, u32(4))
+	testing.expect_value(t, glyph, u32(2))
+	testing.expect(t, r.instances.instance_data[1].r > 0.9 && r.instances.instance_data[3].g > 0.9, "same local style ID must retain independent backgrounds")
+	testing.expect(t, r.instances.instance_data[bg].r > 0.9 && r.instances.instance_data[bg+1].g > 0.9, "same local style ID must retain independent glyph colors")
+	panes[0].clip_rect = {4, 0, 8, 16}
+	bg, glyph, _, _ = render._prepare_pane_instances_v2(r, &lut, panes, compiled)
+	testing.expect_value(t, r.instances.instance_data[1].x, f32(4))
+	testing.expect_value(t, r.instances.instance_data[1].cw, f32(4))
+	testing.expect(t, abs(r.instances.instance_data[bg].u0 - 0.5) < 0.001, "pane clipping must crop glyph UVs")
+	// Empty panes still publish independent theme backgrounds.
+	for i in 0 ..< len(terms) {
+		terms[i].grid.style_table.theme.background = colors[i]
+		termgrid.grid_set_cell(&terms[i].grid, 0, 0, termgrid.Semantic_Cell{content = ' ', width = 1})
+		render.render_compile_full_v2(&compiled[i], &terms[i])
+	}
+	bg, glyph, _, _ = render._prepare_pane_instances_v2(r, &lut, panes, compiled)
+	testing.expect_value(t, bg, u32(2))
+	testing.expect_value(t, glyph, u32(0))
+	testing.expect(t, r.instances.instance_data[0].r > 0.9 && r.instances.instance_data[1].g > 0.9, "empty panes must retain their own theme background")
+	panes[0].cols = 0
+	panes[1].w = 0
+	bg, glyph, _, _ = render._prepare_pane_instances_v2(r, &lut, panes, compiled)
+	testing.expect_value(t, bg, u32(0))
+	testing.expect_value(t, glyph, u32(0))
+}
+
+@(test)
+test_pane_clip_left_top_and_invalid :: proc(t: ^testing.T) {
+	quad := instance.Instance_Data{x = 0, y = 0, cw = 20, ch = 40, u0 = 0.2, u1 = 0.8, v0 = 0.1, v1 = 0.9}
+	testing.expect(t, render._clip_instance_rect(&quad, {10, 20, 20, 40}, true))
+	testing.expect(t, abs(quad.u0 - 0.5) < 0.001 && abs(quad.v0 - 0.5) < 0.001)
+	testing.expect_value(t, quad.x, f32(10))
+	testing.expect_value(t, quad.y, f32(20))
+	testing.expect(t, !render._clip_instance_rect(&quad, {20, 20, 10, 40}, true))
+	quad.cw = 0
+	testing.expect(t, !render._clip_instance_rect(&quad, {0, 0, 40, 40}, true))
+}

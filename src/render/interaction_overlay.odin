@@ -28,6 +28,11 @@ interaction_overlay_draw :: proc(
 	s: ^interaction.Interaction_State,
 	v: ^termgrid.Terminal_View,
 	t: ^termgrid.Terminal,
+	offset_x: f32 = 0,
+	offset_y: f32 = 0,
+	viewport_rows: int = 0,
+	viewport_cols: int = 0,
+	clip_rect: [4]f32 = {},
 ) -> bool {
 	if r == nil {
 		return false
@@ -40,8 +45,8 @@ interaction_overlay_draw :: proc(
 		return false
 	}
 
-	rows := int(r.rows)
-	cols := int(r.cols)
+	rows := viewport_rows if viewport_rows > 0 else int(r.rows)
+	cols := viewport_cols if viewport_cols > 0 else int(r.cols)
 	if rows <= 0 || cols <= 0 {
 		return false
 	}
@@ -113,7 +118,7 @@ interaction_overlay_draw :: proc(
 		cg := is_active ? INTERACTION_MATCH_PRIMARY_G : INTERACTION_MATCH_SECONDARY_G
 		cb := is_active ? INTERACTION_MATCH_PRIMARY_B : INTERACTION_MATCH_SECONDARY_B
 
-		y := r.pad_y + f32(vp_row) * r.cell_height
+		y := r.pad_y + offset_y + f32(vp_row) * r.cell_height
 		h := r.cell_height
 		w := r.cell_width
 
@@ -121,7 +126,10 @@ interaction_overlay_draw :: proc(
 			if staged >= total_to_stage {
 				break
 			}
-			x := r.pad_x + f32(col) * r.cell_width
+			x := r.pad_x + offset_x + f32(col) * r.cell_width
+			if clip_rect[2] > clip_rect[0] {
+				if x < clip_rect[0] || y < clip_rect[1] || x+w > clip_rect[2] || y+h > clip_rect[3] do continue
+			}
 			slot := start_slot + u32(staged)
 			instance.instance_renderer_fill_bg(inst, slot, x, y, w, h, cr, cg, cb)
 			staged += 1

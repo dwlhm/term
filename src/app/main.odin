@@ -13,7 +13,6 @@ import "core:fmt"
 import "core:os"
 import "core:strings"
 import "core:sync"
-import odin_thread "core:thread"
 import "core:time"
 
 import "vendor:sdl3"
@@ -366,8 +365,6 @@ App :: struct {
 	confirm_dialog:      platform_dialogs.Confirm_Dialog_State,
 	drag_region:         win.Drag_Region,
 	drop_fx:             Drop_Fx_State,
-	pty_monitor_thread:  ^odin_thread.Thread,
-	pty_monitor_running: b32,
 	pty_event_pending:   b32,
 	pending_wake_event:  sdl3.Event,
 	has_wake_event:      bool,
@@ -376,58 +373,6 @@ App :: struct {
 	last_present_time_ns:     u64,
 	target_frame_interval_ns: u64,
 	has_deferred_render:      bool,
-}
-
-pty_monitor_proc :: proc(t: ^odin_thread.Thread) {
-	a := (^App)(t.data)
-	if a == nil do return
-
-	pfds: [MAX_TABS + 1]posix.pollfd
-
-	for sync.atomic_load(&a.pty_monitor_running) {
-		count := 0
-
-		// Gather active PTY master file descriptors across all tabs
-		for i in 0 ..< len(a.session_mgr.tabs) {
-			s := &a.session_mgr.tabs[i]
-			if s.backend.pty.state == .Running && s.backend.pty.master >= 0 {
-				if count < len(pfds) {
-					pfds[count] = posix.pollfd{fd = posix.FD(s.backend.pty.master), events = {.IN}}
-					count += 1
-				}
-			}
-		}
-
-		// Also check single backend fallback if no tabs
-		if count == 0 && a.backend.pty.state == .Running && a.backend.pty.master >= 0 {
-			pfds[0] = posix.pollfd{fd = posix.FD(a.backend.pty.master), events = {.IN}}
-			count = 1
-		}
-
-		if count == 0 {
-			time.sleep(10 * time.Millisecond)
-			continue
-		}
-
-		r := posix.poll(&pfds[0], posix.nfds_t(count), 10)
-		if r > 0 {
-			has_data := false
-			for i in 0 ..< count {
-				if (pfds[i].revents & {.IN, .HUP, .ERR}) != {} {
-					has_data = true
-					break
-				}
-			}
-			if has_data {
-				if !sync.atomic_load(&a.pty_event_pending) {
-					sync.atomic_store(&a.pty_event_pending, true)
-					user_ev: sdl3.Event
-					user_ev.type = PTY_DATA_READY
-					_ = sdl3.PushEvent(&user_ev)
-				}
-			}
-		}
-	}
 }
 
 _app_on_backend_data_ready :: proc(user_data: rawptr) {
@@ -446,7 +391,7 @@ _app_on_backend_data_ready :: proc(user_data: rawptr) {
 app_active_backend :: proc(a: ^App) -> ^Backend {
 	if a == nil do return nil
 	if len(a.session_mgr.tabs) > 0 && a.session_mgr.active_idx >= 0 && a.session_mgr.active_idx < len(a.session_mgr.tabs) {
-		return &a.session_mgr.tabs[a.session_mgr.active_idx].backend
+		return tab_active_backend(&a.session_mgr.tabs[a.session_mgr.active_idx])
 	}
 	return &a.backend
 }
@@ -642,7 +587,7 @@ _app_request_close_tab :: proc(a: ^App, idx: int) {
 	if a == nil do return
 	if idx < 0 || idx >= len(a.session_mgr.tabs) do return
 	tab := &a.session_mgr.tabs[idx]
-	if pty.pty_has_running_processes(&tab.backend.pty) {
+	if _app_tab_has_running_processes(tab) {
 		platform_dialogs.confirm_dialog_show(&a.confirm_dialog, idx, tab.id)
 		a.renderer.full_redraw_pending = true
 		_app_set_drag_region(a)
@@ -812,13 +757,7 @@ app_init :: proc(a: ^App, rows, cols: int, prog: string, argv: []string) -> bool
 
 	_ = sdl3.AddEventWatch(_app_event_watch, a)
 
-	sync.atomic_store(&a.pty_monitor_running, true)
 	sync.atomic_store(&a.pty_event_pending, false)
-	a.pty_monitor_thread = odin_thread.create(pty_monitor_proc)
-	if a.pty_monitor_thread != nil {
-		a.pty_monitor_thread.data = a
-		odin_thread.start(a.pty_monitor_thread)
-	}
 
 	probe.frame_probe_init(&a.frame_probe)
 	if debug_env, ok := os.lookup_env("TERM_DEBUG", context.temp_allocator); ok && debug_env == "1" {
@@ -833,12 +772,6 @@ app_init :: proc(a: ^App, rows, cols: int, prog: string, argv: []string) -> bool
 app_destroy :: proc(a: ^App) {
 	if a == nil {
 		return
-	}
-	if a.pty_monitor_thread != nil {
-		sync.atomic_store(&a.pty_monitor_running, false)
-		odin_thread.join(a.pty_monitor_thread)
-		odin_thread.destroy(a.pty_monitor_thread)
-		a.pty_monitor_thread = nil
 	}
 	sdl3.RemoveEventWatch(_app_event_watch, a)
 	session_manager_destroy(&a.session_mgr)
@@ -880,10 +813,17 @@ _app_sync_focus :: proc(a: ^App) {
 	if a == nil || a.window.handle == nil {
 		return
 	}
-	flags := sdl3.GetWindowFlags(a.window.handle)
-	b := app_active_backend(a)
-	if b != nil {
-		backend_set_focused(b, .INPUT_FOCUS in flags)
+	focused := .INPUT_FOCUS in sdl3.GetWindowFlags(a.window.handle)
+	if len(a.session_mgr.tabs) > 0 {
+		for &tab, idx in a.session_mgr.tabs {
+			leaves: [MAX_PANE_NODES]^Pane_Node
+			n := tab_leaf_panes(&tab, leaves[:])
+			for leaf in leaves[:n] {
+				_ = _app_dispatch_backend(leaf.backend, UI_Event{type = .Focus, focused = focused && idx == a.session_mgr.active_idx && leaf.id == tab.tree.focused_pane_id})
+			}
+		}
+	} else {
+		_ = _app_dispatch_backend(app_active_backend(a), UI_Event{type = .Focus, focused = focused})
 	}
 }
 
@@ -893,6 +833,15 @@ _app_pointer_cell :: proc(a: ^App, x, y: f32) -> termgrid.Terminal_Point {
 	}
 	b := app_active_backend(a)
 	if b == nil do return termgrid.Terminal_Point{}
+	if tab := _app_active_tab(a); tab != nil {
+		if leaf := pane_tree_find_pane(&tab.tree, tab.tree.focused_pane_id); leaf != nil && leaf.rows > 0 && leaf.cols > 0 {
+			scale := frontend_content_scale(&a.frontend)
+			pad := _app_pane_padding(a)
+			cw := max(a.renderer.cell_width, f32(1))
+			ch := max(a.renderer.cell_height, f32(1))
+			return termgrid.Terminal_Point{row = clamp(int((y*scale-leaf.rect.y-pad)/ch), 0, leaf.rows-1), col = clamp(int((x*scale-leaf.rect.x-pad)/cw), 0, leaf.cols-1)}
+		}
+	}
 	return frontend_pointer_cell(&a.frontend, b.terminal.grid.row_count, b.terminal.grid.col_count, x, y)
 }
 
@@ -911,222 +860,10 @@ _app_pointer_wheel_delta :: backend_pointer_wheel_delta
 _app_pointer_selection_changed :: backend_pointer_selection_changed
 
 _app_route_pointer :: proc(a: ^App, pointer: input.Input_Pointer_Event) -> bool {
-	if a == nil {
-		return false
-	}
 	b := app_active_backend(a)
 	if b == nil do return false
-
-	if b.terminal.mouse_tracking != .None && !pointer.shift {
-		pt := _app_pointer_cell(a, pointer.x, pointer.y)
-		col := clamp(pt.col + 1, 1, max(1, b.terminal.grid.col_count))
-		row := clamp(pt.row + 1, 1, max(1, b.terminal.grid.row_count))
-
-		if pointer.kind == .Wheel {
-			delta := backend_accumulate_wheel(b, pointer)
-			if delta == 0 {
-				return true
-			}
-			p_wheel := pointer
-			p_wheel.wheel_y = 1 if delta > 0 else -1
-			p_wheel.wheel_integer_y = 1 if delta > 0 else -1
-			buf: [32]u8
-			n := input.mouse_encode_sgr(p_wheel, col, row, pointer.shift, buf[:])
-			if n > 0 {
-				for _ in 0 ..< abs(delta) {
-					_ = pty.pty_write(&b.pty, buf[:n])
-				}
-			}
-			b.last_mouse_col = col
-			b.last_mouse_row = row
-			return true
-		}
-
-		if pointer.kind == .Motion {
-			if b.terminal.mouse_tracking == .Normal {
-				return true
-			}
-			if b.terminal.mouse_tracking == .Button_Event && !pointer.primary_down && pointer.button == 0 {
-				return true
-			}
-			if col == b.last_mouse_col && row == b.last_mouse_row {
-				return true
-			}
-		}
-
-		buf: [32]u8
-		n := input.mouse_encode_sgr(pointer, col, row, pointer.shift, buf[:])
-		if n > 0 {
-			_ = pty.pty_write(&b.pty, buf[:n])
-		}
-		b.last_mouse_col = col
-		b.last_mouse_row = row
-		return true
-	}
-
-	pt_viewport := _app_pointer_cell(a, pointer.x, pointer.y)
-	doc_pt := termgrid.terminal_view_point_from_viewport(&b.terminal, &b.view, pt_viewport)
-	p_doc := pointer
-	p_doc.x = f32(doc_pt.col * APP_CELL_W)
-	p_doc.y = f32(doc_pt.row * APP_CELL_H)
-	total_doc_rows := termgrid.scrollback_len(&b.terminal.scrollback) + b.terminal.grid.row_count
-
-	consumed, action := inter.interaction_dispatch_pointer(
-		&b.interaction,
-		p_doc,
-		b.terminal.is_alt_screen,
-		total_doc_rows,
-		b.terminal.grid.col_count,
-		APP_CELL_W,
-		APP_CELL_H,
-	)
-
-	if consumed {
-		if pointer.kind == .Button_Down && pointer.button == 1 {
-			clicks := pointer.clicks == 0 ? 1 : pointer.clicks
-			if clicks == 2 {
-				start, end := inter.interaction_select_word_bounds(&b.terminal, doc_pt)
-				b.interaction.selection_anchor = start
-				b.interaction.visual_cursor = end
-			} else if clicks >= 3 {
-				start, end := inter.interaction_select_line_bounds(&b.terminal, doc_pt)
-				b.interaction.selection_anchor = start
-				b.interaction.visual_cursor = end
-			}
-		}
-
-		switch action {
-		case .Copy:
-			text := inter.interaction_extract_selection_text(&b.terminal, &b.interaction)
-			if len(text) > 0 {
-				_app_clipboard_cb(transmute([]u8)text)
-				delete(text)
-			}
-			termgrid.terminal_view_set_offset(&b.view, &b.terminal, 0)
-			b.view_generation += 1
-		case .Resume_Live:
-			termgrid.terminal_view_set_offset(&b.view, &b.terminal, 0)
-			b.view_generation += 1
-		case .Scroll_To_Match:
-			if b.interaction.search_active && b.interaction.search_match_count > 0 {
-				match_row := b.interaction.search_matches[b.interaction.search_match_idx].row
-				sb_len := termgrid.scrollback_len(&b.terminal.scrollback)
-				target_offset := max(0, sb_len - match_row)
-				termgrid.terminal_view_set_offset(&b.view, &b.terminal, target_offset)
-				b.view_generation += 1
-			}
-		case .Paste, .None:
-		case .Open_Link:
-			term_ref := &b.front_terminal if backend_is_threaded(b) else &b.terminal
-			target := inter.interaction_detect_link_at_point(term_ref, doc_pt)
-			if target.kind == .URL {
-				url_str := string(target.text[:target.len])
-				_ = sdl3.OpenURL(fmt.ctprintf("%s", url_str))
-			} else if target.kind == .Path {
-				path_str := string(target.text[:target.len])
-				clean_path := path_str
-				colon_idx := strings.index(path_str, ":")
-				if colon_idx > 0 {
-					clean_path = path_str[:colon_idx]
-				}
-				if strings.has_prefix(clean_path, "~/") {
-					home := os.get_env("HOME", context.temp_allocator)
-					clean_path = fmt.tprintf("%s/%s", home, clean_path[2:])
-				}
-				when ODIN_OS == .Darwin {
-					c_prog := strings.clone_to_cstring("/usr/bin/open", context.temp_allocator)
-					c_opt := strings.clone_to_cstring("--", context.temp_allocator)
-					c_path := strings.clone_to_cstring(clean_path, context.temp_allocator)
-					c_argv := [4]cstring{c_prog, c_opt, c_path, nil}
-					pid := posix.fork()
-					if pid == 0 {
-						if posix.fork() == 0 {
-							posix.close(0)
-							posix.close(1)
-							posix.close(2)
-							posix.execvp(c_prog, raw_data(c_argv[:]))
-							posix._exit(1)
-						}
-						posix._exit(0)
-					}
-					if pid > 0 {
-						posix.waitpid(pid, nil, {})
-					}
-				}
-			}
-		}
-
-		b.view.selection.active = b.interaction.selection_active
-		b.view.selection.anchor = b.interaction.selection_anchor
-		b.view.selection.focus = b.interaction.visual_cursor
-		b.view.selection.block = (b.interaction.visual_kind == .Block)
-		b.view.visual_mode = (b.interaction.mode == .Visual)
-		b.view_generation += 1
-		return true
-	}
-
-	switch pointer.kind {
-	case .Wheel:
-		if b.terminal.is_alt_screen {
-			delta := backend_accumulate_wheel(b, pointer)
-			if delta == 0 {
-				return true
-			}
-			alt_lines := b.config.alt_screen_wheel_lines if b.config.alt_screen_wheel_lines > 0 else APP_ALT_SCREEN_WHEEL_LINES
-			steps := abs(delta) * alt_lines
-			code: u8 = 'A' if delta > 0 else 'B'
-			seq: [3]u8
-			if b.terminal.app_cursor_keys {
-				seq = {0x1B, 'O', code}
-			} else {
-				seq = {0x1B, '[', code}
-			}
-			for _ in 0 ..< steps {
-				_ = pty.pty_write(&b.pty, seq[:])
-			}
-			return true
-		}
-		delta := backend_accumulate_wheel(b, pointer)
-		old_offset := b.view.scrollback_offset
-		_ = termgrid.terminal_view_scroll(&b.view, &b.terminal, delta)
-		if old_offset != b.view.scrollback_offset {
-			if b.view.scrollback_offset > 0 && b.interaction.viewport_flow == .Live {
-				inter.interaction_pause_viewport(&b.interaction, b.view.scrollback_offset)
-			} else if b.view.scrollback_offset == 0 && b.interaction.mode == .Passthrough {
-				inter.interaction_resume_viewport(&b.interaction)
-			}
-			b.view_generation += 1
-			a.renderer.full_redraw_pending = true
-			if backend_is_threaded(b) {
-				b.front_view = b.view
-			}
-		}
-	case .Button_Down:
-		if pointer.button != 1 {
-			return true
-		}
-		point := _app_pointer_point(a, pointer.x, pointer.y)
-		_ = _app_pointer_selection_changed(b, point, true)
-		_ = win.window_capture_mouse(&a.window, true)
-	case .Motion:
-		if b.view.selection.active && b.view.selection.anchor != b.view.selection.focus && !pointer.primary_down {
-			return true
-		}
-		if b.view.selection.active && pointer.primary_down {
-			point := _app_pointer_point(a, pointer.x, pointer.y)
-			_ = _app_pointer_selection_changed(b, point, false)
-		}
-	case .Button_Up:
-		if pointer.button != 1 {
-			return true
-		}
-		if b.view.selection.active {
-			point := _app_pointer_point(a, pointer.x, pointer.y)
-			_ = _app_pointer_selection_changed(b, point, false)
-		}
-		_ = win.window_capture_mouse(&a.window, false)
-	}
-	return true
+	point := _app_pointer_cell(a, pointer.x, pointer.y)
+	return _app_dispatch_backend(b, UI_Event{type = .Input, input = input.Input_Event{event_type = .Pointer, pointer = pointer}, rows = point.row, cols = point.col})
 }
 
 _app_copy_selection :: proc(a: ^App) -> bool {
@@ -1135,12 +872,14 @@ _app_copy_selection :: proc(a: ^App) -> bool {
 	}
 	b := app_active_backend(a)
 	if b == nil do return false
+	if backend_is_threaded(b) do backend_lock_render(b)
+	defer if backend_is_threaded(b) { backend_unlock_render(b) }
 	copied: string
 	if backend_is_threaded(b) {
 		if b.front_interaction.selection_active {
 			copied = inter.interaction_extract_selection_text(&b.front_terminal, &b.front_interaction)
 		} else {
-			copied = backend_copy_selection(b)
+			copied = termgrid.terminal_view_copy(&b.front_terminal, &b.front_view)
 		}
 	} else {
 		if b.interaction.selection_active {
@@ -1166,11 +905,8 @@ _app_paste_clipboard :: proc(a: ^App) -> bool {
 		delete(text)
 		return true
 	}
-	if backend_is_threaded(b) {
-		return backend_push_event(b, UI_Event{type = .Paste, text = text})
-	}
 	defer delete(text)
-	return backend_paste(b, text)
+	return _app_send_paste(b, text)
 }
 
 // _app_shell_quote_path wraps a file path in single quotes for shell safety.
@@ -1210,7 +946,9 @@ _app_apply_zoom :: proc(a: ^App) -> bool {
 	}
 	b := app_active_backend(a)
 	if b == nil do return false
-	return frontend_apply_zoom(&a.frontend, &b.terminal, &b.pty)
+	changed := frontend_apply_zoom(&a.frontend, nil, &b.pty)
+	if changed do _app_layout_panes(a)
+	return changed
 }
 
 app_reload_config :: proc(a: ^App) -> bool {
@@ -1242,10 +980,21 @@ app_reload_config :: proc(a: ^App) -> bool {
 
 	if theme_changed {
 		for &tab in a.session_mgr.tabs {
-			backend_apply_theme(&tab.backend, theme)
+			leaves: [MAX_PANE_NODES]^Pane_Node
+			n := tab_leaf_panes(&tab, leaves[:])
+			for leaf in leaves[:n] {
+				if !_app_send_theme(leaf.backend, theme) {
+					fmt.eprintln("config reload rejected: backend theme queue full")
+					config.config_destroy(&new_cfg)
+					return false
+				}
+			}
 		}
 		if active_b := app_active_backend(a); active_b != nil && len(a.session_mgr.tabs) == 0 {
-			backend_apply_theme(active_b, theme)
+			if !_app_send_theme(active_b, theme) {
+				config.config_destroy(&new_cfg)
+				return false
+			}
 		}
 		frontend_apply_theme(&a.frontend, theme)
 	}
@@ -1384,10 +1133,11 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 					a.renderer.full_redraw_pending = true
 					continue
 				}
-				if ev.shift && (ev.rune == '\\' || ev.rune == '|') {
+				if ui.ui_shortcut_matches(.Overflow, ev) {
 					_app_open_tab_overflow(a)
 					continue
 				}
+				if _app_dispatch_pane_shortcut(a, ev) do continue
 				if ev.ctrl && (ev.rune == 'z' || ev.rune == 'Z') {
 					_ = win.window_zoom(&a.window)
 					win.window_update_pixel_size(&a.window)
@@ -1417,39 +1167,9 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 				} else if ev.rune == 'd' || ev.rune == 'D' {
 					_app_request_close_tab(a, a.session_mgr.active_idx)
 					continue
-				} else if ev.shift && (ev.rune == '[' || ev.rune == '{') {
-					if len(a.session_mgr.tabs) > 0 {
-						prev_idx := (a.session_mgr.active_idx - 1 + len(a.session_mgr.tabs)) % len(a.session_mgr.tabs)
-						session_switch_tab(&a.session_mgr, prev_idx)
-						_app_resync_tab_modals(a)
-						ui.tab_bar_anim_activate(&a.tab_bar)
-						a.renderer.full_redraw_pending = true
-					}
-					continue
-				} else if ev.shift && (ev.rune == ']' || ev.rune == '}') {
-					if len(a.session_mgr.tabs) > 0 {
-						next_idx := (a.session_mgr.active_idx + 1) % len(a.session_mgr.tabs)
-						session_switch_tab(&a.session_mgr, next_idx)
-						_app_resync_tab_modals(a)
-						ui.tab_bar_anim_activate(&a.tab_bar)
-						a.renderer.full_redraw_pending = true
-					}
-					continue
 				} else if ev.rune == 'f' || ev.rune == 'F' {
 					a.search_bar.visible = !a.search_bar.visible
-					if a.search_bar.visible {
-						_app_layout_ui(a)
-						inter.interaction_enter_search(&active_b.interaction)
-						if backend_is_threaded(active_b) {
-							active_b.front_interaction = active_b.interaction
-						}
-					} else {
-						inter.interaction_exit_to_passthrough(&active_b.interaction)
-						if backend_is_threaded(active_b) {
-							active_b.front_interaction = active_b.interaction
-						}
-					}
-					a.renderer.full_redraw_pending = true
+					_app_search_action(a, .Query_Changed if a.search_bar.visible else .Close)
 					continue
 				} else if ev.rune == '9' {
 					if len(a.session_mgr.tabs) > 0 {
@@ -1476,152 +1196,16 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 		if a.search_bar.visible && ev.event_type == .Key {
 			consumed, s_action := platform_chrome.search_bar_dispatch_key(&a.search_bar, ev)
 			if consumed {
-				switch s_action {
-				case .Query_Changed:
-					_ = platform_chrome.search_bar_execute_scan(&a.search_bar, &active_b.terminal, active_b.interaction.search_matches[:])
-					copy(active_b.interaction.search_query[:], a.search_bar.query[:a.search_bar.query_len])
-					active_b.interaction.search_len = a.search_bar.query_len
-					active_b.interaction.search_match_count = a.search_bar.match_count
-					active_b.interaction.search_match_idx = a.search_bar.match_idx
-					active_b.interaction.search_active = true
-					if a.search_bar.match_count > 0 {
-						match_row := active_b.interaction.search_matches[active_b.interaction.search_match_idx].row
-						sb_len := termgrid.scrollback_len(&active_b.terminal.scrollback)
-						target_offset := clamp(sb_len - match_row, 0, termgrid.terminal_view_max_offset(&active_b.terminal))
-						termgrid.terminal_view_set_offset(&active_b.view, &active_b.terminal, target_offset)
-						active_b.view_generation += 1
-						if backend_is_threaded(active_b) {
-							active_b.front_view = active_b.view
-						}
-					}
-					if backend_is_threaded(active_b) {
-						active_b.front_interaction = active_b.interaction
-					}
-					a.renderer.full_redraw_pending = true
-				case .Next_Match, .Prev_Match:
-					if a.search_bar.match_count > 0 {
-						if s_action == .Next_Match {
-							a.search_bar.match_idx = (a.search_bar.match_idx + 1) % a.search_bar.match_count
-						} else {
-							a.search_bar.match_idx = (a.search_bar.match_idx - 1 + a.search_bar.match_count) % a.search_bar.match_count
-						}
-						active_b.interaction.search_match_idx = a.search_bar.match_idx
-						match_row := active_b.interaction.search_matches[active_b.interaction.search_match_idx].row
-						sb_len := termgrid.scrollback_len(&active_b.terminal.scrollback)
-						target_offset := clamp(sb_len - match_row, 0, termgrid.terminal_view_max_offset(&active_b.terminal))
-						termgrid.terminal_view_set_offset(&active_b.view, &active_b.terminal, target_offset)
-						active_b.view_generation += 1
-						if backend_is_threaded(active_b) {
-							active_b.front_view = active_b.view
-							active_b.front_interaction = active_b.interaction
-						}
-						a.renderer.full_redraw_pending = true
-					}
-				case .Close:
-					a.search_bar.visible = false
-					inter.interaction_exit_to_passthrough(&active_b.interaction)
-					termgrid.terminal_view_set_offset(&active_b.view, &active_b.terminal, 0)
-					active_b.view_generation += 1
-					if backend_is_threaded(active_b) {
-						active_b.front_view = active_b.view
-						active_b.front_interaction = active_b.interaction
-					}
-					a.renderer.full_redraw_pending = true
-				case .None:
-				}
+				_app_search_action(a, s_action)
 				continue
 			}
 		}
 
 		switch ev.event_type {
 		case .Key:
-			state_before := active_b.interaction
-			consumed, action := inter.interaction_dispatch_key(&active_b.interaction, ev, active_b.terminal.is_alt_screen)
-			if consumed {
-				if active_b.interaction.search_active {
-					q := string(active_b.interaction.search_query[:active_b.interaction.search_len])
-					active_b.interaction.search_match_count = inter.interaction_search_scan(
-						&active_b.terminal,
-						q,
-						active_b.interaction.search_matches[:],
-					)
-					if active_b.interaction.search_match_idx >= active_b.interaction.search_match_count {
-						active_b.interaction.search_match_idx = 0
-					}
-				}
-				switch action {
-				case .Copy:
-					text := inter.interaction_extract_selection_text(&active_b.terminal, &active_b.interaction)
-					if len(text) == 0 && state_before.selection_active {
-						text = inter.interaction_extract_selection_text(&active_b.terminal, &state_before)
-					}
-					if len(text) > 0 {
-						_app_clipboard_cb(transmute([]u8)text)
-						delete(text)
-					}
-					termgrid.terminal_view_set_offset(&active_b.view, &active_b.terminal, 0)
-					active_b.view_generation += 1
-				case .Resume_Live:
-					termgrid.terminal_view_set_offset(&active_b.view, &active_b.terminal, 0)
-					active_b.view_generation += 1
-				case .Scroll_To_Match:
-					if active_b.interaction.search_active && active_b.interaction.search_match_count > 0 {
-						match_row := active_b.interaction.search_matches[active_b.interaction.search_match_idx].row
-						sb_len := termgrid.scrollback_len(&active_b.terminal.scrollback)
-						target_offset := max(0, sb_len - match_row)
-						termgrid.terminal_view_set_offset(&active_b.view, &active_b.terminal, target_offset)
-						active_b.view_generation += 1
-					}
-				case .Paste:
-					buf: [4096]u8
-					n := _app_clipboard_read_cb(active_b, buf[:])
-					if n > 0 {
-						backend_paste(active_b, string(buf[:n]))
-					}
-				case .None, .Open_Link:
-				}
-				active_b.view.selection.active = active_b.interaction.selection_active
-				active_b.view.selection.anchor = active_b.interaction.selection_anchor
-				active_b.view.selection.focus = active_b.interaction.visual_cursor
-				active_b.view.selection.block = (active_b.interaction.visual_kind == .Block)
-				active_b.view.visual_mode = (active_b.interaction.mode == .Visual)
-				active_b.view_generation += 1
-				if backend_is_threaded(active_b) {
-					active_b.front_view = active_b.view
-					active_b.front_interaction = active_b.interaction
-				}
-				continue
-			}
-
-			if active_b.pty.state == .Exited {
-				switch app_handle_exited_key(ev) {
-				case .Relaunch:
-					_ = app_relaunch(a)
-				case .Quit:
-					if len(a.session_mgr.tabs) > 0 {
-						session_close_tab(&a.session_mgr, a.session_mgr.active_idx)
-						if len(a.session_mgr.tabs) == 0 {
-							a.should_quit = true
-						}
-						_app_resync_tab_modals(a)
-					} else {
-						a.should_quit = true
-					}
-					a.renderer.full_redraw_pending = true
-					continue
-				case .None:
-				}
-			} else {
-				key_ev := [1]input.Input_Event{ev}
-				kitty_flags := termgrid.terminal_kitty_active(&active_b.terminal).flags
-				ok = input.input_pump_events(&active_b.pty, key_ev[:], kitty_flags, active_b.terminal.app_cursor_keys) && ok
-			}
+			ok = _app_dispatch_backend(active_b, UI_Event{type = .Input, input = ev}) && ok
 		case .Local:
-			switch ev.action {
-			case .Copy:
-				if !_app_copy_selection(a) {
-					ok = false
-				}
+			#partial switch ev.action {
 			case .Paste:
 				if a.tab_rename.active || a.search_bar.visible || a.tab_menu.visible || a.tab_overflow.visible do continue
 				if !_app_paste_clipboard(a) {
@@ -1641,10 +1225,10 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 					if ev.drop.kind == .File {
 						// Shell-quote path: wrap in single quotes, escape embedded single quotes
 						quoted := _app_shell_quote_path(ev.drop.text)
-						_ = backend_paste(active_b, quoted)
+						_ = _app_send_paste(active_b, quoted)
 						delete(quoted)
 					} else {
-						_ = backend_paste(active_b, ev.drop.text)
+						_ = _app_send_paste(active_b, ev.drop.text)
 					}
 					delete(ev.drop.text)
 				} else if len(ev.drop.text) > 0 {
@@ -1745,59 +1329,7 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 			if a.search_bar.visible && platform_chrome.point_in_rect(px, py, a.search_bar.rect) {
 				consumed, s_action := platform_chrome.search_bar_dispatch_pointer(&a.search_bar, px, py, primary_click)
 				if consumed {
-					switch s_action {
-					case .Query_Changed:
-						_ = platform_chrome.search_bar_execute_scan(&a.search_bar, &active_b.terminal, active_b.interaction.search_matches[:])
-						copy(active_b.interaction.search_query[:], a.search_bar.query[:a.search_bar.query_len])
-						active_b.interaction.search_len = a.search_bar.query_len
-						active_b.interaction.search_match_count = a.search_bar.match_count
-						active_b.interaction.search_match_idx = a.search_bar.match_idx
-						active_b.interaction.search_active = true
-						if a.search_bar.match_count > 0 {
-							match_row := active_b.interaction.search_matches[active_b.interaction.search_match_idx].row
-							sb_len := termgrid.scrollback_len(&active_b.terminal.scrollback)
-							target_offset := clamp(sb_len - match_row, 0, termgrid.terminal_view_max_offset(&active_b.terminal))
-							termgrid.terminal_view_set_offset(&active_b.view, &active_b.terminal, target_offset)
-							active_b.view_generation += 1
-							if backend_is_threaded(active_b) {
-								active_b.front_view = active_b.view
-							}
-						}
-						if backend_is_threaded(active_b) {
-							active_b.front_interaction = active_b.interaction
-						}
-						a.renderer.full_redraw_pending = true
-					case .Next_Match, .Prev_Match:
-						if a.search_bar.match_count > 0 {
-							if s_action == .Next_Match {
-								a.search_bar.match_idx = (a.search_bar.match_idx + 1) % a.search_bar.match_count
-							} else {
-								a.search_bar.match_idx = (a.search_bar.match_idx - 1 + a.search_bar.match_count) % a.search_bar.match_count
-							}
-							active_b.interaction.search_match_idx = a.search_bar.match_idx
-							match_row := active_b.interaction.search_matches[active_b.interaction.search_match_idx].row
-							sb_len := termgrid.scrollback_len(&active_b.terminal.scrollback)
-							target_offset := clamp(sb_len - match_row, 0, termgrid.terminal_view_max_offset(&active_b.terminal))
-							termgrid.terminal_view_set_offset(&active_b.view, &active_b.terminal, target_offset)
-							active_b.view_generation += 1
-							if backend_is_threaded(active_b) {
-								active_b.front_view = active_b.view
-								active_b.front_interaction = active_b.interaction
-							}
-							a.renderer.full_redraw_pending = true
-						}
-					case .Close:
-						a.search_bar.visible = false
-						inter.interaction_exit_to_passthrough(&active_b.interaction)
-						termgrid.terminal_view_set_offset(&active_b.view, &active_b.terminal, 0)
-						active_b.view_generation += 1
-						if backend_is_threaded(active_b) {
-							active_b.front_view = active_b.view
-							active_b.front_interaction = active_b.interaction
-						}
-						a.renderer.full_redraw_pending = true
-					case .None:
-					}
+					_app_search_action(a, s_action)
 					continue
 				}
 			}
@@ -1839,7 +1371,8 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 					ev.pointer.clicks,
 				)
 				if consumed {
-					switch t_action {
+					#partial switch t_action {
+
 					case .Switch_Tab:
 						if is_down && ev.pointer.clicks == 2 {
 							_app_begin_tab_rename(a, target_idx)
@@ -1893,35 +1426,30 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 				}
 			}
 
-			// (c) Terminal scrollbar hit/drag
-			if active_b != nil && active_b.terminal.scrollbar.visible {
-				sb := &active_b.terminal.scrollbar
-				if sb.is_dragging {
-					if ev.pointer.kind == .Motion {
-						new_offset := termgrid.scrollbar_drag(sb, py)
-						termgrid.terminal_view_set_offset(&active_b.view, &active_b.terminal, new_offset)
-						active_b.view_generation += 1
-						a.renderer.full_redraw_pending = true
-						continue
-					} else if ev.pointer.kind == .Button_Up && ev.pointer.button == sdl3.BUTTON_LEFT {
-						sb.is_dragging = false
-						a.renderer.full_redraw_pending = true
-						continue
-					}
-				} else if ev.pointer.kind == .Button_Down && ev.pointer.button == sdl3.BUTTON_LEFT {
-					hit_thumb, hit_track := termgrid.scrollbar_hit_test(sb, px, py)
-					if hit_thumb {
+			if _app_route_pane_pointer(a, ev.pointer) do continue
+			active_b = app_active_backend(a)
+			// Singleton scrollbar presentation belongs to the frontend, scrolling to its backend.
+			tab := _app_active_tab(a)
+			if (tab == nil || tab.tree.node_count == 1) && a.frontend.scrollbar.visible {
+				sb := &a.frontend.scrollbar
+				if sb.is_dragging && ev.pointer.kind == .Button_Up {
+					sb.is_dragging = false
+					continue
+				}
+				if primary_click {
+					hit_thumb, hit_track := termgrid.scrollbar_hit_test(sb, px*frontend_content_scale(&a.frontend), py*frontend_content_scale(&a.frontend))
+					if hit_thumb || hit_track {
 						sb.is_dragging = true
-						sb.drag_start_y = py
+						sb.drag_start_y = py*frontend_content_scale(&a.frontend)
 						sb.drag_start_offset = sb.offset
 						continue
-					} else if hit_track {
-						new_offset := termgrid.scrollbar_drag(sb, py)
-						termgrid.terminal_view_set_offset(&active_b.view, &active_b.terminal, new_offset)
-						active_b.view_generation += 1
-						a.renderer.full_redraw_pending = true
-						continue
 					}
+				}
+				if sb.is_dragging && ev.pointer.kind == .Motion {
+					offset := termgrid.scrollbar_drag(sb, py*frontend_content_scale(&a.frontend))
+					_ = _app_dispatch_backend(active_b, UI_Event{type = .Scroll, rows = offset})
+					a.renderer.full_redraw_pending = true
+					continue
 				}
 			}
 
@@ -1936,18 +1464,8 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 }
 
 _app_apply_resize :: proc(a: ^App) {
-	b := app_active_backend(a)
-	if b == nil do return
-	rows := b.terminal.grid.row_count
-	cols := b.terminal.grid.col_count
-	if rows > 0 && cols > 0 {
-		render.renderer_resize_grid(&a.renderer, &b.terminal, i32(rows), i32(cols))
-	}
-	if a.window.pixel_w > 0 && a.window.pixel_h > 0 {
-		render.renderer_resize(&a.renderer, u32(a.window.pixel_w), u32(a.window.pixel_h))
-	}
-	a.last_px_w = a.window.pixel_w
-	a.last_px_h = a.window.pixel_h
+	if a == nil do return
+	_ = app_on_resize(a, a.window.pixel_w, a.window.pixel_h)
 }
 
 _app_mark_cursor_dirty :: proc(a: ^App, row, col: int) -> bool {
@@ -1977,56 +1495,19 @@ app_relaunch :: proc(a: ^App) -> bool {
 	return backend_relaunch(b)
 }
 
-app_on_resize :: proc(a: ^App, pixel_w: i32, pixel_h: i32) -> (resized: bool) {
-	threaded := false
-	started_ns := profile_clock_ns()
-	if a == nil || pixel_w <= 0 || pixel_h <= 0 {
-		return false
-	}
-	b := app_active_backend(a)
-	if b == nil do return false
-
+app_on_resize :: proc(a: ^App, pixel_w: i32, pixel_h: i32) -> bool {
+	if a == nil || pixel_w <= 0 || pixel_h <= 0 do return false
+	changed := a.last_px_w != pixel_w || a.last_px_h != pixel_h
 	frontend_update_padding(&a.frontend)
-
-	rows, cols := grid_dimensions_for_pixels(
-		pixel_w,
-		pixel_h,
-		a.renderer.cell_width,
-		a.renderer.cell_height,
-		a.renderer.pad_x,
-		a.renderer.pad_y,
-	)
-
-	threaded = backend_is_threaded(b)
-	if threaded {
-		backend_lock_render(b)
-		defer backend_unlock_render(b)
+	if changed {
 		render.renderer_resize(&a.renderer, u32(pixel_w), u32(pixel_h))
-		win.platform_setup_metal_layer(a.window.handle)
+		if a.window.handle != nil do win.platform_setup_metal_layer(a.window.handle)
 		a.frontend.last_px_w = pixel_w
 		a.frontend.last_px_h = pixel_h
 		a.last_px_w = pixel_w
 		a.last_px_h = pixel_h
-		profile_record(.Resize_Begin, _profile_scenario.phase, pixel_w, pixel_h, i32(rows), i32(cols), 0, true)
-		backend_push_event(b, UI_Event{
-			type = .Resize,
-			pixel_w = pixel_w,
-			pixel_h = pixel_h,
-			rows = rows,
-			cols = cols,
-		})
-		elapsed := profile_elapsed_ns(started_ns)
-		profile_record(.Resize_End, _profile_scenario.phase, pixel_w, pixel_h, i32(rows), i32(cols), elapsed, true)
-		return true
 	}
-
-	profile_record(.Resize_Begin, _profile_scenario.phase, pixel_w, pixel_h, i32(rows), i32(cols), 0, false)
-	resized = frontend_on_resize(&a.frontend, &b.terminal, &b.pty, pixel_w, pixel_h)
-	elapsed := profile_elapsed_ns(started_ns)
-	profile_record(.Resize_End, _profile_scenario.phase, pixel_w, pixel_h, i32(rows), i32(cols), elapsed, false)
-	a.last_px_w = pixel_w
-	a.last_px_h = pixel_h
-	return resized
+	return _app_layout_panes(a) || changed
 }
 
 _app_event_watch :: proc "c" (userdata: rawptr, event: ^sdl3.Event) -> bool {
@@ -2069,19 +1550,7 @@ _app_event_watch :: proc "c" (userdata: rawptr, event: ^sdl3.Event) -> bool {
 				if size_changed {
 					app_on_resize(a, a.window.pixel_w, a.window.pixel_h)
 				}
-				if active_b != nil {
-					threaded := backend_is_threaded(active_b)
-					if threaded {
-						backend_lock_render(active_b)
-					}
-					state := backend_get_render_state(active_b)
-					state.debug_frames = a.debug_frames
-					_app_stage_ui(a)
-					_ = frontend_render(&a.frontend, &state)
-					if threaded {
-						backend_unlock_render(active_b)
-					}
-				}
+				_ = _app_present(a)
 			}
 		}
 	}
@@ -2093,10 +1562,14 @@ _app_compute_hud_title :: proc(s: ^inter.Interaction_State) -> string {
 	switch s.mode {
 	case .Visual:
 		kind_str := "CHAR"
+		if !s.selection_active {
+			kind_str = "NAV"
+		} else {
 		switch s.visual_kind {
 		case .Char:  kind_str = "CHAR"
 		case .Line:  kind_str = "LINE"
 		case .Block: kind_str = "BLOCK"
+		}
 		}
 		if s.paused_lines_accumulated > 0 {
 			return fmt.tprintf(APP_HUD_VISUAL_PAUSED_FMT, kind_str, s.paused_lines_accumulated)
@@ -2137,6 +1610,8 @@ _app_sync_title :: proc(a: ^App) {
 		}
 	}
 
+	if backend_is_threaded(active_b) do backend_lock_render(active_b)
+	defer if backend_is_threaded(active_b) { backend_unlock_render(active_b) }
 	inter_ptr := &active_b.front_interaction if backend_is_threaded(active_b) else &active_b.interaction
 	if inter_ptr.mode != .Passthrough || inter_ptr.viewport_flow == .Paused {
 		hud_title := _app_compute_hud_title(inter_ptr)
@@ -2165,6 +1640,8 @@ _app_drain_terminal_events :: proc(a: ^App, term_ref: ^termgrid.Terminal) {
 		win.window_set_clipboard_text(&a.window, clip_text)
 	}
 
+	if backend_is_threaded(active_b) do backend_lock_render(active_b)
+	defer if backend_is_threaded(active_b) { backend_unlock_render(active_b) }
 	if term_ref.bell_event {
 		term_ref.bell_event = false
 		when ODIN_OS == .Darwin {
@@ -2209,12 +1686,14 @@ _app_layout_ui :: proc(a: ^App) {
 	if a.confirm_dialog.visible {
 		platform_dialogs.confirm_dialog_layout(&a.confirm_dialog, window_w, window_h)
 	}
+	_app_layout_panes(a)
 	_app_set_drag_region(a)
 }
 
 _app_stage_ui :: proc(a: ^App) {
-	if a == nil || a.window.handle == nil do return
+	if a == nil do return
 	_app_layout_ui(a)
+	if a.window.handle == nil do return
 	ui_tabs: [MAX_TABS]platform_tabs.Tab_Info
 	tab_count := _app_build_ui_tabs(a, ui_tabs[:])
 	_ = ui.ui_render_stage(
@@ -2270,13 +1749,6 @@ _app_frame_dt_ms :: proc() -> f32 {
 	return clamp(dt_ms, 0, platform_tabs.TAB_BAR_ANIM_DT_MAX_MS)
 }
 
-_app_render_unlock :: proc(data: rawptr) {
-	b := (^Backend)(data)
-	if b != nil {
-		backend_unlock_render(b)
-	}
-}
-
 app_frame :: proc(a: ^App) -> bool {
 	if a == nil {
 		return false
@@ -2285,6 +1757,7 @@ app_frame :: proc(a: ^App) -> bool {
 		pool := win.platform_autorelease_pool_push()
 		defer win.platform_autorelease_pool_pop(pool)
 	}
+	defer _app_sync_pane_cursor(a)
 	defer free_all(context.temp_allocator)
 
 	if ! _profile_scenario_step(a) { return false }
@@ -2393,26 +1866,19 @@ app_frame :: proc(a: ^App) -> bool {
 	threaded := backend_is_threaded(active_b)
 	active_term := &active_b.front_terminal if threaded else &active_b.terminal
 
-	if _damage_cells(active_term) > 0 {
-		any_damaged = true
-	}
-	if a.renderer.rows != i32(active_term.grid.row_count) || a.renderer.cols != i32(active_term.grid.col_count) {
-		render.renderer_resize_grid(&a.renderer, active_term, i32(active_term.grid.row_count), i32(active_term.grid.col_count))
-		any_damaged = true
-	}
+	if threaded do backend_lock_render(active_b)
+	if _damage_cells(active_term) > 0 do any_damaged = true
+	if threaded do backend_unlock_render(active_b)
 	_app_drain_terminal_events(a, active_term)
-
-	// Window title sync from backend / interaction HUD
 	_app_sync_title(a)
-
-	cursor_changed, position_changed, style_changed, old_row, old_col := backend_sync_cursor(active_b)
-	if cursor_changed || position_changed {
-		_app_mark_cursor_dirty(a, old_row, old_col)
-		cur := termgrid.terminal_get_cursor(active_term)
-		_app_mark_cursor_dirty(a, cur.row, cur.col)
-	} else if style_changed {
-		cur := termgrid.terminal_get_cursor(active_term)
-		_app_mark_cursor_dirty(a, cur.row, cur.col)
+	_app_sync_search_bar(a)
+	if !threaded {
+		cursor_changed, position_changed, style_changed, old_row, old_col := backend_sync_cursor(active_b)
+		if cursor_changed || position_changed || style_changed {
+			_app_mark_cursor_dirty(a, old_row, old_col)
+			cur := termgrid.terminal_get_cursor(active_term)
+			_app_mark_cursor_dirty(a, cur.row, cur.col)
+		}
 	}
 
 	dt_ms := _app_frame_dt_ms()
@@ -2447,20 +1913,7 @@ app_frame :: proc(a: ^App) -> bool {
 
 		if should_render {
 			a.has_deferred_render = false
-			if threaded {
-				backend_lock_render(active_b)
-				a.frontend.renderer.unlock_cb = _app_render_unlock
-				a.frontend.renderer.unlock_data = rawptr(active_b)
-			}
-			state := backend_get_render_state(active_b)
-			state.debug_frames = a.debug_frames
-			_app_stage_ui(a)
-			_ = frontend_render(&a.frontend, &state)
-			if threaded {
-				a.frontend.renderer.unlock_cb = nil
-				a.frontend.renderer.unlock_data = nil
-				backend_unlock_render(active_b)
-			}
+			_ = _app_present(a)
 			a.last_present_time_ns = u64(platform.platform_ticks_to_ns(platform.platform_now()))
 		}
 	}
@@ -2474,7 +1927,7 @@ app_frame :: proc(a: ^App) -> bool {
 		grid_cols = int(a.renderer.cols),
 	})
 
-	backend_poll_exit(active_b)
+	if !backend_is_threaded(active_b) do backend_poll_exit(active_b)
 
 	return !a.should_quit
 }
@@ -2519,11 +1972,10 @@ main :: proc() {
 
 		drop_fx_anim_active := drop_fx_active(&app.drop_fx)
 		anim_active := app.tab_bar.anim.anim_active || drop_fx_anim_active
-		active_b := app_active_backend(app)
-		has_pending_damage := active_b != nil && (_damage_cells(&active_b.front_terminal) > 0 || _damage_cells(&active_b.terminal) > 0)
+		has_pending_damage := _app_has_pending_damage(app)
 		ev: sdl3.Event
 		has_ev := false
-		if anim_active || profile_scenario_enabled() || has_pending_damage || app.has_deferred_render {
+		if anim_active || profile_scenario_enabled() || has_pending_damage || app.has_deferred_render || app.renderer.full_redraw_pending {
 			if sdl3.WaitEventTimeout(&ev, 1) {
 				has_ev = true
 			}

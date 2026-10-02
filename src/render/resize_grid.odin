@@ -88,7 +88,7 @@ renderer_resize_grid :: proc(r: ^Renderer, t: ^termgrid.Terminal, rows: i32, col
 	// 5. Dirty mirror: rebuild against the committed dims (rebase + arm
 	// inside init; nil backend skips GPU creation for CPU-only use).
 	// Instance capacity scales dynamically for large viewports/fullscreen.
-	needed_instances := max(u32(RENDER_MAX_INSTANCES), u32(2 * rows * cols + 128))
+	needed_instances := _renderer_instance_capacity(rows, cols)
 	if needed_instances > r.instances.max_instances {
 		r.instances.max_instances = needed_instances
 		when ODIN_OS == .Darwin {

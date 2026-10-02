@@ -1,5 +1,7 @@
 package main
 
+import platform_chrome "../platform/chrome"
+
 // Contract definitions for communication between Backend and Frontend.
 // Decouples terminal/PTY state from OS window/GPU rendering.
 
@@ -91,6 +93,9 @@ UI_Event_Type :: enum {
 	Focus,
 	Paste,
 	Quit,
+	Search,
+	Scroll,
+	Theme,
 }
 
 // UI_Event represents an event received by the frontend (keyboard, mouse,
@@ -104,6 +109,11 @@ UI_Event :: struct {
 	cols:        int,
 	focused:     bool,
 	text:        string,
+	search_action: platform_chrome.Search_Action,
+	query: [256]u8,
+	query_len: int,
+	case_sensitive, use_regex, whole_word: bool,
+	theme: ^termgrid.Theme,
 }
 
 // App_Exit_Action is the per-key decision while the child is Exited.

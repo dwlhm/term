@@ -39,6 +39,8 @@ Input_Local_Action :: enum u8 {
 	Zoom_In,
 	Zoom_Out,
 	Reload_Config,
+	Detach_Tab,
+	Attach_Session,
 }
 
 // Input_Drop_Kind distinguishes file path drops, text drops, and hover/completion states.

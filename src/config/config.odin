@@ -28,6 +28,9 @@ Config :: struct {
 	padding_y:                int,
 	locale:                   string,
 	tab_max_title_len:        int,
+	window_opacity:           f32,
+	window_blur:              bool,
+	allow_screensaver:        bool,
 }
 
 // config_default returns a default terminal configuration struct matching standard defaults.
@@ -56,6 +59,9 @@ config_default :: proc() -> Config {
 		padding_y                = 4,
 		locale                   = strings.clone(""),
 		tab_max_title_len        = 16,
+		window_opacity           = 1.0,
+		window_blur              = false,
+		allow_screensaver        = true,
 	}
 }
 

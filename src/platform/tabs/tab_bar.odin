@@ -23,6 +23,7 @@ Tab_Hit_Target :: enum u8 {
 	Btn_Close,
 	Btn_New_Tab,
 	Btn_Overflow,
+	Btn_Detached,
 }
 
 TAB_BAR_HEIGHT:          f32 : 28.0
@@ -55,7 +56,9 @@ Tab_Bar_State :: struct {
 	new_tab_rect:            Rect_f32,
 	overflow_rect:           Rect_f32,
 	overflow_indicator_rect: Rect_f32,
+	detached_badge_rect:     Rect_f32,
 	hover_overflow:          bool,
+	hover_detached:          bool,
 	hover_target:            Tab_Hit_Target,
 	hover_tab_idx:           int,
 	hover_close_idx:         int,
@@ -73,6 +76,7 @@ Tab_Bar_State :: struct {
 	display_start:           int,
 	visible_tab_count:       int,
 	overflow_count:          int,
+	detached_count:          int,
 	target_scroll_idx:       int,
 	anim:                    Tab_Bar_Anim,
 }
@@ -86,6 +90,7 @@ Tab_Action :: enum u8 {
 	Context_Menu,
 	Show_Overflow,
 	Window_Zoom,
+	Open_Session_Switcher,
 }
 
 // tabs_init initializes the tab bar state to clean defaults.
@@ -95,7 +100,9 @@ tabs_init :: proc(state: ^Tab_Bar_State) {
 	state.new_tab_rect = Rect_f32{}
 	state.overflow_rect = Rect_f32{}
 	state.overflow_indicator_rect = Rect_f32{}
+	state.detached_badge_rect = Rect_f32{}
 	state.hover_overflow = false
+	state.hover_detached = false
 	state.hover_target = .None
 	state.hover_tab_idx = -1
 	state.hover_close_idx = -1
@@ -113,6 +120,7 @@ tabs_init :: proc(state: ^Tab_Bar_State) {
 	state.display_start = 0
 	state.visible_tab_count = 0
 	state.overflow_count = 0
+	state.detached_count = 0
 	state.target_scroll_idx = -1
 	state.anim = Tab_Bar_Anim{}
 }
@@ -230,6 +238,7 @@ tabs_layout :: proc(
 		state.new_tab_rect = Rect_f32{}
 		state.overflow_rect = Rect_f32{}
 		state.overflow_indicator_rect = Rect_f32{}
+		state.detached_badge_rect = Rect_f32{}
 		state.viewport_rect = Rect_f32{}
 		state.title_rect = Rect_f32{}
 		state.drag_rect = Rect_f32{}
@@ -357,6 +366,17 @@ tabs_layout :: proc(
 	state.new_tab_rect = Rect_f32{x = cur_x, y = 0, w = btn_w, h = TAB_BAR_HEIGHT}
 	cur_x += btn_w
 
+	if state.detached_count > 0 {
+		buf: [32]u8
+		str := fmt.bprintf(buf[:], "○ %d detached", state.detached_count)
+		det_w := f32(_rune_count(str)) * cw + 12.0
+		det_w = min(det_w, max(0, width - cur_x))
+		state.detached_badge_rect = Rect_f32{x = cur_x, y = 0, w = det_w, h = TAB_BAR_HEIGHT}
+		cur_x += det_w
+	} else {
+		state.detached_badge_rect = Rect_f32{}
+	}
+
 	remaining_w := max(0, width - cur_x)
 	state.drag_rect = Rect_f32{x = cur_x, y = 0, w = remaining_w, h = TAB_BAR_HEIGHT}
 	state.title_rect = state.drag_rect
@@ -419,6 +439,9 @@ tab_bar_hit_test :: proc(state: ^Tab_Bar_State, tab_count: int, tab_rects: []Rec
 	if state.new_tab_rect.w > 0 && point_in_rect(x, y, state.new_tab_rect) {
 		return .Btn_New_Tab, -1
 	}
+	if state.detached_count > 0 && state.detached_badge_rect.w > 0 && point_in_rect(x, y, state.detached_badge_rect) {
+		return .Btn_Detached, -1
+	}
 	if !point_in_rect(x, y, state.viewport_rect) && !point_in_rect(x, y, state.rect) {
 		return .None, -1
 	}
@@ -460,14 +483,16 @@ tabs_dispatch_pointer :: proc(
 	prev_tab := state.hover_tab_idx
 	prev_close := state.hover_close_idx
 	prev_new := state.hover_new_tab
+	prev_detached := state.hover_detached
 
 	state.hover_target = target
 	state.hover_tab_idx = idx if target == .Tab_Item else -1
 	state.hover_close_idx = idx if target == .Btn_Close else -1
 	state.hover_new_tab = (target == .Btn_New_Tab)
 	state.hover_overflow = (target == .Btn_Overflow)
+	state.hover_detached = (target == .Btn_Detached)
 
-	if state.hover_target != prev_target || state.hover_tab_idx != prev_tab || state.hover_close_idx != prev_close || state.hover_new_tab != prev_new {
+	if state.hover_target != prev_target || state.hover_tab_idx != prev_tab || state.hover_close_idx != prev_close || state.hover_new_tab != prev_new || state.hover_detached != prev_detached {
 		tab_bar_anim_activate(state)
 	}
 
@@ -497,6 +522,8 @@ tabs_dispatch_pointer :: proc(
 				return true, .Show_Overflow, -1
 			case .Btn_New_Tab:
 				return true, .New_Tab, -1
+			case .Btn_Detached:
+				return true, .Open_Session_Switcher, -1
 			case .None:
 				return true, .None, -1
 			}

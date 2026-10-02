@@ -737,6 +737,7 @@ test_shortcut_registry_labels :: proc(t: ^testing.T) {
 	testing.expect_value(t, ui.ui_shortcut_label(.Close_Tab), "\u2318D")
 	testing.expect_value(t, ui.ui_shortcut_label(.Close_Others), "\u2325\u2318D")
 	testing.expect_value(t, ui.ui_shortcut_label(.Close_To_Right), "\u2325\u21E7\u2318D")
+	testing.expect_value(t, ui.ui_shortcut_label(.Detach_Tab), "\u2325\u2318B")
 	testing.expect_value(t, ui.ui_shortcut_label(.Overflow), "\u21E7\u2318\\")
 	testing.expect_value(t, ui.ui_shortcut_label(.Window_Zoom), "\u2303\u2318Z")
 	testing.expect_value(t, ui.ui_shortcut_label(.Cancel), "esc")
@@ -907,4 +908,77 @@ test_water_surface_filters_bounds_and_resets :: proc(t: ^testing.T) {
 	ui.ui_stage_water_surface(r, 800, 600, 2, waves[2:], col)
 	testing.expect_value(t, r.ui_bg_count, render.RENDER_MAX_UI_INSTANCES)
 	testing.expect_value(t, r.instances.uniform_data.water_meta[0], f32(0))
+}
+
+@test
+test_pane_chrome_dividers_and_active_border :: proc(t: ^testing.T) {
+	r := new(render.Renderer)
+	defer free(r)
+	theme := ui.theme_catppuccin_mocha()
+
+	dividers := []ui.Pane_Divider{
+		{x = 400, y = 28, w = 1, h = 572, is_hovered = false},
+		{x = 401, y = 300, w = 399, h = 1, is_hovered = true},
+	}
+	active_rect := ui.Rect_f32{x = 0, y = 28, w = 400, h = 572}
+
+	ui.ui_stage_pane_chrome(r, &theme, dividers, active_rect, true, 1.0)
+	testing.expect(t, r.ui_staged, "ui must be staged")
+	// 2 dividers + 4 border quads = 6 quads
+	testing.expect_value(t, r.ui_bg_count, 6)
+
+	// Divider 0: border_subtle
+	testing.expect_value(t, r.ui_bg_data[0].x, f32(400))
+	testing.expect_value(t, r.ui_bg_data[0].y, f32(28))
+	testing.expect_value(t, r.ui_bg_data[0].cw, f32(1))
+	testing.expect_value(t, r.ui_bg_data[0].ch, f32(572))
+	testing.expect_value(t, r.ui_bg_data[0].r, theme.border_subtle.r)
+
+	// Divider 1: surface_hover
+	testing.expect_value(t, r.ui_bg_data[1].x, f32(401))
+	testing.expect_value(t, r.ui_bg_data[1].y, f32(300))
+	testing.expect_value(t, r.ui_bg_data[1].cw, f32(399))
+	testing.expect_value(t, r.ui_bg_data[1].ch, f32(1))
+	testing.expect_value(t, r.ui_bg_data[1].r, theme.surface_hover.r)
+
+	// Border quads (top, bottom, left, right): accent_primary
+	for i in 2..<6 {
+		testing.expect_value(t, r.ui_bg_data[i].r, theme.accent_primary.r)
+		testing.expect_value(t, r.ui_bg_data[i].g, theme.accent_primary.g)
+		testing.expect_value(t, r.ui_bg_data[i].b, theme.accent_primary.b)
+	}
+}
+
+@test
+test_pane_chrome_hollow_cursor :: proc(t: ^testing.T) {
+	r := new(render.Renderer)
+	defer free(r)
+
+	ui.ui_stage_hollow_cursor(r, 100, 200, 8, 16, {0.8, 0.8, 0.8, 0.8}, 1.0)
+	testing.expect(t, r.ui_staged, "ui must be staged")
+	testing.expect_value(t, r.ui_bg_count, 4)
+
+	// Top: (100, 200, 8, 1)
+	testing.expect_value(t, r.ui_bg_data[0].x, f32(100))
+	testing.expect_value(t, r.ui_bg_data[0].y, f32(200))
+	testing.expect_value(t, r.ui_bg_data[0].cw, f32(8))
+	testing.expect_value(t, r.ui_bg_data[0].ch, f32(1))
+
+	// Bottom: (100, 215, 8, 1)
+	testing.expect_value(t, r.ui_bg_data[1].x, f32(100))
+	testing.expect_value(t, r.ui_bg_data[1].y, f32(215))
+	testing.expect_value(t, r.ui_bg_data[1].cw, f32(8))
+	testing.expect_value(t, r.ui_bg_data[1].ch, f32(1))
+
+	// Left: (100, 200, 1, 16)
+	testing.expect_value(t, r.ui_bg_data[2].x, f32(100))
+	testing.expect_value(t, r.ui_bg_data[2].y, f32(200))
+	testing.expect_value(t, r.ui_bg_data[2].cw, f32(1))
+	testing.expect_value(t, r.ui_bg_data[2].ch, f32(16))
+
+	// Right: (107, 200, 1, 16)
+	testing.expect_value(t, r.ui_bg_data[3].x, f32(107))
+	testing.expect_value(t, r.ui_bg_data[3].y, f32(200))
+	testing.expect_value(t, r.ui_bg_data[3].cw, f32(1))
+	testing.expect_value(t, r.ui_bg_data[3].ch, f32(16))
 }

@@ -188,3 +188,22 @@ test_resize_grid_no_leak :: proc(t: ^testing.T) {
 	leaked := len(track.allocation_map)
 	testing.expect_value(t, leaked, 0)
 }
+
+@(test)
+test_resize_grid_large_surface_draw_capacity :: proc(t: ^testing.T) {
+	r := _resize_grid_test_renderer(RESIZE_GRID_TEST_ROWS, RESIZE_GRID_TEST_COLS)
+	defer _resize_grid_test_destroy(&r)
+	// Derive a surface beyond the fixed baseline rather than assuming a
+	// particular display or a fixed maximum instance count.
+	rows := i32(RESIZE_GRID_TEST_ROWS)
+	cols := i32(render.RENDER_MAX_INSTANCES / RESIZE_GRID_TEST_ROWS)
+	render.renderer_resize_grid(&r, nil, rows, cols)
+	cells := u32(rows) * u32(cols)
+	testing.expect(t, r.instances.max_instances >= cells * 4 + 128, "surface must reserve background, glyph, decoration and interaction capacity")
+	testing.expect(t, r.instances.max_instances > render.RENDER_MAX_INSTANCES)
+	testing.expect_value(t, len(r.instances.instance_data), int(r.instances.max_instances))
+	testing.expect(t, u64(len(r.upload_ring.staging[0])) >= u64(r.instances.max_instances) * instance.INSTANCE_STRIDE, "ring must accept the complete expanded draw")
+	staging := raw_data(r.upload_ring.staging[0])
+	render.renderer_resize_grid(&r, nil, rows, cols)
+	testing.expect(t, raw_data(r.upload_ring.staging[0]) == staging, "large same-size resize must remain a no-op")
+}

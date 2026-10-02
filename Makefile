@@ -9,7 +9,7 @@ TEST_FLAGS ?= -define:ODIN_TEST_THREADS=1
 DEBUG_FLAGS ?= -debug
 RELEASE_FLAGS ?= -o:speed -no-bounds-check
 
-.PHONY: all build release build-mcp release-mcp test-mcp bench-mcp bundle install dmg run check test test-terminal test-parser test-pty test-input test-ui test-interaction test-render test-app test-bench test-mcp test-diag test-probe bench bench-run bench-video bench-vte clean help
+.PHONY: all build release build-mcp release-mcp test-mcp bench-mcp bundle install dmg run check test test-terminal test-parser test-pty test-input test-tabs test-ui test-interaction test-render test-app test-bench test-mcp test-diag test-probe test-session-core bench bench-run bench-video bench-vte clean help
 
 all: build
 
@@ -77,7 +77,7 @@ check:
 	$(ODIN) check src/diag $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/bench/probe $(CHECK_FLAGS) -no-entry-point
 
-test: test-config test-terminal test-parser test-pty test-input test-ui test-interaction test-render test-app test-bench test-mcp test-diag test-probe
+test: test-config test-terminal test-parser test-pty test-input test-tabs test-ui test-interaction test-render test-app test-bench test-mcp test-diag test-probe test-session-core
 
 test-config:
 	$(ODIN) test src/config/tests $(COMMON_FLAGS) $(TEST_FLAGS)
@@ -93,6 +93,9 @@ test-pty:
 
 test-input:
 	$(ODIN) test src/platform/input/tests $(COMMON_FLAGS) $(TEST_FLAGS)
+
+test-tabs:
+	$(ODIN) test src/platform/tabs/tests $(COMMON_FLAGS) $(TEST_FLAGS)
 
 test-ui:
 	$(ODIN) test src/ui/tests $(COMMON_FLAGS) $(TEST_FLAGS)
@@ -117,6 +120,9 @@ test-diag:
 
 test-probe:
 	$(ODIN) test src/bench/probe/tests $(COMMON_FLAGS) $(TEST_FLAGS)
+
+test-session-core:
+	$(ODIN) test src/session_core/tests $(COMMON_FLAGS) $(TEST_FLAGS)
 
 bench-mcp: release-mcp
 	python3 scripts/bench_mcp_comprehensive.py

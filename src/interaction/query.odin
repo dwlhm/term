@@ -294,3 +294,19 @@ interaction_detect_link_at_point :: proc(t: ^termgrid.Terminal, pt: termgrid.Ter
 
 	return res
 }
+
+// interaction_select_all selects all document cells from scrollback start to grid end.
+interaction_select_all :: proc(t: ^termgrid.Terminal, s: ^Interaction_State) {
+	if t == nil || s == nil || t.grid.row_count <= 0 || t.grid.col_count <= 0 {
+		return
+	}
+	total_rows := termgrid.scrollback_len(&t.scrollback) + t.grid.row_count
+	s.selection_anchor = termgrid.Terminal_Point{row = 0, col = 0}
+	s.visual_cursor = termgrid.Terminal_Point{
+		row = max(0, total_rows - 1),
+		col = max(0, t.grid.col_count - 1),
+	}
+	s.visual_kind = .Char
+	s.selection_active = true
+	s.pending_yank = false
+}

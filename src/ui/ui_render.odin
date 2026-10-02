@@ -301,6 +301,7 @@ ui_render_stage :: proc(
 	tab_rename:    ^Tab_Rename_State = nil,
 	confirm_state: ^Confirm_Dialog_State = nil,
 	tab_overflow: ^Tab_Overflow_State = nil,
+	session_switcher: ^Session_Switcher_State = nil,
 ) -> int {
 	if r == nil || theme == nil || tab_state == nil {
 		return 0
@@ -414,6 +415,26 @@ ui_render_stage :: proc(
 		btn := tab_state.new_tab_rect
 		col := theme.text_primary if tab_state.hover_new_tab else theme.text_muted
 		emit_char(r, btn.x + (btn.w - cw) * 0.5, (TAB_BAR_HEIGHT - ch) * 0.5, cw, ch, '+', col)
+	}
+
+	// '○ N detached' badge if detached_count > 0 (clickable to open Session Switcher)
+	if tab_state.detached_count > 0 && tab_state.detached_badge_rect.w > 0 && r.ui_glyph_count < render.RENDER_MAX_UI_INSTANCES {
+		btn := tab_state.detached_badge_rect
+		if tab_state.hover_detached {
+			emit_bg(r, btn.x + 2.0, 2.0, max(0.0, btn.w - 4.0), TAB_BAR_HEIGHT - 4.0, theme.surface_hover)
+		}
+		bx := btn.x + 4.0
+		by := (TAB_BAR_HEIGHT - ch) * 0.5
+		emit_char(r, bx, by, cw, ch, '○', theme.accent_primary if tab_state.hover_detached else theme.text_muted)
+		bx += cw + 4.0
+		buf: [32]u8
+		lbl := fmt.bprintf(buf[:], "%d detached", tab_state.detached_count)
+		text_col := theme.text_primary if tab_state.hover_detached else theme.text_muted
+		for cp in lbl {
+			if bx + cw > btn.x + btn.w do break
+			emit_char(r, bx, by, cw, ch, cp, text_col)
+			bx += cw
+		}
 	}
 
 	// Trailing right area is completely clean/empty.
@@ -625,6 +646,110 @@ ui_render_stage :: proc(
 		}
 	}
 
+	if session_switcher != nil && session_switcher.visible {
+		cr := session_switcher.rect
+		pad := theme.spacing.md
+
+		// 1. Backdrop card & borders
+		emit_bg(r, cr.x, cr.y, cr.w, cr.h, theme.surface_card)
+		emit_bg(r, cr.x, cr.y, cr.w, 1.0, theme.border_subtle)
+		emit_bg(r, cr.x, cr.y + cr.h - 1.0, cr.w, 1.0, theme.border_subtle)
+		emit_bg(r, cr.x, cr.y, 1.0, cr.h, theme.border_subtle)
+		emit_bg(r, cr.x + cr.w - 1.0, cr.y, 1.0, cr.h, theme.border_subtle)
+
+		// 2. Search header: "> {query}_" and right-aligned "[{match_count} matches]"
+		header_h: f32 = 38.0
+		hy := cr.y + (header_h - ch) * 0.5
+		emit_char(r, cr.x + pad, hy, cw, ch, '>', theme.accent_primary)
+
+		hx := cr.x + pad + cw * 2
+		q_str := string(session_switcher.query[:session_switcher.query_len])
+		_emit_text_clipped(r, q_str, hx, hy, cw, ch, 36, theme.text_primary)
+
+		cursor_x := hx + f32(session_switcher.query_len) * cw
+		emit_char(r, cursor_x, hy, cw, ch, '_', theme.accent_primary)
+
+		count_buf: [48]u8
+		count_str := fmt.bprintf(count_buf[:], "[%d match%s • %d detached]", session_switcher.match_count, "es" if session_switcher.match_count != 1 else "", session_switcher.detached_count)
+		count_w := f32(len(count_str)) * cw
+		count_x := cr.x + cr.w - pad - count_w
+		_emit_text_clipped(r, count_str, count_x, hy, cw, ch, len(count_str), theme.text_faint)
+
+		// 3. Horizontal divider below header
+		emit_bg(r, cr.x, cr.y + header_h, cr.w, 1.0, theme.border_subtle)
+
+		// 4. Matched rows
+		row_h: f32 = 26.0
+		if session_switcher.match_count == 0 {
+			no_match_y := cr.y + header_h + (row_h - ch) * 0.5 + 4.0
+			_emit_text_clipped(r, "No matching sessions", cr.x + pad, no_match_y, cw, ch, 32, theme.text_faint)
+		} else {
+			visible_rows := min(session_switcher.match_count, 8)
+			for row in 0 ..< visible_rows {
+				item_idx := session_switcher.matches[row]
+				item := session_switcher.items[item_idx]
+				ry := cr.y + header_h + 1.0 + f32(row) * row_h
+
+				if row == session_switcher.selected_match_idx {
+					emit_bg(r, cr.x + 4.0, ry + 1.0, cr.w - 8.0, row_h - 2.0, theme.surface_hover)
+				}
+
+				glyph_y := ry + (row_h - ch) * 0.5
+				rx := cr.x + pad
+
+				// Status glyph: ● (active tab), ○ (detached), or ⊞ (layout)
+				glyph_cp: rune = '⊞' if item.is_persisted else (!item.is_detached ? '●' : '○')
+				glyph_col := theme.status_success if item.is_persisted else (!item.is_detached ? theme.accent_primary : theme.text_faint)
+				emit_char(r, rx, glyph_y, cw, ch, glyph_cp, glyph_col)
+				rx += cw * 2
+
+				// Item text: [{slot}] {title} ({status})
+				slot_buf: [16]u8
+				slot_str := fmt.bprintf(slot_buf[:], "[%d]", item.tab_idx + 1) if item.tab_idx >= 0 else (item.is_persisted ? "[L]" : "[–]")
+				status_str := "layout" if item.is_persisted else (!item.is_detached ? "active" : "detached")
+				title_buf: [128]u8
+				title_str := fmt.bprintf(title_buf[:], "%s %s (%s)", slot_str, item.title, status_str)
+				title_cols := 22
+				_emit_text_clipped(r, title_str, rx, glyph_y, cw, ch, title_cols, theme.text_primary)
+				rx += f32(min(len(title_str), title_cols)) * cw + cw * 2
+
+				// PID
+				if item.pid > 0 {
+					pid_buf: [32]u8
+					pid_str := fmt.bprintf(pid_buf[:], "PID %d", item.pid)
+					_emit_text_clipped(r, pid_str, rx, glyph_y, cw, ch, 10, theme.text_faint)
+					rx += f32(len(pid_str)) * cw + cw * 2
+				}
+
+				// Metrics
+				if item.rss_mb > 0 {
+					metric_buf: [32]u8
+					metric_str := fmt.bprintf(metric_buf[:], "%d MB", item.rss_mb)
+					_emit_text_clipped(r, metric_str, rx, glyph_y, cw, ch, 10, theme.text_muted)
+					rx += f32(len(metric_str)) * cw + cw * 2
+				}
+
+				// CWD truncated
+				if len(item.cwd) > 0 {
+					rem_w := max(0.0, cr.x + cr.w - pad - rx)
+					rem_cols := int(rem_w / cw)
+					if rem_cols > 0 {
+						_emit_text_clipped(r, item.cwd, rx, glyph_y, cw, ch, rem_cols, theme.text_faint)
+					}
+				}
+			}
+		}
+
+		// 5. Footer divider and hint bar
+		footer_h: f32 = 28.0
+		footer_y := cr.y + cr.h - footer_h
+		emit_bg(r, cr.x, footer_y, cr.w, 1.0, theme.border_subtle)
+		hint_y := footer_y + (footer_h - ch) * 0.5
+		hints := "↑/↓: Navigate  •  Enter: Open  •  ⌥⌘b: Detach  •  Esc: Close"
+		hint_cols := int((cr.w - pad * 2) / cw)
+		_emit_text_clipped(r, hints, cr.x + pad, hint_y, cw, ch, hint_cols, theme.text_faint)
+	}
+
 	// Convert once at the GPU boundary; hit rectangles remain in logical units.
 	for &quad in r.ui_bg_data[:r.ui_bg_count] {
 		quad.x *= content_scale
@@ -642,5 +767,81 @@ ui_render_stage :: proc(
 		r.ui_staged = true
 	}
 	return int(r.ui_bg_count + r.ui_glyph_count)
+}
+
+// Pane_Divider defines geometry and hover state for multi-pane split chrome.
+Pane_Divider :: struct {
+	x, y, w, h: f32,
+	is_hovered: bool,
+}
+
+// ui_stage_pane_chrome stages 1px hairline dividers and active pane outline border.
+ui_stage_pane_chrome :: proc(
+	r:                  ^UI_Render,
+	theme:              ^UI_Theme,
+	dividers:           []Pane_Divider,
+	active_rect:        Rect_f32,
+	show_active_border: bool,
+	scale:              f32 = 1.0,
+) {
+	if r == nil || theme == nil do return
+	s := scale if scale > 0 else 1.0
+
+	// 1. Dividers
+	for div in dividers {
+		col := theme.surface_hover if div.is_hovered else theme.border_subtle
+		emit_bg(r, div.x * s, div.y * s, max(f32(1.0), div.w * s), max(f32(1.0), div.h * s), col)
+	}
+
+	// 2. Active pane outline (1px hairline)
+	if show_active_border && active_rect.w > 0 && active_rect.h > 0 {
+		col := theme.accent_primary
+		border_size := max(f32(1.0), 1.0 * s)
+		ax := active_rect.x * s
+		ay := active_rect.y * s
+		aw := active_rect.w * s
+		ah := active_rect.h * s
+
+		// Top
+		emit_bg(r, ax, ay, aw, border_size, col)
+		// Bottom
+		emit_bg(r, ax, ay + ah - border_size, aw, border_size, col)
+		// Left
+		emit_bg(r, ax, ay, border_size, ah, col)
+		// Right
+		emit_bg(r, ax + aw - border_size, ay, border_size, ah, col)
+	}
+
+	if len(dividers) > 0 || show_active_border {
+		r.ui_staged = true
+	}
+}
+
+// ui_stage_hollow_cursor emits a 1-cell hollow box cursor outline for inactive panes.
+ui_stage_hollow_cursor :: proc(
+	r:     ^UI_Render,
+	x, y:  f32,
+	w, h:  f32,
+	col:   [4]f32 = {0.75, 0.75, 0.75, 0.75},
+	scale: f32 = 1.0,
+) {
+	if r == nil || w <= 0 || h <= 0 do return
+	s := scale if scale > 0 else 1.0
+	sx := x * s
+	sy := y * s
+	sw := w * s
+	sh := h * s
+	t := max(f32(1.0), 1.0 * s)
+
+	// Top
+	emit_bg(r, sx, sy, sw, t, col)
+	// Bottom
+	emit_bg(r, sx, sy + sh - t, sw, t, col)
+	// Left
+	emit_bg(r, sx, sy, t, sh, col)
+	// Right
+	emit_bg(r, sx + sw - t, sy, t, sh, col)
+
+	r.ui_staged = true
 }
 

@@ -1,6 +1,7 @@
 package render
 
 // Top-level renderer: orchestrates the full render pipeline.
+import "core:fmt"
 //
 // Pipeline per frame:
 //   1. Take damage journal from terminal
@@ -30,6 +31,18 @@ EMOJI_WGSL :: #load("shaders/emoji.wgsl")
 BG_MSL :: #load("shaders/msl_spike/bg.msl")
 GLYPH_MSL :: #load("shaders/msl_spike/glyph.msl")
 EMOJI_MSL :: #load("shaders/msl_spike/emoji.msl")
+
+// Pane_Viewport defines a rendering rectangle for a single pane within the app window.
+Pane_Viewport :: struct {
+	terminal:   ^termgrid.Terminal,
+	view:       ^termgrid.Terminal_View,
+	x, y:       f32,
+	w, h:       f32,
+	clip_rect:  [4]f32, // [min_x, min_y, max_x, max_y] physical pixels; if clip_rect[2] <= clip_rect[0], no clipping
+	rows, cols: int,
+	dim_factor: f32, // 1.0 for active focused pane, 0.75-0.80 for inactive
+	is_active:  bool,
+}
 
 // Render_Strategy selects the frame path. Instance is the zero value and the
 // default; Compute_Tiles routes renderer_frame_compute through the tiled
@@ -166,6 +179,16 @@ Renderer :: struct {
 
 // RENDER_MAX_INSTANCES is the maximum number of instances per draw call.
 RENDER_MAX_INSTANCES :: 16384
+
+// Reserve one background, glyph, decoration and interaction quad per
+// surface cell. Slack covers bounded pane fills, cursor and chrome overlays.
+RENDER_INSTANCES_PER_CELL :: 4
+RENDER_INSTANCE_OVERLAY_SLACK :: 128
+
+_renderer_instance_capacity :: proc(rows, cols: i32) -> u32 {
+	return max(u32(RENDER_MAX_INSTANCES), u32(RENDER_INSTANCES_PER_CELL * rows * cols + RENDER_INSTANCE_OVERLAY_SLACK))
+}
+
 RENDER_MAX_UI_INSTANCES :: 512
 
 // RENDER_UPLOAD_CAPACITY is the bytes per upload ring slot.
@@ -259,7 +282,7 @@ renderer_init :: proc(
 		backend,
 		device,
 		queue,
-		RENDER_MAX_INSTANCES,
+		_renderer_instance_capacity(rows, cols),
 		r.atlas.gpu_texture,
 		r.atlas.gpu_view,
 		format,
@@ -290,7 +313,7 @@ renderer_init :: proc(
 	// as the legacy-fallback carrier and is always initialized so the
 	// fallback path has valid buffers.
 	dirty_upload_init(&r.dirty, r, allocator)
-	upload_ring_init(&r.upload_ring, backend, device, queue, RENDER_UPLOAD_CAPACITY, allocator)
+	upload_ring_init(&r.upload_ring, backend, device, queue, max(u64(RENDER_UPLOAD_CAPACITY), u64(r.instances.max_instances) * instance.INSTANCE_STRIDE), allocator)
 
 	// Phase 12: async raster queue, worker start LAST (after the chain the
 	// worker reads and every other subsystem is ready).
@@ -480,6 +503,104 @@ renderer_attach_surface :: proc(r: ^Renderer, surface: gpu.Gpu_Surface, width: u
 		return
 	}
 	r.backend.configure_surface(rawptr(surface), r.device, r.format, width, height)
+}
+
+// renderer_frame_panes processes a multi-pane layout into a single frame.
+renderer_frame_panes :: proc(
+	r:     ^Renderer,
+	panes: []Pane_Viewport,
+	lut:   ^Style_LUT = nil,
+) -> bool {
+	if r == nil || len(panes) == 0 {
+		return false
+	}
+	if r.backend == nil || rawptr(r.device) == nil || rawptr(r.queue) == nil ||
+		rawptr(r.instances.bg_pipeline) == nil || rawptr(r.instances.glyph_pipeline) == nil {
+		return false
+	}
+	active_term: ^termgrid.Terminal = nil
+	active_view: ^termgrid.Terminal_View = nil
+	grid_limit := min(int(r.instances.max_instances) - 1, len(r.instances.instance_data))
+	if r.interaction_staged { grid_limit = min(grid_limit, int(r.interaction_slot_start)) }
+	needed := 0
+	for p in panes {
+		if p.terminal == nil || p.rows <= 0 || p.cols <= 0 || !(p.w > 0) || !(p.h > 0) {
+			return false
+		}
+		// Each cell can emit a background, glyph and decoration. Reject
+		// insufficient storage before touching staged overlays or damage.
+		if grid_limit < 0 || p.rows > max(0, grid_limit - 1) / 3 / p.cols { return false }
+		needed += p.rows * p.cols * 3 + 1
+		if needed > grid_limit { return false }
+		if active_term == nil || p.is_active {
+			active_term = p.terminal
+			active_view = p.view
+		}
+	}
+	if !r.frame_prepared { renderer_prepare_frame(r, active_term) }
+	r.frame_prepared = false
+	// Pane journals and borrowed terminal state remain protected through
+	// publication or failure restoration.
+	unlock_cb, unlock_data := r.unlock_cb, r.unlock_data
+	r.unlock_cb = nil
+	defer {
+		r.unlock_cb, r.unlock_data = unlock_cb, unlock_data
+		if unlock_cb != nil { unlock_cb(unlock_data) }
+	}
+	r.frame_count += 1
+	lut_ptr := lut != nil ? lut : &r.style_lut
+	journals := make([]termgrid.Damage_Journal, len(panes), context.temp_allocator)
+	published := false
+	defer {
+		for i in 0 ..< len(panes) {
+			if !published { termgrid.damage_requeue_journal(&panes[i].terminal.damage, &journals[i]) }
+			termgrid.damage_journal_destroy(&journals[i])
+		}
+	}
+	for i in 0 ..< len(panes) { journals[i] = termgrid.terminal_take_damage(panes[i].terminal) }
+
+	compiled_panes := make([]Compiled_Frame_V2, len(panes), context.temp_allocator)
+	for i in 0 ..< len(panes) {
+		p := &panes[i]
+		render_compiler_init_v2(&compiled_panes[i], i32(p.rows), i32(p.cols), context.temp_allocator)
+		render_compile_full_v2(&compiled_panes[i], p.terminal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster, p.view)
+	}
+
+	r.dirty.armed = false
+	bg_count, glyph_count, emoji_count, decor_count := _prepare_pane_instances_v2(r, lut_ptr, panes, compiled_panes)
+
+	when ODIN_OS == .Darwin {
+		if r.emoji_atlas.gpu_dirty {
+			emoji_atlas_upload_gpu(&r.emoji_atlas, r.backend, r.device, r.queue)
+		}
+		if emoji_count > 0 && rawptr(r.instances.emoji_buffer) != nil && r.instances.emoji_data != nil {
+			r.backend.write_buffer(r.queue, r.instances.emoji_buffer, 0, raw_data(r.instances.emoji_data), u64(emoji_count) * instance.INSTANCE_STRIDE)
+		}
+	}
+	if r.atlas.gpu_dirty {
+		atlas_upload_gpu(&r.atlas, r.backend, r.device, r.queue)
+	}
+
+	frame, ok := _renderer_surface_begin(r)
+	if !ok {
+		return false
+	}
+	if !_renderer_upload_instances(r, bg_count + glyph_count + decor_count, &frame) {
+		_renderer_surface_abort(r, &frame)
+		return false
+	}
+	decor_offset := u64(bg_count + glyph_count) * instance.INSTANCE_STRIDE
+	if !_draw_instance_buffer(r, &frame, frame.cursor_buffer, bg_count, glyph_count, u64(bg_count) * instance.INSTANCE_STRIDE, emoji_count, false, decor_count, decor_offset) {
+		_renderer_surface_abort(r, &frame)
+		return false
+	}
+	if !_renderer_surface_commit(r, &frame) {
+		return false
+	}
+	r.full_redraw_pending = false
+	published = true
+	_renderer_frame_published(r, active_view)
+	return true
 }
 
 // renderer_frame keeps the original entry point while using the transaction
@@ -1579,4 +1700,192 @@ renderer_resize :: proc(r: ^Renderer, new_width_px: u32, new_height_px: u32) {
 		}
 	}
 	r.full_redraw_pending = true
+}
+// _clip_instance_rect intersects a quad with physical pixel bounds and
+// preserves the corresponding atlas region when clipping textured quads.
+_clip_instance_rect :: proc(quad: ^instance.Instance_Data, clip: [4]f32, textured: bool) -> bool {
+	if quad == nil || !(quad.cw > 0) || !(quad.ch > 0) { return false }
+	x0 := max(quad.x, clip[0])
+	y0 := max(quad.y, clip[1])
+	x1 := min(quad.x + quad.cw, clip[2])
+	y1 := min(quad.y + quad.ch, clip[3])
+	if !(x1 > x0) || !(y1 > y0) { return false }
+	if textured {
+		du := quad.u1 - quad.u0
+		dv := quad.v1 - quad.v0
+		u0, v0 := quad.u0, quad.v0
+		quad.u0 = u0 + du * (x0 - quad.x) / quad.cw
+		quad.u1 = u0 + du * (x1 - quad.x) / quad.cw
+		quad.v0 = v0 + dv * (y0 - quad.y) / quad.ch
+		quad.v1 = v0 + dv * (y1 - quad.y) / quad.ch
+	}
+	quad.x, quad.y = x0, y0
+	quad.cw, quad.ch = x1 - x0, y1 - y0
+	return true
+}
+
+// _prepare_pane_style_clip resolves terminal-local styles and the intersection
+// of viewport geometry with any additional caller clip.
+_prepare_pane_style_clip :: proc(lut: ^Style_LUT, p: ^Pane_Viewport) -> [4]f32 {
+	style_lut_rebuild(lut, &p.terminal.grid.style_table)
+	bg := p.terminal.grid.style_table.theme.background
+	if p.view != nil && p.view.visual_mode { bg = _renderer_visual_background_color(bg) }
+	lut.bg_r5g6b5[0] = color_to_r5g6b5(bg)
+	clip := [4]f32{p.x, p.y, p.x + p.w, p.y + p.h}
+	if p.clip_rect[2] > p.clip_rect[0] && p.clip_rect[3] > p.clip_rect[1] {
+		clip = {max(clip[0], p.clip_rect[0]), max(clip[1], p.clip_rect[1]), min(clip[2], p.clip_rect[2]), min(clip[3], p.clip_rect[3])}
+	}
+	return clip
+}
+
+_prepare_pane_instances_v2 :: proc(
+	r:              ^Renderer,
+	lut:            ^Style_LUT,
+	panes:          []Pane_Viewport,
+	compiled_panes: []Compiled_Frame_V2,
+) -> (bg_count: u32, glyph_count: u32, emoji_count: u32, decor_count: u32) {
+	cell_w := r.cell_width
+	cell_h := r.cell_height
+	atlas := &r.atlas
+	inst := &r.instances
+
+	bg_count = 0
+	glyph_count = 0
+	emoji_count = 0
+	decor_count = 0
+	grid_limit := u32(min(int(inst.max_instances > 1 ? inst.max_instances - 1 : 0), len(inst.instance_data)))
+	if r.interaction_staged { grid_limit = min(grid_limit, r.interaction_slot_start) }
+
+	// Pass 1: backgrounds across all panes
+	for i in 0 ..< len(panes) {
+		p := &panes[i]
+		if p.terminal == nil || i >= len(compiled_panes) || p.rows <= 0 || p.cols <= 0 || !(p.w > 0) || !(p.h > 0) do continue
+		clip := _prepare_pane_style_clip(lut, p)
+		cells := compiled_panes[i].cells
+		cols := i32(p.cols)
+		dim := p.dim_factor
+		// Empty/default cells intentionally emit no quad. Fill the viewport
+		// first so every pane retains its own theme and dimmed background.
+		if bg_count < grid_limit {
+			red, green, blue := instance.unpack_r5g6b5(lut.bg_r5g6b5[0])
+			inst.instance_data[bg_count] = instance.Instance_Data{
+				x = p.x, y = p.y, cw = p.w, ch = p.h,
+				r = red * dim, g = green * dim, b = blue * dim, a = 1,
+			}
+			if _clip_instance_rect(&inst.instance_data[bg_count], clip, false) { bg_count += 1 }
+		}
+
+		for idx in 0 ..< len(cells) {
+			if bg_count >= grid_limit do break
+			row := i32(idx) / cols
+			col := i32(idx) % cols
+			x := p.x + f32(col) * cell_w
+			y := p.y + f32(row) * cell_h
+
+			dc := termgrid.terminal_view_get_direct_color(p.terminal, p.view, int(row), int(col))
+			emit_bg, _, _, _ := render_cell_expand_instance(
+				cells[idx], lut, atlas, x, y, cell_w, cell_h,
+				&inst.instance_data[bg_count], nil,
+				direct_color = dc,
+			)
+			if emit_bg && _clip_instance_rect(&inst.instance_data[bg_count], clip, false) {
+				if dim < 1.0 {
+					inst.instance_data[bg_count].r *= dim
+					inst.instance_data[bg_count].g *= dim
+					inst.instance_data[bg_count].b *= dim
+				}
+				bg_count += 1
+			}
+		}
+	}
+
+	// Pass 2: glyphs and emojis across all panes
+	for i in 0 ..< len(panes) {
+		p := &panes[i]
+		if p.terminal == nil || i >= len(compiled_panes) || p.rows <= 0 || p.cols <= 0 || !(p.w > 0) || !(p.h > 0) do continue
+		clip := _prepare_pane_style_clip(lut, p)
+		cells := compiled_panes[i].cells
+		cols := i32(p.cols)
+		dim := p.dim_factor
+
+		for idx in 0 ..< len(cells) {
+			glyph_idx := bg_count + glyph_count
+			if glyph_idx >= grid_limit do break
+			row := i32(idx) / cols
+			col := i32(idx) % cols
+			x := p.x + f32(col) * cell_w
+			y := p.y + f32(row) * cell_h
+
+			emoji_inst_ptr: ^instance.Instance_Data = nil
+			emoji_atlas_ptr: ^Emoji_Atlas = nil
+			if r.emoji_atlas.has_font {
+				if emoji_count < grid_limit && inst.emoji_data != nil {
+					emoji_inst_ptr = &inst.emoji_data[emoji_count]
+				}
+				emoji_atlas_ptr = &r.emoji_atlas
+			}
+
+			dc := termgrid.terminal_view_get_direct_color(p.terminal, p.view, int(row), int(col))
+			_, emit_glyph, emit_emoji, _ := render_cell_expand_instance(
+				cells[idx], lut, atlas, x, y, cell_w, cell_h,
+				nil, &inst.instance_data[glyph_idx],
+				emoji_inst_ptr,
+				emoji_atlas_ptr,
+				&p.terminal.grapheme_store,
+				direct_color = dc,
+			)
+			if emit_emoji && emoji_inst_ptr != nil && _clip_instance_rect(emoji_inst_ptr, clip, true) {
+				if dim < 1.0 && emoji_inst_ptr != nil {
+					emoji_inst_ptr.r *= dim
+					emoji_inst_ptr.g *= dim
+					emoji_inst_ptr.b *= dim
+				}
+				emoji_count += 1
+			} else if emit_glyph && _clip_instance_rect(&inst.instance_data[glyph_idx], clip, true) {
+				if dim < 1.0 {
+					inst.instance_data[glyph_idx].r *= dim
+					inst.instance_data[glyph_idx].g *= dim
+					inst.instance_data[glyph_idx].b *= dim
+				}
+				glyph_count += 1
+			}
+		}
+	}
+
+	// Pass 3: decorations across all panes
+	for i in 0 ..< len(panes) {
+		p := &panes[i]
+		if p.terminal == nil || i >= len(compiled_panes) || p.rows <= 0 || p.cols <= 0 || !(p.w > 0) || !(p.h > 0) do continue
+		clip := _prepare_pane_style_clip(lut, p)
+		cells := compiled_panes[i].cells
+		cols := i32(p.cols)
+		dim := p.dim_factor
+
+		for idx in 0 ..< len(cells) {
+			decor_idx := bg_count + glyph_count + decor_count
+			if decor_idx >= grid_limit do break
+			row := i32(idx) / cols
+			col := i32(idx) % cols
+			x := p.x + f32(col) * cell_w
+			y := p.y + f32(row) * cell_h
+
+			dc := termgrid.terminal_view_get_direct_color(p.terminal, p.view, int(row), int(col))
+			_, _, _, emit_decor := render_cell_expand_instance(
+				cells[idx], lut, atlas, x, y, cell_w, cell_h,
+				nil, nil, nil, nil, nil,
+				&inst.instance_data[decor_idx],
+				direct_color = dc,
+			)
+			if emit_decor && _clip_instance_rect(&inst.instance_data[decor_idx], clip, false) {
+				if dim < 1.0 {
+					inst.instance_data[decor_idx].r *= dim
+					inst.instance_data[decor_idx].g *= dim
+					inst.instance_data[decor_idx].b *= dim
+				}
+				decor_count += 1
+			}
+		}
+	}
+
+	return bg_count, glyph_count, emoji_count, decor_count
 }

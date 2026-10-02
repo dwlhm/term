@@ -67,7 +67,7 @@ damage_init :: proc(d: ^Damage, rows, cols: int, allocator: runtime.Allocator = 
 
 // damage_destroy frees all damage tracking state.
 damage_destroy :: proc(d: ^Damage, allocator: runtime.Allocator = context.allocator) {
-	assert(!d.journal_active)
+	d.journal_active = false
 	if d.dirty_rows != nil {
 		delete(d.dirty_rows)
 		d.dirty_rows = nil
@@ -102,7 +102,7 @@ _clamp_col :: proc(d: ^Damage, col: int) -> int {
 
 // damage_mark_cell marks a single cell as dirty.
 damage_mark_cell :: proc(d: ^Damage, row, col: int, generation: u32) {
-	if row < 0 || row >= d.row_count {
+	if row < 0 || row >= d.row_count || row >= len(d.dirty_rows) {
 		return
 	}
 	c := _clamp_col(d, col)
@@ -139,7 +139,7 @@ damage_mark_cell :: proc(d: ^Damage, row, col: int, generation: u32) {
 
 // damage_mark_span marks a range of cells as dirty.
 damage_mark_span :: proc(d: ^Damage, row, col_start, col_end: int, generation: u32) {
-	if row < 0 || row >= d.row_count {
+	if row < 0 || row >= d.row_count || row >= len(d.dirty_rows) {
 		return
 	}
 
@@ -174,7 +174,7 @@ damage_mark_span :: proc(d: ^Damage, row, col_start, col_end: int, generation: u
 
 // damage_mark_row marks an entire row as dirty.
 damage_mark_row :: proc(d: ^Damage, row: int, generation: u32) {
-	if row < 0 || row >= d.row_count {
+	if row < 0 || row >= d.row_count || row >= len(d.dirty_rows) {
 		return
 	}
 	dr := &d.dirty_rows[row]
@@ -228,11 +228,13 @@ damage_take_journal :: proc(d: ^Damage, allocator: runtime.Allocator = context.a
 
 // damage_journal_destroy frees the journal.
 damage_journal_destroy :: proc(j: ^Damage_Journal, allocator: runtime.Allocator = context.allocator) {
+	if j == nil { return }
 	if j.borrowed {
-		assert(j.owner != nil)
-		j.owner.journal_active = false
+		if j.owner != nil {
+			j.owner.journal_active = false
+			j.owner = nil
+		}
 		j.borrowed = false
-		j.owner = nil
 		j.dirty_rows = nil
 		j.scroll_ops = nil
 		return

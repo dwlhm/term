@@ -14,8 +14,11 @@ import "core:strings"
 import "core:sync"
 import "core:thread"
 import "core:time"
+import posix "core:sys/posix"
+
 
 import termgrid "../terminal"
+import platform_chrome "../platform/chrome"
 import parser "../parser"
 import render "../render"
 import platform "../platform"
@@ -98,6 +101,10 @@ Backend :: struct {
 	front_view:           termgrid.Terminal_View,
 	front_cursor:         render.Cursor_Overlay,
 	front_focused:        bool,
+	front_exited:         bool,
+	search_invalid_regex: bool,
+	front_search_invalid_regex: bool,
+	focus_requested:      bool,
 
 	parser:               parser.Parser,
 	pty:                  pty.Pty,
@@ -135,6 +142,9 @@ Backend :: struct {
 	resize_generation:    u64,
 	notify_data_ready_cb: proc(user_data: rawptr),
 	notify_user_data:     rawptr,
+	wake_pipe_r:          posix.FD,
+	wake_pipe_w:          posix.FD,
+
 
 	// Session core observer port & mode
 	observer:             session_core.Terminal_Observer_Port,
@@ -320,9 +330,21 @@ backend_init :: proc(
 	b.front_view = termgrid.Terminal_View{}
 	b.front_cursor = render.Cursor_Overlay{}
 	b.front_focused = true
+	b.focus_requested = true
 	b.drain_buf = make([]u8, APP_DRAIN_CAP, runtime.heap_allocator())
 	b.thread = nil
 	b.thread_running = false
+
+	pipe_fds: [2]posix.FD
+	if posix.pipe(&pipe_fds) == .OK {
+		b.wake_pipe_r = pipe_fds[0]
+		b.wake_pipe_w = pipe_fds[1]
+		_ = posix.fcntl(b.wake_pipe_r, .SETFL, int(posix.O_NONBLOCK))
+		_ = posix.fcntl(b.wake_pipe_w, .SETFL, int(posix.O_NONBLOCK))
+	} else {
+		b.wake_pipe_r = -1
+		b.wake_pipe_w = -1
+	}
 
 	parser.parser_init(&b.parser)
 	b.parser.response_cb = _backend_response_cb
@@ -365,6 +387,14 @@ backend_init :: proc(
 	if !pty.pty_spawn(&b.pty, init_rows, init_cols, spawn_prog, spawn_argv, b.cwd) {
 		termgrid.terminal_destroy(&b.terminal)
 		termgrid.terminal_destroy(&b.front_terminal)
+		if b.wake_pipe_r >= 0 {
+			posix.close(b.wake_pipe_r)
+			b.wake_pipe_r = -1
+		}
+		if b.wake_pipe_w >= 0 {
+			posix.close(b.wake_pipe_w)
+			b.wake_pipe_w = -1
+		}
 		if b.drain_buf != nil {
 			delete(b.drain_buf, runtime.heap_allocator())
 			b.drain_buf = nil
@@ -379,12 +409,115 @@ backend_init :: proc(
 	return true
 }
 
+// backend_init_from_core_session initializes backend state transferring ownership
+// from an existing Core_Session (used during session attach).
+backend_init_from_core_session :: proc(
+	b: ^Backend,
+	cs: ^session_core.Core_Session,
+	cfg: ^config.Config,
+	theme: termgrid.Theme,
+) -> bool {
+	if b == nil || cs == nil {
+		return false
+	}
+
+	b.pty = cs.pty_handle
+	b.terminal = cs.term
+	b.parser = cs.vt_parser
+	b.session_mode = cs.mode
+
+	b.focused = true
+	b.should_quit = false
+	b.view = termgrid.Terminal_View{}
+	inter.interaction_init(&b.interaction)
+	inter.interaction_init(&b.front_interaction)
+	b.view_generation = 0
+	b.last_mouse_col = 0
+	b.last_mouse_row = 0
+	b.sync_output_start_ns = 0
+
+	rows := b.terminal.grid.row_count
+	cols := b.terminal.grid.col_count
+
+	termgrid.terminal_init(&b.front_terminal, rows, cols, theme = theme)
+	b.front_view = termgrid.Terminal_View{}
+	b.front_cursor = render.Cursor_Overlay{}
+	b.front_focused = true
+	b.focus_requested = true
+	b.drain_buf = make([]u8, APP_DRAIN_CAP, runtime.heap_allocator())
+	b.thread = nil
+	b.thread_running = false
+
+	pipe_fds: [2]posix.FD
+	if posix.pipe(&pipe_fds) == .OK {
+		b.wake_pipe_r = pipe_fds[0]
+		b.wake_pipe_w = pipe_fds[1]
+		_ = posix.fcntl(b.wake_pipe_r, .SETFL, int(posix.O_NONBLOCK))
+		_ = posix.fcntl(b.wake_pipe_w, .SETFL, int(posix.O_NONBLOCK))
+	} else {
+		b.wake_pipe_r = -1
+		b.wake_pipe_w = -1
+	}
+
+	b.parser.response_cb = _backend_response_cb
+	b.parser.clipboard_cb = _backend_clipboard_cb
+	b.parser.clipboard_read_cb = _backend_clipboard_read_cb
+	b.parser.clipboard_read_user_data = b
+	backend_global = b
+
+	spawn_cwd := cfg.working_directory if (cfg != nil && len(cfg.working_directory) > 0) else "~"
+	b.cwd = strings.clone(spawn_cwd)
+
+	b.observer = session_core.Terminal_Observer_Port{
+		user_data       = b,
+		on_damage       = _backend_observer_on_damage,
+		on_title_change = _backend_observer_on_title_change,
+		on_bell         = _backend_observer_on_bell,
+		on_exit         = _backend_observer_on_exit,
+	}
+	b.session_cfg = session_core.Session_Config{
+		rows     = rows,
+		cols     = cols,
+		mode     = b.session_mode,
+		observer = b.observer,
+	}
+
+	backend_apply_theme(b, theme)
+
+	// Synchronize virtual grid to front terminal
+	_terminal_sync_to_front(b)
+
+	// Mark all damage so renderer immediately displays the session's active screen and scrollback
+	termgrid.damage_mark_all(&b.terminal.damage, nil)
+	termgrid.damage_mark_all(&b.front_terminal.damage, nil)
+	b.view_generation += 1
+
+	return true
+}
+
 // backend_destroy frees terminal, parser, and closes PTY.
 backend_destroy :: proc(b: ^Backend) {
 	if b == nil {
 		return
 	}
 	backend_stop_thread(b)
+	remaining: [128]UI_Event
+	for {
+		n := ui_event_queue_pop_all(&b.event_queue, remaining[:])
+		if n == 0 do break
+		for ev in remaining[:n] {
+		if ev.type == .Paste do delete(ev.text)
+		if ev.type == .Theme && ev.theme != nil do free(ev.theme)
+		}
+	}
+	if b.wake_pipe_r >= 0 {
+		posix.close(b.wake_pipe_r)
+		b.wake_pipe_r = -1
+	}
+	if b.wake_pipe_w >= 0 {
+		posix.close(b.wake_pipe_w)
+		b.wake_pipe_w = -1
+	}
 	pty.pty_close(&b.pty)
 	termgrid.terminal_destroy(&b.terminal)
 	termgrid.terminal_destroy(&b.front_terminal)
@@ -509,23 +642,39 @@ backend_sync_cursor :: proc(
 		return false, false, false, 0, 0
 	}
 	t := &b.front_terminal if b.thread != nil else &b.terminal
-	cur := termgrid.terminal_get_cursor(t)
-	style_changed = b.cursor.style != cur.style
-	position_changed = b.cursor.row != cur.row || b.cursor.col != cur.col
+	view_ptr := &b.front_view if b.thread != nil else &b.view
+	inter_ptr := &b.front_interaction if b.thread != nil else &b.interaction
+
+	cur_row: int
+	cur_col: int
+	cur_style: u8
+	cur_visible: bool
+
+	if inter_ptr.mode == .Visual {
+		doc_offset := termgrid.scrollback_len(&t.scrollback) - clamp(view_ptr.scrollback_offset, 0, termgrid.terminal_view_max_offset(t))
+		cur_row = inter_ptr.visual_cursor.row - doc_offset
+		cur_col = clamp(inter_ptr.visual_cursor.col, 0, max(0, t.grid.col_count - 1))
+		cur_style = 2 // Steady block cursor for visual mode
+		cur_visible = (cur_row >= 0 && cur_row < t.grid.row_count)
+	} else {
+		cur := termgrid.terminal_get_cursor(t)
+		cur_row = cur.row
+		cur_col = cur.col
+		cur_style = cur.style
+		cur_visible = cur.visible
+	}
+
+	style_changed = b.cursor.style != cur_style
+	position_changed = b.cursor.row != cur_row || b.cursor.col != cur_col
 	old_row = b.cursor.row
 	old_col = b.cursor.col
-	render.cursor_overlay_sync(&b.cursor, cur.row, cur.col, cur.style)
+	render.cursor_overlay_sync(&b.cursor, cur_row, cur_col, cur_style)
 	now := platform.platform_ticks_to_ns(platform.platform_now())
-	cursor_changed = render.cursor_overlay_tick(&b.cursor, now, b.focused, cur.visible)
+	cursor_changed = render.cursor_overlay_tick(&b.cursor, now, b.focused, cur_visible)
 	return cursor_changed, position_changed, style_changed, old_row, old_col
 }
 
-// backend_mark_cursor_dirty marks the cursor cell with its live generation in the damage tracker.
-backend_mark_cursor_dirty :: proc(b: ^Backend, row, col: int) -> bool {
-	if b == nil {
-		return false
-	}
-	mark_term :: proc(t: ^termgrid.Terminal, r, c: int) -> bool {
+_backend_mark_cursor_dirty_terminal :: proc(t: ^termgrid.Terminal, r, c: int) -> bool {
 		g := &t.grid
 		if g.row_count <= 0 || g.col_count <= 0 || len(g.rows) == 0 {
 			return false
@@ -541,10 +690,15 @@ backend_mark_cursor_dirty :: proc(b: ^Backend, row, col: int) -> bool {
 		return true
 	}
 
-	if b.thread != nil {
-		_ = mark_term(&b.front_terminal, row, col)
+// backend_mark_cursor_dirty marks the cursor cell with its live generation in the damage tracker.
+backend_mark_cursor_dirty :: proc(b: ^Backend, row, col: int) -> bool {
+	if b == nil {
+		return false
 	}
-	return mark_term(&b.terminal, row, col)
+
+	t := &b.front_terminal if b.thread != nil else &b.terminal
+	marked := _backend_mark_cursor_dirty_terminal(t, row, col)
+	return marked
 }
 
 // backend_get_render_state constructs a Render_State snapshot for the frontend.
@@ -601,11 +755,11 @@ backend_on_resize :: proc(b: ^Backend, rows, cols: int) -> bool {
 	if b == nil || rows <= 0 || cols <= 0 {
 		return false
 	}
+	pty.pty_set_winsize(&b.pty, rows, cols)
 	if rows == b.terminal.grid.row_count && cols == b.terminal.grid.col_count {
-		return false
+		return true
 	}
 	termgrid.terminal_resize(&b.terminal, rows, cols)
-	pty.pty_set_winsize(&b.pty, rows, cols)
 	return true
 }
 
@@ -802,18 +956,13 @@ backend_apply_theme :: proc(b: ^Backend, theme: termgrid.Theme) {
 	b.terminal.alt_grid.style_table.theme = theme
 	b.terminal.alt_grid.style_table.entries[0] = termgrid.style_table_default(&b.terminal.alt_grid.style_table)
 
-	b.front_terminal.grid.style_table.theme = theme
-	b.front_terminal.grid.style_table.entries[0] = termgrid.style_table_default(&b.front_terminal.grid.style_table)
-	b.front_terminal.alt_grid.style_table.theme = theme
-	b.front_terminal.alt_grid.style_table.entries[0] = termgrid.style_table_default(&b.front_terminal.alt_grid.style_table)
-
 	render.style_lut_rebuild(&b.lut, &b.terminal.grid.style_table)
 	for r in 0..<b.terminal.grid.row_count {
 		phys := (b.terminal.grid.origin + r) & b.terminal.grid.mask
 		gen := b.terminal.grid.rows[phys].generation
 		termgrid.damage_mark_row(&b.terminal.damage, r, gen)
 	}
-	_backend_swap_buffers(b)
+	if backend_is_threaded(b) do _backend_swap_buffers(b)
 }
 
 // _terminal_sync_to_front synchronizes back buffer terminal state to front buffer terminal.
@@ -1019,6 +1168,20 @@ _terminal_sync_to_front :: proc(b: ^Backend) {
 	dst.active_charset_is_dec = src.active_charset_is_dec
 }
 
+// _backend_perform_swap_locked performs the state swap; caller MUST hold b.swap_mutex.
+_backend_perform_swap_locked :: proc(b: ^Backend) {
+	_terminal_sync_to_front(b)
+	b.front_view = b.view
+	b.front_cursor = b.cursor
+	b.front_focused = b.focused
+	b.front_exited = b.pty.state == .Exited
+	b.front_search_invalid_regex = b.search_invalid_regex
+	b.front_interaction = b.interaction
+	if b.notify_data_ready_cb != nil {
+		b.notify_data_ready_cb(b.notify_user_data)
+	}
+}
+
 // _backend_swap_buffers performs the double-buffering state swap under swap_mutex.
 _backend_swap_buffers :: proc(b: ^Backend) {
 	if b == nil {
@@ -1027,14 +1190,7 @@ _backend_swap_buffers :: proc(b: ^Backend) {
 	sync.mutex_lock(&b.swap_mutex)
 	defer sync.mutex_unlock(&b.swap_mutex)
 
-	_terminal_sync_to_front(b)
-	b.front_view = b.view
-	b.front_cursor = b.cursor
-	b.front_focused = b.focused
-	b.front_interaction = b.interaction
-	if b.notify_data_ready_cb != nil {
-		b.notify_data_ready_cb(b.notify_user_data)
-	}
+	_backend_perform_swap_locked(b)
 }
 
 // backend_start_thread starts the background worker thread.
@@ -1060,6 +1216,10 @@ backend_stop_thread :: proc(b: ^Backend) {
 		return
 	}
 	sync.atomic_store(&b.thread_running, false)
+	if b.wake_pipe_w >= 0 {
+		wake_byte: [1]byte = {1}
+		_ = posix.write(b.wake_pipe_w, raw_data(wake_byte[:]), 1)
+	}
 	thread.join(b.thread)
 	thread.destroy(b.thread)
 	b.thread = nil
@@ -1094,7 +1254,12 @@ backend_push_event :: proc(b: ^Backend, ev: UI_Event) -> bool {
 	if ev.type == .Resize {
 		sync.atomic_add(&b.resize_generation, 1)
 	}
-	return ui_event_queue_push(&b.event_queue, ev)
+	ok := ui_event_queue_push(&b.event_queue, ev)
+	if ok && b.wake_pipe_w >= 0 {
+		wake_byte: [1]byte = {1}
+		_ = posix.write(b.wake_pipe_w, raw_data(wake_byte[:]), 1)
+	}
+	return ok
 }
 
 // backend_handle_ui_event processes a single UI event inside the backend thread.
@@ -1108,6 +1273,12 @@ backend_handle_ui_event :: proc(b: ^Backend, ev: UI_Event) {
 		case .Key:
 			if ev.input.paste_shadow && b.interaction.mode != .Search {
 				return
+			}
+			if b.interaction.mode == .Passthrough {
+				if b.interaction.visual_cursor == {} || (ev.input.gui && ev.input.ctrl && (ev.input.rune == 'y' || ev.input.rune == 'Y')) {
+					cur := termgrid.terminal_get_cursor(&b.terminal)
+					b.interaction.visual_cursor = termgrid.terminal_view_point_from_viewport(&b.terminal, &b.view, termgrid.Terminal_Point{row = cur.row, col = cur.col})
+				}
 			}
 			state_before := b.interaction
 			consumed, action := inter.interaction_dispatch_key(&b.interaction, ev.input, b.terminal.is_alt_screen)
@@ -1125,8 +1296,12 @@ backend_handle_ui_event :: proc(b: ^Backend, ev: UI_Event) {
 				}
 
 				switch action {
+				case .Select_All:
+					inter.interaction_select_all(&b.terminal, &b.interaction)
 				case .Copy:
-					text := inter.interaction_extract_selection_text(&b.terminal, &b.interaction)
+					copy_state := b.interaction
+					copy_state.selection_active = true
+					text := inter.interaction_extract_selection_text(&b.terminal, &copy_state)
 					if len(text) == 0 && state_before.selection_active {
 						text = inter.interaction_extract_selection_text(&b.terminal, &state_before)
 					}
@@ -1169,7 +1344,7 @@ backend_handle_ui_event :: proc(b: ^Backend, ev: UI_Event) {
 				switch app_handle_exited_key(ev.input) {
 				case .Relaunch:
 					_ = backend_relaunch(b)
-				case .Quit:
+	case .Quit:
 					b.should_quit = true
 				case .None:
 				}
@@ -1257,7 +1432,7 @@ backend_handle_ui_event :: proc(b: ^Backend, ev: UI_Event) {
 						termgrid.terminal_view_set_offset(&b.view, &b.terminal, target_offset)
 						b.view_generation += 1
 					}
-				case .Paste, .None, .Open_Link:
+				case .Paste, .None, .Open_Link, .Select_All:
 				}
 
 				b.view.selection.active = b.interaction.selection_active
@@ -1345,6 +1520,39 @@ backend_handle_ui_event :: proc(b: ^Backend, ev: UI_Event) {
 			backend_paste(b, ev.text)
 			delete(ev.text)
 		}
+	case .Search:
+		if ev.search_action == .Close {
+			inter.interaction_exit_to_passthrough(&b.interaction)
+			termgrid.terminal_view_set_offset(&b.view, &b.terminal, 0)
+		} else {
+			if ev.search_action == .Query_Changed {
+				inter.interaction_enter_search(&b.interaction)
+				query := ev.query
+				b.interaction.search_len = copy(b.interaction.search_query[:], query[:clamp(ev.query_len, 0, len(query))])
+				search := platform_chrome.Search_Bar_State{query = query, query_len = b.interaction.search_len, case_sensitive = ev.case_sensitive, use_regex = ev.use_regex, whole_word = ev.whole_word}
+				b.interaction.search_match_count = platform_chrome.search_bar_execute_scan(&search, &b.terminal, b.interaction.search_matches[:])
+				b.search_invalid_regex = search.is_invalid_regex
+				b.interaction.search_match_idx = 0
+			} else if b.interaction.search_match_count > 0 {
+				step := 1 if ev.search_action == .Next_Match else -1
+				b.interaction.search_match_idx = (b.interaction.search_match_idx+step+b.interaction.search_match_count)%b.interaction.search_match_count
+			}
+			if b.interaction.search_match_count > 0 {
+				match := b.interaction.search_matches[b.interaction.search_match_idx]
+				offset := clamp(termgrid.scrollback_len(&b.terminal.scrollback)-match.row, 0, termgrid.terminal_view_max_offset(&b.terminal))
+				termgrid.terminal_view_set_offset(&b.view, &b.terminal, offset)
+			}
+		}
+		b.view_generation += 1
+	case .Scroll:
+		termgrid.terminal_view_set_offset(&b.view, &b.terminal, ev.rows)
+		b.view_generation += 1
+
+	case .Theme:
+		if ev.theme != nil {
+			backend_apply_theme(b, ev.theme^)
+			free(ev.theme)
+		}
 	case .Quit:
 		b.should_quit = true
 	}
@@ -1352,6 +1560,7 @@ backend_handle_ui_event :: proc(b: ^Backend, ev: UI_Event) {
 
 // backend_worker_proc is the main loop of the background backend thread.
 backend_worker_proc :: proc(t: ^thread.Thread) {
+	context = runtime.default_context()
 	b := (^Backend)(t.data)
 	if b == nil {
 		return
@@ -1378,21 +1587,23 @@ backend_worker_proc :: proc(t: ^thread.Thread) {
 		}
 
 		// 3. Child exit poll
+		was_exited := b.pty.state == .Exited
 		backend_poll_exit(b)
+		exit_changed := !was_exited && b.pty.state == .Exited
 
 		// 4. Cursor sync & damage marking
 		cursor_changed, position_changed, style_changed, old_row, old_col := backend_sync_cursor(b)
 		if cursor_changed || position_changed {
-			backend_mark_cursor_dirty(b, old_row, old_col)
+			_backend_mark_cursor_dirty_terminal(&b.terminal, old_row, old_col)
 			cur := termgrid.terminal_get_cursor(&b.terminal)
-			backend_mark_cursor_dirty(b, cur.row, cur.col)
+			_backend_mark_cursor_dirty_terminal(&b.terminal, cur.row, cur.col)
 		} else if style_changed {
 			cur := termgrid.terminal_get_cursor(&b.terminal)
-			backend_mark_cursor_dirty(b, cur.row, cur.col)
+			_backend_mark_cursor_dirty_terminal(&b.terminal, cur.row, cur.col)
 		}
 
 		// 5. Swap back buffer to front buffer if any state changed
-		if bytes_read > 0 || n_events > 0 || cursor_changed || position_changed || style_changed {
+		if exit_changed || bytes_read > 0 || n_events > 0 || cursor_changed || position_changed || style_changed {
 			pending_swap = true
 		}
 		
@@ -1400,45 +1611,55 @@ backend_worker_proc :: proc(t: ^thread.Thread) {
 			// If a new resize is queued, skip swapping stale buffers to avoid
 			// heavy deep copies while window geometry is actively changing.
 			if ui_event_queue_has_resize(&b.event_queue) {
+				free_all(context.temp_allocator)
 				continue
 			}
 			if sync.mutex_try_lock(&b.swap_mutex) {
-				_terminal_sync_to_front(b)
-				b.front_view = b.view
-				b.front_cursor = b.cursor
-				b.front_focused = b.focused
-				b.front_interaction = b.interaction
+				_backend_perform_swap_locked(b)
 				sync.mutex_unlock(&b.swap_mutex)
+				pending_swap = false
+				if b.notify_data_ready_cb != nil do b.notify_data_ready_cb(b.notify_user_data)
+			}
+		}
+
+		// 6. Wait when idle
+		if bytes_read == 0 && n_events == 0 {
+			if pending_swap {
+				_backend_swap_buffers(b)
 				pending_swap = false
 				if b.notify_data_ready_cb != nil {
 					b.notify_data_ready_cb(b.notify_user_data)
 				}
 			}
-		}
 
-		// 6. Wait / Sleep when idle
-		if bytes_read == 0 && n_events == 0 {
+			pfds: [2]posix.pollfd
+			pfd_count: int = 0
 			if b.pty.state == .Running && b.pty.master >= 0 {
-				is_readable := pty.pty_wait_readable(&b.pty, 2)
-				if !is_readable && pending_swap {
-					// Truly idle: blocking lock to guarantee final frame delivery
-					_backend_swap_buffers(b)
-					pending_swap = false
-					if b.notify_data_ready_cb != nil {
-						b.notify_data_ready_cb(b.notify_user_data)
+				pfds[pfd_count] = posix.pollfd{fd = posix.FD(b.pty.master), events = {.IN}}
+				pfd_count += 1
+			}
+			wake_idx := -1
+			if b.wake_pipe_r >= 0 {
+				pfds[pfd_count] = posix.pollfd{fd = b.wake_pipe_r, events = {.IN}}
+				wake_idx = pfd_count
+				pfd_count += 1
+			}
+
+			if pfd_count > 0 {
+				r := posix.poll(&pfds[0], posix.nfds_t(pfd_count), -1)
+				if r > 0 && wake_idx >= 0 && (pfds[wake_idx].revents & {.IN}) != {} {
+					buf: [64]byte
+					for {
+						n := posix.read(b.wake_pipe_r, raw_data(buf[:]), len(buf))
+						if n <= 0 do break
 					}
 				}
 			} else {
-				if pending_swap {
-					_backend_swap_buffers(b)
-					pending_swap = false
-					if b.notify_data_ready_cb != nil {
-						b.notify_data_ready_cb(b.notify_user_data)
-					}
-				}
-				time.sleep(2 * time.Millisecond)
+				time.sleep(10 * time.Millisecond)
 			}
 		}
+
+		free_all(context.temp_allocator)
 	}
 }
 
@@ -1456,4 +1677,16 @@ backend_title_metadata :: proc(b: ^Backend, title, cwd: []u8) -> (title_len, cwd
 	}
 	cwd_len = copy(cwd, t.cwd[:clamp(t.cwd_len, 0, len(t.cwd))])
 	return
+}
+
+// Workers own child reaping; the UI reads the published lifecycle snapshot.
+backend_snapshot_exited :: proc(b: ^Backend) -> bool {
+	if b == nil do return false
+	if backend_is_threaded(b) {
+		backend_lock_render(b)
+		defer backend_unlock_render(b)
+		return b.front_exited
+	}
+	backend_poll_exit(b)
+	return b.pty.state == .Exited
 }

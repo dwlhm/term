@@ -30,6 +30,8 @@ Trace_State :: struct {
 	present_count: int,
 	release_count: int,
 	write_count: int,
+	unlock_count: int,
+	unlock_after_publication: bool,
 	acquire_ok:  bool,
 	encoder_ok:  bool,
 	submit_ok:   bool,
@@ -425,4 +427,70 @@ test_frame_transaction_out_of_range_journal :: proc(t: ^testing.T) {
 	termgrid.damage_requeue_journal(&term.damage, &journal)
 	testing.expect_value(t, term.damage.dirty_rows[0].span_count, u8(0))
 	testing.expect_value(t, len(term.damage.scroll_ops), 0)
+}
+
+@(test)
+test_pane_frame_damage_and_overlay_transaction :: proc(t: ^testing.T) {
+	sync.mutex_lock(&_trace_mutex)
+	defer sync.mutex_unlock(&_trace_mutex)
+	r := new(render.Renderer)
+	defer free(r)
+	_trace_renderer(r)
+	defer _trace_renderer_destroy(r)
+	delete(r.instances.instance_data)
+	r.instances.max_instances = 128
+	r.instances.instance_data = make([]instance.Instance_Data, 128)
+	render.upload_ring_destroy(&r.upload_ring)
+	render.upload_ring_init(&r.upload_ring, &_trace_backend, r.device, r.queue, 128 * instance.INSTANCE_STRIDE)
+	terms := make([]termgrid.Terminal, 2)
+	defer delete(terms)
+	defer { for &term in terms { termgrid.terminal_destroy(&term) } }
+	panes := make([]render.Pane_Viewport, 2)
+	defer delete(panes)
+	for i in 0 ..< len(terms) {
+		termgrid.terminal_init(&terms[i], FRAME_TRACE_ROWS, FRAME_TRACE_COLS)
+		_trace_mark_damage(&terms[i])
+		panes[i] = render.Pane_Viewport{terminal = &terms[i], x = f32(i)*16, w = 16, h = 32, rows = 2, cols = 2, dim_factor = 1, is_active = i == 0}
+	}
+	r.cursor_staged = true
+	r.ui_staged = true
+	r.ui_bg_count = 1
+	r.ui_bg_data[0] = instance.Instance_Data{cw = 4, ch = 4}
+	r.interaction_staged = true
+	r.interaction_slot_start = 126
+	r.interaction_quad_count = 1
+	_trace_reset()
+	_trace.submit_ok = false
+	testing.expect(t, !render.renderer_frame_panes(r, panes))
+	for &term in terms { _trace_expect_requeued(t, &term) }
+	testing.expect_value(t, _trace.present_count, 0)
+	testing.expect_value(t, _trace.release_count, 1)
+	testing.expect(t, r.cursor_staged && r.ui_staged && r.interaction_staged && r.first_frame_pending, "failed frame must preserve pending overlays")
+	_trace_reset()
+	r.unlock_cb = _trace_pane_unlock
+	r.unlock_data = r
+	testing.expect(t, render.renderer_frame_panes(r, panes))
+	testing.expect_value(t, _trace.unlock_count, 1)
+	testing.expect(t, _trace.unlock_after_publication, "pane callback must follow publication and borrowed-state cleanup")
+	testing.expect_value(t, _trace.submit_count, 1)
+	testing.expect_value(t, _trace.present_count, 1)
+	testing.expect_value(t, _trace.release_count, 1)
+	testing.expect(t, !r.cursor_staged && !r.ui_staged && !r.interaction_staged && !r.first_frame_pending)
+	for &term in terms {
+		testing.expect_value(t, len(term.damage.scroll_ops), 0)
+	}
+	_trace_reset()
+	panes[0].cols = 0
+	testing.expect(t, !render.renderer_frame_panes(r, panes))
+	testing.expect_value(t, _trace.count, 0)
+	panes[0].cols = 2
+	r.instances.max_instances = 2
+	testing.expect(t, !render.renderer_frame_panes(r, panes), "capacity failure must precede surface acquisition")
+	testing.expect_value(t, _trace.count, 0)
+}
+
+_trace_pane_unlock :: proc(data: rawptr) {
+	r := (^render.Renderer)(data)
+	_trace.unlock_count += 1
+	_trace.unlock_after_publication = _trace.present_count > 0 && !r.first_frame_pending && !r.ui_staged
 }

@@ -565,6 +565,20 @@ test_pump_translate_reload_config_shortcut :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_pump_translate_detach_tab_shortcut :: proc(t: ^testing.T) {
+	out: [4]input.Input_Event
+
+	// Option+Cmd+B (macOS) -> Local Detach_Tab (no Shift required)
+	n, _, _ := input.input_translate_sdl(_pump_key(sdl3.K_B, sdl3.KMOD_GUI|sdl3.KMOD_ALT), out[:])
+	testing.expect_value(t, n, 1)
+	testing.expect(t, out[0].event_type == .Local && out[0].action == .Detach_Tab, "Option+Cmd+B must be local Detach_Tab")
+
+	// Bare Cmd+B -> Not Detach_Tab
+	n, _, _ = input.input_translate_sdl(_pump_key(sdl3.K_B, sdl3.KMOD_GUI), out[:])
+	testing.expect(t, out[0].action != .Detach_Tab, "bare Cmd+B must not trigger Detach_Tab")
+}
+
+@(test)
 test_pump_translate_mouse_events :: proc(t: ^testing.T) {
 	out: [2]input.Input_Event
 

@@ -26,6 +26,7 @@ Interaction_Action :: enum u8 {
 	Scroll_To_Match = 3,
 	Resume_Live     = 4,
 	Open_Link       = 5,
+	Select_All      = 6,
 }
 
 Search_Match :: termgrid.Search_Match
@@ -39,6 +40,7 @@ Interaction_State :: struct {
 	visual_cursor:            termgrid.Terminal_Point,
 	selection_anchor:         termgrid.Terminal_Point,
 	selection_active:         bool,
+	pending_yank:             bool,
 	paused_offset:            int,
 	paused_lines_accumulated: int,
 	search_query:             [256]u8,

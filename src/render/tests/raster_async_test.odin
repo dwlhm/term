@@ -481,10 +481,18 @@ test_raster_pool_recycle_immune :: proc(t: ^testing.T) {
 	// carry by-value key + shaped + marks, never a pool handle.
 	_ra_word(&term, 0, 0, 0x4E2D)
 	key_a := render.cluster_key_from_handle(termgrid.grid_get_cell(&term.grid, 0, 0).content, &term.grapheme_store)
-	render.render_compile_full_v2(&frame, &term, &chain, &cache, &atlas, &fcounters, &q)
+	for _ in 0..<1000 {
+		if rcounters.enqueued >= 1 do break
+		render.render_compile_full_v2(&frame, &term, &chain, &cache, &atlas, &fcounters, &q)
+		thread.yield()
+	}
 	_ra_word(&term, 0, 0, 0x4E2E)
 	key_b := render.cluster_key_from_handle(termgrid.grid_get_cell(&term.grid, 0, 0).content, &term.grapheme_store)
-	render.render_compile_full_v2(&frame, &term, &chain, &cache, &atlas, &fcounters, &q)
+	for _ in 0..<1000 {
+		if rcounters.enqueued >= 2 do break
+		render.render_compile_full_v2(&frame, &term, &chain, &cache, &atlas, &fcounters, &q)
+		thread.yield()
+	}
 	testing.expect_value(t, rcounters.enqueued, u64(2))
 
 	render.raster_worker_shutdown(&q)
