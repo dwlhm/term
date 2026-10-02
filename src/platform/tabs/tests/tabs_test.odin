@@ -78,7 +78,7 @@ test_tabs_detached_badge :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_tabs_detached_badge_leads_strip :: proc(t: ^testing.T) {
+test_tabs_detached_badge_trails_strip :: proc(t: ^testing.T) {
 	state: tabs.Tab_Bar_State
 	tabs.tabs_init(&state)
 	state.detached_count = 3
@@ -90,17 +90,27 @@ test_tabs_detached_badge_leads_strip :: proc(t: ^testing.T) {
 	badge := state.detached_badge_rect
 	testing.expect(t, badge.w > 0, "detached badge must have width when detached_count > 0")
 
-	// The badge sits at the left edge and the strip starts right after it.
-	strip_x := rects[0].x
-	for i in 1 ..< 3 {
-		if rects[i].w > 0 && rects[i].x < strip_x do strip_x = rects[i].x
+	// The badge is pinned to the right corner, opposite the left-anchored strip.
+	testing.expect(
+		t, abs((badge.x + badge.w) - state.rect.w) <= 1.0,
+		"badge must end flush with the tab bar right edge",
+	)
+
+	strip_end: f32 = 0
+	for i in 0 ..< 3 {
+		if rects[i].w > 0 && rects[i].x + rects[i].w > strip_end do strip_end = rects[i].x + rects[i].w
 	}
-	testing.expect(t, badge.x < strip_x, "badge must start left of the first tab")
-	testing.expect(t, abs(strip_x - (badge.x + badge.w)) <= 1.0, "tab strip must start where the badge ends")
-	testing.expect(t, abs(strip_x - state.left_offset) <= 1.0, "left_offset must track the strip origin")
+	testing.expect(t, badge.x > strip_end, "badge must start right of the last visible tab")
+
+	// The drag surface stops at the badge and the strip viewport stays on the left.
+	testing.expect(
+		t, state.drag_rect.x + state.drag_rect.w <= badge.x + 1.0,
+		"drag surface must stop where the badge begins",
+	)
+	testing.expect(t, abs(state.viewport_rect.x - state.left_offset) <= 1.0, "viewport must stay anchored to the strip origin")
 
 	when ODIN_OS == .Darwin {
-		testing.expect(t, abs(badge.x - tabs.TRAFFIC_LIGHT_OFFSET_DARWIN) <= 1.0, "badge must sit at the traffic-light offset")
+		testing.expect_value(t, state.left_offset, tabs.TRAFFIC_LIGHT_OFFSET_DARWIN)
 	}
 
 	// Clicking the relocated badge still opens the session switcher.
@@ -112,14 +122,25 @@ test_tabs_detached_badge_leads_strip :: proc(t: ^testing.T) {
 	)
 	testing.expect_value(t, consumed, true)
 	testing.expect_value(t, action, tabs.Tab_Action.Open_Session_Switcher)
+}
 
-	// With no detached sessions the badge collapses and the strip returns to the
-	// plain traffic-light offset.
+@(test)
+test_tabs_detached_badge_hidden_without_sessions :: proc(t: ^testing.T) {
+	state: tabs.Tab_Bar_State
+	tabs.tabs_init(&state)
 	state.detached_count = 0
+
+	rects: [4]tabs.Rect_f32
+	titles := []string{"Tab 1", "Tab 2", "Tab 3"}
 	_ = tabs.tabs_layout(&state, 800, 3, rects[:], 0, titles)
-	testing.expect_value(t, state.detached_badge_rect.w, f32(0))
-	testing.expect_value(t, rects[0].x, state.left_offset)
-	when ODIN_OS == .Darwin {
-		testing.expect_value(t, rects[0].x, tabs.TRAFFIC_LIGHT_OFFSET_DARWIN)
-	}
+
+	badge := state.detached_badge_rect
+	testing.expect_value(t, badge.x, f32(0))
+	testing.expect_value(t, badge.y, f32(0))
+	testing.expect_value(t, badge.w, f32(0))
+	testing.expect_value(t, badge.h, f32(0))
+
+	// With no badge the right corner is not a target.
+	target, _ := tabs.tab_bar_hit_test(&state, 3, rects[:], 799.0, tabs.TAB_BAR_HEIGHT * 0.5)
+	testing.expect_value(t, target, tabs.Tab_Hit_Target.None)
 }

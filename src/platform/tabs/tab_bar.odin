@@ -285,9 +285,11 @@ tabs_layout :: proc(
 		label := fmt.bprintf(buf[:], "○ %d background", state.detached_count)
 		badge_w = min(f32(_rune_count(label)) * cw + 12, max(0, width - traffic_light_offset - button_w))
 	}
-	// The detached badge is pinned to the far left; the tab strip follows it.
-	left_offset := traffic_light_offset + badge_w
-	base_reserved := left_offset + button_w + min_drag_w
+	// The detached badge is pinned to the far right; the tab strip still starts
+	// at the traffic-light offset, and the badge width stays reserved so the tab
+	// fit budget never grows into the badge's corner.
+	left_offset := traffic_light_offset
+	base_reserved := left_offset + button_w + min_drag_w + badge_w
 
 	fit_tabs :: proc(widths: []f32, start_idx, total_count: int, max_w: f32) -> int {
 		if total_count <= 0 || start_idx >= total_count || max_w <= 0 do return 0
@@ -348,9 +350,9 @@ tabs_layout :: proc(
 	state.overflow_count = overflow_cnt
 
 	cur_x := left_offset
-	// The badge owns the left edge; the tab strip and its controls follow it.
+	// The badge owns the right corner, opposite the left-anchored tab strip.
 	if state.detached_count > 0 {
-		state.detached_badge_rect = Rect_f32{x = traffic_light_offset, y = 0, w = badge_w, h = TAB_BAR_HEIGHT}
+		state.detached_badge_rect = Rect_f32{x = max(0, width - badge_w), y = 0, w = badge_w, h = TAB_BAR_HEIGHT}
 	} else {
 		state.detached_badge_rect = Rect_f32{}
 	}
@@ -380,7 +382,13 @@ tabs_layout :: proc(
 	state.new_tab_rect = Rect_f32{x = cur_x, y = 0, w = btn_w, h = TAB_BAR_HEIGHT}
 	cur_x += btn_w
 
-	remaining_w := max(0, width - cur_x)
+	// The drag surface stops where the badge begins so the right corner is
+	// claimed by exactly one hit target.
+	drag_end := width
+	if state.detached_badge_rect.w > 0 {
+		drag_end = min(drag_end, state.detached_badge_rect.x)
+	}
+	remaining_w := max(0, drag_end - cur_x)
 	state.drag_rect = Rect_f32{x = cur_x, y = 0, w = remaining_w, h = TAB_BAR_HEIGHT}
 	state.title_rect = state.drag_rect
 	state.rect = Rect_f32{w = width, h = TAB_BAR_HEIGHT}
