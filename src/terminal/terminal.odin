@@ -189,6 +189,7 @@ Terminal :: struct {
 	kitty_kb:         Kitty_Keyboard, // progressive-enhancement state, main screen
 	kitty_kb_alt:     Kitty_Keyboard, // progressive-enhancement state, alt screen
 	synchronized_output: bool, // mode 2026: synchronized output (defer presentation)
+	unicode_width_mode: bool, // mode 2027: explicitly enabled; width remains Unicode by default
 
 	// Notification and bell events
 	bell_event:          bool,
@@ -311,6 +312,7 @@ terminal_init :: proc(
 	t.kitty_kb = Kitty_Keyboard{}
 	t.kitty_kb_alt = Kitty_Keyboard{}
 	t.synchronized_output = false
+	t.unicode_width_mode = false
 	t.bell_event = false
 	t.notification_head = 0
 	t.notification_tail = 0
@@ -1359,6 +1361,7 @@ terminal_reset :: proc(t: ^Terminal) {
 	t.charset_g1 = .US_ASCII
 	t.active_charset_is_g1 = false
 	t.active_charset_is_dec = false
+	t.unicode_width_mode = false
 }
 
 // terminal_set_scroll_region sets the scroll margins (0-indexed, inclusive).

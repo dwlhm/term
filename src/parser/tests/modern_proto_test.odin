@@ -328,6 +328,68 @@ test_synchronized_output_mode :: proc(t: ^testing.T) {
 	testing.expect(t, !term.synchronized_output, "synchronized_output must be false after CSI ? 2026 l")
 }
 
+// --- DEC Private Mode 2027 (Unicode width mode) ---
+
+@(test)
+test_unicode_width_mode_decrqm_and_independence :: proc(t: ^testing.T) {
+	_proto_reset()
+	parser: p.Parser
+	p.parser_init(&parser)
+	parser.response_cb = _proto_cb_response
+
+	term: tg.Terminal
+	tg.terminal_init(&term, 24, 80)
+	defer tg.terminal_destroy(&term)
+
+	query := []u8{0x1B, '[', '?', '2', '0', '2', '7', '$', 'p'}
+	p.parse_chunk(&parser, &term, query)
+	_proto_bytes_eq(t, _proto_response(), []u8{0x1B, '[', '?', '2', '0', '2', '7', ';', '2', '$', 'y'}, "2027 starts reset and DECRQM reports status 2")
+
+	_proto_reset()
+	p.parse_chunk(&parser, &term, []u8{0x1B, '[', '?', '2', '0', '2', '7', 'h'})
+	p.parse_chunk(&parser, &term, query)
+	_proto_bytes_eq(t, _proto_response(), []u8{0x1B, '[', '?', '2', '0', '2', '7', ';', '1', '$', 'y'}, "enabled 2027 DECRQM reports status 1")
+	testing.expect(t, term.unicode_width_mode, "2027 must be enabled")
+	testing.expect(t, !term.synchronized_output, "enabling 2027 must not enable synchronized output")
+
+	p.parse_chunk(&parser, &term, []u8{0x1B, '[', '?', '2', '0', '2', '6', 'h'})
+	testing.expect(t, term.synchronized_output, "2026 must remain independently enabled")
+	testing.expect(t, term.unicode_width_mode, "2026 must not alter 2027 state")
+
+	_proto_reset()
+	p.parse_chunk(&parser, &term, []u8{0x1B, '[', '?', '2', '0', '2', '7', 'l'})
+	p.parse_chunk(&parser, &term, query)
+	_proto_bytes_eq(t, _proto_response(), []u8{0x1B, '[', '?', '2', '0', '2', '7', ';', '2', '$', 'y'}, "reset 2027 DECRQM reports status 2")
+	testing.expect(t, !term.unicode_width_mode, "2027 reset must clear its state")
+	testing.expect(t, term.synchronized_output, "resetting 2027 must not alter 2026")
+
+	p.parse_chunk(&parser, &term, []u8{0x1B, '[', '?', '2', '0', '2', '6', 'l'})
+	testing.expect(t, !term.synchronized_output, "2026 reset must clear synchronized output")
+	testing.expect(t, !term.unicode_width_mode, "2026 must not alter reset 2027 state")
+}
+
+@(test)
+test_unicode_width_mode_ris_reset :: proc(t: ^testing.T) {
+	_proto_reset()
+	parser: p.Parser
+	p.parser_init(&parser)
+	parser.response_cb = _proto_cb_response
+
+	term: tg.Terminal
+	tg.terminal_init(&term, 24, 80)
+	defer tg.terminal_destroy(&term)
+
+	p.parse_chunk(&parser, &term, []u8{0x1B, '[', '?', '2', '0', '2', '7', 'h'})
+	testing.expect(t, term.unicode_width_mode, "2027 must be enabled before RIS")
+
+	p.parse_chunk(&parser, &term, []u8{0x1B, 'c'})
+	testing.expect(t, !term.unicode_width_mode, "RIS must reset Unicode width mode")
+
+	_proto_reset()
+	p.parse_chunk(&parser, &term, []u8{0x1B, '[', '?', '2', '0', '2', '7', '$', 'p'})
+	_proto_bytes_eq(t, _proto_response(), []u8{0x1B, '[', '?', '2', '0', '2', '7', ';', '2', '$', 'y'}, "RIS-reset 2027 DECRQM reports status 2")
+}
+
 // --- XTGETTCAP Tc and RGB (Truecolor / Direct Color) ---
 
 @(test)

@@ -6,6 +6,7 @@ import "core:os"
 import "core:strings"
 import "core:testing"
 import "core:time"
+import build_info "../../../build_info"
 import posix "core:sys/posix"
 import pty "../"
 
@@ -177,7 +178,7 @@ test_spawn_clears_prompt_eol_marker :: proc(t: ^testing.T) {
 @(test)
 test_spawn_env_term_program_and_path :: proc(t: ^testing.T) {
 	p: pty.Pty
-	ok := pty.pty_spawn(&p, 24, 80, "/bin/sh", {"-c", "printf '%s|%s' \"$TERM_PROGRAM\" \"$PATH\""})
+	ok := pty.pty_spawn(&p, 24, 80, "/bin/sh", {"-c", "printf '%s|%s|%s' \"$TERM_PROGRAM\" \"$TERM_PROGRAM_VERSION\" \"$PATH\""})
 	testing.expect(t, ok, "spawn must succeed")
 	if !ok { return }
 	defer _teardown(&p)
@@ -190,7 +191,7 @@ test_spawn_env_term_program_and_path :: proc(t: ^testing.T) {
 		time.sleep(1 * time.Millisecond)
 	}
 	output := string(buf[:total])
-	testing.expect(t, strings.has_prefix(output, "ghostty|"), "TERM_PROGRAM must be ghostty")
+	testing.expect(t, strings.has_prefix(output, "Term|" + build_info.VERSION + "|"), "PTY identity and version must match Term build info")
 	testing.expect(t, strings.contains(output, "/opt/homebrew/bin"), "PATH must contain /opt/homebrew/bin")
 }
 
@@ -220,7 +221,72 @@ test_spawn_env_inheritance :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_spawn_does_not_inject_opentui_force_unicode :: proc(t: ^testing.T) {
+	test_env_key :: "OPENTUI_FORCE_UNICODE"
+	previous, was_set := os.lookup_env(test_env_key, context.temp_allocator)
+	os.unset_env(test_env_key)
+	defer {
+		if was_set { os.set_env(test_env_key, previous) } else { os.unset_env(test_env_key) }
+	}
+
+	p: pty.Pty
+	ok := pty.pty_spawn(&p, 24, 80, "/bin/sh", {"-c", "printf '%s' \"$OPENTUI_FORCE_UNICODE\""})
+	testing.expect(t, ok, "spawn must succeed")
+	if !ok { return }
+	defer _teardown(&p)
+
+	buf: [256]u8
+	total := 0
+	for _ in 0..<200 {
+		n, eof := pty.pty_drain(&p, buf[total:], len(buf) - total)
+		total += n
+		if eof || total >= len(buf) { break }
+		time.sleep(1 * time.Millisecond)
+	}
+	testing.expect_value(t, string(buf[:total]), "")
+}
+
+@(test)
+test_spawn_inherits_opentui_force_unicode_unchanged :: proc(t: ^testing.T) {
+	test_env_key :: "OPENTUI_FORCE_UNICODE"
+	test_env_val :: "user_supplied_value_9876"
+	previous, was_set := os.lookup_env(test_env_key, context.temp_allocator)
+	os.set_env(test_env_key, test_env_val)
+	defer {
+		if was_set { os.set_env(test_env_key, previous) } else { os.unset_env(test_env_key) }
+	}
+
+	p: pty.Pty
+	ok := pty.pty_spawn(&p, 24, 80, "/bin/sh", {"-c", "printf '%s' \"$OPENTUI_FORCE_UNICODE\""})
+	testing.expect(t, ok, "spawn must succeed")
+	if !ok { return }
+	defer _teardown(&p)
+
+	buf: [256]u8
+	total := 0
+	for _ in 0..<200 {
+		n, eof := pty.pty_drain(&p, buf[total:], len(buf) - total)
+		total += n
+		if eof || total >= len(buf) { break }
+		time.sleep(1 * time.Millisecond)
+	}
+	testing.expect_value(t, string(buf[:total]), test_env_val)
+}
+
+@(test)
 test_spawn_env_shell_integration :: proc(t: ^testing.T) {
+	keys := [4]string{"POWERLEVEL9K_TERM_SHELL_INTEGRATION", "KITTY_SHELL_INTEGRATION", "ITERM_SHELL_INTEGRATION_INSTALLED", "TERM_SHELL_INTEGRATION"}
+	previous: [4]string
+	was_set: [4]bool
+	for key, i in keys {
+		previous[i], was_set[i] = os.lookup_env(key, context.temp_allocator)
+		os.unset_env(key)
+	}
+	defer {
+		for key, i in keys {
+			if was_set[i] { os.set_env(key, previous[i]) } else { os.unset_env(key) }
+		}
+	}
 	p: pty.Pty
 	ok := pty.pty_spawn(&p, 24, 80, "/bin/sh", {"-c", "printf '%s|%s|%s|%s' \"$POWERLEVEL9K_TERM_SHELL_INTEGRATION\" \"$KITTY_SHELL_INTEGRATION\" \"$ITERM_SHELL_INTEGRATION_INSTALLED\" \"$TERM_SHELL_INTEGRATION\""})
 	testing.expect(t, ok, "spawn must succeed")
@@ -236,6 +302,6 @@ test_spawn_env_shell_integration :: proc(t: ^testing.T) {
 		time.sleep(1 * time.Millisecond)
 	}
 	output := string(buf[:total])
-	testing.expect_value(t, output, "true|enabled|Yes|1")
+	testing.expect_value(t, output, "|||")
 }
 

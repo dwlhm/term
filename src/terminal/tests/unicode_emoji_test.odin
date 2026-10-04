@@ -2,6 +2,7 @@ package termgrid_test
 
 import "core:testing"
 import tg "../"
+import p "../../parser"
 
 @(test)
 test_emoji_wcwidth_modern_ranges :: proc(t: ^testing.T) {
@@ -126,6 +127,34 @@ test_wcwidth_emoji_bmp_wide :: proc(t: ^testing.T) {
 	// Variation selectors and ZWJ must remain zero-width.
 	testing.expect(t, tg.wcwidth(0xFE0F) == 0, "0xFE0F (VS16) must remain zero-width")
 	testing.expect(t, tg.wcwidth(0x200D) == 0, "0x200D (ZWJ) must remain zero-width")
+}
+
+@(test)
+test_unicode_width_default_and_mode_2027 :: proc(t: ^testing.T) {
+	term: tg.Terminal
+	tg.terminal_init(&term, 24, 80)
+	defer tg.terminal_destroy(&term)
+
+	parser: p.Parser
+	p.parser_init(&parser)
+
+	// Term's default and explicit 2027 mode both retain Unicode grapheme geometry.
+	tg.terminal_put_char(&term, 0x1F468)
+	tg.terminal_put_char(&term, 0x200D)
+	tg.terminal_put_char(&term, 0x1F4BC)
+	default_lead := tg.terminal_get_cell(&term, 0, 0)
+	testing.expect(t, default_lead.width == 2, "default ZWJ grapheme occupies two grid cells")
+	testing.expect(t, term.cursor.col == 2, "default ZWJ grapheme advances cursor by two cells")
+
+	term.cursor.row = 1
+	term.cursor.col = 0
+	p.parse_chunk(&parser, &term, []u8{0x1B, '[', '?', '2', '0', '2', '7', 'h'})
+	tg.terminal_put_char(&term, 0x1F468)
+	tg.terminal_put_char(&term, 0x200D)
+	tg.terminal_put_char(&term, 0x1F4BC)
+	mode_lead := tg.terminal_get_cell(&term, 1, 0)
+	testing.expect(t, mode_lead.width == 2, "explicit 2027 ZWJ grapheme occupies two grid cells")
+	testing.expect(t, term.cursor.col == 2, "explicit 2027 ZWJ grapheme advances cursor by two cells")
 }
 
 @(test)

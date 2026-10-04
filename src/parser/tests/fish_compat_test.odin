@@ -1,8 +1,10 @@
 package parser_test
 
+import "core:fmt"
 import "core:testing"
 import tg "../../terminal"
 import p "../../parser"
+import build_info "../../build_info"
 
 // Fish + modern-CLI compatibility tests: CPR, DECSCUSR, XTVERSION, kitty
 // keyboard mode, bracketed paste / focus reporting modes, colon-form SGR,
@@ -136,8 +138,8 @@ test_fx_xtversion :: proc(t: ^testing.T) {
 	_fx_bytes_eq(
 		t,
 		_fx_response(),
-		[]u8{0x1B, 'P', '>', '|', 'g', 'h', 'o', 's', 't', 't', 'y', '(', '1', '.', '3', '.', '1', ')', 0x1B, '\\'},
-		"CSI > q must answer DCS > | ghostty(1.3.1) ST",
+		transmute([]u8)fmt.tprintf("\x1bP>|Term(%s)\x1b\\", build_info.VERSION),
+		"CSI > q must answer DCS > | Term(version) ST",
 	)
 
 	_fx_reset()
@@ -145,8 +147,8 @@ test_fx_xtversion :: proc(t: ^testing.T) {
 	_fx_bytes_eq(
 		t,
 		_fx_response(),
-		[]u8{0x1B, 'P', '>', '|', 'g', 'h', 'o', 's', 't', 't', 'y', '(', '1', '.', '3', '.', '1', ')', 0x1B, '\\'},
-		"CSI > 0 q must answer DCS > | ghostty(1.3.1) ST",
+		transmute([]u8)fmt.tprintf("\x1bP>|Term(%s)\x1b\\", build_info.VERSION),
+		"CSI > 0 q must answer DCS > | Term(version) ST",
 	)
 }
 
