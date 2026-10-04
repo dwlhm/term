@@ -19,6 +19,7 @@ import "vendor:sdl3"
 
 import session_core "../session_core"
 import diag "../diag"
+import build_info "../build_info"
 import probe "../bench/probe"
 
 Profile_Ring :: probe.Profile_Ring
@@ -2374,7 +2375,7 @@ main :: proc() {
 		debug_mode = true
 	}
 	diag.diag_init(diag.Diag_Config{
-		app_version   = "0.3.0",
+		app_version   = build_info.VERSION,
 		log_to_stderr = true,
 		log_to_file   = true,
 		min_level     = .Debug if debug_mode else .Info,

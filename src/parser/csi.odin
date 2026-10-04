@@ -2,6 +2,7 @@ package parser
 
 import "core:fmt"
 import termgrid "../terminal"
+import build_info "../build_info"
 
 // CSI_Params holds CSI parameters.
 // subparam_mask bit i is 1 when values[i] was introduced by a colon (ECMA-48
@@ -432,6 +433,7 @@ _csi_execute_dectcem :: proc(t: ^termgrid.Terminal, params: CSI_Params, visible:
 // - Mode 1004: Focus Reporting (send \e[I on focus gain, \e[O on focus loss)
 // - Mode 2004: Bracketed Paste (wrap pastes with \e[200~ and \e[201~)
 // - Mode 2026: Synchronized Output
+// - Mode 2027: Unicode width mode (Term already uses Unicode width by default)
 _csi_execute_private_mode :: proc(t: ^termgrid.Terminal, params: CSI_Params, enable: bool) {
 	for i in 0..<int(params.count) {
 		switch int(params.values[i]) {
@@ -451,6 +453,8 @@ _csi_execute_private_mode :: proc(t: ^termgrid.Terminal, params: CSI_Params, ena
 			t.bracketed_paste = enable
 		case 2026:
 			termgrid.terminal_set_sync_output(t, enable)
+		case 2027:
+			t.unicode_width_mode = enable
 		}
 	}
 }
@@ -573,9 +577,9 @@ _csi_execute_xtversion :: proc(t: ^termgrid.Terminal, params: CSI_Params, p: ^Pa
 	if p.response_cb == nil {
 		return
 	}
-	// DCS > | ghostty(1.3.1) ST
-	response := [20]u8{0x1B, 'P', '>', '|', 'g', 'h', 'o', 's', 't', 't', 'y', '(', '1', '.', '3', '.', '1', ')', 0x1B, '\\'}
-	p.response_cb(response[:])
+	// Preserve the DCS > | name(version) ST framing while identifying Term.
+	response := fmt.tprintf("\x1bP>|Term(%s)\x1b\\", build_info.VERSION)
+	p.response_cb(transmute([]u8)response)
 }
 
 // _csi_execute_decrqm handles Request Mode (DECRQM: CSI ? Ps $ p or CSI Ps $ p).
@@ -589,8 +593,10 @@ _csi_execute_decrqm :: proc(t: ^termgrid.Terminal, params: CSI_Params, p: ^Parse
 	status: u8 = 0 // 0 = not recognized, 1 = set, 2 = reset
 	if is_private {
 		switch mode {
-		case 2026, 2027:
-			status = 2 // Synchronized output / Unicode clustering supported, currently reset
+		case 2026:
+			status = 2 // Synchronized output is currently reset
+		case 2027:
+			status = 1 if t.unicode_width_mode else 2
 		case 25:
 			status = 1 if t.cursor.visible else 2
 		case 1004:

@@ -5,6 +5,7 @@ import "core:fmt"
 import "core:os"
 import "core:strings"
 import posix "core:sys/posix"
+import build_info "../../build_info"
 
 when ODIN_OS == .Darwin {
 	foreign import libc "system:System.framework"
@@ -50,14 +51,10 @@ PTY_CHILD_FAIL_EXIT :: 127
 // PTY environment overrides and defaults.
 PTY_ENV_TERM :: "TERM=xterm-256color"
 PTY_ENV_COLORTERM :: "COLORTERM=truecolor"
-PTY_ENV_TERM_PROGRAM :: "TERM_PROGRAM=ghostty"
-PTY_ENV_TERM_PROGRAM_VERSION :: "TERM_PROGRAM_VERSION=1.3.1"
-PTY_ENV_OPENTUI_FORCE_UNICODE :: "OPENTUI_FORCE_UNICODE=true"
+PTY_ENV_TERM_PROGRAM :: "TERM_PROGRAM=Term"
 PTY_ENV_PROMPT_EOL_MARK :: "PROMPT_EOL_MARK="
-PTY_ENV_P10K_INTEGRATION   :: "POWERLEVEL9K_TERM_SHELL_INTEGRATION=true"
-PTY_ENV_KITTY_INTEGRATION  :: "KITTY_SHELL_INTEGRATION=enabled"
-PTY_ENV_ITERM_INTEGRATION  :: "ITERM_SHELL_INTEGRATION_INSTALLED=Yes"
-PTY_ENV_TERM_INTEGRATION   :: "TERM_SHELL_INTEGRATION=1"
+// Term parses OSC 133 but does not currently provide shell-integration scripts;
+// do not advertise third-party shell integration contracts to child processes.
 PTY_ENV_DEFAULT_LANG :: "LANG=en_US.UTF-8"
 PTY_ENV_DEFAULT_LC_ALL :: "LC_ALL=en_US.UTF-8"
 PTY_ENV_DEFAULT_PATH :: "PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -265,8 +262,7 @@ pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string, c
 		   strings.has_prefix(entry, "COLORTERM=") ||
 		   strings.has_prefix(entry, "PROMPT_EOL_MARK=") ||
 		   strings.has_prefix(entry, "TERM_PROGRAM=") ||
-		   strings.has_prefix(entry, "TERM_PROGRAM_VERSION=") ||
-		   strings.has_prefix(entry, "OPENTUI_FORCE_UNICODE=") {
+		   strings.has_prefix(entry, "TERM_PROGRAM_VERSION=") {
 			continue
 		}
 		if strings.has_prefix(entry, "COLUMNS=") || strings.has_prefix(entry, "LINES=") {
@@ -294,13 +290,8 @@ pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string, c
 		PTY_ENV_TERM,
 		PTY_ENV_COLORTERM,
 		PTY_ENV_TERM_PROGRAM,
-		PTY_ENV_TERM_PROGRAM_VERSION,
-		PTY_ENV_OPENTUI_FORCE_UNICODE,
+		build_info.TERM_PROGRAM_VERSION_ENV,
 		PTY_ENV_PROMPT_EOL_MARK,
-		PTY_ENV_P10K_INTEGRATION,
-		PTY_ENV_KITTY_INTEGRATION,
-		PTY_ENV_ITERM_INTEGRATION,
-		PTY_ENV_TERM_INTEGRATION,
 	)
 
 	if !has_lang {

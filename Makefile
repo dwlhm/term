@@ -9,15 +9,18 @@ TEST_FLAGS ?= -define:ODIN_TEST_THREADS=1
 DEBUG_FLAGS ?= -debug
 RELEASE_FLAGS ?= -o:speed -no-bounds-check
 
-.PHONY: all build release build-mcp release-mcp test-mcp bench-mcp bundle install dmg run check test test-terminal test-parser test-pty test-input test-tabs test-ui test-interaction test-render test-app test-bench test-mcp test-diag test-probe test-session-core bench bench-run bench-video bench-vte clean help
+.PHONY: all build release build-mcp release-mcp test-mcp test-version bench-mcp bundle install dmg run check test test-terminal test-parser test-pty test-input test-tabs test-ui test-interaction test-render test-app test-bench test-mcp test-diag test-probe test-session-core bench bench-run bench-video bench-vte clean help version-info
 
 all: build
 
-build:
+version-info:
+	python3 scripts/resolve_version.py --source src/build_info/version.odin --plist $(OUT_DIR)/Info.plist
+
+build: version-info
 	@mkdir -p $(OUT_DIR)
 	$(ODIN) build $(MAIN_SRC) -out:$(TARGET) $(DEBUG_FLAGS) $(COMMON_FLAGS)
 
-release:
+release: version-info
 	@mkdir -p $(OUT_DIR)
 	$(ODIN) build $(MAIN_SRC) -out:$(TARGET) $(RELEASE_FLAGS) $(COMMON_FLAGS)
 
@@ -33,7 +36,7 @@ bundle: release
 	@mkdir -p $(OUT_DIR)/Term.app/Contents/MacOS
 	@mkdir -p $(OUT_DIR)/Term.app/Contents/Resources
 	cp $(TARGET) $(OUT_DIR)/Term.app/Contents/MacOS/
-	cp assets/Info.plist $(OUT_DIR)/Term.app/Contents/Info.plist
+	cp $(OUT_DIR)/Info.plist $(OUT_DIR)/Term.app/Contents/Info.plist
 	cp assets/term.icns $(OUT_DIR)/Term.app/Contents/Resources/
 	rm -rf $(OUT_DIR)/Term.app/Contents/Resources/fonts
 	cp -R assets/fonts $(OUT_DIR)/Term.app/Contents/Resources/
@@ -63,7 +66,7 @@ dmg: bundle
 run: build
 	./$(TARGET)
 
-check:
+check: version-info
 	$(ODIN) check src/app $(CHECK_FLAGS)
 	$(ODIN) check src/session_core $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/cmd/term_mcp $(CHECK_FLAGS)
@@ -77,7 +80,10 @@ check:
 	$(ODIN) check src/diag $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/bench/probe $(CHECK_FLAGS) -no-entry-point
 
-test: test-config test-terminal test-parser test-pty test-input test-tabs test-ui test-interaction test-render test-app test-bench test-mcp test-diag test-probe test-session-core
+test: version-info test-version test-config test-terminal test-parser test-pty test-input test-tabs test-ui test-interaction test-render test-app test-bench test-mcp test-diag test-probe test-session-core
+
+test-version:
+	python3 -m unittest discover -s scripts/tests -v
 
 test-config:
 	$(ODIN) test src/config/tests $(COMMON_FLAGS) $(TEST_FLAGS)
@@ -85,10 +91,10 @@ test-config:
 test-terminal:
 	$(ODIN) test src/terminal/tests $(COMMON_FLAGS) $(TEST_FLAGS)
 
-test-parser:
+test-parser: version-info
 	$(ODIN) test src/parser/tests $(COMMON_FLAGS) $(TEST_FLAGS)
 
-test-pty:
+test-pty: version-info
 	$(ODIN) test src/platform/pty/tests $(COMMON_FLAGS) $(TEST_FLAGS)
 
 test-input:
@@ -106,7 +112,7 @@ test-interaction:
 test-render:
 	$(ODIN) test src/render/tests $(COMMON_FLAGS) $(TEST_FLAGS)
 
-test-app:
+test-app: version-info
 	$(ODIN) test src/app/tests $(COMMON_FLAGS) $(TEST_FLAGS)
 
 test-bench:

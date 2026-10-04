@@ -20,10 +20,12 @@
 /render_tests
 bin/
 build/
+/src/build_info/version.odin
 
 # Debug artifacts & symbols
 *.dSYM
 *.dSYM/
+__pycache__/
 *.log
 debug.log
 
@@ -44,6 +46,7 @@ scratch/
 # Scratch scripts and temporary binaries
 *.py
 !scripts/*.py
+!scripts/tests/*.py
 term_test
 term_resize_repro
 test_slice.odin
