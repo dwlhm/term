@@ -719,7 +719,10 @@ frontend_apply_zoom :: proc(
 		termgrid.terminal_resize(terminal, rows, cols)
 		if f.use_pinnacle { pinnacle_app.resize_terminal_adapter(&f.p_term_adapter, i32(rows), i32(cols)) } else { render.renderer_resize_grid(&f.renderer, terminal, i32(rows), i32(cols)) }
 	}
-	if terminal != nil do pty.pty_set_winsize(pty_ptr, rows, cols)
+	if terminal != nil {
+		grid_pixel_w, grid_pixel_h := grid_pixel_extent_for_cells(rows, cols, f.renderer.cell_width, f.renderer.cell_height)
+		pty.pty_set_winsize(pty_ptr, rows, cols, grid_pixel_w, grid_pixel_h)
+	}
 	if pixel_w > 0 && pixel_h > 0 {
 		render.renderer_resize(&f.renderer, u32(pixel_w), u32(pixel_h))
 	}
@@ -755,14 +758,15 @@ frontend_on_resize :: proc(
 		return false
 	}
 	grid_changed := rows != cur_rows || cols != cur_cols
+	grid_pixel_w, grid_pixel_h := grid_pixel_extent_for_cells(rows, cols, f.renderer.cell_width, f.renderer.cell_height)
 	if grid_changed {
 		if terminal != nil {
 			termgrid.terminal_resize(terminal, rows, cols)
 			if f.use_pinnacle { pinnacle_app.resize_terminal_adapter(&f.p_term_adapter, i32(rows), i32(cols)) } else { render.renderer_resize_grid(&f.renderer, terminal, i32(rows), i32(cols)) }
 		}
-		if pty_ptr != nil {
-			pty.pty_set_winsize(pty_ptr, rows, cols)
-		}
+	}
+	if pty_ptr != nil && (grid_changed || pty_ptr.pixel_w != grid_pixel_w || pty_ptr.pixel_h != grid_pixel_h) {
+		pty.pty_set_winsize(pty_ptr, rows, cols, grid_pixel_w, grid_pixel_h)
 	}
 	render.renderer_resize(&f.renderer, u32(pixel_w), u32(pixel_h))
 	f.last_px_w = pixel_w

@@ -11,6 +11,8 @@ test_image_focus_hit_test_and_state_clamps :: proc(t: ^testing.T) {
 	store := new(graphics.Store)
 	defer free(store)
 	graphics.store_init(store)
+	store.placements, _ = make([]graphics.Placement, 2, context.allocator)
+	defer delete(store.placements, context.allocator)
 	store.images[0] = graphics.Image_Slot{used = true, id = 4, generation = 9, frame_count = 1, current_frame = 0}
 	store.images[0].frames[0] = graphics.Frame{width = 80, height = 40}
 	store.images[1] = graphics.Image_Slot{used = true, id = 8, generation = 11, frame_count = 1, current_frame = 0}

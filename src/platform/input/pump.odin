@@ -659,10 +659,12 @@ input_pump_resize :: proc(
 		return false, false
 	}
 	rows, cols := input_grid_for_pixels(pixel_w, pixel_h, cell_w, cell_h)
-	if rows == t.grid.row_count && cols == t.grid.col_count {
+	grid_pixel_w := cols * cell_w
+	grid_pixel_h := rows * cell_h
+	if rows == t.grid.row_count && cols == t.grid.col_count && grid_pixel_w == p.pixel_w && grid_pixel_h == p.pixel_h {
 		return false, true
 	}
-	ok = pty.pty_set_winsize(p, rows, cols)
+	ok = pty.pty_set_winsize(p, rows, cols, grid_pixel_w, grid_pixel_h)
 	termgrid.terminal_resize(t, rows, cols)
 	return true, ok
 }

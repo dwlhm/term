@@ -23,6 +23,7 @@ import "core:time"
 import "core:os"
 import posix "core:sys/posix"
 import "core:strings"
+import "base:runtime"
 import "vendor:sdl3"
 
 import app "../"
@@ -108,6 +109,43 @@ _cpu_renderer :: proc(a: ^app.App) {
 _cpu_renderer_destroy :: proc(a: ^app.App) {
 	delete(a.renderer.instances.instance_data)
 	a.renderer.instances.instance_data = nil
+}
+
+@(test)
+test_app_pending_clipboard_preserves_complete_payload :: proc(t: ^testing.T) {
+	b := new(app.Backend)
+	defer free(b)
+
+	line := "clipboard payload regression line\n"
+	payload := make([]u8, 64 * len(line), context.allocator)
+	defer delete(payload, context.allocator)
+	for i in 0..<64 {
+		copy(payload[i * len(line):], transmute([]u8)line)
+	}
+
+	app.backend_set_pending_clipboard(b, payload)
+	got, ok := app.backend_take_pending_clipboard(b)
+	testing.expect(t, ok, "queued clipboard payload must be available")
+	defer delete(got, runtime.heap_allocator())
+	testing.expect(t, len(got) == len(payload), "clipboard payload length must be preserved")
+	testing.expect(t, got == string(payload), "clipboard payload bytes must be preserved")
+
+	discard := "discard this queued value"
+	replacement_text := "replacement payload"
+	app.backend_set_pending_clipboard(b, transmute([]u8)discard)
+	app.backend_set_pending_clipboard(b, transmute([]u8)replacement_text)
+	replaced, replaced_ok := app.backend_take_pending_clipboard(b)
+	testing.expect(t, replaced_ok, "replacement clipboard payload must be available")
+	if replaced_ok {
+		defer delete(replaced, runtime.heap_allocator())
+		testing.expect(t, replaced == "replacement payload", "latest queued payload must replace the previous value")
+	}
+
+	clear_text := "pending value cleared by empty input"
+	app.backend_set_pending_clipboard(b, transmute([]u8)clear_text)
+	app.backend_set_pending_clipboard(b, nil)
+	_, empty_ok := app.backend_take_pending_clipboard(b)
+	testing.expect(t, !empty_ok, "empty pending clipboard state must return false")
 }
 
 // _damage_cells counts dirty cells in the live damage state.
@@ -297,6 +335,16 @@ test_app_frame_drain_parse_exit :: proc(t: ^testing.T) {
 
 	// Exited loop keeps running (banner is step 15), input parked.
 	testing.expect(t, app.app_frame(a), "post-exit frame must stay alive")
+}
+
+@(test)
+test_grid_pixel_extent_uses_cell_geometry :: proc(t: ^testing.T) {
+	pixel_w, pixel_h := app.grid_pixel_extent_for_cells(25, 91, 8.5, 17.25)
+	testing.expect_value(t, pixel_w, 774)
+	testing.expect_value(t, pixel_h, 431)
+	pixel_w, pixel_h = app.grid_pixel_extent_for_cells(25, 91, 0, 17.25)
+	testing.expect_value(t, pixel_w, 0)
+	testing.expect_value(t, pixel_h, 0)
 }
 
 @(test)

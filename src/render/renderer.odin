@@ -161,8 +161,9 @@ Renderer :: struct {
 	image_pipeline: gpu.Gpu_RenderPipeline,
 	image_bind_group_layout: gpu.Gpu_BindGroupLayout,
 	image_cache: [graphics_pkg.KGP_MAX_IMAGES]Image_Texture_Cache_Slot,
-	image_instances: [graphics_pkg.KGP_MAX_PLACEMENTS]instance.Instance_Data,
-	image_draws: [graphics_pkg.KGP_MAX_PLACEMENTS]Image_Draw,
+	image_instances: []instance.Instance_Data,
+	image_draws: []Image_Draw,
+	image_staging_allocator: runtime.Allocator,
 	image_count: u32,
 	image_under_count: u32,
 	image_focus_staged: bool,
@@ -437,6 +438,7 @@ renderer_init :: proc(
 	r.device      = device
 	r.queue       = queue
 	r.backend     = backend
+	r.image_staging_allocator = allocator
 	r.frame_count = 0
 	r.last_dirty  = true
 	r.surface     = gpu.Gpu_Surface(nil)
@@ -622,6 +624,14 @@ renderer_destroy :: proc(r: ^Renderer, allocator: runtime.Allocator = context.al
 	dirty_upload_destroy(&r.dirty, allocator)
 	upload_ring_destroy(&r.upload_ring, allocator)
 	_image_texture_cache_destroy(r)
+	if r.image_instances != nil {
+		delete(r.image_instances, r.image_staging_allocator)
+		r.image_instances = nil
+	}
+	if r.image_draws != nil {
+		delete(r.image_draws, r.image_staging_allocator)
+		r.image_draws = nil
+	}
 	if r.backend != nil {
 		if rawptr(r.image_pipeline) != nil {
 			r.backend.destroy_render_pipeline(r.image_pipeline)
@@ -954,6 +964,38 @@ _image_texture_cache_acquire :: proc(
 	return free_index, true
 }
 
+_renderer_grow_image_staging :: proc(r: ^Renderer, required: int) -> bool {
+	if r == nil || required < 0 do return false
+	current := len(r.image_instances)
+	if len(r.image_draws) < current { current = len(r.image_draws) }
+	if required <= current do return true
+	max_int := int(~uintptr(0) >> 1)
+	if required > max_int / size_of(instance.Instance_Data) || required > max_int / size_of(Image_Draw) do return false
+	capacity := max(4, current)
+	for capacity < required {
+		if capacity > max_int / 2 {
+			capacity = required
+			break
+		}
+		capacity *= 2
+	}
+	if capacity < required do return false
+	instances, instance_err := make([]instance.Instance_Data, capacity, r.image_staging_allocator)
+	if instance_err != nil do return false
+	draws, draw_err := make([]Image_Draw, capacity, r.image_staging_allocator)
+	if draw_err != nil {
+		delete(instances, r.image_staging_allocator)
+		return false
+	}
+	copy(instances, r.image_instances)
+	copy(draws, r.image_draws)
+	if r.image_instances != nil { delete(r.image_instances, r.image_staging_allocator) }
+	if r.image_draws != nil { delete(r.image_draws, r.image_staging_allocator) }
+	r.image_instances = instances
+	r.image_draws = draws
+	return true
+}
+
 _renderer_stage_images_for_pane :: proc(r: ^Renderer, pane: ^Pane_Viewport) -> bool {
 	if r == nil || pane == nil || pane.terminal == nil do return false
 	store := termgrid.terminal_graphics_active(pane.terminal)
@@ -964,7 +1006,8 @@ _renderer_stage_images_for_pane :: proc(r: ^Renderer, pane: ^Pane_Viewport) -> b
 		_image_texture_cache_evict_namespace(r, namespace)
 	}
 	clip := _image_clip_for_pane(r, pane)
-	for i := 0; i < graphics_pkg.KGP_MAX_PLACEMENTS; i += 1 {
+	if !_renderer_grow_image_staging(r, len(store.placements)) do return false
+	for i := 0; i < len(store.placements); i += 1 {
 		placement := &store.placements[i]
 		if !placement.used do continue
 		image := graphics_pkg.store_find_image(store, placement.image_id, placement.image_number)
@@ -975,7 +1018,7 @@ _renderer_stage_images_for_pane :: proc(r: ^Renderer, pane: ^Pane_Viewport) -> b
 		if !rect_ok || !uv_ok do continue
 		slot, slot_ok := _image_texture_cache_acquire(r, namespace, image)
 		if !slot_ok do return false
-		if r.image_count >= u32(len(r.image_instances)) do return false
+		if !_renderer_grow_image_staging(r, int(r.image_count)+1) do return false
 		index := r.image_count
 		r.image_instances[index] = instance.Instance_Data{
 			x = pane.x + rect[0], y = pane.y + rect[1], cw = rect[2], ch = rect[3],

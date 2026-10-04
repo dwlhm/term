@@ -105,6 +105,8 @@ UI_Event :: struct {
 	input:       input.Input_Event,
 	pixel_w:     i32,
 	pixel_h:     i32,
+	grid_pixel_w: i32,
+	grid_pixel_h: i32,
 	rows:        int,
 	cols:        int,
 	focused:     bool,
@@ -127,6 +129,14 @@ App_Exit_Action :: enum {
 // depending on SDL or windowing libraries.
 Clipboard_Write_Proc :: #type proc(user_data: rawptr, text: string)
 Clipboard_Read_Proc  :: #type proc(user_data: rawptr, out: []u8) -> int
+
+// grid_pixel_extent_for_cells returns the physical extent of a terminal grid.
+grid_pixel_extent_for_cells :: proc(rows, cols: int, cell_w, cell_h: f32) -> (pixel_w, pixel_h: int) {
+	if rows <= 0 || cols <= 0 || cell_w <= 0 || cell_h <= 0 do return 0, 0
+	pixel_w = int(f32(cols) * cell_w + 0.5)
+	pixel_h = int(f32(rows) * cell_h + 0.5)
+	return
+}
 
 // grid_dimensions_for_pixels converts window pixel dimensions and cell metrics
 // to grid row and column counts.

@@ -583,14 +583,14 @@ session_send_key :: proc(s: ^Core_Session, key: string) -> bool {
 }
 
 // session_resize updates both the PTY window size and terminal grid dimensions.
-session_resize :: proc(s: ^Core_Session, rows, cols: int) -> bool {
+session_resize :: proc(s: ^Core_Session, rows, cols: int, pixel_w: int = 0, pixel_h: int = 0) -> bool {
 	if s == nil || rows <= 0 || cols <= 0 {
 		return false
 	}
 	sync.mutex_lock(&s.lock)
 	defer sync.mutex_unlock(&s.lock)
 
-	pty_ok := pty.pty_set_winsize(&s.pty_handle, rows, cols)
+	pty_ok := pty.pty_set_winsize(&s.pty_handle, rows, cols, pixel_w, pixel_h)
 	termgrid.terminal_resize(&s.term, rows, cols)
 	return pty_ok
 }

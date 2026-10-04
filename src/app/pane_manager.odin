@@ -56,8 +56,9 @@ _app_layout_panes :: proc(a: ^App) -> bool {
 		b := app_active_backend(a)
 		if b == nil || b.terminal.grid.row_count <= 0 || b.terminal.grid.col_count <= 0 do return false
 		if a.renderer.rows != i32(rows) || a.renderer.cols != i32(cols) do render.renderer_resize_grid(&a.renderer, nil, i32(rows), i32(cols))
-		if b.terminal.grid.row_count == rows && b.terminal.grid.col_count == cols do return false
-		return _app_dispatch_backend(b, UI_Event{type = .Resize, rows = rows, cols = cols, pixel_w = pw, pixel_h = ph})
+		grid_pixel_w, grid_pixel_h := grid_pixel_extent_for_cells(rows, cols, a.renderer.cell_width, a.renderer.cell_height)
+		if b.terminal.grid.row_count == rows && b.terminal.grid.col_count == cols && b.pty.pixel_w == grid_pixel_w && b.pty.pixel_h == grid_pixel_h do return false
+		return _app_dispatch_backend(b, UI_Event{type = .Resize, rows = rows, cols = cols, pixel_w = pw, pixel_h = ph, grid_pixel_w = i32(grid_pixel_w), grid_pixel_h = i32(grid_pixel_h)})
 	}
 	if tab.tree.root == nil do return false
 	pad := _app_pane_padding(a)
@@ -81,10 +82,13 @@ _app_layout_panes :: proc(a: ^App) -> bool {
 	changed := false
 	for leaf in leaves[:n] {
 		if leaf.rect.w <= 0 || leaf.rect.h <= 0 || leaf.backend == nil do continue
-		if leaf.rows == leaf.dispatched_rows && leaf.cols == leaf.dispatched_cols do continue
-		if _app_dispatch_backend(leaf.backend, UI_Event{type = .Resize, rows = leaf.rows, cols = leaf.cols, pixel_w = i32(leaf.rect.w), pixel_h = i32(leaf.rect.h)}) {
+		grid_pixel_w, grid_pixel_h := grid_pixel_extent_for_cells(leaf.rows, leaf.cols, a.renderer.cell_width, a.renderer.cell_height)
+		if leaf.rows == leaf.dispatched_rows && leaf.cols == leaf.dispatched_cols && grid_pixel_w == leaf.dispatched_pixel_w && grid_pixel_h == leaf.dispatched_pixel_h do continue
+		if _app_dispatch_backend(leaf.backend, UI_Event{type = .Resize, rows = leaf.rows, cols = leaf.cols, pixel_w = i32(leaf.rect.w), pixel_h = i32(leaf.rect.h), grid_pixel_w = i32(grid_pixel_w), grid_pixel_h = i32(grid_pixel_h)}) {
 			leaf.dispatched_rows = leaf.rows
 			leaf.dispatched_cols = leaf.cols
+			leaf.dispatched_pixel_w = grid_pixel_w
+			leaf.dispatched_pixel_h = grid_pixel_h
 			changed = true
 		}
 	}
@@ -102,7 +106,8 @@ _app_spawn_pane_backend :: proc(a: ^App, init_rows: int = 0, init_cols: int = 0,
 	cfg := a.config
 	if len(cwd) > 0 do cfg.working_directory = cwd
 	b := new(Backend)
-	if !backend_init(b, rows, cols, shell, shell_argv, &cfg, a.renderer.theme) {
+	pixel_w, pixel_h := grid_pixel_extent_for_cells(rows, cols, a.renderer.cell_width, a.renderer.cell_height)
+	if !backend_init(b, rows, cols, shell, shell_argv, &cfg, a.renderer.theme, pixel_w, pixel_h) {
 		free(b)
 		return nil
 	}

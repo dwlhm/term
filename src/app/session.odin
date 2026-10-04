@@ -56,6 +56,8 @@ Session_Manager :: struct {
 	registry:             ^session_core.Session_Registry,
 	default_rows:         int,
 	default_cols:         int,
+	default_pixel_w:      int,
+	default_pixel_h:      int,
 	default_config:       ^config.Config,
 	default_theme:        termgrid.Theme,
 	clipboard_user_data:  rawptr,
@@ -302,6 +304,8 @@ session_spawn :: proc(
 	rows, cols: int,
 	cfg: ^config.Config,
 	theme: termgrid.Theme,
+	pixel_w: int = 0,
+	pixel_h: int = 0,
 ) -> (idx: int, ok: bool) {
 	if sm == nil do return -1, false
 	// Max Tab Guard
@@ -309,6 +313,8 @@ session_spawn :: proc(
 
 	sm.default_rows = rows
 	sm.default_cols = cols
+	sm.default_pixel_w = pixel_w
+	sm.default_pixel_h = pixel_h
 	sm.default_config = cfg
 	sm.default_theme = theme
 
@@ -320,7 +326,7 @@ session_spawn :: proc(
 	tab.status = .Spawning
 	tab.title_len = session_sanitize_title(tab.title_buf[:], i18n.i18n_get().tab_untitled)
 
-	if !backend_init(&tab.backend, rows, cols, prog, argv, cfg, theme) {
+	if !backend_init(&tab.backend, rows, cols, prog, argv, cfg, theme, pixel_w, pixel_h) {
 		tab.status = .Error_Spawn
 		ordered_remove(&sm.tabs, new_idx)
 		return -1, false
@@ -529,7 +535,7 @@ session_detach_tab :: proc(sm: ^Session_Manager, idx: int) -> bool {
 		shell_argv := _resolve_shell_argv(shell)
 		rows := sm.default_rows > 0 ? sm.default_rows : 24
 		cols := sm.default_cols > 0 ? sm.default_cols : 80
-		new_idx, spawn_ok := session_spawn(sm, shell, shell_argv, rows, cols, sm.default_config, sm.default_theme)
+		new_idx, spawn_ok := session_spawn(sm, shell, shell_argv, rows, cols, sm.default_config, sm.default_theme, sm.default_pixel_w, sm.default_pixel_h)
 		if spawn_ok {
 			sm.active_idx = new_idx
 			new_b := tab_active_backend(&sm.tabs[new_idx])

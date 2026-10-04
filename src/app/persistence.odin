@@ -835,7 +835,8 @@ persistence_restore_tab :: proc(a: ^App, layout: Persisted_Layout) -> (tab_idx: 
 	cfg_copy := a.config
 	cfg_copy.working_directory = root_cwd
 
-	new_idx, spawn_ok := session_spawn(&a.session_mgr, shell, shell_argv, rows, cols, &cfg_copy, a.renderer.theme)
+	pixel_w, pixel_h := grid_pixel_extent_for_cells(rows, cols, a.renderer.cell_width, a.renderer.cell_height)
+	new_idx, spawn_ok := session_spawn(&a.session_mgr, shell, shell_argv, rows, cols, &cfg_copy, a.renderer.theme, pixel_w, pixel_h)
 	if !spawn_ok do return -1, false
 
 	tab := &a.session_mgr.tabs[new_idx]

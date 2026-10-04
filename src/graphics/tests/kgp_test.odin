@@ -2,6 +2,7 @@ package graphics_tests
 
 import "core:testing"
 import "core:c"
+import "core:fmt"
 import "core:strings"
 import posix "core:sys/posix"
 import graphics ".."
@@ -25,6 +26,8 @@ GRAPHICS_TEST_PNG :: [?]u8{
 	0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44,
 	0xae, 0x42, 0x60, 0x82,
 }
+
+GRAPHICS_TEST_PNG_BASE64 :: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGPgEpHTAAAAzQBlapmEQgAAAABJRU5ErkJggg=="
 
 _graphics_capture_write :: proc(user_data: rawptr, data: []u8) {
 	capture := cast(^Response_Capture)user_data
@@ -259,6 +262,113 @@ test_graphics_store_lifecycle_and_placement :: proc(t: ^testing.T) {
 	testing.expect(t, result == .Ok, "image deletion must succeed")
 	testing.expect(t, graphics.store_find_image(&store, 7, 0) == nil, "deleted image must not be findable")
 	graphics.store_destroy(&store, context.allocator)
+}
+
+@(test)
+test_graphics_store_dynamic_kgp_placements_and_sync :: proc(t: ^testing.T) {
+	store: graphics.Store
+	graphics.store_init(&store)
+	defer graphics.store_destroy(&store, context.allocator)
+	ctx := _graphics_context()
+	capture: Response_Capture
+	store.images[0] = graphics.Image_Slot{used = true, id = 7, number = 1, generation = 1, frame_count = 1, current_frame = 0}
+	store.images[0].frames[0] = graphics.Frame{width = 512, height = 1}
+	store.image_count = 1
+
+	KGp_TEST_PLACEMENT_COUNT :: 200
+	for index in 0..<KGp_TEST_PLACEMENT_COUNT {
+		placement_id := u32(index + 1)
+		control := fmt.tprintf("a=p,i=7,p=%d,c=1,r=1,x=%d,y=0,w=1,h=1", placement_id, index)
+		defer delete(control, context.temp_allocator)
+		ctx.cursor_col = index
+		result := _graphics_feed(&store, ctx, &capture, control, "")
+		if !testing.expect(t, result == .Ok, "each one-cell KGP placement must be accepted") do return
+	}
+	testing.expect_value(t, store.placement_count, KGp_TEST_PLACEMENT_COUNT)
+	last := graphics.store_find_placement(&store, 7, 0, u32(KGp_TEST_PLACEMENT_COUNT))
+	testing.expect(t, last != nil, "placement beyond the former inline capacity must remain stored")
+	if last != nil {
+		testing.expect_value(t, last.src_x, u32(KGp_TEST_PLACEMENT_COUNT-1))
+		testing.expect_value(t, last.src_w, u32(1))
+	}
+
+	snapshot: graphics.Store
+	graphics.store_init(&snapshot)
+	defer graphics.store_destroy(&snapshot, context.allocator)
+	graphics.store_sync(&snapshot, &store, context.allocator)
+	copied := graphics.store_find_placement(&snapshot, 7, 0, u32(KGp_TEST_PLACEMENT_COUNT))
+	testing.expect(t, copied != nil, "snapshot must include placements after dynamic growth")
+	if copied != nil && last != nil {
+		testing.expect(t, rawptr(copied) != rawptr(last), "snapshot placements must not alias source backing")
+		testing.expect_value(t, copied.src_x, last.src_x)
+	}
+	previous_snapshot_backing := rawptr(&snapshot.placements[0])
+	graphics.store_sync(&snapshot, &store, context.allocator)
+	testing.expect(t, rawptr(&snapshot.placements[0]) != previous_snapshot_backing, "snapshot replacement must allocate independent backing before releasing the old copy")
+	graphics.store_clear_placements(&snapshot)
+	testing.expect_value(t, len(snapshot.placements), 0)
+	graphics.store_sync(&snapshot, &store, context.allocator)
+	copied = graphics.store_find_placement(&snapshot, 7, 0, u32(KGp_TEST_PLACEMENT_COUNT))
+	testing.expect(t, copied != nil, "snapshot replacement must restore independent placement backing")
+}
+
+@(test)
+test_graphics_transmit_put_grows_full_placement_storage :: proc(t: ^testing.T) {
+	store: graphics.Store
+	graphics.store_init(&store)
+	defer graphics.store_destroy(&store, context.allocator)
+	ctx := _graphics_context()
+	capture: Response_Capture
+	store.images[0] = graphics.Image_Slot{used = true, id = 7, number = 1, generation = 1, frame_count = 1, current_frame = 0}
+	store.images[0].frames[0] = graphics.Frame{width = 512, height = 1}
+	store.image_count = 1
+
+	for index in 0..<200 {
+		placement_id := u32(index + 1)
+		control := fmt.tprintf("a=p,i=7,p=%d,c=1,r=1,x=%d,y=0,w=1,h=1", placement_id, index)
+		defer delete(control, context.temp_allocator)
+		ctx.cursor_col = index
+		if !testing.expect(t, _graphics_feed(&store, ctx, &capture, control, "") == .Ok, "placement setup must succeed") do return
+	}
+	previous_capacity := len(store.placements)
+	for index := store.placement_count; index < previous_capacity; index += 1 {
+		placement_id := u32(index + 1)
+		control := fmt.tprintf("a=p,i=7,p=%d,c=1,r=1,x=%d,y=0,w=1,h=1", placement_id, index)
+		defer delete(control, context.temp_allocator)
+		ctx.cursor_col = index
+		if !testing.expect(t, _graphics_feed(&store, ctx, &capture, control, "") == .Ok, "placement capacity must be fillable") do return
+	}
+	if !testing.expect(t, store.placement_count == previous_capacity, "placement backing must be full before transmitted placement") do return
+
+	png_payload := _graphics_bytes(GRAPHICS_TEST_PNG_BASE64)
+	transmit_control := _graphics_bytes("a=T,f=100,s=1,v=1,i=9,p=999,c=1,r=1,w=1,h=1")
+	result := graphics.store_feed(
+		&store,
+		ctx,
+		transmit_control,
+		png_payload,
+		_graphics_sink(&capture),
+	)
+	if !testing.expect(t, result == .Ok, "transmit-put must grow full placement storage and succeed") do return
+	if !testing.expect(t, len(store.placements) > previous_capacity, "transmit-put must grow beyond prior placement capacity") do return
+	image := graphics.store_find_image(&store, 9, 0)
+	placement := graphics.store_find_placement(&store, 9, 0, 999)
+	testing.expect(t, image != nil, "transmitted image must be installed")
+	testing.expect(t, placement != nil, "transmitted image placement must be installed")
+
+	grown_capacity := len(store.placements)
+	result = graphics.store_feed(
+		&store,
+		ctx,
+		transmit_control,
+		png_payload,
+		_graphics_sink(&capture),
+	)
+	testing.expect(t, result == .Ok, "repeated placement ID must remain accepted")
+	testing.expect_value(t, len(store.placements), grown_capacity)
+
+	graphics.store_destroy(&store, context.allocator)
+	testing.expect(t, store.placements == nil, "store destruction must release placement backing")
 }
 
 @(test)

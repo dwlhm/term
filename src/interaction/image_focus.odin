@@ -135,7 +135,7 @@ interaction_hit_test_image :: proc(store: ^graphics.Store, x, y, cell_w, cell_h:
 	best_z: i32 = 0
 	best_image, best_placement: u32 = 0, 0
 	found := false
-	for i := 0; i < graphics.KGP_MAX_PLACEMENTS; i += 1 {
+	for i := 0; i < len(store.placements); i += 1 {
 		p := &store.placements[i]
 		if !p.used do continue
 		image := graphics.store_find_image(store, p.image_id, p.image_number)

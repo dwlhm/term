@@ -5,6 +5,8 @@ import graphics "../../graphics"
 import instance "../instance"
 import render ".."
 import interaction "../../interaction"
+import gpu "../gpu"
+import termgrid "../../terminal"
 
 @(test)
 test_image_cache_key_keeps_namespace_and_generation_distinct :: proc(t: ^testing.T) {
@@ -15,6 +17,121 @@ test_image_cache_key_keeps_namespace_and_generation_distinct :: proc(t: ^testing
 	different_generation.generation += 1
 	testing.expect(t, base != different_namespace, "cache keys must separate terminal namespaces")
 	testing.expect(t, base != different_generation, "cache keys must separate image generations")
+}
+
+_image_stage_test_texture := rawptr(uintptr(0x2011))
+_image_stage_test_view := rawptr(uintptr(0x2012))
+_image_stage_test_bind_group := rawptr(uintptr(0x2013))
+
+_image_stage_test_create_texture :: proc(device: gpu.Gpu_Device, width, height: u32, format: gpu.Gpu_Format, usage: gpu.Gpu_Texture_Usage) -> gpu.Gpu_Texture {
+	return gpu.Gpu_Texture(_image_stage_test_texture)
+}
+
+_image_stage_test_destroy_texture :: proc(texture: gpu.Gpu_Texture) {}
+
+_image_stage_test_create_texture_view :: proc(texture: gpu.Gpu_Texture) -> gpu.Gpu_TextureView {
+	return gpu.Gpu_TextureView(_image_stage_test_view)
+}
+
+_image_stage_test_destroy_texture_view :: proc(view: gpu.Gpu_TextureView) {}
+
+_image_stage_test_write_texture :: proc(queue: gpu.Gpu_Queue, texture: gpu.Gpu_Texture, data: []u8, width, height: u32) {}
+
+_image_stage_test_create_bind_group :: proc(device: gpu.Gpu_Device, layout: gpu.Gpu_BindGroupLayout, entries: []gpu.Gpu_Bind_Entry) -> gpu.Gpu_BindGroup {
+	return gpu.Gpu_BindGroup(_image_stage_test_bind_group)
+}
+
+_image_stage_test_destroy_bind_group :: proc(group: gpu.Gpu_BindGroup) {}
+
+_image_stage_test_create_sampler :: proc(device: gpu.Gpu_Device) -> gpu.Gpu_Sampler {
+	return gpu.Gpu_Sampler(rawptr(uintptr(0x2016)))
+}
+
+@(test)
+test_image_staging_traverses_placements_beyond_128 :: proc(t: ^testing.T) {
+	PLACEMENT_TEST_COUNT :: 200
+	term: termgrid.Terminal
+	termgrid.terminal_init(&term, 1, PLACEMENT_TEST_COUNT)
+	defer termgrid.terminal_destroy(&term)
+	term.graphics_namespace = 1
+	store := termgrid.terminal_graphics_active(&term)
+	store.images[0] = graphics.Image_Slot{
+		used = true, id = 1, number = 1, generation = 1,
+		frame_count = 1, current_frame = 0,
+	}
+	frame_data, frame_alloc_err := make([]u8, 4, context.allocator)
+	if !testing.expect(t, frame_alloc_err == nil, "image frame fixture allocation must succeed") do return
+	frame_data[0] = 255
+	frame_data[1] = 255
+	frame_data[2] = 255
+	frame_data[3] = 255
+	store.images[0].frames[0] = graphics.Frame{width = 1, height = 1, data = frame_data, allocator = context.allocator}
+	placements, alloc_err := make([]graphics.Placement, PLACEMENT_TEST_COUNT, context.allocator)
+	if !testing.expect(t, alloc_err == nil, "placement fixture allocation must succeed") do return
+	store.placements = placements
+	store.placement_allocator = context.allocator
+	store.placement_allocator_set = true
+	store.placement_count = PLACEMENT_TEST_COUNT
+	for i in 0..<PLACEMENT_TEST_COUNT {
+		store.placements[i] = graphics.Placement{
+			used = true, image_id = 1, image_number = 1, placement_id = u32(i+1),
+			col = i, cols = 1, rows = 1, src_w = 1, src_h = 1,
+		}
+	}
+
+	backend := gpu.Gpu_Backend_VTable{
+		create_texture = _image_stage_test_create_texture,
+		destroy_texture = _image_stage_test_destroy_texture,
+		create_texture_view = _image_stage_test_create_texture_view,
+		destroy_texture_view = _image_stage_test_destroy_texture_view,
+		write_texture = _image_stage_test_write_texture,
+		create_bind_group = _image_stage_test_create_bind_group,
+		destroy_bind_group = _image_stage_test_destroy_bind_group,
+		create_sampler = _image_stage_test_create_sampler,
+	}
+	renderer := render.Renderer{
+		backend = &backend,
+		image_bind_group_layout = gpu.Gpu_BindGroupLayout(rawptr(uintptr(0x2014))),
+		image_staging_allocator = context.allocator,
+		cell_width = 1, cell_height = 1,
+	}
+	renderer.instances.uniform_buffer = gpu.Gpu_Buffer(rawptr(uintptr(0x2015)))
+	renderer.instances.sampler = gpu.Gpu_Sampler(rawptr(uintptr(0x2016)))
+	defer {
+		render._image_texture_cache_destroy(&renderer)
+		if renderer.image_instances != nil { delete(renderer.image_instances, renderer.image_staging_allocator) }
+		if renderer.image_draws != nil { delete(renderer.image_draws, renderer.image_staging_allocator) }
+	}
+	pane := render.Pane_Viewport{terminal = &term, w = f32(PLACEMENT_TEST_COUNT), h = 1, cols = PLACEMENT_TEST_COUNT, rows = 1, dim_factor = 1}
+	if !testing.expect(t, render._renderer_stage_images_for_pane(&renderer, &pane), "renderer must stage the full placement set") do return
+	testing.expect_value(t, renderer.image_count, u32(PLACEMENT_TEST_COUNT))
+	testing.expect_value(t, renderer.image_draws[PLACEMENT_TEST_COUNT-1].placement_id, u32(PLACEMENT_TEST_COUNT))
+}
+
+@(test)
+test_image_staging_grows_for_every_placement :: proc(t: ^testing.T) {
+	PLACEMENT_TEST_COUNT :: 200
+	placements, alloc_err := make([]graphics.Placement, PLACEMENT_TEST_COUNT, context.allocator)
+	if !testing.expect(t, alloc_err == nil, "placement fixture allocation must succeed") do return
+	defer delete(placements, context.allocator)
+	for i in 0..<PLACEMENT_TEST_COUNT {
+		placements[i] = graphics.Placement{used = true, placement_id = u32(i+1), src_x = u32(i), src_w = 1, src_h = 1}
+	}
+
+	renderer := render.Renderer{image_staging_allocator = context.allocator}
+	defer {
+		if renderer.image_instances != nil { delete(renderer.image_instances, renderer.image_staging_allocator) }
+		if renderer.image_draws != nil { delete(renderer.image_draws, renderer.image_staging_allocator) }
+	}
+	if !testing.expect(t, render._renderer_grow_image_staging(&renderer, len(placements)), "image staging must grow to fit the complete placement set") do return
+	for i in 0..<len(placements) {
+		renderer.image_instances[i] = instance.Instance_Data{u0 = f32(placements[i].src_x)}
+		renderer.image_draws[i] = render.Image_Draw{used = true, placement_id = placements[i].placement_id}
+	}
+	renderer.image_count = u32(len(placements))
+	testing.expect_value(t, renderer.image_count, u32(PLACEMENT_TEST_COUNT))
+	testing.expect_value(t, renderer.image_draws[PLACEMENT_TEST_COUNT-1].placement_id, u32(PLACEMENT_TEST_COUNT))
+	testing.expect_value(t, renderer.image_instances[PLACEMENT_TEST_COUNT-1].u0, f32(PLACEMENT_TEST_COUNT-1))
 }
 
 @(test)

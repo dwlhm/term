@@ -46,6 +46,8 @@ Pane_Node :: struct {
 	cols:            int,
 	dispatched_rows: int,
 	dispatched_cols: int,
+	dispatched_pixel_w: int,
+	dispatched_pixel_h: int,
 }
 
 // Pane_Tree coordinates the binary split hierarchy, layout computation,
@@ -227,6 +229,8 @@ pane_tree_split :: proc(
 	first_child.cols = target.cols
 	first_child.dispatched_rows = target.dispatched_rows
 	first_child.dispatched_cols = target.dispatched_cols
+	first_child.dispatched_pixel_w = target.dispatched_pixel_w
+	first_child.dispatched_pixel_h = target.dispatched_pixel_h
 	first_child.ratio = DEFAULT_RATIO
 
 	// Initialize new pane leaf

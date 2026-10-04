@@ -28,6 +28,16 @@ PTY_DEFAULT_ROWS :: 24
 // PTY_DEFAULT_COLS is the column count used when the caller passes cols <= 0.
 PTY_DEFAULT_COLS :: 80
 
+// PTY_WINSIZE_PIXEL_MAX is the largest physical pixel extent representable
+// by BSD struct winsize.
+PTY_WINSIZE_PIXEL_MAX :: int(0xFFFF)
+
+@(private="file")
+_winsize_pixel :: proc(value: int) -> c.ushort {
+	if value <= 0 do return 0
+	return c.ushort(min(value, PTY_WINSIZE_PIXEL_MAX))
+}
+
 // TIOCSWINSZ sets the window size of a terminal device.
 // BSD/macOS value, verified against the system headers on this machine.
 TIOCSWINSZ :: 0x80087467
@@ -68,6 +78,8 @@ Pty :: struct {
 	exit_code: int,
 	rows:      int,
 	cols:      int,
+	pixel_w:   int,
+	pixel_h:   int,
 }
 
 // Winsize mirrors BSD struct winsize for the TIOCSWINSZ ioctl.
@@ -134,7 +146,7 @@ _resolve_working_dir :: proc(cwd: string) -> (target_path: string, c_cwd: cstrin
 // On success the parent returns true with master >= 0, pid > 0 and state
 // Running. On any failure all half-open fds are closed, the failed child
 // (if any) is reaped, *p is left untouched, and the result is false.
-pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string, cwd: string = "") -> bool {
+pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string, cwd: string = "", pixel_w: int = 0, pixel_h: int = 0) -> bool {
 	if p == nil {
 		return false
 	}
@@ -192,7 +204,9 @@ pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string, c
 	// Initial size is applied to the slave in the child after fork: on
 	// Darwin TIOCSWINSZ is only valid on the slave side, and the size
 	// set there is visible to the parent through the master.
-	ws := Winsize{ws_row = c.ushort(r), ws_col = c.ushort(ncols)}
+	px := int(_winsize_pixel(pixel_w))
+	py := int(_winsize_pixel(pixel_h))
+	ws := Winsize{ws_row = c.ushort(r), ws_col = c.ushort(ncols), ws_xpixel = c.ushort(px), ws_ypixel = c.ushort(py)}
 
 	// Error pipe: the write end is CLOEXEC, so the parent reads EOF exactly
 	// when exec succeeds and one byte when the child fails before exec.
@@ -406,7 +420,8 @@ pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string, c
 	p.exit_code = 0
 	p.rows = r
 	p.cols = ncols
-	pty_set_winsize(p, r, ncols)
+	p.pixel_w = px
+	p.pixel_h = py
 	return true
 }
 
@@ -552,7 +567,7 @@ pty_write :: proc(p: ^Pty, data: []u8) -> bool {
 // A nil pty, a negative master, or Exited state returns false without
 // issuing a syscall; an ioctl error returns false with p.rows/p.cols
 // unchanged.
-pty_set_winsize :: proc(p: ^Pty, rows: int, cols: int) -> bool {
+pty_set_winsize :: proc(p: ^Pty, rows: int, cols: int, pixel_w: int = 0, pixel_h: int = 0) -> bool {
 	if p == nil {
 		return false
 	}
@@ -570,12 +585,16 @@ pty_set_winsize :: proc(p: ^Pty, rows: int, cols: int) -> bool {
 	if ncols <= 0 {
 		ncols = PTY_DEFAULT_COLS
 	}
-	ws := Winsize{ws_row = c.ushort(r), ws_col = c.ushort(ncols)}
+	px := int(_winsize_pixel(pixel_w))
+	py := int(_winsize_pixel(pixel_h))
+	ws := Winsize{ws_row = c.ushort(r), ws_col = c.ushort(ncols), ws_xpixel = c.ushort(px), ws_ypixel = c.ushort(py)}
 	if ioctl(c.int(p.master), TIOCSWINSZ, &ws) != 0 {
 		return false
 	}
 	p.rows = r
 	p.cols = ncols
+	p.pixel_w = px
+	p.pixel_h = py
 	return true
 }
 

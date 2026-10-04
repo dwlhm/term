@@ -129,8 +129,7 @@ Backend :: struct {
 	clipboard_user_data:  rawptr,
 	clipboard_write_cb:   Clipboard_Write_Proc,
 	clipboard_read_cb:    Clipboard_Read_Proc,
-	clipboard_pending_buf: [1024]u8,
-	clipboard_pending_len: int,
+	clipboard_pending_buf: []u8,
 	clipboard_pending_mtx: sync.Mutex,
 
 	// Multi-threaded worker thread & synchronization primitives
@@ -241,24 +240,26 @@ _backend_clipboard_cb :: proc(data: []u8) {
 	}
 }
 
-// backend_set_pending_clipboard stores clipboard data into the pending buffer under mutex.
+// backend_set_pending_clipboard stores a complete owned copy under the mutex.
 backend_set_pending_clipboard :: proc(b: ^Backend, data: []u8) {
 	if b == nil do return
+	pending := make([]u8, len(data), runtime.heap_allocator())
+	copy(pending, data)
 	sync.mutex_lock(&b.clipboard_pending_mtx)
 	defer sync.mutex_unlock(&b.clipboard_pending_mtx)
-	n := min(len(data), len(b.clipboard_pending_buf))
-	copy(b.clipboard_pending_buf[:n], data[:n])
-	b.clipboard_pending_len = n
+	delete(b.clipboard_pending_buf, runtime.heap_allocator())
+	b.clipboard_pending_buf = pending
 }
 
-// backend_take_pending_clipboard retrieves and clears pending clipboard data under mutex.
+// backend_take_pending_clipboard returns independently owned text and clears pending storage.
 backend_take_pending_clipboard :: proc(b: ^Backend) -> (string, bool) {
 	if b == nil do return "", false
 	sync.mutex_lock(&b.clipboard_pending_mtx)
 	defer sync.mutex_unlock(&b.clipboard_pending_mtx)
-	if b.clipboard_pending_len == 0 do return "", false
-	text := string(b.clipboard_pending_buf[:b.clipboard_pending_len])
-	b.clipboard_pending_len = 0
+	if len(b.clipboard_pending_buf) == 0 do return "", false
+	text := strings.clone(string(b.clipboard_pending_buf), runtime.heap_allocator())
+	delete(b.clipboard_pending_buf, runtime.heap_allocator())
+	b.clipboard_pending_buf = nil
 	return text, true
 }
 
@@ -322,6 +323,8 @@ backend_init :: proc(
 	argv: []string,
 	cfg: ^config.Config,
 	theme: termgrid.Theme,
+	pixel_w: int = 0,
+	pixel_h: int = 0,
 ) -> bool {
 	if b == nil {
 		return false
@@ -418,7 +421,7 @@ backend_init :: proc(
 		observer = b.observer,
 	}
 
-	if !pty.pty_spawn(&b.pty, init_rows, init_cols, spawn_prog, spawn_argv, b.cwd) {
+	if !pty.pty_spawn(&b.pty, init_rows, init_cols, spawn_prog, spawn_argv, b.cwd, pixel_w, pixel_h) {
 		termgrid.terminal_destroy(&b.terminal)
 		termgrid.terminal_destroy(&b.front_terminal)
 		if b.wake_pipe_r >= 0 {
@@ -578,6 +581,10 @@ backend_destroy :: proc(b: ^Backend) {
 		b.wake_pipe_w = -1
 	}
 	pty.pty_close(&b.pty)
+	sync.mutex_lock(&b.clipboard_pending_mtx)
+	delete(b.clipboard_pending_buf, runtime.heap_allocator())
+	b.clipboard_pending_buf = nil
+	sync.mutex_unlock(&b.clipboard_pending_mtx)
 	b.parser.graphics_cb = nil
 	b.parser.graphics_user_data = nil
 	termgrid.terminal_destroy(&b.terminal)
@@ -826,11 +833,11 @@ backend_set_focused :: proc(b: ^Backend, new_focused: bool) {
 }
 
 // backend_on_resize updates the terminal grid size and PTY window size.
-backend_on_resize :: proc(b: ^Backend, rows, cols: int) -> bool {
+backend_on_resize :: proc(b: ^Backend, rows, cols: int, pixel_w: int = 0, pixel_h: int = 0) -> bool {
 	if b == nil || rows <= 0 || cols <= 0 {
 		return false
 	}
-	pty.pty_set_winsize(&b.pty, rows, cols)
+	pty.pty_set_winsize(&b.pty, rows, cols, pixel_w, pixel_h)
 	if rows == b.terminal.grid.row_count && cols == b.terminal.grid.col_count {
 		return true
 	}
@@ -896,7 +903,7 @@ backend_relaunch :: proc(b: ^Backend) -> bool {
 	pty.pty_close(&b.pty)
 	rows := b.terminal.grid.row_count
 	cols := b.terminal.grid.col_count
-	if !pty.pty_spawn(&b.pty, rows, cols, b.prog, b.argv, b.cwd) {
+	if !pty.pty_spawn(&b.pty, rows, cols, b.prog, b.argv, b.cwd, b.pty.pixel_w, b.pty.pixel_h) {
 		backend_show_banner_fail(b)
 		return false
 	}
@@ -1615,7 +1622,7 @@ backend_handle_ui_event :: proc(b: ^Backend, ev: UI_Event) {
 				return
 			}
 			started_ns := probe.profile_clock_ns()
-			backend_on_resize(b, ev.rows, ev.cols)
+			backend_on_resize(b, ev.rows, ev.cols, int(ev.grid_pixel_w), int(ev.grid_pixel_h))
 			elapsed := probe.profile_elapsed_ns(started_ns)
 			probe.profile_record_resize(.Idle, .Resize_Stage, ev.pixel_w, ev.pixel_h, ev.pixel_w, ev.pixel_h, i32(ev.rows), i32(ev.cols), i32(b.terminal.grid.row_count), i32(b.terminal.grid.col_count), elapsed, true)
 		}

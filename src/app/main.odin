@@ -648,7 +648,8 @@ _app_execute_tab_menu :: proc(a: ^App, item: platform_tabs.Tab_Menu_Item, target
 		shell_argv := _resolve_shell_argv(shell)
 		rows := a.renderer.rows > 0 ? int(a.renderer.rows) : APP_DEFAULT_ROWS
 		cols := a.renderer.cols > 0 ? int(a.renderer.cols) : APP_DEFAULT_COLS
-		new_idx, spawn_ok := session_spawn(&a.session_mgr, shell, shell_argv, rows, cols, &a.config, a.renderer.theme)
+		pixel_w, pixel_h := grid_pixel_extent_for_cells(rows, cols, a.renderer.cell_width, a.renderer.cell_height)
+		new_idx, spawn_ok := session_spawn(&a.session_mgr, shell, shell_argv, rows, cols, &a.config, a.renderer.theme, pixel_w, pixel_h)
 		if spawn_ok {
 			new_b := &a.session_mgr.tabs[new_idx].backend
 			backend_set_clipboard_callbacks(new_b, &a.frontend, _frontend_clipboard_write_cb, _frontend_clipboard_read_cb)
@@ -820,7 +821,8 @@ app_init :: proc(a: ^App, rows, cols: int, prog: string, argv: []string) -> bool
 	_ = win.window_set_drag_region(&a.window, &a.drag_region)
 
 	// (3) Spawn initial Tab Session
-	spawn_idx, spawn_ok := session_spawn(&a.session_mgr, prog, argv, init_rows, init_cols, &a.config, app_theme)
+	init_pixel_w, init_pixel_h := grid_pixel_extent_for_cells(init_rows, init_cols, cell_w, cell_h)
+	spawn_idx, spawn_ok := session_spawn(&a.session_mgr, prog, argv, init_rows, init_cols, &a.config, app_theme, init_pixel_w, init_pixel_h)
 	if !spawn_ok {
 		session_manager_destroy(&a.session_mgr)
 		frontend_destroy(&a.frontend)
@@ -1420,7 +1422,8 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 					shell_argv := _resolve_shell_argv(shell)
 					rows := a.renderer.rows > 0 ? int(a.renderer.rows) : APP_DEFAULT_ROWS
 					cols := a.renderer.cols > 0 ? int(a.renderer.cols) : APP_DEFAULT_COLS
-					new_idx, spawn_ok := session_spawn(&a.session_mgr, shell, shell_argv, rows, cols, &a.config, a.renderer.theme)
+					pixel_w, pixel_h := grid_pixel_extent_for_cells(rows, cols, a.renderer.cell_width, a.renderer.cell_height)
+					new_idx, spawn_ok := session_spawn(&a.session_mgr, shell, shell_argv, rows, cols, &a.config, a.renderer.theme, pixel_w, pixel_h)
 					if spawn_ok {
 						new_b := &a.session_mgr.tabs[new_idx].backend
 						backend_set_clipboard_callbacks(new_b, &a.frontend, _frontend_clipboard_write_cb, _frontend_clipboard_read_cb)
@@ -1679,7 +1682,8 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 						shell_argv := _resolve_shell_argv(shell)
 						rows := a.renderer.rows > 0 ? int(a.renderer.rows) : APP_DEFAULT_ROWS
 						cols := a.renderer.cols > 0 ? int(a.renderer.cols) : APP_DEFAULT_COLS
-						new_idx, spawn_ok := session_spawn(&a.session_mgr, shell, shell_argv, rows, cols, &a.config, a.renderer.theme)
+						pixel_w, pixel_h := grid_pixel_extent_for_cells(rows, cols, a.renderer.cell_width, a.renderer.cell_height)
+						new_idx, spawn_ok := session_spawn(&a.session_mgr, shell, shell_argv, rows, cols, &a.config, a.renderer.theme, pixel_w, pixel_h)
 						if spawn_ok {
 							new_b := &a.session_mgr.tabs[new_idx].backend
 							backend_set_clipboard_callbacks(new_b, &a.frontend, _frontend_clipboard_write_cb, _frontend_clipboard_read_cb)
@@ -1937,6 +1941,7 @@ _app_drain_terminal_events :: proc(a: ^App, term_ref: ^termgrid.Terminal) {
 
 	if clip_text, ok := backend_take_pending_clipboard(active_b); ok {
 		win.window_set_clipboard_text(&a.window, clip_text)
+		delete(clip_text, runtime.heap_allocator())
 	}
 
 	if backend_is_threaded(active_b) do backend_lock_render(active_b)

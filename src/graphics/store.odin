@@ -5,7 +5,6 @@ import "core:bytes"
 import "core:compress/zlib"
 
 KGP_MAX_IMAGES :: 256
-KGP_MAX_PLACEMENTS :: 128
 KGP_MAX_FRAMES :: 64
 KGP_MAX_IMAGE_BYTES :: 64 * 1024 * 1024
 KGP_UPLOAD_QUEUE_CAP :: 256
@@ -68,8 +67,10 @@ Pending_Upload :: struct {
 Store :: struct {
 	images: [KGP_MAX_IMAGES]Image_Slot,
 	image_count: int,
-	placements: [KGP_MAX_PLACEMENTS]Placement,
+	placements: []Placement,
 	placement_count: int,
+	placement_allocator: runtime.Allocator,
+	placement_allocator_set: bool,
 	next_number: u32,
 	epoch: u64,
 	placement_epoch: u64,
@@ -142,9 +143,54 @@ _store_release_all_uploads :: proc(s: ^Store, allocator: runtime.Allocator) {
 	s.upload_count = 0
 }
 
+_store_release_placements :: proc(s: ^Store) {
+	if s == nil do return
+	if s.placements != nil {
+		allocator := s.placement_allocator
+		if !s.placement_allocator_set {
+			allocator = context.allocator
+		}
+		delete(s.placements, allocator)
+	}
+	s.placements = nil
+	s.placement_allocator = {}
+	s.placement_allocator_set = false
+}
+
+_store_grow_placements :: proc(s: ^Store, allocator: runtime.Allocator) -> bool {
+	if s == nil do return false
+	old_capacity := len(s.placements)
+	max_int := int(~uintptr(0) >> 1)
+	max_capacity := max_int / size_of(Placement)
+	if old_capacity >= max_capacity do return false
+	new_capacity := 4
+	if old_capacity > 0 {
+		if old_capacity > max_capacity / 2 {
+			new_capacity = max_capacity
+		} else {
+			new_capacity = old_capacity * 2
+		}
+	}
+	if new_capacity <= old_capacity || new_capacity > max_capacity do return false
+	owner_allocator := allocator
+	if s.placement_allocator_set {
+		owner_allocator = s.placement_allocator
+	}
+	placements, alloc_err := make([]Placement, new_capacity, owner_allocator)
+	if alloc_err != nil do return false
+	copy(placements, s.placements)
+	if s.placements != nil {
+		delete(s.placements, owner_allocator)
+	}
+	s.placements = placements
+	s.placement_allocator = owner_allocator
+	s.placement_allocator_set = true
+	return true
+}
+
 _store_image_has_placement :: proc(s: ^Store, image_id, image_number: u32) -> bool {
 	if s == nil do return false
-	for i := 0; i < KGP_MAX_PLACEMENTS; i += 1 {
+	for i := 0; i < len(s.placements); i += 1 {
 		p := &s.placements[i]
 		if !p.used do continue
 		if p.image_id == image_id && p.image_number == image_number {
@@ -200,6 +246,7 @@ store_destroy :: proc(s: ^Store, allocator: runtime.Allocator) {
 	}
 	_store_release_all_uploads(s, allocator)
 	_store_reset_assembly(s, allocator)
+	_store_release_placements(s)
 	s^ = Store{}
 }
 
@@ -229,7 +276,17 @@ store_sync :: proc(dst: ^Store, src: ^Store, allocator: runtime.Allocator) {
 	replacement.next_number = src.next_number
 	replacement.epoch = src.epoch
 	replacement.placement_epoch = src.placement_epoch
-	replacement.placements = src.placements
+	if len(src.placements) > 0 {
+		placements, alloc_err := make([]Placement, len(src.placements), allocator)
+		if alloc_err != nil {
+			free(replacement, allocator)
+			return
+		}
+		copy(placements, src.placements)
+		replacement.placements = placements
+		replacement.placement_allocator = allocator
+		replacement.placement_allocator_set = true
+	}
 
 	for i := 0; i < KGP_MAX_IMAGES; i += 1 {
 		source_image := &src.images[i]
@@ -299,9 +356,7 @@ store_clear :: proc(s: ^Store, allocator: runtime.Allocator) {
 	}
 	_store_release_all_uploads(s, allocator)
 	_store_reset_assembly(s, allocator)
-	for i := 0; i < KGP_MAX_PLACEMENTS; i += 1 {
-		s.placements[i] = Placement{}
-	}
+	_store_release_placements(s)
 	s.image_count = 0
 	s.placement_count = 0
 	s.upload_count = 0
@@ -312,9 +367,7 @@ store_clear :: proc(s: ^Store, allocator: runtime.Allocator) {
 
 store_clear_placements :: proc(s: ^Store) {
 	if s == nil do return
-	for i := 0; i < KGP_MAX_PLACEMENTS; i += 1 {
-		s.placements[i] = Placement{}
-	}
+	_store_release_placements(s)
 	s.placement_count = 0
 	_store_bump_placement_epoch(s)
 }
@@ -322,7 +375,7 @@ store_clear_placements :: proc(s: ^Store) {
 store_scroll :: proc(s: ^Store, delta: int) {
 	if s == nil do return
 	changed := false
-	for i := KGP_MAX_PLACEMENTS - 1; i >= 0; i -= 1 {
+	for i := len(s.placements) - 1; i >= 0; i -= 1 {
 		p := &s.placements[i]
 		if !p.used do continue
 		p.row -= delta
@@ -370,7 +423,7 @@ store_find_image :: proc(s: ^Store, id, number: u32) -> ^Image_Slot {
 
 store_find_placement :: proc(s: ^Store, image_id, image_number, placement_id: u32) -> ^Placement {
 	if s == nil || placement_id == 0 do return nil
-	for i := 0; i < KGP_MAX_PLACEMENTS; i += 1 {
+	for i := 0; i < len(s.placements); i += 1 {
 		p := &s.placements[i]
 		if p.used && p.placement_id == placement_id &&
 			(image_id == 0 || p.image_id == image_id) &&
@@ -692,7 +745,7 @@ _store_install_image :: proc(s: ^Store, c: ^Control, decoded: ^Decoded_Image, ha
 _store_next_placement_id :: proc(s: ^Store) -> u32 {
 	for candidate: u32 = 1; candidate != 0; candidate += 1 {
 		used := false
-		for i := 0; i < KGP_MAX_PLACEMENTS; i += 1 {
+		for i := 0; i < len(s.placements); i += 1 {
 			if s.placements[i].used && s.placements[i].placement_id == candidate {
 				used = true
 				break
@@ -705,16 +758,21 @@ _store_next_placement_id :: proc(s: ^Store) -> u32 {
 	return 0
 }
 
-_store_can_place :: proc(s: ^Store, c: ^Control) -> bool {
+_store_can_place :: proc(s: ^Store, c: ^Control, allocator: runtime.Allocator) -> bool {
 	if s == nil || c == nil do return false
 	if c.placement_id != 0 {
-		for i := 0; i < KGP_MAX_PLACEMENTS; i += 1 {
+		for i := 0; i < len(s.placements); i += 1 {
 			if s.placements[i].used && s.placements[i].placement_id == c.placement_id {
 				return true
 			}
 		}
 	}
-	return s.placement_count < KGP_MAX_PLACEMENTS
+	for i := 0; i < len(s.placements); i += 1 {
+		if !s.placements[i].used {
+			return true
+		}
+	}
+	return _store_grow_placements(s, allocator)
 }
 
 _store_place :: proc(s: ^Store, c: ^Control, ctx: Feed_Context, image: ^Image_Slot) -> Feed_Result {
@@ -724,15 +782,16 @@ _store_place :: proc(s: ^Store, c: ^Control, ctx: Feed_Context, image: ^Image_Sl
 		placement = store_find_placement(s, 0, 0, c.placement_id)
 	}
 	if placement == nil {
-		for i := 0; i < KGP_MAX_PLACEMENTS; i += 1 {
+		for i := 0; i < len(s.placements); i += 1 {
 			if !s.placements[i].used {
 				placement = &s.placements[i]
 				break
 			}
 		}
-	}
-	if placement == nil {
-		return .No_Space
+		if placement == nil {
+			if !_store_grow_placements(s, ctx.allocator) do return .No_Space
+			placement = &s.placements[len(s.placements)-1]
+		}
 	}
 	if !placement.used {
 		s.placement_count += 1
@@ -1036,7 +1095,7 @@ _store_delete_matches :: proc(s: ^Store, c: ^Control, ctx: Feed_Context, allocat
 	}
 	uppercase := mode >= 'A' && mode <= 'Z'
 	marked: [KGP_MAX_IMAGES]bool
-	for i := KGP_MAX_PLACEMENTS - 1; i >= 0; i -= 1 {
+	for i := len(s.placements) - 1; i >= 0; i -= 1 {
 		p := &s.placements[i]
 		if !p.used do continue
 		matches := false
@@ -1171,7 +1230,7 @@ _store_process :: proc(s: ^Store, ctx: Feed_Context, c: ^Control, payload: []u8,
 	if s == nil || c == nil do return .Invalid, 0
 	switch c.action {
 	case .Transmit, .Transmit_Put:
-		if c.action == .Transmit_Put && !_store_can_place(s, c) {
+		if c.action == .Transmit_Put && !_store_can_place(s, c, ctx.allocator) {
 			return .No_Space, 0
 		}
 		decoded, decode_res := _store_decode(c, payload, ctx.allocator)

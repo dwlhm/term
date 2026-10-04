@@ -28,12 +28,12 @@ _Winsize :: struct {
 }
 
 // _get_winsize reads the size visible through the master fd.
-_get_winsize :: proc(master: int) -> (rows, cols: int, ok: bool) {
+_get_winsize :: proc(master: int) -> (rows, cols, pixel_w, pixel_h: int, ok: bool) {
 	ws: _Winsize
 	if ioctl(c.int(master), TIOCGWINSZ, &ws) != 0 {
-		return 0, 0, false
+		return 0, 0, 0, 0, false
 	}
-	return int(ws.ws_row), int(ws.ws_col), true
+	return int(ws.ws_row), int(ws.ws_col), int(ws.ws_xpixel), int(ws.ws_ypixel), true
 }
 
 // _teardown kills the spawned child, reaps it, and closes the master fd.
@@ -84,16 +84,18 @@ test_spawn_with_argv :: proc(t: ^testing.T) {
 @(test)
 test_spawn_applies_winsize :: proc(t: ^testing.T) {
 	p: pty.Pty
-	ok := pty.pty_spawn(&p, 40, 100, "/bin/sh", {})
+	ok := pty.pty_spawn(&p, 40, 100, "/bin/sh", {}, "", 800, 640)
 	testing.expect(t, ok, "pty_spawn must succeed")
 	if !ok {
 		return
 	}
 	defer _teardown(&p)
-	rows, cols, wok := _get_winsize(p.master)
+	rows, cols, pixel_w, pixel_h, wok := _get_winsize(p.master)
 	testing.expect(t, wok, "winsize read-back must succeed")
 	testing.expect(t, rows == 40, "child must observe rows=40")
 	testing.expect(t, cols == 100, "child must observe cols=100")
+	testing.expect(t, pixel_w == 800, "child must observe initial pixel width")
+	testing.expect(t, pixel_h == 640, "child must observe initial pixel height")
 }
 
 @(test)
