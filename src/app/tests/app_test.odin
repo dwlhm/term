@@ -818,6 +818,58 @@ test_backend_paste_shadow_worker_routing :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_backend_passthrough_key_resumes_live_viewport :: proc(t: ^testing.T) {
+	b := new(app.Backend)
+	defer free(b)
+	termgrid.terminal_init(&b.terminal, APP_TEST_ROWS, APP_TEST_COLS)
+	defer termgrid.terminal_destroy(&b.terminal)
+	parser.parser_init(&b.parser)
+	defer parser.parser_destroy(&b.parser)
+	interaction.interaction_init(&b.interaction)
+
+	pipefd: [2]posix.FD
+	if posix.pipe(&pipefd) != .OK {
+		testing.expect(t, false, "posix.pipe must succeed")
+		return
+	}
+	defer posix.close(pipefd[0])
+	b.pty.master = int(pipefd[1])
+	b.pty.state = .Running
+	defer if b.pty.master >= 0 {
+		posix.close(posix.FD(b.pty.master))
+		b.pty.master = -1
+	}
+
+	cells := make([]termgrid.Semantic_Cell, APP_TEST_COLS)
+	for i in 0..<len(cells) {
+		cells[i] = termgrid.CELL_DEFAULT
+	}
+	termgrid.scrollback_push(&b.terminal.scrollback, cells, &b.terminal.grapheme_store)
+	delete(cells)
+	termgrid.terminal_view_set_offset(&b.view, &b.terminal, 1)
+	testing.expect_value(t, b.view.scrollback_offset, 1)
+	interaction.interaction_pause_viewport(&b.interaction, b.view.scrollback_offset)
+	app.backend_handle_ui_event(b, app.UI_Event{
+		type = .Input,
+		input = input.Input_Event{
+			event_type = .Key,
+			kind       = .Printable,
+			rune       = 'x',
+		},
+	})
+
+	testing.expect_value(t, b.view.scrollback_offset, 0)
+	testing.expect_value(t, b.interaction.viewport_flow, interaction.Viewport_Flow.Live)
+
+	buf: [8]u8
+	n := posix.read(pipefd[0], raw_data(buf[:]), len(buf))
+	testing.expect_value(t, n, 1)
+	if n > 0 {
+		testing.expect_value(t, string(buf[:n]), "x")
+	}
+}
+
+@(test)
 test_app_interaction_dispatch_integration :: proc(t: ^testing.T) {
 	b := new(app.Backend)
 	defer free(b)

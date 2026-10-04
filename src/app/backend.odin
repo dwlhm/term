@@ -1462,6 +1462,11 @@ backend_handle_ui_event :: proc(b: ^Backend, ev: UI_Event) {
 				case .None:
 				}
 			} else {
+				if b.pty.state == .Running && b.view.scrollback_offset > 0 {
+					termgrid.terminal_view_set_offset(&b.view, &b.terminal, 0)
+					inter.interaction_resume_viewport(&b.interaction)
+					b.view_generation += 1
+				}
 				kitty_flags := termgrid.terminal_kitty_active(&b.terminal).flags
 				key_evs := [1]input.Input_Event{ev.input}
 				_ = input.input_pump_events(&b.pty, key_evs[:], kitty_flags, b.terminal.app_cursor_keys)
