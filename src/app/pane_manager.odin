@@ -137,7 +137,12 @@ _app_split_pane :: proc(a: ^App, direction: Split_Direction) -> bool {
 		return false
 	}
 	previous := leaf.backend
-	b := _app_spawn_pane_backend(a, leaf.rows, leaf.cols)
+	cwd := leaf.backend.cwd
+	live_cwd: [4096]u8
+	if cwd_len := pty.pty_working_directory(&leaf.backend.pty, live_cwd[:]); cwd_len > 0 {
+		cwd = string(live_cwd[:cwd_len])
+	}
+	b := _app_spawn_pane_backend(a, leaf.rows, leaf.cols, cwd)
 	if b == nil {
 		fmt.eprintln("split pane rejected: shell spawn failed")
 		return false
