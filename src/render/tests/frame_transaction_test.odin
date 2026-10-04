@@ -14,6 +14,8 @@ import termgrid "../../terminal"
 FRAME_TRACE_ROWS :: 4
 FRAME_TRACE_COLS :: 8
 FRAME_TRACE_UPLOAD_BYTES :: instance.INSTANCE_STRIDE * 4
+FRAME_TRACE_OPACITY: f32 : 0.375
+FRAME_TRACE_THEME_BACKGROUND: u32 : 0x80102030
 
 Trace_Event :: enum {
 	Acquire,
@@ -30,6 +32,8 @@ Trace_State :: struct {
 	present_count: int,
 	release_count: int,
 	write_count: int,
+	clear_color: [4]f64,
+	load_op:     gpu.Gpu_Load_Op,
 	unlock_count: int,
 	unlock_after_publication: bool,
 	acquire_ok:  bool,
@@ -124,6 +128,8 @@ _trace_create_command_encoder :: proc(device: gpu.Gpu_Device) -> gpu.Gpu_Command
 _trace_release_command_encoder :: proc(encoder: gpu.Gpu_CommandEncoder) {}
 
 _trace_begin_render_pass :: proc(encoder: gpu.Gpu_CommandEncoder, color_view: gpu.Gpu_TextureView, clear_color: [4]f64, load_op: gpu.Gpu_Load_Op) -> gpu.Gpu_RenderPassEncoder {
+	_trace.clear_color = clear_color
+	_trace.load_op = load_op
 	return gpu.Gpu_RenderPassEncoder(_TRACE_PASS)
 }
 
@@ -217,6 +223,31 @@ _trace_expect_requeued :: proc(t: ^testing.T, term: ^termgrid.Terminal) {
 	}
 	testing.expect(t, full_row.full || full_row.span_count > 0, "failed frame must restore full rows")
 	testing.expect_value(t, len(term.damage.scroll_ops), 1)
+}
+
+@(test)
+test_theme_clear_applies_default_background_opacity_once :: proc(t: ^testing.T) {
+	theme := termgrid.Theme{background = FRAME_TRACE_THEME_BACKGROUND}
+	color := render._renderer_theme_clear_color(theme, opacity = FRAME_TRACE_OPACITY)
+	want_alpha := f64((FRAME_TRACE_THEME_BACKGROUND >> 24) & 0xFF) / 255.0 * f64(FRAME_TRACE_OPACITY)
+	testing.expect(t, abs(color[3] - want_alpha) < 0.0001, "theme alpha and configured opacity must each be applied once")
+	for channel in 0..<3 {
+		shift := u32((2 - channel) * 8)
+		want_rgb := f64((FRAME_TRACE_THEME_BACKGROUND >> shift) & 0xFF) / 255.0 * want_alpha
+		testing.expect(t, abs(color[channel] - want_rgb) < 0.0001, "clear RGB must be premultiplied for compositor consumption")
+	}
+	transparent := render._renderer_theme_clear_color(theme, opacity = 0)
+	testing.expect_value(t, transparent, [4]f64{})
+
+	r: render.Renderer
+	r.background_opacity = FRAME_TRACE_OPACITY
+	r.fullscreen.bg_opacity = f32(1)
+	r.compute_tiles.bg_opacity = f32(1)
+	render._renderer_sync_bg_opacity(&r, FRAME_TRACE_THEME_BACKGROUND)
+	testing.expect_value(t, r.fullscreen.cell_opacity, FRAME_TRACE_OPACITY)
+	testing.expect_value(t, r.compute_tiles.cell_opacity, FRAME_TRACE_OPACITY)
+	testing.expect(t, abs(r.fullscreen.bg_opacity - f32(want_alpha)) < 0.0001, "fullscreen params must receive effective default alpha")
+	testing.expect(t, abs(r.compute_tiles.bg_opacity - f32(want_alpha)) < 0.0001, "tile params must receive effective default alpha")
 }
 
 @(test)
@@ -335,7 +366,13 @@ test_frame_transaction_submit_failure :: proc(t: ^testing.T) {
 
 	testing.expect(t, !render.renderer_frame_fullscreen(r, &term, &lut), "submit failure must abort")
 	_trace_expect_requeued(t, &term)
-	testing.expect_value(t, _trace.present_count, 0)
+	// The abandoned frame hands its drawable back to the layer so its pool slot
+	// is reclaimed; the layer has no other way to recover a drawable that was
+	// acquired and never presented. That present shows the previous frame, so the
+	// failed frame still contributes no content, which surface_reclaims makes
+	// distinguishable from a frame that presented real output.
+	testing.expect_value(t, _trace.present_count, 1)
+	testing.expect_value(t, r.surface_reclaims, 1)
 	testing.expect_value(t, _trace.release_count, 1)
 }
 
@@ -437,6 +474,7 @@ test_pane_frame_damage_and_overlay_transaction :: proc(t: ^testing.T) {
 	defer free(r)
 	_trace_renderer(r)
 	defer _trace_renderer_destroy(r)
+	r.background_opacity = FRAME_TRACE_OPACITY
 	delete(r.instances.instance_data)
 	r.instances.max_instances = 128
 	r.instances.instance_data = make([]instance.Instance_Data, 128)
@@ -464,7 +502,10 @@ test_pane_frame_damage_and_overlay_transaction :: proc(t: ^testing.T) {
 	_trace.submit_ok = false
 	testing.expect(t, !render.renderer_frame_panes(r, panes))
 	for &term in terms { _trace_expect_requeued(t, &term) }
-	testing.expect_value(t, _trace.present_count, 0)
+	// Same contract as the non-pane path: the abandoned frame reclaims its
+	// drawable rather than presenting anything it drew.
+	testing.expect_value(t, _trace.present_count, 1)
+	testing.expect_value(t, r.surface_reclaims, 1)
 	testing.expect_value(t, _trace.release_count, 1)
 	testing.expect(t, r.cursor_staged && r.ui_staged && r.interaction_staged && r.first_frame_pending, "failed frame must preserve pending overlays")
 	_trace_reset()
@@ -476,6 +517,10 @@ test_pane_frame_damage_and_overlay_transaction :: proc(t: ^testing.T) {
 	testing.expect_value(t, _trace.submit_count, 1)
 	testing.expect_value(t, _trace.present_count, 1)
 	testing.expect_value(t, _trace.release_count, 1)
+	testing.expect_value(t, _trace.load_op, gpu.Gpu_Load_Op.Clear)
+	testing.expect_value(t, _trace.clear_color[3], f64(0))
+	testing.expect_value(t, r.instances.instance_data[0].a, FRAME_TRACE_OPACITY)
+	testing.expect_value(t, r.instances.instance_data[1].a, FRAME_TRACE_OPACITY)
 	testing.expect(t, !r.cursor_staged && !r.ui_staged && !r.interaction_staged && !r.first_frame_pending)
 	for &term in terms {
 		testing.expect_value(t, len(term.damage.scroll_ops), 0)

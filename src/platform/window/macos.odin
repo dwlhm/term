@@ -56,7 +56,54 @@ platform_titlebar_double_click :: proc(handle: ^sdl3.Window, last_event: ^i64) -
 	}
 }
 
-// platform_zoom_window invokes the native standard zoom action, never fullscreen.
+// Zoom_Frame_Rect mirrors CGRect so the swizzled setFrame:display:animate: keeps
+// the exact same ABI as the method it replaces.
+@(private)
+Zoom_Frame_Rect :: struct { x, y, w, h: f64 }
+
+// _zoom_restore_frame remembers the frame the window had before the last zoom,
+// so a second zoom restores it. Only one window is zoomable at a time through
+// this path, so a single slot is sufficient.
+@(private)
+_zoom_restore_frame: Zoom_Frame_Rect
+
+@(private)
+_zoom_restore_valid := false
+
+// _zoom_rect_is_near compares two rects with a half-point tolerance, which is
+// below anything a user can perceive and above the rounding AppKit applies when
+// it snaps a window to a screen edge.
+@(private)
+_zoom_rect_is_near :: proc(a, b: Zoom_Frame_Rect) -> bool {
+	return abs(a.x - b.x) < 0.5 &&
+	       abs(a.y - b.y) < 0.5 &&
+	       abs(a.w - b.w) < 0.5 &&
+	       abs(a.h - b.h) < 0.5
+}
+
+// platform_zoom_window zooms the window to its screen's visible frame, or
+// restores it if it is already zoomed. It never fullscreens.
+//
+// The zoom is deliberately applied with animate:NO and never through
+// performZoom:.
+//
+// An animated setFrame:display:animate: spins a nested CFRunLoop. Inside that
+// loop AppKit posts its own resize notification, SDL's window listener turns it
+// into an SDL event, and that push re-enters an event queue the main thread is
+// already inside. The main thread and the backend thread then block on the same
+// SDL event-watch mutex and neither can proceed, so the window freezes
+// permanently and never recovers.
+//
+// This was measured, not inferred. With the process frozen, 100% of main-thread
+// samples sat inside performZoom: -> setFrame:display:animate: -> nested
+// CFRunLoop -> -[SDL3Cocoa_WindowListener windowDidResize:] -> SDL_PushEvent_REAL,
+// while _app_on_backend_data_ready sat in SDL_DispatchEventWatchList waiting on
+// the same mutex. It reproduced with and without DevTools, and deferring the
+// call out of event dispatch did not help: the nested run loop is the hazard, not
+// where the call happens to be made from.
+//
+// Applying the frame directly with animate:NO keeps the zoom geometry and
+// removes the nested run loop entirely.
 platform_zoom_window :: proc(handle: ^sdl3.Window) -> bool {
 	when ODIN_OS == .Darwin {
 		if handle == nil do return false
@@ -69,11 +116,39 @@ platform_zoom_window :: proc(handle: ^sdl3.Window) -> bool {
 		Get_Mask :: #type proc "c" (target: id, sel: SEL) -> uint
 		NS_WINDOW_FULLSCREEN: uint : 1 << 14
 		if Get_Mask(imp_mask)(nswindow, sel_mask) & NS_WINDOW_FULLSCREEN != 0 do return false
-		sel_zoom := sel_registerName("performZoom:")
-		imp_zoom := class_getMethodImplementation(cls_window, sel_zoom)
-		if imp_zoom == nil do return false
-		Perform_Zoom :: #type proc "c" (target: id, sel: SEL, sender: id)
-		Perform_Zoom(imp_zoom)(nswindow, sel_zoom, nil)
+
+		Get_Rect :: #type proc "c" (target: id, sel: SEL) -> Zoom_Frame_Rect
+		Get_Id :: #type proc "c" (target: id, sel: SEL) -> id
+		Set_Rect :: #type proc "c" (target: id, sel: SEL, rect: Zoom_Frame_Rect, display: bool, animate: bool)
+
+		sel_frame := sel_registerName("frame")
+		imp_frame := class_getMethodImplementation(cls_window, sel_frame)
+		if imp_frame == nil do return false
+		sel_screen := sel_registerName("screen")
+		imp_screen := class_getMethodImplementation(cls_window, sel_screen)
+		if imp_screen == nil do return false
+		screen := Get_Id(imp_screen)(nswindow, sel_screen)
+		if screen == nil do return false
+		sel_visible := sel_registerName("visibleFrame")
+		imp_visible := class_getMethodImplementation(object_getClass(screen), sel_visible)
+		if imp_visible == nil do return false
+		sel_setframe := sel_registerName("setFrame:display:animate:")
+		imp_setframe := class_getMethodImplementation(cls_window, sel_setframe)
+		if imp_setframe == nil do return false
+
+		current := Get_Rect(imp_frame)(nswindow, sel_frame)
+		zoomed := Get_Rect(imp_visible)(screen, sel_visible)
+
+		target := zoomed
+		if _zoom_rect_is_near(current, zoomed) && _zoom_restore_valid {
+			target = _zoom_restore_frame
+			_zoom_restore_valid = false
+		} else {
+			_zoom_restore_frame = current
+			_zoom_restore_valid = true
+		}
+		if target.w <= 0 || target.h <= 0 do return false
+		Set_Rect(imp_setframe)(nswindow, sel_setframe, target, true, false)
 		return true
 	} else {
 		return false
@@ -94,6 +169,7 @@ when ODIN_OS == .Darwin {
 	@(default_calling_convention="c")
 	foreign libobjc {
 		objc_getClass :: proc(name: cstring) -> Class ---
+		objc_release :: proc(obj: id) ---
 		sel_registerName :: proc(name: cstring) -> SEL ---
 		object_getClass :: proc(obj: id) -> Class ---
 		class_getMethodImplementation :: proc(cls: Class, name: SEL) -> rawptr ---
@@ -397,15 +473,20 @@ when ODIN_OS == .Darwin {
 			}
 		}
 	}
+
 }
 
-// platform_configure_window_vibrancy configures window translucency and AppKit vibrancy blur.
-// Zero-overhead when disabled: If opacity >= 1.0 && !blur, window remains opaque, no NSVisualEffectView is attached.
-// When opacity < 1.0 || blur: window is set non-opaque with clear background;
-// if blur == true, creates and attaches NSVisualEffectView behind the contentView.
-platform_configure_window_vibrancy :: proc(handle: ^sdl3.Window, opacity: f32, blur: bool) -> bool {
+// platform_configure_window_vibrancy configures normalized window translucency
+// and AppKit vibrancy. AppKit exposes no public continuous blur-radius API, so
+// blur maps directly to the visual-effect view's alphaValue (0 = no blur,
+// 1 = full-strength frosted material). The exact opacity == 1 and blur == 0
+// fast path remains fully opaque and has no NSVisualEffectView; every other
+// combination uses non-opaque compositing.
+platform_configure_window_vibrancy :: proc(handle: ^sdl3.Window, opacity: f32, blur: f32) -> bool {
 	when ODIN_OS == .Darwin {
 		if handle == nil do return false
+		normalized_opacity := clamp(opacity, VIBRANCY_NORMALIZED_MIN, VIBRANCY_NORMALIZED_MAX)
+		normalized_blur := clamp(blur, VIBRANCY_NORMALIZED_MIN, VIBRANCY_NORMALIZED_MAX)
 		props := sdl3.GetWindowProperties(handle)
 		nswindow := id(sdl3.GetPointerProperty(props, sdl3.PROP_WINDOW_COCOA_WINDOW_POINTER, nil))
 		if nswindow == nil do return false
@@ -423,14 +504,14 @@ platform_configure_window_vibrancy :: proc(handle: ^sdl3.Window, opacity: f32, b
 		Set_Obj_Proc  :: #type proc "c" (target: id, sel: SEL, obj: id)
 
 		cls_color := objc_getClass("NSColor")
+		if cls_color == nil do return false
 
-		// Zero-overhead when disabled: opacity >= 1.0 && !blur
-		if opacity >= 1.0 && !blur {
+		// Zero-overhead exact opaque fast path.
+		if window_vibrancy_is_opaque(normalized_opacity, normalized_blur) {
 			sel_set_opaque := sel_registerName("setOpaque:")
 			imp_set_opaque := class_getMethodImplementation(cls_win, sel_set_opaque)
-			if imp_set_opaque != nil {
-				(Set_Bool_Proc(imp_set_opaque))(nswindow, sel_set_opaque, true)
-			}
+			if imp_set_opaque == nil do return false
+			(Set_Bool_Proc(imp_set_opaque))(nswindow, sel_set_opaque, true)
 
 			_platform_remove_visual_effect_view(contentView)
 
@@ -439,21 +520,19 @@ platform_configure_window_vibrancy :: proc(handle: ^sdl3.Window, opacity: f32, b
 				imp_window_bg := class_getMethodImplementation(object_getClass(id(cls_color)), sel_window_bg)
 				sel_set_bg_color := sel_registerName("setBackgroundColor:")
 				imp_set_bg_color := class_getMethodImplementation(cls_win, sel_set_bg_color)
-				if imp_window_bg != nil && imp_set_bg_color != nil {
-					bg_color := (Get_Obj_Proc(imp_window_bg))(id(cls_color), sel_window_bg)
-					(Set_Obj_Proc(imp_set_bg_color))(nswindow, sel_set_bg_color, bg_color)
-				}
+				if imp_window_bg == nil || imp_set_bg_color == nil do return false
+				bg_color := (Get_Obj_Proc(imp_window_bg))(id(cls_color), sel_window_bg)
+				(Set_Obj_Proc(imp_set_bg_color))(nswindow, sel_set_bg_color, bg_color)
 			}
 			return true
 		}
 
-		// When opacity < 1.0 || blur:
+		// Every non-fast-path combination requires non-opaque compositing.
 		// 1. [nswindow setOpaque:NO]
 		sel_set_opaque := sel_registerName("setOpaque:")
 		imp_set_opaque := class_getMethodImplementation(cls_win, sel_set_opaque)
-		if imp_set_opaque != nil {
-			(Set_Bool_Proc(imp_set_opaque))(nswindow, sel_set_opaque, false)
-		}
+		if imp_set_opaque == nil do return false
+		(Set_Bool_Proc(imp_set_opaque))(nswindow, sel_set_opaque, false)
 
 		// 2. [nswindow setBackgroundColor:[NSColor clearColor]]
 		if cls_color != nil {
@@ -461,14 +540,13 @@ platform_configure_window_vibrancy :: proc(handle: ^sdl3.Window, opacity: f32, b
 			imp_clear_color := class_getMethodImplementation(object_getClass(id(cls_color)), sel_clear_color)
 			sel_set_bg_color := sel_registerName("setBackgroundColor:")
 			imp_set_bg_color := class_getMethodImplementation(cls_win, sel_set_bg_color)
-			if imp_clear_color != nil && imp_set_bg_color != nil {
-				clear_color := (Get_Obj_Proc(imp_clear_color))(id(cls_color), sel_clear_color)
-				(Set_Obj_Proc(imp_set_bg_color))(nswindow, sel_set_bg_color, clear_color)
-			}
+			if imp_clear_color == nil || imp_set_bg_color == nil do return false
+			clear_color := (Get_Obj_Proc(imp_clear_color))(id(cls_color), sel_clear_color)
+			(Set_Obj_Proc(imp_set_bg_color))(nswindow, sel_set_bg_color, clear_color)
 		}
 
 		// 3. Visual effect view handling
-		if blur {
+		if normalized_blur > VIBRANCY_NORMALIZED_MIN {
 			existing_vev := _platform_find_visual_effect_view(contentView)
 			if existing_vev == nil {
 				cls_vev := objc_getClass("NSVisualEffectView")
@@ -480,6 +558,11 @@ platform_configure_window_vibrancy :: proc(handle: ^sdl3.Window, opacity: f32, b
 				if imp_alloc == nil do return false
 				vev := (Get_Obj_Proc(imp_alloc))(id(cls_vev), sel_alloc)
 				if vev == nil do return false
+				// init consumes the allocated receiver even when it returns nil.
+				// Release the initialized result, or the allocation if init is unavailable.
+				defer {
+					if vev != nil do objc_release(vev)
+				}
 
 				imp_init := class_getMethodImplementation(object_getClass(vev), sel_init)
 				if imp_init == nil do return false
@@ -491,71 +574,75 @@ platform_configure_window_vibrancy :: proc(handle: ^sdl3.Window, opacity: f32, b
 				// Set frame to contentView.bounds
 				sel_bounds := sel_registerName("bounds")
 				imp_bounds := class_getMethodImplementation(cls_view, sel_bounds)
-				if imp_bounds != nil {
-					Get_Rect_Proc :: #type proc "c" (target: id, sel: SEL) -> NSRect
-					Set_Rect_Proc :: #type proc "c" (target: id, sel: SEL, frame: NSRect)
-					bounds := (Get_Rect_Proc(imp_bounds))(contentView, sel_bounds)
-					sel_set_frame := sel_registerName("setFrame:")
-					imp_set_frame := class_getMethodImplementation(cls_inst_vev, sel_set_frame)
-					if imp_set_frame != nil {
-						(Set_Rect_Proc(imp_set_frame))(vev, sel_set_frame, bounds)
-					}
-				}
+				if imp_bounds == nil do return false
+				Get_Rect_Proc :: #type proc "c" (target: id, sel: SEL) -> NSRect
+				Set_Rect_Proc :: #type proc "c" (target: id, sel: SEL, frame: NSRect)
+				bounds := (Get_Rect_Proc(imp_bounds))(contentView, sel_bounds)
+				sel_set_frame := sel_registerName("setFrame:")
+				imp_set_frame := class_getMethodImplementation(cls_inst_vev, sel_set_frame)
+				if imp_set_frame == nil do return false
+				(Set_Rect_Proc(imp_set_frame))(vev, sel_set_frame, bounds)
 
 				// Autoresizing mask: NSViewWidthSizable (2) | NSViewHeightSizable (16) = 18
 				sel_set_autoresize := sel_registerName("setAutoresizingMask:")
 				imp_set_autoresize := class_getMethodImplementation(cls_inst_vev, sel_set_autoresize)
-				if imp_set_autoresize != nil {
-					Set_Uint_Proc :: #type proc "c" (target: id, sel: SEL, mask: uint)
-					(Set_Uint_Proc(imp_set_autoresize))(vev, sel_set_autoresize, 18)
-				}
+				if imp_set_autoresize == nil do return false
+				Set_Uint_Proc :: #type proc "c" (target: id, sel: SEL, mask: uint)
+				(Set_Uint_Proc(imp_set_autoresize))(vev, sel_set_autoresize, 18)
 
-				// Material: NSVisualEffectMaterialUnderWindowBackground (21)
+				// Material: NSVisualEffectMaterialHUDWindow (13) — frosted glass
+				// blur, unlike UnderWindowBackground which only tints.
 				sel_set_material := sel_registerName("setMaterial:")
 				imp_set_material := class_getMethodImplementation(cls_inst_vev, sel_set_material)
-				if imp_set_material != nil {
-					Set_Int_Proc :: #type proc "c" (target: id, sel: SEL, mat: int)
-					(Set_Int_Proc(imp_set_material))(vev, sel_set_material, 21)
-				}
+				if imp_set_material == nil do return false
+				Set_Int_Proc :: #type proc "c" (target: id, sel: SEL, mat: int)
+				(Set_Int_Proc(imp_set_material))(vev, sel_set_material, 13)
 
 				// Blending mode: NSVisualEffectBlendingModeBehindWindow (0)
 				sel_set_blending := sel_registerName("setBlendingMode:")
 				imp_set_blending := class_getMethodImplementation(cls_inst_vev, sel_set_blending)
-				if imp_set_blending != nil {
-					Set_Int_Proc :: #type proc "c" (target: id, sel: SEL, mode: int)
-					(Set_Int_Proc(imp_set_blending))(vev, sel_set_blending, 0)
-				}
+				if imp_set_blending == nil do return false
+				(Set_Int_Proc(imp_set_blending))(vev, sel_set_blending, 0)
 
 				// State: NSVisualEffectStateActive (1)
 				sel_set_state := sel_registerName("setState:")
 				imp_set_state := class_getMethodImplementation(cls_inst_vev, sel_set_state)
-				if imp_set_state != nil {
-					Set_Int_Proc :: #type proc "c" (target: id, sel: SEL, state: int)
-					(Set_Int_Proc(imp_set_state))(vev, sel_set_state, 1)
-				}
+				if imp_set_state == nil do return false
+				(Set_Int_Proc(imp_set_state))(vev, sel_set_state, 1)
+				// The blur config value maps directly to the effect view's
+				// alphaValue, so the user controls blend intensity themselves.
+				sel_set_alpha := sel_registerName("setAlphaValue:")
+				imp_set_alpha := class_getMethodImplementation(cls_inst_vev, sel_set_alpha)
+				if imp_set_alpha == nil do return false
+				Set_F64_Proc :: #type proc "c" (target: id, sel: SEL, val: f64)
+				(Set_F64_Proc(imp_set_alpha))(vev, sel_set_alpha, f64(normalized_blur))
 
 				// Add subview positioned below all other subviews
 				sel_add_subview := sel_registerName("addSubview:positioned:relativeTo:")
 				imp_add_subview := class_getMethodImplementation(cls_view, sel_add_subview)
-				if imp_add_subview != nil {
-					Add_Subview_Pos_Proc :: #type proc "c" (target: id, sel: SEL, view: id, place: int, other: id)
-					(Add_Subview_Pos_Proc(imp_add_subview))(contentView, sel_add_subview, vev, -1, nil)
-				}
+				if imp_add_subview == nil do return false
+				Add_Subview_Pos_Proc :: #type proc "c" (target: id, sel: SEL, view: id, place: int, other: id)
+				(Add_Subview_Pos_Proc(imp_add_subview))(contentView, sel_add_subview, vev, -1, nil)
+
+				// The content view retains its subview; deferred release balances ownership.
 			} else {
-				// Update existing view frame if needed
+				// Reuse the existing effect view, refreshing geometry and blend intensity.
+				cls_inst_vev := object_getClass(existing_vev)
 				sel_bounds := sel_registerName("bounds")
 				imp_bounds := class_getMethodImplementation(cls_view, sel_bounds)
-				if imp_bounds != nil {
-					Get_Rect_Proc :: #type proc "c" (target: id, sel: SEL) -> NSRect
-					Set_Rect_Proc :: #type proc "c" (target: id, sel: SEL, frame: NSRect)
-					bounds := (Get_Rect_Proc(imp_bounds))(contentView, sel_bounds)
-					cls_inst_vev := object_getClass(existing_vev)
-					sel_set_frame := sel_registerName("setFrame:")
-					imp_set_frame := class_getMethodImplementation(cls_inst_vev, sel_set_frame)
-					if imp_set_frame != nil {
-						(Set_Rect_Proc(imp_set_frame))(existing_vev, sel_set_frame, bounds)
-					}
-				}
+				if imp_bounds == nil do return false
+				Get_Rect_Proc :: #type proc "c" (target: id, sel: SEL) -> NSRect
+				Set_Rect_Proc :: #type proc "c" (target: id, sel: SEL, frame: NSRect)
+				bounds := (Get_Rect_Proc(imp_bounds))(contentView, sel_bounds)
+				sel_set_frame := sel_registerName("setFrame:")
+				imp_set_frame := class_getMethodImplementation(cls_inst_vev, sel_set_frame)
+				if imp_set_frame == nil do return false
+				(Set_Rect_Proc(imp_set_frame))(existing_vev, sel_set_frame, bounds)
+				sel_set_alpha := sel_registerName("setAlphaValue:")
+				imp_set_alpha := class_getMethodImplementation(cls_inst_vev, sel_set_alpha)
+				if imp_set_alpha == nil do return false
+				Set_F64_Proc :: #type proc "c" (target: id, sel: SEL, val: f64)
+				(Set_F64_Proc(imp_set_alpha))(existing_vev, sel_set_alpha, f64(normalized_blur))
 			}
 		} else {
 			_platform_remove_visual_effect_view(contentView)

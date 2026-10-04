@@ -18,6 +18,7 @@ import posix "core:sys/posix"
 
 
 import termgrid "../terminal"
+import graphics "../graphics"
 import platform_chrome "../platform/chrome"
 import parser "../parser"
 import render "../render"
@@ -140,6 +141,20 @@ Backend :: struct {
 	event_queue:          UI_Event_Queue,
 	drain_buf:            []u8,
 	resize_generation:    u64,
+	// pty_bytes_total counts every byte backend_drain_pty has consumed since
+	// the backend was created, across all drain paths (worker thread,
+	// session_poll_all, the legacy headless drain). The frame loop cannot see
+	// the drain's return value on the tabbed path because the drain runs on
+	// another thread, so the count is published here instead. It is updated
+	// with sync.atomic_add on the writer side and read with sync.atomic_load
+	// by the renderer, matching the discipline already used for
+	// resize_generation: a bare read would race with the worker thread, and
+	// the swap mutex cannot be used instead because the drain does not hold
+	// it. The counter is monotonic per backend, so a torn read is the only
+	// failure a relaxed load can produce and that cannot happen here; the
+	// frame loop additionally clamps a negative delta, which is what a reset
+	// backend produces.
+	pty_bytes_total:      u64,
 	notify_data_ready_cb: proc(user_data: rawptr),
 	notify_user_data:     rawptr,
 	wake_pipe_r:          posix.FD,
@@ -201,6 +216,22 @@ _backend_response_cb :: proc(data: []u8) {
 	if b != nil && b.pty.master >= 0 && b.pty.state == .Running {
 		pty.pty_write(&b.pty, data)
 	}
+}
+
+_backend_graphics_write :: proc(user_data: rawptr, data: []u8) {
+	b := (^Backend)(user_data)
+	if b == nil || b.pty.master < 0 || b.pty.state != .Running do return
+	_ = pty.pty_write(&b.pty, data)
+}
+
+_backend_graphics_cb :: proc(user_data: rawptr, t: ^termgrid.Terminal, control, payload: []u8) {
+	b := (^Backend)(user_data)
+	if b == nil || t == nil || t != &b.terminal do return
+	sink := graphics.Response_Sink{
+		user_data = user_data,
+		write = _backend_graphics_write,
+	}
+	_ = termgrid.terminal_graphics_feed(t, control, payload, sink)
 }
 
 _backend_clipboard_cb :: proc(data: []u8) {
@@ -307,6 +338,7 @@ backend_init :: proc(
 	inter.interaction_init(&b.interaction)
 	inter.interaction_init(&b.front_interaction)
 	b.view_generation = 0
+	b.pty_bytes_total = 0
 	b.prog = prog
 	b.argv = argv
 	b.banner_shown = false
@@ -348,6 +380,8 @@ backend_init :: proc(
 
 	parser.parser_init(&b.parser)
 	b.parser.response_cb = _backend_response_cb
+	b.parser.graphics_cb = _backend_graphics_cb
+	b.parser.graphics_user_data = b
 	b.parser.clipboard_cb = _backend_clipboard_cb
 	b.parser.clipboard_read_cb = _backend_clipboard_read_cb
 	b.parser.clipboard_read_user_data = b
@@ -465,6 +499,8 @@ backend_init_from_core_session :: proc(
 	}
 
 	b.parser.response_cb = _backend_response_cb
+	b.parser.graphics_cb = _backend_graphics_cb
+	b.parser.graphics_user_data = b
 	b.parser.clipboard_cb = _backend_clipboard_cb
 	b.parser.clipboard_read_cb = _backend_clipboard_read_cb
 	b.parser.clipboard_read_user_data = b
@@ -507,6 +543,8 @@ backend_restore_core_session :: proc(b: ^Backend, cs: ^session_core.Core_Session
 	cs.pty_handle = b.pty
 	cs.term = b.terminal
 	cs.vt_parser = b.parser
+	cs.vt_parser.graphics_cb = nil
+	cs.vt_parser.graphics_user_data = nil
 	cs.mode = b.session_mode
 	cs.gui_prog = b.prog
 	cs.gui_argv = b.argv
@@ -540,6 +578,8 @@ backend_destroy :: proc(b: ^Backend) {
 		b.wake_pipe_w = -1
 	}
 	pty.pty_close(&b.pty)
+	b.parser.graphics_cb = nil
+	b.parser.graphics_user_data = nil
 	termgrid.terminal_destroy(&b.terminal)
 	termgrid.terminal_destroy(&b.front_terminal)
 	parser.parser_destroy(&b.parser)
@@ -592,6 +632,7 @@ backend_drain_pty :: proc(b: ^Backend) -> int {
 	clear_before := b.terminal.scrollback.clear_generation
 	n, _ := pty.pty_drain(&b.pty, buf, len(buf))
 	if n > 0 {
+		sync.atomic_add(&b.pty_bytes_total, u64(n))
 		backend_global = b
 		parser.parse_chunk(&b.parser, &b.terminal, buf[:n])
 		if b.observer.on_damage != nil {
@@ -643,6 +684,19 @@ backend_drain_pty :: proc(b: ^Backend) -> int {
 
 // backend_poll_pty aliases backend_drain_pty.
 backend_poll_pty :: backend_drain_pty
+
+// backend_pty_bytes_total returns the cumulative number of PTY bytes this
+// backend has drained. It is a monotonic counter, not a rate: callers on the
+// frame path subtract their previous observation to obtain a per-frame delta,
+// because the drain itself is not observable from there.
+//
+// Callable from any thread; the read is atomic.
+backend_pty_bytes_total :: proc(b: ^Backend) -> u64 {
+	if b == nil {
+		return 0
+	}
+	return sync.atomic_load(&b.pty_bytes_total)
+}
 
 // backend_take_title retrieves and clears any pending window title requested by OSC 0/1/2.
 backend_take_title :: proc(b: ^Backend) -> string {
@@ -849,6 +903,12 @@ backend_relaunch :: proc(b: ^Backend) -> bool {
 	termgrid.terminal_erase_display(&b.terminal, .Entire)
 	termgrid.terminal_move_cursor(&b.terminal, 0, 0)
 	parser.parser_init(&b.parser)
+	b.parser.response_cb = _backend_response_cb
+	b.parser.graphics_cb = _backend_graphics_cb
+	b.parser.graphics_user_data = b
+	b.parser.clipboard_cb = _backend_clipboard_cb
+	b.parser.clipboard_read_cb = _backend_clipboard_read_cb
+	b.parser.clipboard_read_user_data = b
 	b.banner_shown = false
 	return true
 }
@@ -1117,6 +1177,31 @@ _terminal_sync_to_front :: proc(b: ^Backend) {
 		b.front_scrollback_synced_clear_gen = src.scrollback.clear_generation
 	}
 
+	// Graphics stores are published as a separate deep snapshot. Store epochs
+	// cover image/frame changes while placement epochs cover placement changes.
+	graphics_changed := dst.graphics_namespace != src.graphics_namespace
+	if dst.graphics == nil || src.graphics == nil {
+		graphics_changed = graphics_changed || dst.graphics != src.graphics
+	} else {
+		graphics_changed = graphics_changed ||
+			dst.graphics.epoch != src.graphics.epoch ||
+			dst.graphics.placement_epoch != src.graphics.placement_epoch ||
+			dst.graphics.upload_count != src.graphics.upload_count
+	}
+	if dst.graphics_alt == nil || src.graphics_alt == nil {
+		graphics_changed = graphics_changed || dst.graphics_alt != src.graphics_alt
+	} else {
+		graphics_changed = graphics_changed ||
+			dst.graphics_alt.epoch != src.graphics_alt.epoch ||
+			dst.graphics_alt.placement_epoch != src.graphics_alt.placement_epoch ||
+			dst.graphics_alt.upload_count != src.graphics_alt.upload_count
+	}
+	graphics_allocator := dst.state_allocator if dst.state_allocator_set else runtime.heap_allocator()
+	termgrid.terminal_graphics_sync(dst, src, graphics_allocator)
+	if graphics_changed {
+		termgrid.damage_mark_all(&dst.damage, nil)
+	}
+
 	// 5. Transfer damage from src to dst: merge dirty rows and copy scroll ops
 	for r in 0..<src.damage.row_count {
 		if r < len(dst.damage.dirty_rows) && r < len(src.damage.dirty_rows) {
@@ -1189,7 +1274,8 @@ _terminal_sync_to_front :: proc(b: ^Backend) {
 	dst.active_charset_is_dec = src.active_charset_is_dec
 }
 
-// _backend_perform_swap_locked performs the state swap; caller MUST hold b.swap_mutex.
+// _backend_perform_swap_locked only publishes state; caller MUST hold b.swap_mutex.
+// Notifications must run after unlocking because they may enter the window event system.
 _backend_perform_swap_locked :: proc(b: ^Backend) {
 	_terminal_sync_to_front(b)
 	b.front_view = b.view
@@ -1198,20 +1284,19 @@ _backend_perform_swap_locked :: proc(b: ^Backend) {
 	b.front_exited = b.pty.state == .Exited
 	b.front_search_invalid_regex = b.search_invalid_regex
 	b.front_interaction = b.interaction
-	if b.notify_data_ready_cb != nil {
-		b.notify_data_ready_cb(b.notify_user_data)
-	}
 }
 
-// _backend_swap_buffers performs the double-buffering state swap under swap_mutex.
+// _backend_swap_buffers publishes under swap_mutex, then notifies after unlocking.
 _backend_swap_buffers :: proc(b: ^Backend) {
 	if b == nil {
 		return
 	}
 	sync.mutex_lock(&b.swap_mutex)
-	defer sync.mutex_unlock(&b.swap_mutex)
-
 	_backend_perform_swap_locked(b)
+	sync.mutex_unlock(&b.swap_mutex)
+	if b.notify_data_ready_cb != nil {
+		b.notify_data_ready_cb(b.notify_user_data)
+	}
 }
 
 // backend_start_thread starts the background worker thread.
@@ -1648,9 +1733,6 @@ backend_worker_proc :: proc(t: ^thread.Thread) {
 			if pending_swap {
 				_backend_swap_buffers(b)
 				pending_swap = false
-				if b.notify_data_ready_cb != nil {
-					b.notify_data_ready_cb(b.notify_user_data)
-				}
 			}
 
 			pfds: [2]posix.pollfd

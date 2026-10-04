@@ -23,16 +23,16 @@ import "core:mem"
 import gpu "../gpu"
 
 // FULLSCREEN_PARAMS_SIZE is the params uniform buffer size in bytes.
-// size_of(Fullscreen_Params) == 40; the trailing 24 bytes stay zero.
+// size_of(Fullscreen_Params) == 48; the trailing 20 bytes stay zero.
 FULLSCREEN_PARAMS_SIZE :: 64
 
 // FULLSCREEN_CELL_BYTES is one packed V2 cell (u64).
 FULLSCREEN_CELL_BYTES :: 8
 
 // FULLSCREEN_LUT_WORDS / FULLSCREEN_LUT_BYTES cover the raw Style_LUT
-// fg+bg bytes (1024 u16 fg + 1024 u16 bg = 1024 u32 words).
-FULLSCREEN_LUT_WORDS :: 1024
-FULLSCREEN_LUT_BYTES :: 4096
+// fg+bg arrays plus the packed selection foreground/background word.
+FULLSCREEN_LUT_WORDS :: 1025
+FULLSCREEN_LUT_BYTES :: FULLSCREEN_LUT_WORDS * size_of(u32)
 
 // FULLSCREEN_ATLAS_TEX_W/H mirror the render atlas pixel dimensions
 // (render.ATLAS_COLS * render.ATLAS_GLYPH_SIZE = 256,
@@ -46,8 +46,9 @@ FULLSCREEN_VERTEX_ENTRY :: "fullscreen_vs_main"
 FULLSCREEN_FRAGMENT_ENTRY :: "fullscreen_fs_main"
 
 // Fullscreen_Params mirrors the WGSL Fullscreen_Params struct field for
-// field (40 bytes, all 4-byte scalars, no padding). screen_w/h carry the
-// framebuffer size in pixels.
+// field (48 bytes, all 4-byte scalars, no padding). screen_w/h carry the
+// framebuffer size in pixels; bg_opacity scales only default-background
+// alpha; cell_opacity independently scales authored background paints.
 Fullscreen_Params :: struct {
 	screen_w: f32,
 	screen_h: f32,
@@ -59,9 +60,11 @@ Fullscreen_Params :: struct {
 	pad_y:    f32,
 	atlas_w:  u32,
 	atlas_h:  u32,
+	bg_opacity: f32,
+	cell_opacity: f32,
 }
 
-#assert(size_of(Fullscreen_Params) == 40)
+#assert(size_of(Fullscreen_Params) == 48)
 
 // Fullscreen_Renderer holds the fullscreen path GPU state.
 // available == false means every frame must take the instance fallback;
@@ -87,6 +90,8 @@ Fullscreen_Renderer :: struct {
 	layout:        gpu.Gpu_BindGroupLayout,
 	fb_w_px:       u32,
 	fb_h_px:       u32,
+	bg_opacity:    f32,
+	cell_opacity: f32,
 	format:        gpu.Gpu_Format,
 }
 
@@ -103,6 +108,8 @@ _fullscreen_params :: proc(r: ^Fullscreen_Renderer) -> Fullscreen_Params {
 		pad_y    = r.pad_y,
 		atlas_w  = FULLSCREEN_ATLAS_TEX_W,
 		atlas_h  = FULLSCREEN_ATLAS_TEX_H,
+		bg_opacity = r.bg_opacity,
+		cell_opacity = r.cell_opacity,
 	}
 }
 
@@ -206,7 +213,7 @@ fullscreen_init :: proc(
 }
 
 // fullscreen_write_params uploads the current geometry to the params buffer
-// (full 64 bytes: 40-byte params + trailing zero pad).
+// (full 64 bytes: 48-byte params + trailing zero pad).
 fullscreen_write_params :: proc(r: ^Fullscreen_Renderer) {
 	if r.backend == nil || rawptr(r.queue) == nil || rawptr(r.params_buffer) == nil {
 		return
@@ -335,7 +342,7 @@ fullscreen_resize :: proc(r: ^Fullscreen_Renderer, rows: i32, cols: i32, cell_w:
 
 // fullscreen_upload_grid writes the full grid plus (when rebuilt) the LUT.
 // cells holds packed V2 u64s in row-major order; lut_words views the raw
-// Style_LUT fg+bg bytes as FULLSCREEN_LUT_WORDS u32s. Byte math runs even
+// Style_LUT color bytes as FULLSCREEN_LUT_WORDS u32s. Byte math runs even
 // with a nil backend (CPU-only accounting); write_buffer is issued only
 // when backend, queue, and buffers are live. Full re-upload, no
 // ranges/offsets. Returns total bytes that would be / were uploaded.

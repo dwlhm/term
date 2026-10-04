@@ -112,6 +112,27 @@ Gpu_Blend_Mode :: enum int {
 	Alpha_Blend,  // standard alpha blending: src * srcAlpha + dst * (1 - srcAlpha)
 }
 
+// Gpu_Frame_Complete_Proc reports the GPU execution time of one submitted
+// command buffer, in nanoseconds.
+//
+// Contract:
+//   - Called from the backend's own completion handler AFTER the command buffer
+//     has finished, never before, and never in place of a blocking wait.
+//   - valid == false means the GPU never ran the work: the buffer errored, was
+//     dropped, or the device does not report timestamps. gpu_ns is meaningless
+//     in that case and must be passed as 0.
+//   - Backends MUST NOT invoke this synchronously from submit. Reading GPU
+//     timing must never serialise CPU command encoding against GPU execution;
+//     a backend that needs the timestamps must register an asynchronous
+//     completion handler rather than blocking the caller.
+//   - The callback may run on a driver-internal thread, so the implementation
+//     must be thread-safe.
+//
+// This is a notification channel only: a backend with no way to observe GPU
+// timestamps may leave the vtable slot nil, and callers must treat nil as
+// "no timing available" rather than as an error.
+Gpu_Frame_Complete_Proc :: proc(gpu_ns: u64, valid: bool)
+
 // Gpu_Backend_VTable is the virtual function table for a GPU backend.
 // Each backend (WGPU, etc.) provides an implementation of these functions.
 Gpu_Backend_VTable :: struct {
@@ -185,6 +206,9 @@ Gpu_Backend_VTable :: struct {
 	// Blocks until all work submitted to the device queue has completed.
 	// Implementations must return false when completion cannot be verified.
 	wait_for_idle: proc(device: Gpu_Device) -> bool,
+	// Optional asynchronous GPU timing sink; may be nil. See
+	// Gpu_Frame_Complete_Proc for the contract an implementation must honour.
+	gpu_frame_complete: Gpu_Frame_Complete_Proc,
 
 	// Render pass commands
 	render_set_pipeline: proc(pass: Gpu_RenderPassEncoder, pipeline: Gpu_RenderPipeline),

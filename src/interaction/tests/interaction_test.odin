@@ -4,6 +4,39 @@ import "core:testing"
 import inter "../"
 import input "../../platform/input"
 import tg "../../terminal"
+import graphics "../../graphics"
+
+@(test)
+test_image_focus_hit_test_and_state_clamps :: proc(t: ^testing.T) {
+	store := new(graphics.Store)
+	defer free(store)
+	graphics.store_init(store)
+	store.images[0] = graphics.Image_Slot{used = true, id = 4, generation = 9, frame_count = 1, current_frame = 0}
+	store.images[0].frames[0] = graphics.Frame{width = 80, height = 40}
+	store.images[1] = graphics.Image_Slot{used = true, id = 8, generation = 11, frame_count = 1, current_frame = 0}
+	store.images[1].frames[0] = graphics.Frame{width = 80, height = 40}
+	store.placements[0] = graphics.Placement{used = true, image_id = 4, placement_id = 3, col = 1, row = 1, cols = 5, rows = 2, src_w = 80, src_h = 40, z = 2}
+	store.placements[1] = graphics.Placement{used = true, image_id = 8, placement_id = 4, col = 1, row = 1, cols = 5, rows = 2, src_w = 80, src_h = 40, z = 2}
+	store.image_count = 2
+	store.placement_count = 2
+	hit, ok := inter.interaction_hit_test_image(store, 15, 18, 10, 10)
+	testing.expect(t, ok, "an image destination must be hit-testable")
+	testing.expect_value(t, hit.image_id, u32(8))
+	testing.expect_value(t, hit.generation, u64(11))
+
+	s: inter.Image_Focus_State
+	inter.image_focus_init(&s)
+	inter.image_focus_open(&s, 7, 8, 11)
+	_ = inter.image_focus_zoom(&s, 1)
+	_ = inter.image_focus_pan(&s, 100, -100, 20, 12)
+	testing.expect(t, s.zoom > inter.IMAGE_FOCUS_DEFAULT_ZOOM, "zoom gesture must increase zoom")
+	testing.expect_value(t, s.pan_x, f32(20))
+	testing.expect_value(t, s.pan_y, f32(-12))
+	inter.image_focus_clamp_for_view(&s, 100, 100, 20, 10)
+	testing.expect(t, s.pan_x <= 0 || s.pan_x >= 0, "view clamp must produce finite pan")
+	inter.image_focus_close(&s)
+	testing.expect(t, !s.active && s.image_id == 0, "close must clear the authoritative focus target")
+}
 
 @(test)
 test_fsm_mode_transitions_and_reset :: proc(t: ^testing.T) {

@@ -8,11 +8,13 @@ import win "../platform/window"
 import "../platform/input"
 import platform_tabs "../platform/tabs"
 import "../render"
+import inter "../interaction"
 import platform "../platform"
 import "../ui"
 import pty "../platform/pty"
 import platform_chrome "../platform/chrome"
 import termgrid "../terminal"
+import graphics "../graphics"
 
 PANE_RESIZE_STEP :: f32(0.05)
 PANE_INACTIVE_DIM :: f32(0.78)
@@ -243,6 +245,59 @@ _app_route_pane_pointer :: proc(a: ^App, p: input.Input_Pointer_Event) -> bool {
 	return false
 }
 
+_app_image_focus_hit :: proc(a: ^App, p: input.Input_Pointer_Event) -> (hit: inter.Image_Focus_Hit, namespace: u64, ok: bool) {
+	if a == nil do return {}, 0, false
+	tab := _app_active_tab(a)
+	if tab == nil do return {}, 0, false
+	scale := frontend_content_scale(&a.frontend)
+	px, py := p.x * scale, p.y * scale
+	pad := _app_pane_padding(a)
+	leaves: [MAX_PANE_NODES]^Pane_Node
+	n := tab_leaf_panes(tab, leaves[:])
+	for leaf in leaves[:n] {
+		if leaf == nil || leaf.backend == nil || leaf.rect.w <= 0 || leaf.rect.h <= 0 do continue
+		if px < leaf.rect.x || py < leaf.rect.y || px >= leaf.rect.x + leaf.rect.w || py >= leaf.rect.y + leaf.rect.h do continue
+		if px < leaf.rect.x + pad || py < leaf.rect.y + pad || px >= leaf.rect.x + leaf.rect.w - pad || py >= leaf.rect.y + leaf.rect.h - pad do continue
+		b := leaf.backend
+		threaded := backend_is_threaded(b)
+		if threaded do backend_lock_render(b)
+		t := &b.front_terminal if threaded else &b.terminal
+		defer if threaded { backend_unlock_render(b) }
+		// Alt-screen applications retain the existing terminal mouse policy unless
+		// Shift explicitly opts into the GUI interaction layer.
+		if t.is_alt_screen && !p.shift do return {}, 0, false
+		store := termgrid.terminal_graphics_active(t)
+		local_x := px - leaf.rect.x - pad
+		local_y := py - leaf.rect.y - pad
+		hit, hit_ok := inter.interaction_hit_test_image(store, local_x, local_y, a.renderer.cell_width, a.renderer.cell_height)
+		if hit_ok do return hit, t.graphics_namespace, true
+		return {}, 0, false
+	}
+	return {}, 0, false
+}
+
+_app_image_focus_contains :: proc(a: ^App, p: input.Input_Pointer_Event) -> bool {
+	if a == nil || !a.image_focus.active do return false
+	b := app_active_backend(a)
+	if b == nil do return false
+	threaded := backend_is_threaded(b)
+	if threaded do backend_lock_render(b)
+	defer if threaded { backend_unlock_render(b) }
+	t := &b.front_terminal if threaded else &b.terminal
+	if t.graphics_namespace != a.image_focus.namespace do return false
+	store := termgrid.terminal_graphics_active(t)
+	image := graphics.store_find_image(store, a.image_focus.image_id, 0)
+	if image == nil || !image.used || image.generation != a.image_focus.generation || image.frame_count <= 0 || image.current_frame < 0 || image.current_frame >= image.frame_count do return false
+	frame := &image.frames[image.current_frame]
+	focused := a.image_focus
+	inter.image_focus_clamp_for_view(&focused, a.renderer.screen_w, a.renderer.screen_h, f32(frame.width), f32(frame.height))
+	rect, ok := inter.image_focus_rect(focused, a.renderer.screen_w, a.renderer.screen_h, f32(frame.width), f32(frame.height))
+	if !ok do return false
+	scale := frontend_content_scale(&a.frontend)
+	x, y := p.x * scale, p.y * scale
+	return x >= rect[0] && y >= rect[1] && x < rect[0] + rect[2] && y < rect[1] + rect[3]
+}
+
 _app_tab_has_running_processes :: proc(tab: ^Tab_Session) -> bool {
 	leaves: [MAX_PANE_NODES]^Pane_Node
 	n := tab_leaf_panes(tab, leaves[:])
@@ -379,7 +434,7 @@ _app_present :: proc(a: ^App) -> bool {
 		}
 	}
 	panes := frame.viewports[:frame.count] if _app_active_tab(a) != nil else nil
-	ok := frontend_render(&a.frontend, &frame.states[frame.active], panes)
+	ok := frontend_render(&a.frontend, &frame.states[frame.active], panes, &a.image_focus)
 	if !ok {
 		a.renderer.full_redraw_pending = true
 		a.has_deferred_render = true

@@ -5,6 +5,10 @@ import "core:testing"
 import config ".."
 import termgrid "../../terminal"
 
+CONFIG_TEST_FRACTIONAL: f32 : 0.375
+CONFIG_TEST_BELOW_RANGE: f32 : -0.25
+CONFIG_TEST_ABOVE_RANGE: f32 : 1.25
+
 @(test)
 test_config_default :: proc(t: ^testing.T) {
 	cfg := config.config_default()
@@ -28,8 +32,8 @@ test_config_default :: proc(t: ^testing.T) {
 	testing.expect_value(t, cfg.padding_x, 6)
 	testing.expect_value(t, cfg.padding_y, 4)
 	testing.expect_value(t, cfg.locale, "")
-	testing.expect_value(t, cfg.window_opacity, f32(1.0))
-	testing.expect_value(t, cfg.window_blur, false)
+	testing.expect_value(t, cfg.opacity, config.CONFIG_NORMALIZED_MAX)
+	testing.expect_value(t, cfg.window_blur, config.CONFIG_NORMALIZED_MIN)
 	testing.expect_value(t, cfg.allow_screensaver, true)
 }
 
@@ -218,50 +222,80 @@ locale = "id"
 }
 
 @(test)
-test_parse_config_window_opacity_and_blur :: proc(t: ^testing.T) {
-	src := `
-window_opacity = 0.85
-window_blur = true
-`
-	cfg, ok, _ := config.parse_config(src)
-	defer config.config_destroy(&cfg)
-
-	testing.expect(t, ok, "window_opacity and blur must parse successfully")
-	testing.expect_value(t, cfg.window_opacity, f32(0.85))
-	testing.expect_value(t, cfg.window_blur, true)
+test_parse_config_opacity_aliases :: proc(t: ^testing.T) {
+	aliases := []string{"opacity", "background_opacity", "window_opacity", "bg_opacity"}
+	for alias in aliases {
+		src := fmt.tprintf("%s = %g", alias, CONFIG_TEST_FRACTIONAL)
+		cfg, ok, _ := config.parse_config(src)
+		testing.expect(t, ok, "every opacity alias must parse")
+		testing.expect_value(t, cfg.opacity, CONFIG_TEST_FRACTIONAL)
+		config.config_destroy(&cfg)
+	}
 }
 
 @(test)
-test_parse_config_window_opacity_clamping :: proc(t: ^testing.T) {
-	src_low := `window_opacity = 0.05`
-	cfg_low, ok_low, _ := config.parse_config(src_low)
-	defer config.config_destroy(&cfg_low)
-	testing.expect(t, ok_low)
-	testing.expect_value(t, cfg_low.window_opacity, f32(0.1))
+test_parse_config_opacity_normalization :: proc(t: ^testing.T) {
+	cases := []struct {
+		value:    f32,
+		expected: f32,
+	}{
+		{config.CONFIG_NORMALIZED_MIN, config.CONFIG_NORMALIZED_MIN},
+		{CONFIG_TEST_FRACTIONAL, CONFIG_TEST_FRACTIONAL},
+		{config.CONFIG_NORMALIZED_MAX, config.CONFIG_NORMALIZED_MAX},
+		{CONFIG_TEST_BELOW_RANGE, config.CONFIG_NORMALIZED_MIN},
+		{CONFIG_TEST_ABOVE_RANGE, config.CONFIG_NORMALIZED_MAX},
+	}
+	for c in cases {
+		src := fmt.tprintf("opacity = %g", c.value)
+		cfg, ok, _ := config.parse_config(src)
+		testing.expect(t, ok, "opacity normalization case must parse")
+		testing.expect_value(t, cfg.opacity, c.expected)
+		config.config_destroy(&cfg)
+	}
+}
 
-	src_high := `window_opacity = 1.5`
-	cfg_high, ok_high, _ := config.parse_config(src_high)
-	defer config.config_destroy(&cfg_high)
-	testing.expect(t, ok_high)
-	testing.expect_value(t, cfg_high.window_opacity, f32(1.0))
+@(test)
+test_parse_config_blur_aliases_and_normalization :: proc(t: ^testing.T) {
+	aliases := []string{"blur", "window_blur"}
+	values := []struct {
+		value:    f32,
+		expected: f32,
+	}{
+		{config.CONFIG_NORMALIZED_MIN, config.CONFIG_NORMALIZED_MIN},
+		{CONFIG_TEST_FRACTIONAL, CONFIG_TEST_FRACTIONAL},
+		{config.CONFIG_NORMALIZED_MAX, config.CONFIG_NORMALIZED_MAX},
+		{CONFIG_TEST_BELOW_RANGE, config.CONFIG_NORMALIZED_MIN},
+		{CONFIG_TEST_ABOVE_RANGE, config.CONFIG_NORMALIZED_MAX},
+	}
+	for alias in aliases {
+		for c in values {
+			src := fmt.tprintf("%s = %g", alias, c.value)
+			cfg, ok, _ := config.parse_config(src)
+			testing.expect(t, ok, "every blur alias and normalization case must parse")
+			testing.expect_value(t, cfg.window_blur, c.expected)
+			config.config_destroy(&cfg)
+		}
+	}
 }
 
 @(test)
 test_parse_config_window_blur_boolean_variants :: proc(t: ^testing.T) {
 	cases := []struct {
-		val:      string,
-		expected: bool,
+		value:    string,
+		expected: f32,
 	}{
-		{"true", true},
-		{"yes", true},
-		{"1", true},
-		{"false", false},
-		{"no", false},
-		{"0", false},
+		{"true", config.CONFIG_NORMALIZED_MAX},
+		{"yes", config.CONFIG_NORMALIZED_MAX},
+		{"on", config.CONFIG_NORMALIZED_MAX},
+		{"1", config.CONFIG_NORMALIZED_MAX},
+		{"false", config.CONFIG_NORMALIZED_MIN},
+		{"no", config.CONFIG_NORMALIZED_MIN},
+		{"off", config.CONFIG_NORMALIZED_MIN},
+		{"0", config.CONFIG_NORMALIZED_MIN},
 	}
 
 	for c in cases {
-		src := fmt.tprintf("window_blur = %s", c.val)
+		src := fmt.tprintf("window_blur = %s", c.value)
 		cfg, ok, _ := config.parse_config(src)
 		testing.expect(t, ok)
 		testing.expect_value(t, cfg.window_blur, c.expected)

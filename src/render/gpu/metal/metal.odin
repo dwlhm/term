@@ -75,11 +75,14 @@ Metal_ComputePassEncoder :: struct {
 	cmd_buf: ^MTL.CommandBuffer,
 }
 
+METAL_VIBRANCY_MIN: f32 : 0.0
+METAL_VIBRANCY_MAX: f32 : 1.0
+
 Metal_Surface :: struct {
 	layer:          ^CA.MetalLayer,
 	cur_drawable:   ^CA.MetalDrawable,
 	window_opacity: f32,
-	window_blur:    bool,
+	window_blur:    f32,
 }
 
 // Global active handles for queue submission and presentation coordination
@@ -181,8 +184,8 @@ metal_backend_vtable :: proc() -> ^gpu.Gpu_Backend_VTable {
 create_surface :: proc(layer: ^CA.MetalLayer) -> ^Metal_Surface {
 	surf := new(Metal_Surface)
 	surf.layer = layer
-	surf.window_opacity = 1.0
-	surf.window_blur = false
+	surf.window_opacity = METAL_VIBRANCY_MAX
+	surf.window_blur = METAL_VIBRANCY_MIN
 	if layer != nil {
 		top_left := _create_ns_string("topLeft")
 		if top_left != nil {
@@ -193,16 +196,13 @@ create_surface :: proc(layer: ^CA.MetalLayer) -> ^Metal_Surface {
 	return surf
 }
 
-configure_surface_vibrancy :: proc(surf: ^Metal_Surface, opacity: f32, blur: bool) {
+configure_surface_vibrancy :: proc(surf: ^Metal_Surface, opacity: f32, blur: f32) {
 	if surf == nil do return
-	surf.window_opacity = opacity
-	surf.window_blur = blur
+	surf.window_opacity = clamp(opacity, METAL_VIBRANCY_MIN, METAL_VIBRANCY_MAX)
+	surf.window_blur = clamp(blur, METAL_VIBRANCY_MIN, METAL_VIBRANCY_MAX)
 	if surf.layer != nil {
-		if opacity < 1.0 || blur {
-			surf.layer->setOpaque(NS.BOOL(false))
-		} else {
-			surf.layer->setOpaque(NS.BOOL(true))
-		}
+		opaque := surf.window_opacity == METAL_VIBRANCY_MAX && surf.window_blur == METAL_VIBRANCY_MIN
+		surf.layer->setOpaque(NS.BOOL(opaque))
 	}
 }
 
@@ -269,6 +269,12 @@ _metal_configure_surface :: proc(surface: rawptr, device: gpu.Gpu_Device, format
 	dev := (^Metal_Device)(rawptr(device))
 	if surf == nil || surf.layer == nil || dev == nil || dev.handle == nil do return
 
+	// Changing drawableSize makes CAMetalLayer discard its whole drawable pool.
+	// A drawable still referenced here came from the previous pool, can never be
+	// presented again, and would otherwise be silently overwritten by the next
+	// nextDrawable() while the layer still counted it as in use.
+	surf.cur_drawable = nil
+
 	surf.layer->setDevice(dev.handle)
 	surf.layer->setPixelFormat(.BGRA8Unorm)
 	surf.layer->setDrawableSize(NS.Size{NS.Float(width), NS.Float(height)})
@@ -282,11 +288,8 @@ _metal_configure_surface :: proc(surface: rawptr, device: gpu.Gpu_Device, format
 		top_left->release()
 	}
 
-	if surf.window_opacity < 1.0 || surf.window_blur {
-		surf.layer->setOpaque(NS.BOOL(false))
-	} else {
-		surf.layer->setOpaque(NS.BOOL(true))
-	}
+	opaque := surf.window_opacity == METAL_VIBRANCY_MAX && surf.window_blur == METAL_VIBRANCY_MIN
+	surf.layer->setOpaque(NS.BOOL(opaque))
 
 	_active_surface = surf
 }
@@ -774,11 +777,10 @@ _metal_begin_render_pass :: proc(
 			switch load_op {
 			case .Clear:
 				color_attach->setLoadAction(MTL.LoadAction.Clear)
-				alpha := clear_color[3]
-				if _active_surface != nil && _active_surface.window_opacity > 0 {
-					alpha *= f64(_active_surface.window_opacity)
-				}
-				color_attach->setClearColor(MTL.ClearColor{clear_color[0], clear_color[1], clear_color[2], alpha})
+				// The clear alpha is already theme_alpha * background_opacity
+				// (see _renderer_theme_clear_color). Multiplying by the surface
+				// opacity here would square it, so it is deliberately not applied.
+				color_attach->setClearColor(MTL.ClearColor{clear_color[0], clear_color[1], clear_color[2], clear_color[3]})
 			case .Load:
 				color_attach->setLoadAction(MTL.LoadAction.Load)
 			case .Undefined:
@@ -817,6 +819,103 @@ _metal_release_command_buffer :: proc(command_buffer: rawptr) {
 	// Command buffers are managed by Metal queue
 }
 
+// Objective-C block ABI for a `void (^)(id<MTLCommandBuffer>)` handler.
+// The runtime owns the layout, not this binding: isa, flags and descriptor are
+// read by _Block_copy when the handler is handed to Metal.
+@(private)
+Metal_Block_Descriptor :: struct {
+	reserved: uint,
+	size:     uint,
+}
+
+// Metal_Command_Buffer_Handler_Block is the capture-free block literal for the
+// GPU timing handler. It has no captures because the finished command buffer
+// arrives as the handler's argument, so the literal can live in static storage
+// as a global block.
+@(private)
+Metal_Command_Buffer_Handler_Block :: struct {
+	isa:        ^intrinsics.objc_class,
+	flags:      u32,
+	reserved:   u32,
+	invoke:     proc "c" (block: ^Metal_Command_Buffer_Handler_Block, command_buffer: ^MTL.CommandBuffer),
+	descriptor: ^Metal_Block_Descriptor,
+}
+
+foreign import libSystem "system:System"
+foreign libSystem {
+	_NSConcreteGlobalBlock: intrinsics.objc_class
+}
+
+@(private)
+_metal_handler_block_descriptor: Metal_Block_Descriptor = Metal_Block_Descriptor{
+	reserved = 0,
+	size     = size_of(Metal_Command_Buffer_Handler_Block),
+}
+
+// BLOCK_IS_GLOBAL from the Objective-C block ABI. A capture-free block literal
+// is emitted as a global block, and _Block_copy on one returns the same pointer
+// instead of mallocing a copy, so registering the handler adds no allocation to
+// the frame path.
+METAL_BLOCK_IS_GLOBAL :: 1 << 28
+
+@(private)
+_metal_gpu_timing_handler: Metal_Command_Buffer_Handler_Block = Metal_Command_Buffer_Handler_Block{
+	isa        = &_NSConcreteGlobalBlock,
+	flags      = u32(METAL_BLOCK_IS_GLOBAL),
+	invoke     = _metal_gpu_completion,
+	descriptor = &_metal_handler_block_descriptor,
+}
+
+// _metal_gpu_completion reports one command buffer's GPU execution time.
+//
+// It runs on a Metal-internal thread after the buffer has finished. It
+// allocates nothing, takes no lock beyond whatever the consumer's callback
+// takes, and reads nothing but the command buffer it is handed, so it is safe
+// to invoke from a driver thread.
+@(private)
+_metal_gpu_completion :: proc "c" (block: ^Metal_Command_Buffer_Handler_Block, command_buffer: ^MTL.CommandBuffer) {
+	_ = block
+	if _metal_vtable.gpu_frame_complete == nil || command_buffer == nil do return
+
+	gpu_ns: u64 = 0
+	valid := true
+	// An errored buffer did not execute the work, so its timestamps describe
+	// nothing that reached the screen.
+	if command_buffer->status() == .Error {
+		valid = false
+	} else {
+		start := command_buffer->GPUStartTime()
+		end := command_buffer->GPUEndTime()
+		if end > start {
+			gpu_ns = u64((end - start) * 1_000_000_000.0)
+		} else {
+			// Timestamps are unavailable: some devices never populate them, and
+			// dropped work leaves both at zero. Reporting 0 as valid would read
+			// as "the GPU took no time", which is a different and wrong claim.
+			valid = false
+		}
+	}
+	// The vtable slot is an ordinary Odin proc, while this handler is entered
+	// through a C block trampoline, so the call goes through rawptr to drop the
+	// context-calling convention rather than smuggling a context into Metal.
+	((proc "c" (gpu_ns: u64, valid: bool))(rawptr(_metal_vtable.gpu_frame_complete)))(gpu_ns, valid)
+}
+
+// _metal_install_gpu_timing attaches the GPU timing handler to a command buffer
+// that is about to be committed.
+//
+// Asynchronous by design. Commit 34b2daa set setMaximumDrawableCount:3 on the
+// CAMetalLayer precisely so CPU command encoding runs ahead of GPU execution.
+// Blocking on the command buffer here to read the timestamps would serialise
+// encoding against execution and delete that, turning a triple-buffered
+// pipelined renderer into a stalling one. The handler runs later, on a
+// Metal-internal thread, and reads the timestamps once the buffer has genuinely
+// completed.
+_metal_install_gpu_timing :: proc(cmd_buf: ^MTL.CommandBuffer) {
+	if cmd_buf == nil do return
+	cmd_buf->addCompletedHandler(MTL.CommandBufferHandler(rawptr(&_metal_gpu_timing_handler)))
+}
+
 _metal_submit :: proc(queue: gpu.Gpu_Queue, command_buffer: rawptr) -> bool {
 	if command_buffer == nil do return false
 	cmd_buf := (^MTL.CommandBuffer)(command_buffer)
@@ -824,6 +923,7 @@ _metal_submit :: proc(queue: gpu.Gpu_Queue, command_buffer: rawptr) -> bool {
 		cmd_buf->presentDrawable(_active_surface.cur_drawable)
 		_active_surface.cur_drawable = nil
 	}
+	_metal_install_gpu_timing(cmd_buf)
 	cmd_buf->commit()
 	return true
 }

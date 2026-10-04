@@ -55,6 +55,12 @@ _is_ligature_candidate :: proc(b: u8) -> bool {
 	return false
 }
 
+// _is_kitty_graphics_placeholder identifies direct and grapheme-backed KGP cells.
+_is_kitty_graphics_placeholder :: proc(cell: termgrid.Semantic_Cell, store: ^termgrid.Grapheme_Store) -> bool {
+	handle := termgrid.Content_Handle(cell.content)
+	return termgrid.grapheme_resolve_base(handle, store) == termgrid.KITTY_GRAPHICS_PLACEHOLDER
+}
+
 // render_compile compiles a terminal grid into packed render cells,
 // processing only the dirty ranges specified by the damage journal.
 render_compile :: proc(
@@ -127,8 +133,14 @@ _compile_row_range :: proc(
 		// Build flags
 		flags := Render_Cell_Flags(cell.width)
 
-		// Pack into render cell
-		rc := render_cell_pack(cell.content, fg_packed, bg_packed, flags)
+		// Pack into render cell. KGP owns the image placement; its placeholder
+		// must keep the cell styling without producing a text glyph.
+		rc: Render_Cell
+		if _is_kitty_graphics_placeholder(cell, &terminal.grapheme_store) {
+			rc = render_cell_pack(u32(' '), fg_packed, bg_packed, flags)
+		} else {
+			rc = render_cell_pack(cell.content, fg_packed, bg_packed, flags)
+		}
 
 		// Write to output array (row-major order)
 		idx := row * cols + col
@@ -357,7 +369,23 @@ _compile_row_range_v2 :: proc(
 			shape_rq = nil
 		}
 		rc: Render_Cell_V2
-		if _is_emoji_cell(cell, store) {
+		if _is_kitty_graphics_placeholder(cell, store) {
+			w := RENDER_CELL_V2_WIDTH_NARROW
+			cf := u8(0)
+			if u8(cell.flags) & u8(termgrid.Cell_Flags.Wide_Continuation) != 0 {
+				w = RENDER_CELL_V2_WIDTH_CONTINUATION
+				cf = RENDER_CELL_V2_CFLAG_WIDE_CONT
+			} else if cell.width == 2 {
+				w = RENDER_CELL_V2_WIDTH_WIDE_LEAD
+			}
+			if selected {
+				cf |= RENDER_CELL_V2_CFLAG_SELECTED
+			}
+			if u8(cell.flags) & u8(termgrid.Cell_Flags.Direct_Color) != 0 {
+				cf |= RENDER_CELL_V2_CFLAG_DIRECT_COLOR
+			}
+			rc = render_cell_pack_v2(0, u16(cell.style), w, cf, RENDER_CELL_V2_SLOT_UNRESOLVED)
+		} else if _is_emoji_cell(cell, store) {
 			w := RENDER_CELL_V2_WIDTH_NARROW
 			cf := u8(RENDER_CELL_V2_CFLAG_EMOJI)
 			if selected {
@@ -432,6 +460,11 @@ shaped_cell_from_cluster :: proc(
 ) -> Render_Cell_V2 {
 	handle := termgrid.Content_Handle(cell.content)
 	base := termgrid.grapheme_resolve_base(handle, store)
+	if base == termgrid.KITTY_GRAPHICS_PLACEHOLDER {
+		blank_cell := cell
+		blank_cell.content = 0
+		return render_cell_from_semantic(blank_cell, selected)
+	}
 	if base == 0 || base == 0x20 {
 		return render_cell_from_semantic(cell, selected)
 	}

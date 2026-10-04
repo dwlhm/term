@@ -136,6 +136,7 @@ dirty_upload_rebase :: proc(
 			&d.mirror[idx], &d.mirror[n+idx],
 			emoji_inst_ptr, emoji_atlas_ptr, store,
 			direct_color = dc,
+			background_opacity = r.background_opacity,
 		)
 		if !emit_bg {
 			d.mirror[idx] = instance.Instance_Data{}
@@ -324,6 +325,7 @@ _dirty_expand_row :: proc(
 			&d.mirror[idx], &d.mirror[n+idx],
 			emoji_inst_ptr, emoji_atlas_ptr, store,
 			direct_color = dc,
+			background_opacity = r.background_opacity,
 		)
 		if !emit_bg {
 			d.mirror[idx] = instance.Instance_Data{}

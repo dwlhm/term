@@ -208,6 +208,11 @@ render_cell_unpack_v2 :: proc(cell: Render_Cell_V2) -> (content: u32, style: u16
 // render_cell_from_semantic packs a Semantic_Cell directly into a Render_Cell_V2.
 // Pure: NO style_table_get, NO color conversion; slot is always UNRESOLVED.
 render_cell_from_semantic :: proc(cell: termgrid.Semantic_Cell, selected: bool = false) -> Render_Cell_V2 {
+	content := u32(cell.content)
+	if content == u32(termgrid.KITTY_GRAPHICS_PLACEHOLDER) {
+		content = 0
+	}
+
 	w := RENDER_CELL_V2_WIDTH_NARROW
 	cf := u8(0)
 	if u8(cell.flags) & u8(termgrid.Cell_Flags.Wide_Continuation) != 0 {
@@ -216,7 +221,7 @@ render_cell_from_semantic :: proc(cell: termgrid.Semantic_Cell, selected: bool =
 	} else if cell.width == 2 {
 		w = RENDER_CELL_V2_WIDTH_WIDE_LEAD
 	}
-	if termgrid.is_emoji_codepoint(rune(cell.content)) {
+	if termgrid.is_emoji_codepoint(rune(content)) {
 		cf |= RENDER_CELL_V2_CFLAG_EMOJI
 	}
 	if u8(cell.flags) & u8(termgrid.Cell_Flags.Direct_Color) != 0 {
@@ -225,7 +230,7 @@ render_cell_from_semantic :: proc(cell: termgrid.Semantic_Cell, selected: bool =
 	if selected {
 		cf |= RENDER_CELL_V2_CFLAG_SELECTED
 	}
-	return render_cell_pack_v2(cell.content, u16(cell.style), w, cf, RENDER_CELL_V2_SLOT_UNRESOLVED)
+	return render_cell_pack_v2(content, u16(cell.style), w, cf, RENDER_CELL_V2_SLOT_UNRESOLVED)
 }
 
 // render_cell_empty_v2 returns the default empty V2 cell (space, style 0, narrow).
@@ -299,7 +304,7 @@ style_lut_rebuild :: proc(lut: ^Style_LUT, table: ^termgrid.Style_Table) {
 // Owns the empty + continuation skip rules. Atlas is read read-only.
 // MUST NOT call style_table_get or color_to_r5g6b5 (colors come pre-resolved from lut).
 // Cracks: StyleIdStale (lut index out of range → entry 0),
-// GlyphSlotInvalid (invalid slot → skip glyph, keep bg),
+// GlyphSlotInvalid (invalid slot → skip glyph, keep a non-default bg),
 // ContinuationLeak (continuation cell → emits nothing, never indexes col-1).
 render_cell_expand_instance :: proc(
 	cell: Render_Cell_V2,
@@ -313,6 +318,7 @@ render_cell_expand_instance :: proc(
 	store: ^termgrid.Grapheme_Store = nil,
 	decor_out: ^instance.Instance_Data = nil,
 	direct_color: ^termgrid.Direct_Color_Channel = nil,
+	background_opacity: f32 = 1,
 ) -> (emit_bg: bool, emit_glyph: bool, emit_emoji: bool, emit_decor: bool) {
 	content, style, width, cflags, slot := render_cell_unpack_v2(cell)
 
@@ -333,7 +339,11 @@ render_cell_expand_instance :: proc(
 	}
 	fg := lut.fg_r5g6b5[lut_idx]
 	bg := lut.bg_r5g6b5[lut_idx]
-	if cflags & RENDER_CELL_V2_CFLAG_SELECTED != 0 {
+	// Captured before the selection override below reassigns `bg`, so the
+	// default-background carve-out can tell a genuine selection apart from a
+	// plain default cell whose colors happen to be identical.
+	selected := cflags & RENDER_CELL_V2_CFLAG_SELECTED != 0
+	if selected {
 		fg = lut.selection_fg_r5g6b5
 		bg = lut.selection_bg_r5g6b5
 	}
@@ -384,28 +394,43 @@ render_cell_expand_instance :: proc(
 		emit_decor = true
 	}
 
-	// Empty skip: space or NUL with default/black bg emits nothing.
-	if !has_direct_bg && (content == 0x20 || content == 0) && (bg == 0x0000 || bg == lut.bg_r5g6b5[0]) {
+	// Default-background skip: a cell whose background already equals the
+	// theme default emits NO background quad, printable or not. The pane
+	// viewport fill (and the render-pass clear color on the single-pane path)
+	// already paints that exact color, so a per-cell quad would only
+	// double-composite it and raise alpha behind every run of text.
+	// Selected cells are exempt: a selection highlight is a real background
+	// even when it happens to compare equal to the default, and dropping its
+	// quad would make the selection invisible.
+	bg_is_default := !has_direct_bg && !selected && bg == lut.bg_r5g6b5[0]
+	is_blank := content == 0x20 || content == 0 || content == u32(termgrid.KITTY_GRAPHICS_PLACEHOLDER)
+
+	// Empty skip: space or NUL with the default background emits nothing.
+	if is_blank && bg_is_default {
 		return false, false, false, emit_decor
 	}
 
-	// Background instance. Wide leads span double width.
-	if bg_out != nil {
-		bg_cw := cell_w
-		if width == RENDER_CELL_V2_WIDTH_WIDE_LEAD {
-			bg_cw = cell_w * 2.0
+	// Background instance (non-default backgrounds only). Wide leads span
+	// double width. Background opacity never changes foreground coverage.
+	if !bg_is_default {
+		if bg_out != nil {
+			bg_cw := cell_w
+			if width == RENDER_CELL_V2_WIDTH_WIDE_LEAD {
+				bg_cw = cell_w * 2.0
+			}
+			authored_alpha := has_direct_bg ? f32((direct_color.bg >> 24) & 0xFF) / 255.0 : f32(1)
+			bg_out^ = instance.Instance_Data{
+				x = x, y = y,
+				cw = bg_cw, ch = cell_h,
+				u0 = 0, v0 = 0, u1 = 0, v1 = 0,
+				r = bg_r, g = bg_g, b = bg_b, a = authored_alpha * clamp(background_opacity, f32(0), f32(1)),
+			}
 		}
-		bg_out^ = instance.Instance_Data{
-			x = x, y = y,
-			cw = bg_cw, ch = cell_h,
-			u0 = 0, v0 = 0, u1 = 0, v1 = 0,
-			r = bg_r, g = bg_g, b = bg_b, a = 1.0,
-		}
+		emit_bg = true
 	}
-	emit_bg = true
 
 	// Spaces and NUL emit no glyph.
-	if content == 0x20 || content == 0 {
+	if is_blank {
 		return true, false, false, emit_decor
 	}
 
@@ -448,7 +473,7 @@ render_cell_expand_instance :: proc(
 					v1 = emoji_info.uv[3],
 					r = 1.0, g = 1.0, b = 1.0, a = 1.0,
 				}
-				return true, false, true, emit_decor
+				return emit_bg, false, true, emit_decor
 			}
 		}
 	}
@@ -482,8 +507,8 @@ render_cell_expand_instance :: proc(
 		}
 	}
 	if slot_entry == nil || !slot_entry.valid {
-		// GlyphSlotInvalid → skip glyph, keep bg.
-		return true, false, false, emit_decor
+		// GlyphSlotInvalid → skip glyph, keep a non-default bg.
+		return emit_bg, false, false, emit_decor
 	}
 
 	// Glyph instance (wide leads span double width).
@@ -500,5 +525,5 @@ render_cell_expand_instance :: proc(
 			r = fg_r, g = fg_g, b = fg_b, a = 1.0,
 		}
 	}
-	return true, true, false, emit_decor
+	return emit_bg, true, false, emit_decor
 }

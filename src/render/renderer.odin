@@ -18,7 +18,10 @@ import "core:fmt"
 import "base:runtime"
 import "core:mem"
 import "../platform"
+import diag "../diag"
 import fullscreen "fullscreen"
+import graphics_pkg "../graphics"
+import interaction "../interaction"
 import "gpu"
 import instance "instance"
 import tile "tile"
@@ -27,10 +30,12 @@ import termgrid "../terminal"
 BG_WGSL :: #load("shaders/bg.wgsl")
 GLYPH_WGSL :: #load("shaders/glyph.wgsl")
 EMOJI_WGSL :: #load("shaders/emoji.wgsl")
+IMAGE_WGSL :: #load("shaders/image.wgsl")
 
 BG_MSL :: #load("shaders/msl_spike/bg.msl")
 GLYPH_MSL :: #load("shaders/msl_spike/glyph.msl")
 EMOJI_MSL :: #load("shaders/msl_spike/emoji.msl")
+IMAGE_MSL :: #load("shaders/msl_spike/image.msl")
 
 // Pane_Viewport defines a rendering rectangle for a single pane within the app window.
 Pane_Viewport :: struct {
@@ -73,6 +78,13 @@ Render_Frame_State :: enum int {
 // to the same upload-ring submission as legacy instance data.
 Render_Frame_Transaction :: struct {
 	state:         Render_Frame_State,
+	// drawable_outstanding is true from the moment a surface drawable has been
+	// acquired until a present has been attempted for it. CAMetalLayer only
+	// returns a drawable to its pool once it has been presented, so a frame that
+	// is abandoned while this is true is holding a pool slot that nothing else
+	// can reclaim. It is cleared before the present call, not after, so a present
+	// that fails is not retried on the way out.
+	drawable_outstanding: bool,
 	texture:       gpu.Gpu_Texture,
 	view:          gpu.Gpu_TextureView,
 	format:        gpu.Gpu_Format,
@@ -95,10 +107,46 @@ Render_Frame_Transaction :: struct {
 	command_buffer: rawptr,
 	encoder_released: bool,
 	command_released: bool,
+	image_offset:   u64,
+	image_count:    u32,
+	focus_image_offset: u64,
+	focus_image_count: u32,
+}
+
+Image_Texture_Key :: struct {
+	graphics_namespace: u64,
+	image_id:           u32,
+	generation:         u64,
+}
+
+Image_Texture_Cache_Slot :: struct {
+	used:       bool,
+	key:        Image_Texture_Key,
+	texture:    gpu.Gpu_Texture,
+	view:       gpu.Gpu_TextureView,
+	bind_group: gpu.Gpu_BindGroup,
+	width, height: u32,
+	last_seen_frame: u64,
+}
+
+Image_Draw :: struct {
+	used:         bool,
+	placement_id: u32,
+	image_id:     u32,
+	z:            i32,
+	cache_slot:   int,
+	instance_index: u32,
 }
 
 // Renderer is the top-level render state.
 Renderer :: struct {
+	// surface_reclaims counts frames abandoned after acquiring a drawable, whose
+	// drawable was handed back to the layer from the abort path instead of being
+	// presented with real content. It is per renderer so a test can assert the
+	// distinction between "the frame presented nothing" and "the frame presented
+	// only to reclaim its drawable", and it is the direct measure of how close the
+	// surface is to losing every drawable in its pool.
+	surface_reclaims: u32,
 	// Sub-systems
 	atlas:       Atlas,
 	emoji_atlas: Emoji_Atlas,
@@ -110,6 +158,26 @@ Renderer :: struct {
 	unlock_cb:   proc(data: rawptr),
 	unlock_data: rawptr,
 	instances:  instance.Instance_Renderer,
+	image_pipeline: gpu.Gpu_RenderPipeline,
+	image_bind_group_layout: gpu.Gpu_BindGroupLayout,
+	image_cache: [graphics_pkg.KGP_MAX_IMAGES]Image_Texture_Cache_Slot,
+	image_instances: [graphics_pkg.KGP_MAX_PLACEMENTS]instance.Instance_Data,
+	image_draws: [graphics_pkg.KGP_MAX_PLACEMENTS]Image_Draw,
+	image_count: u32,
+	image_under_count: u32,
+	image_focus_staged: bool,
+	image_focus_instance: instance.Instance_Data,
+	image_focus_cache_slot: int,
+	staged_graphics_store: ^graphics_pkg.Store,
+	staged_graphics_namespace: u64,
+	staged_graphics_epoch: u64,
+	staged_graphics_placement_epoch: u64,
+	staged_graphics_valid: bool,
+	last_graphics_store: ^graphics_pkg.Store,
+	last_graphics_namespace: u64,
+	last_graphics_epoch: u64,
+	last_graphics_placement_epoch: u64,
+	last_graphics_valid: bool,
 	rasterizer: Font_Rasterizer,
 	ligature_cache: Ligature_Cache,
 
@@ -134,6 +202,10 @@ Renderer :: struct {
 	screen_h:   f32,
 	format:     gpu.Gpu_Format,
 	theme:      termgrid.Theme,
+	// background_opacity scales every terminal background paint. Foreground
+	// coverage and app chrome are independent; overlapping background paints
+	// retain normal source-over composition.
+	background_opacity: f32,
 
 	// Surface
 	surface:    gpu.Gpu_Surface,
@@ -194,7 +266,7 @@ _renderer_instance_capacity :: proc(rows, cols: i32) -> u32 {
 
 // UI_LAYER_COUNT is the number of chrome compositing layers. Blended UI has no
 // depth test, so layer order alone decides paint order.
-UI_LAYER_COUNT :: 5
+UI_LAYER_COUNT :: 6
 
 UI_Layer :: enum u8 {
 	Pane_Chrome = 0,  // dividers, active-pane outline, hollow cursors
@@ -202,6 +274,7 @@ UI_Layer :: enum u8 {
 	Popover     = 2,  // tab context menu, tab overflow menu, tab rename
 	Modal       = 3,  // session switcher
 	Overlay     = 4,  // confirm dialog, drop FX surface
+	Devtools    = 5,  // read-only DevTools perf panel (draw-only, never interactive)
 }
 
 // Per-layer instance budgets, sized to real usage. Each layer owns a private
@@ -216,9 +289,14 @@ UI_Layer :: enum u8 {
 // only bounds how much a layer may stage: every layer row is allocated at
 // UI_LAYER_MAX_GLYPH, so raising one does not grow the storage.
 // Positional entries follow the UI_Layer declaration order:
-// {Pane_Chrome, Tab_Chrome, Popover, Modal, Overlay}.
-UI_LAYER_BG_CAPACITY: [UI_LAYER_COUNT]int = [UI_LAYER_COUNT]int{160, 64, 48, 48, 160}
-UI_LAYER_GLYPH_CAPACITY: [UI_LAYER_COUNT]int = [UI_LAYER_COUNT]int{0, 256, 160, 256, 64}
+// {Pane_Chrome, Tab_Chrome, Popover, Modal, Overlay, Devtools}.
+// Devtools needs a single background card and a glyph budget of exactly
+// DEVTOOLS_PANEL_LINES * DEVTOOLS_PANEL_COLUMNS, which is also
+// UI_LAYER_MAX_GLYPH, so the layer adds no static instance memory at all.
+// A capacity must never exceed UI_LAYER_MAX_BG / UI_LAYER_MAX_GLYPH: the
+// staging rows are allocated at the maximum, not at the per-layer capacity.
+UI_LAYER_BG_CAPACITY: [UI_LAYER_COUNT]int = [UI_LAYER_COUNT]int{160, 64, 48, 48, 160, 1}
+UI_LAYER_GLYPH_CAPACITY: [UI_LAYER_COUNT]int = [UI_LAYER_COUNT]int{0, 256, 160, 256, 64, 256}
 
 // Storage dimensions: Odin arrays cannot be ragged, so every layer row is
 // allocated at the widest budget it needs. Total instance memory is
@@ -355,6 +433,7 @@ renderer_init :: proc(
 	r.screen_h    = screen_h
 	r.format      = format
 	r.theme       = theme
+	r.background_opacity = 1.0
 	r.device      = device
 	r.queue       = queue
 	r.backend     = backend
@@ -429,6 +508,31 @@ renderer_init :: proc(
 		return false
 	}
 
+	image_attrs := []gpu.Gpu_Vertex_Attribute{
+		{format = .Float32x2, offset = 0, shader_location = 0},
+		{format = .Float32x2, offset = 8, shader_location = 1},
+		{format = .Float32x4, offset = 16, shader_location = 2},
+		{format = .Float32x4, offset = 32, shader_location = 3},
+	}
+	image_layouts := []gpu.Gpu_Vertex_Layout{
+		{array_stride = instance.INSTANCE_STRIDE, step_mode = .Instance, attributes = image_attrs},
+	}
+	image_module := backend.create_shader_module(device, string(IMAGE_MSL))
+	r.image_pipeline = backend.create_render_pipeline(
+		device, image_module, "vs_main", image_module, "fs_main",
+		image_layouts, format, .Alpha_Blend, .Triangle_List,
+	)
+	backend.destroy_shader_module(image_module)
+	if rawptr(r.image_pipeline) == nil {
+		renderer_destroy(r, allocator)
+		return false
+	}
+	r.image_bind_group_layout = backend.pipeline_get_bind_group_layout(r.image_pipeline, 0)
+	if rawptr(r.image_bind_group_layout) == nil {
+		renderer_destroy(r, allocator)
+		return false
+	}
+
 	if r.emoji_atlas.has_font {
 		emoji_atlas_upload_gpu(&r.emoji_atlas, backend, device, queue)
 		instance.instance_renderer_init_emoji(
@@ -454,6 +558,47 @@ renderer_init :: proc(
 	return true
 }
 
+_image_texture_cache_release_slot :: proc(r: ^Renderer, slot: ^Image_Texture_Cache_Slot) {
+	if r == nil || slot == nil || r.backend == nil do return
+	if rawptr(slot.bind_group) != nil {
+		r.backend.destroy_bind_group(slot.bind_group)
+	}
+	if rawptr(slot.view) != nil {
+		r.backend.destroy_texture_view(slot.view)
+	}
+	if rawptr(slot.texture) != nil {
+		r.backend.destroy_texture(slot.texture)
+	}
+	slot^ = Image_Texture_Cache_Slot{}
+}
+
+_image_texture_cache_destroy :: proc(r: ^Renderer) {
+	if r == nil do return
+	for i := 0; i < len(r.image_cache); i += 1 {
+		_image_texture_cache_release_slot(r, &r.image_cache[i])
+	}
+}
+
+_image_texture_cache_evict_unseen :: proc(r: ^Renderer) {
+	if r == nil do return
+	for i := 0; i < len(r.image_cache); i += 1 {
+		slot := &r.image_cache[i]
+		if slot.used && slot.last_seen_frame != r.frame_count {
+			_image_texture_cache_release_slot(r, slot)
+		}
+	}
+}
+
+_image_texture_cache_evict_namespace :: proc(r: ^Renderer, namespace: u64) {
+	if r == nil || namespace == 0 do return
+	for i := 0; i < len(r.image_cache); i += 1 {
+		slot := &r.image_cache[i]
+		if slot.used && slot.key.graphics_namespace == namespace {
+			_image_texture_cache_release_slot(r, slot)
+		}
+	}
+}
+
 // renderer_destroy frees all renderer resources.
 renderer_destroy :: proc(r: ^Renderer, allocator: runtime.Allocator = context.allocator) {
 	if r == nil { return }
@@ -476,6 +621,17 @@ renderer_destroy :: proc(r: ^Renderer, allocator: runtime.Allocator = context.al
 	}
 	dirty_upload_destroy(&r.dirty, allocator)
 	upload_ring_destroy(&r.upload_ring, allocator)
+	_image_texture_cache_destroy(r)
+	if r.backend != nil {
+		if rawptr(r.image_pipeline) != nil {
+			r.backend.destroy_render_pipeline(r.image_pipeline)
+			r.image_pipeline = gpu.Gpu_RenderPipeline(nil)
+		}
+		if rawptr(r.image_bind_group_layout) != nil {
+			r.backend.destroy_bind_group_layout(r.image_bind_group_layout)
+			r.image_bind_group_layout = gpu.Gpu_BindGroupLayout(nil)
+		}
+	}
 	instance.instance_renderer_destroy(&r.instances, allocator)
 	when ODIN_OS == .Darwin {
 		emoji_atlas_destroy(&r.emoji_atlas, r.backend)
@@ -571,6 +727,9 @@ renderer_rebuild_font :: proc(
 	old.dirty = r.dirty
 	old.upload_ring = r.upload_ring
 	old.instances = r.instances
+	old.image_pipeline = r.image_pipeline
+	old.image_bind_group_layout = r.image_bind_group_layout
+	old.image_cache = r.image_cache
 	old.rasterizer = r.rasterizer
 	old.fallback = r.fallback
 	old.shape_cache = r.shape_cache
@@ -594,6 +753,9 @@ renderer_rebuild_font :: proc(
 	r.style_lut = candidate.style_lut
 	r.upload_ring = candidate.upload_ring
 	r.instances = candidate.instances
+	r.image_pipeline = candidate.image_pipeline
+	r.image_bind_group_layout = candidate.image_bind_group_layout
+	r.image_cache = candidate.image_cache
 	r.rasterizer = candidate.rasterizer
 	r.fallback = candidate.fallback
 	r.shape_cache = candidate.shape_cache
@@ -613,6 +775,9 @@ renderer_rebuild_font :: proc(
 	candidate.dirty = Dirty_Upload{}
 	candidate.upload_ring = Upload_Ring{}
 	candidate.instances = instance.Instance_Renderer{}
+	candidate.image_pipeline = gpu.Gpu_RenderPipeline(nil)
+	candidate.image_bind_group_layout = gpu.Gpu_BindGroupLayout(nil)
+	candidate.image_cache = {}
 	candidate.rasterizer = Font_Rasterizer{}
 	candidate.fallback = Fallback_Chain{}
 	candidate.raster = Raster_Queue{}
@@ -635,6 +800,328 @@ renderer_attach_surface :: proc(r: ^Renderer, surface: gpu.Gpu_Surface, width: u
 		return
 	}
 	r.backend.configure_surface(rawptr(surface), r.device, r.format, width, height)
+}
+
+_image_placement_rect :: proc(
+	placement: ^graphics_pkg.Placement,
+	cell_w, cell_h: f32,
+	frame_w, frame_h: u32,
+) -> (rect: [4]f32, ok: bool) {
+	if placement == nil || !placement.used || cell_w <= 0 || cell_h <= 0 || frame_w == 0 || frame_h == 0 {
+		return {}, false
+	}
+	if placement.src_x >= frame_w || placement.src_y >= frame_h || placement.src_w == 0 || placement.src_h == 0 {
+		return {}, false
+	}
+	src_w := min(placement.src_w, frame_w - placement.src_x)
+	src_h := min(placement.src_h, frame_h - placement.src_y)
+	if src_w == 0 || src_h == 0 do return {}, false
+
+	width := f32(0)
+	height := f32(0)
+	if placement.cols > 0 { width = f32(placement.cols) * cell_w }
+	if placement.rows > 0 { height = f32(placement.rows) * cell_h }
+	if width <= 0 && height <= 0 {
+		width, height = f32(src_w), f32(src_h)
+	} else if width <= 0 {
+		width = height * f32(src_w) / f32(src_h)
+	} else if height <= 0 {
+		height = width * f32(src_h) / f32(src_w)
+	}
+	if !(width > 0) || !(height > 0) do return {}, false
+	return [4]f32{
+		f32(placement.col) * cell_w + f32(placement.cell_x),
+		f32(placement.row) * cell_h + f32(placement.cell_y),
+		width,
+		height,
+	}, true
+}
+
+_image_placement_uv :: proc(placement: ^graphics_pkg.Placement, frame_w, frame_h: u32) -> (uv: [4]f32, ok: bool) {
+	if placement == nil || frame_w == 0 || frame_h == 0 || placement.src_w == 0 || placement.src_h == 0 ||
+		placement.src_x >= frame_w || placement.src_y >= frame_h {
+		return {}, false
+	}
+	src_w := min(placement.src_w, frame_w - placement.src_x)
+	src_h := min(placement.src_h, frame_h - placement.src_y)
+	if src_w == 0 || src_h == 0 do return {}, false
+	return [4]f32{
+		f32(placement.src_x) / f32(frame_w),
+		f32(placement.src_y) / f32(frame_h),
+		f32(placement.src_x + src_w) / f32(frame_w),
+		f32(placement.src_y + src_h) / f32(frame_h),
+	}, true
+}
+
+_image_clip_for_pane :: proc(r: ^Renderer, pane: ^Pane_Viewport) -> [4]f32 {
+	if r == nil || pane == nil do return {}
+	clip := [4]f32{pane.x, pane.y, pane.x + pane.w, pane.y + pane.h}
+	if pane.clip_rect[2] > pane.clip_rect[0] && pane.clip_rect[3] > pane.clip_rect[1] {
+		clip = {max(clip[0], pane.clip_rect[0]), max(clip[1], pane.clip_rect[1]), min(clip[2], pane.clip_rect[2]), min(clip[3], pane.clip_rect[3])}
+	}
+	if r.screen_w > 0 && r.screen_h > 0 {
+		clip = {max(clip[0], f32(0)), max(clip[1], f32(0)), min(clip[2], r.screen_w), min(clip[3], r.screen_h)}
+	}
+	if r.surface_w > 0 && r.surface_h > 0 {
+		clip = {max(clip[0], f32(0)), max(clip[1], f32(0)), min(clip[2], f32(r.surface_w)), min(clip[3], f32(r.surface_h))}
+	}
+	return clip
+}
+
+_image_draw_precedes :: proc(a, b: Image_Draw) -> bool {
+	if a.z != b.z { return a.z < b.z }
+	if a.image_id != b.image_id { return a.image_id < b.image_id }
+	return a.placement_id < b.placement_id
+}
+
+_image_texture_cache_acquire :: proc(
+	r: ^Renderer,
+	namespace: u64,
+	image: ^graphics_pkg.Image_Slot,
+) -> (slot_index: int, ok: bool) {
+	if r == nil || image == nil || !image.used || namespace == 0 || r.backend == nil ||
+		r.backend.create_texture == nil || r.backend.create_texture_view == nil ||
+		r.backend.write_texture == nil || rawptr(r.image_bind_group_layout) == nil ||
+		r.backend.create_bind_group == nil || rawptr(r.instances.uniform_buffer) == nil ||
+		r.backend.create_sampler == nil || rawptr(r.instances.sampler) == nil {
+		return -1, false
+	}
+	if image.frame_count <= 0 || image.current_frame < 0 || image.current_frame >= image.frame_count {
+		return -1, false
+	}
+	frame := &image.frames[image.current_frame]
+	if frame.width <= 0 || frame.height <= 0 || frame.data == nil {
+		return -1, false
+	}
+	byte_count := u64(frame.width) * u64(frame.height) * u64(4)
+	if u64(len(frame.data)) < byte_count do return -1, false
+	key := Image_Texture_Key{graphics_namespace = namespace, image_id = image.id, generation = image.generation}
+	free_index := -1
+	oldest_index := -1
+	oldest_frame: u64 = 0
+	oldest_set := false
+	for i := 0; i < len(r.image_cache); i += 1 {
+		slot := &r.image_cache[i]
+		if !slot.used {
+			if free_index < 0 { free_index = i }
+			continue
+		}
+		if slot.key == key {
+			slot.last_seen_frame = r.frame_count
+			return i, true
+		}
+		if slot.key.graphics_namespace == namespace && slot.key.image_id == image.id {
+			_image_texture_cache_release_slot(r, slot)
+			if free_index < 0 { free_index = i }
+			continue
+		}
+		if !oldest_set || slot.last_seen_frame < oldest_frame {
+			oldest_frame = slot.last_seen_frame
+			oldest_index = i
+			oldest_set = true
+		}
+	}
+	if free_index < 0 { free_index = oldest_index }
+	if free_index < 0 do return -1, false
+	_image_texture_cache_release_slot(r, &r.image_cache[free_index])
+
+	texture := r.backend.create_texture(
+		r.device, u32(frame.width), u32(frame.height), .RGBA8_Unorm,
+		gpu.Gpu_Texture_Usage.Texture_Binding | gpu.Gpu_Texture_Usage.Copy_Dst,
+	)
+	if rawptr(texture) == nil do return -1, false
+	view := r.backend.create_texture_view(texture)
+	if rawptr(view) == nil {
+		r.backend.destroy_texture(texture)
+		return -1, false
+	}
+	entries := []gpu.Gpu_Bind_Entry{
+		{binding = 0, buffer = r.instances.uniform_buffer, offset = 0, size = size_of(instance.Uniform_Data), entry_type = .Buffer},
+		{binding = 1, view = view, entry_type = .Texture_View},
+		{binding = 2, sampler = r.instances.sampler, entry_type = .Sampler},
+	}
+	bind_group := r.backend.create_bind_group(r.device, r.image_bind_group_layout, entries)
+	if rawptr(bind_group) == nil {
+		r.backend.destroy_texture_view(view)
+		r.backend.destroy_texture(texture)
+		return -1, false
+	}
+	r.backend.write_texture(r.queue, texture, frame.data[:int(byte_count)], u32(frame.width), u32(frame.height))
+	r.image_cache[free_index] = Image_Texture_Cache_Slot{
+		used = true, key = key, texture = texture, view = view, bind_group = bind_group,
+		width = u32(frame.width), height = u32(frame.height), last_seen_frame = r.frame_count,
+	}
+	return free_index, true
+}
+
+_renderer_stage_images_for_pane :: proc(r: ^Renderer, pane: ^Pane_Viewport) -> bool {
+	if r == nil || pane == nil || pane.terminal == nil do return false
+	store := termgrid.terminal_graphics_active(pane.terminal)
+	if store == nil do return true
+	namespace := pane.terminal.graphics_namespace
+	if r.staged_graphics_store != nil && r.staged_graphics_store != store &&
+		r.staged_graphics_namespace == namespace {
+		_image_texture_cache_evict_namespace(r, namespace)
+	}
+	clip := _image_clip_for_pane(r, pane)
+	for i := 0; i < graphics_pkg.KGP_MAX_PLACEMENTS; i += 1 {
+		placement := &store.placements[i]
+		if !placement.used do continue
+		image := graphics_pkg.store_find_image(store, placement.image_id, placement.image_number)
+		if image == nil || !image.used || image.frame_count <= 0 || image.current_frame < 0 || image.current_frame >= image.frame_count do continue
+		frame := &image.frames[image.current_frame]
+		rect, rect_ok := _image_placement_rect(placement, r.cell_width, r.cell_height, u32(frame.width), u32(frame.height))
+		uv, uv_ok := _image_placement_uv(placement, u32(frame.width), u32(frame.height))
+		if !rect_ok || !uv_ok do continue
+		slot, slot_ok := _image_texture_cache_acquire(r, namespace, image)
+		if !slot_ok do return false
+		if r.image_count >= u32(len(r.image_instances)) do return false
+		index := r.image_count
+		r.image_instances[index] = instance.Instance_Data{
+			x = pane.x + rect[0], y = pane.y + rect[1], cw = rect[2], ch = rect[3],
+			u0 = uv[0], v0 = uv[1], u1 = uv[2], v1 = uv[3],
+			r = 1, g = 1, b = 1, a = clamp(pane.dim_factor, f32(0), f32(1)),
+		}
+		if !_clip_instance_rect(&r.image_instances[index], clip, true) do continue
+		draw := Image_Draw{used = true, placement_id = placement.placement_id, image_id = image.id, z = placement.z, cache_slot = slot, instance_index = index}
+		insert := int(r.image_count)
+		for insert > 0 && _image_draw_precedes(draw, r.image_draws[insert-1]) {
+			r.image_draws[insert] = r.image_draws[insert-1]
+			insert -= 1
+		}
+		r.image_draws[insert] = draw
+		r.image_count += 1
+	}
+	for i := 0; i < int(r.image_count); i += 1 {
+		if r.image_draws[i].z >= 0 {
+			r.image_under_count = u32(i)
+			break
+		}
+		if i == int(r.image_count)-1 { r.image_under_count = r.image_count }
+	}
+	r.staged_graphics_store = store
+	r.staged_graphics_namespace = namespace
+	r.staged_graphics_epoch = store.epoch
+	r.staged_graphics_placement_epoch = store.placement_epoch
+	r.staged_graphics_valid = true
+	return true
+}
+
+_renderer_stage_images_for_panes :: proc(r: ^Renderer, panes: []Pane_Viewport) -> bool {
+	if r == nil do return false
+	r.image_count = 0
+	r.image_under_count = 0
+	_image_texture_cache_evict_unseen(r)
+	for &pane in panes {
+		if !_renderer_stage_images_for_pane(r, &pane) do return false
+	}
+	return true
+}
+
+// renderer_image_focus_draw stages a focused image and its scrim. It runs on
+// the render thread after the event loop, so cache misses may upload through
+// the existing TG3 cache while event dispatch remains GPU-free.
+renderer_image_focus_draw :: proc(
+	r: ^Renderer,
+	focus: ^interaction.Image_Focus_State,
+	panes: []Pane_Viewport,
+	fallback_terminal: ^termgrid.Terminal = nil,
+) -> bool {
+	if r == nil do return false
+	r.image_focus_staged = false
+	r.image_focus_cache_slot = -1
+	if focus == nil || !focus.active do return true
+
+	found_store: ^graphics_pkg.Store = nil
+	found_image: ^graphics_pkg.Image_Slot = nil
+	for &pane in panes {
+		if pane.terminal == nil || pane.terminal.graphics_namespace != focus.namespace do continue
+		store := termgrid.terminal_graphics_active(pane.terminal)
+		image := graphics_pkg.store_find_image(store, focus.image_id, 0)
+		if store != nil && image != nil && image.used && image.generation == focus.generation {
+			found_store = store
+			found_image = image
+			break
+		}
+	}
+	if found_image == nil && fallback_terminal != nil && fallback_terminal.graphics_namespace == focus.namespace {
+		found_store = termgrid.terminal_graphics_active(fallback_terminal)
+		found_image = graphics_pkg.store_find_image(found_store, focus.image_id, 0)
+		if found_image == nil || !found_image.used || found_image.generation != focus.generation {
+			found_store = nil
+			found_image = nil
+		}
+	}
+	if found_store == nil || found_image == nil || found_image.frame_count <= 0 ||
+		found_image.current_frame < 0 || found_image.current_frame >= found_image.frame_count {
+		return true
+	}
+	frame := &found_image.frames[found_image.current_frame]
+	if frame.width <= 0 || frame.height <= 0 || len(frame.data) == 0 do return true
+	slot, slot_ok := _image_texture_cache_acquire(r, focus.namespace, found_image)
+	if !slot_ok do return false
+
+	focused := focus^
+	interaction.image_focus_clamp_for_view(&focused, r.screen_w, r.screen_h, f32(frame.width), f32(frame.height))
+	rect, rect_ok := interaction.image_focus_rect(focused, r.screen_w, r.screen_h, f32(frame.width), f32(frame.height))
+	if !rect_ok do return true
+	r.image_focus_instance = instance.Instance_Data{
+		x = rect[0], y = rect[1], cw = rect[2], ch = rect[3],
+		u0 = 0, v0 = 0, u1 = 1, v1 = 1,
+		r = 1, g = 1, b = 1, a = 1,
+	}
+	if !_clip_instance_rect(&r.image_focus_instance, {0, 0, r.screen_w, r.screen_h}, true) do return true
+	r.image_focus_cache_slot = slot
+	r.image_focus_staged = true
+
+	// The scrim is an Overlay-layer quad; the focused texture is emitted after
+	// all UI layers in _draw_instance_buffer, keeping the image above chrome.
+	renderer_ui_begin_layer(r, .Overlay)
+	renderer_ui_stage_bg(r, 0, 0, r.screen_w, r.screen_h, {0, 0, 0, 0.52})
+	r.ui_staged = true
+	return true
+}
+
+_renderer_stage_images_for_terminal :: proc(r: ^Renderer, terminal: ^termgrid.Terminal) -> bool {
+	if r == nil || terminal == nil do return false
+	r.image_count = 0
+	r.image_under_count = 0
+	_image_texture_cache_evict_unseen(r)
+	store := termgrid.terminal_graphics_active(terminal)
+	if store == nil do return true
+	if r.last_graphics_store != nil && r.last_graphics_store != store {
+		_image_texture_cache_evict_namespace(r, terminal.graphics_namespace)
+	}
+	pane := Pane_Viewport{
+		terminal = terminal, x = r.pad_x, y = r.pad_y,
+		w = max(r.screen_w - r.pad_x, f32(0)), h = max(r.screen_h - r.pad_y, f32(0)),
+		rows = terminal.grid.row_count, cols = terminal.grid.col_count, dim_factor = 1,
+	}
+	ok := _renderer_stage_images_for_pane(r, &pane)
+	r.staged_graphics_store = store
+	r.staged_graphics_namespace = terminal.graphics_namespace
+	r.staged_graphics_epoch = store.epoch
+	r.staged_graphics_placement_epoch = store.placement_epoch
+	r.staged_graphics_valid = true
+	return ok
+}
+
+_renderer_graphics_changed :: proc(r: ^Renderer, terminal: ^termgrid.Terminal) -> bool {
+	if r == nil || terminal == nil do return false
+	store := termgrid.terminal_graphics_active(terminal)
+	if store == nil { return r.last_graphics_valid }
+	if !r.last_graphics_valid {
+		return store.image_count > 0 || store.placement_count > 0 || store.epoch != 0 || store.placement_epoch != 0
+	}
+	return r.last_graphics_store != store ||
+		r.last_graphics_namespace != terminal.graphics_namespace ||
+		r.last_graphics_epoch != store.epoch || r.last_graphics_placement_epoch != store.placement_epoch
+}
+
+_renderer_terminal_has_graphics :: proc(r: ^Renderer, terminal: ^termgrid.Terminal) -> bool {
+	if terminal == nil do return false
+	store := termgrid.terminal_graphics_active(terminal)
+	return _renderer_graphics_changed(r, terminal) || (store != nil && (store.image_count > 0 || store.placement_count > 0))
 }
 
 // renderer_frame_panes processes a multi-pane layout into a single frame.
@@ -699,6 +1186,9 @@ renderer_frame_panes :: proc(
 	}
 
 	r.dirty.armed = false
+	if !_renderer_stage_images_for_panes(r, panes) {
+		return false
+	}
 	bg_count, glyph_count, emoji_count, decor_count := _prepare_pane_instances_v2(r, lut_ptr, panes, compiled_panes)
 
 	when ODIN_OS == .Darwin {
@@ -717,12 +1207,12 @@ renderer_frame_panes :: proc(
 	if !ok {
 		return false
 	}
-	if !_renderer_upload_instances(r, bg_count + glyph_count + decor_count, &frame) {
+	if !_renderer_upload_instances(r, bg_count + glyph_count + decor_count, &frame, r.image_count) {
 		_renderer_surface_abort(r, &frame)
 		return false
 	}
 	decor_offset := u64(bg_count + glyph_count) * instance.INSTANCE_STRIDE
-	if !_draw_instance_buffer(r, &frame, frame.cursor_buffer, bg_count, glyph_count, u64(bg_count) * instance.INSTANCE_STRIDE, emoji_count, false, decor_count, decor_offset) {
+	if !_draw_instance_buffer(r, &frame, frame.cursor_buffer, bg_count, glyph_count, u64(bg_count) * instance.INSTANCE_STRIDE, emoji_count, false, decor_count, decor_offset, true, r.image_under_count, r.image_count - r.image_under_count) {
 		_renderer_surface_abort(r, &frame)
 		return false
 	}
@@ -814,16 +1304,43 @@ _renderer_visual_background_color :: proc(base_bg: u32) -> u32 {
 	return (a << 24) | (new_r << 16) | (new_g << 8) | new_b
 }
 
-_renderer_theme_clear_color :: proc(theme: termgrid.Theme, visual_mode: bool = false) -> [4]f64 {
+_renderer_default_background_alpha :: proc(argb: u32, opacity: f32) -> f32 {
+	normalized_opacity := clamp(opacity, f32(0), f32(1))
+	return f32((argb >> 24) & 0xFF) / 255.0 * normalized_opacity
+}
+
+_renderer_theme_clear_color :: proc(theme: termgrid.Theme, visual_mode: bool = false, opacity: f32 = 1.0) -> [4]f64 {
 	argb := theme.background
 	if visual_mode {
 		argb = _renderer_visual_background_color(theme.background)
 	}
+	// The drawable is composited as premultiplied alpha. Instance blending
+	// adds straight-source glyphs over this premultiplied destination.
+	alpha := f64(_renderer_default_background_alpha(argb, opacity))
 	return [4]f64{
-		f64((argb >> 16) & 0xFF) / 255.0,
-		f64((argb >> 8) & 0xFF) / 255.0,
-		f64(argb & 0xFF) / 255.0,
-		f64((argb >> 24) & 0xFF) / 255.0,
+		f64((argb >> 16) & 0xFF) / 255.0 * alpha,
+		f64((argb >> 8) & 0xFF) / 255.0 * alpha,
+		f64(argb & 0xFF) / 255.0 * alpha,
+		alpha,
+	}
+}
+
+// _renderer_sync_bg_opacity pushes the effective default-background alpha into
+// the fullscreen and tiled-compute params uniforms, rewriting only on change.
+_renderer_sync_bg_opacity :: proc(r: ^Renderer, theme_background: u32) {
+	if r == nil {
+		return
+	}
+	effective_opacity := _renderer_default_background_alpha(theme_background, r.background_opacity)
+	if r.fullscreen.bg_opacity != effective_opacity || r.fullscreen.cell_opacity != r.background_opacity {
+		r.fullscreen.cell_opacity = r.background_opacity
+		r.fullscreen.bg_opacity = effective_opacity
+		fullscreen.fullscreen_write_params(&r.fullscreen)
+	}
+	if r.compute_tiles.bg_opacity != effective_opacity || r.compute_tiles.cell_opacity != r.background_opacity {
+		r.compute_tiles.cell_opacity = r.background_opacity
+		r.compute_tiles.bg_opacity = effective_opacity
+		tile.compute_tile_write_params(&r.compute_tiles)
 	}
 }
 
@@ -864,7 +1381,7 @@ _renderer_has_pending_work :: proc(
 		return false
 	}
 	if r.first_frame_pending || r.full_redraw_pending || r.atlas.gpu_dirty || r.fallback_pending ||
-		_renderer_view_changed(r, view) || r.ui_staged || r.interaction_staged {
+		_renderer_view_changed(r, view) || _renderer_graphics_changed(r, terminal) || r.ui_staged || r.interaction_staged {
 		return true
 	}
 	for row in terminal.damage.dirty_rows {
@@ -907,13 +1424,39 @@ _renderer_surface_begin :: proc(r: ^Renderer) -> (frame: Render_Frame_Transactio
 	frame.view = view
 	frame.format = format
 	frame.encoder = encoder
+	frame.drawable_outstanding = true
 	frame.state = .Acquired
 	return frame, true
+}
+
+// _surface_abort_note surfaces the first few abandoned frames. A run of aborts
+// is the precondition for drawable pool exhaustion, which shows up as a window
+// that never recovers, so it must not pass silently.
+@(private)
+_renderer_note_surface_abort :: proc(count: u32) {
+	if count <= 5 {
+		diag.diag_warn("renderer: surface frame abandoned (#%d); its drawable was handed back to the layer without being drawn into", count)
+	}
 }
 
 _renderer_surface_abort :: proc(r: ^Renderer, frame: ^Render_Frame_Transaction) {
 	if frame == nil || frame.state == .Released || frame.state == .Aborted {
 		return
+	}
+	// A frame that never reaches present still holds the drawable it acquired in
+	// _renderer_surface_begin, and CAMetalLayer only returns a drawable to its
+	// pool once that drawable has been presented. release_surface_texture frees
+	// only the wrapper structs, not the drawable, so an abandoned frame used to
+	// consume one of the layer's few pool slots permanently. Once those are gone
+	// nextDrawable() blocks with no way out, which is what turned a transient
+	// render failure into a permanently frozen window. Present it here so the slot
+	// returns to the pool; the frame was never drawn into, so the presented content
+	// is simply the previous one.
+	if frame.drawable_outstanding && r != nil && r.backend != nil && r.backend.present_surface != nil && rawptr(r.surface) != nil {
+		frame.drawable_outstanding = false
+		r.surface_reclaims += 1
+		_renderer_note_surface_abort(r.surface_reclaims)
+		_ = r.backend.present_surface(rawptr(r.surface))
 	}
 	if r != nil && r.backend != nil && !frame.command_released && frame.command_buffer != nil {
 		r.backend.release_command_buffer(frame.command_buffer)
@@ -970,6 +1513,10 @@ _renderer_surface_commit :: proc(r: ^Renderer, frame: ^Render_Frame_Transaction)
 		r.unlock_cb(r.unlock_data)
 	}
 	
+	// The drawable is handed back to the layer here. The flag is cleared BEFORE
+	// the call so that a present which fails does not get retried from the abort
+	// path; the attempt itself is what returns the drawable to the pool.
+	frame.drawable_outstanding = false
 	if !r.backend.present_surface(rawptr(r.surface)) {
 		_renderer_surface_abort(r, frame)
 		return false
@@ -987,9 +1534,10 @@ _renderer_surface_commit :: proc(r: ^Renderer, frame: ^Render_Frame_Transaction)
 	return true
 }
 
-_renderer_upload_instances :: proc(r: ^Renderer, base_count: u32, frame: ^Render_Frame_Transaction) -> bool {
+_renderer_upload_instances :: proc(r: ^Renderer, base_count: u32, frame: ^Render_Frame_Transaction, image_count: u32 = 0) -> bool {
 	if r == nil || frame == nil { return false }
 	count := u64(base_count)
+	focus_count: u64 = 1 if r.image_focus_staged else 0
 	cursor_count: u64 = 0
 	if r.cursor_staged { cursor_count = 1 }
 	interaction_count: u64 = 0
@@ -1004,7 +1552,7 @@ _renderer_upload_instances :: proc(r: ^Renderer, base_count: u32, frame: ^Render
 	if r.ui_staged {
 		ui_instances = (renderer_ui_layer_plan(r, 0, &ui_runs)) / instance.INSTANCE_STRIDE
 	}
-	total := count + cursor_count + interaction_count + scrollbar_count + ui_instances
+	total := count + u64(image_count) + focus_count + cursor_count + interaction_count + scrollbar_count + ui_instances
 	byte_count := total * instance.INSTANCE_STRIDE
 	upload := upload_ring_begin(&r.upload_ring)
 	if !upload.reserved { return false }
@@ -1019,6 +1567,10 @@ _renderer_upload_instances :: proc(r: ^Renderer, base_count: u32, frame: ^Render
 	}
 	frame.cursor_buffer = gpu.Gpu_Buffer(nil)
 	frame.cursor_offset = 0
+	frame.image_offset = 0
+	frame.image_count = image_count
+	frame.focus_image_offset = 0
+	frame.focus_image_count = u32(focus_count)
 	frame.interaction_offset = 0
 	frame.interaction_count = 0
 	frame.scrollbar_offset = 0
@@ -1031,6 +1583,21 @@ _renderer_upload_instances :: proc(r: ^Renderer, base_count: u32, frame: ^Render
 	}
 
 	offset := int(count * instance.INSTANCE_STRIDE)
+	if image_count > 0 {
+		if image_count > u32(len(r.image_instances)) {
+			upload_ring_abort(&r.upload_ring, &frame.upload)
+			return false
+		}
+		frame.image_offset = u64(offset)
+		bytes := int(u64(image_count) * instance.INSTANCE_STRIDE)
+		mem.copy(raw_data(staging[offset:]), raw_data(r.image_instances[:]), bytes)
+		offset += bytes
+	}
+	if focus_count > 0 {
+		frame.focus_image_offset = u64(offset)
+		mem.copy(raw_data(staging[offset:]), &r.image_focus_instance, int(instance.INSTANCE_STRIDE))
+		offset += int(instance.INSTANCE_STRIDE)
+	}
 	if cursor_count > 0 {
 		slot := r.instances.max_instances - 1
 		if slot >= u32(len(r.instances.instance_data)) {
@@ -1189,6 +1756,7 @@ _prepare_instances_v2 :: proc(
 			cells[idx], lut, atlas, x, y, cell_w, cell_h,
 			&inst.instance_data[bg_count], nil,
 			direct_color = dc,
+			background_opacity = r.background_opacity,
 		)
 		if emit_bg {
 			bg_count += 1
@@ -1223,6 +1791,7 @@ _prepare_instances_v2 :: proc(
 			emoji_atlas_ptr,
 			store,
 			direct_color = dc,
+			background_opacity = r.background_opacity,
 		)
 		if emit_emoji {
 			emoji_count += 1
@@ -1248,6 +1817,7 @@ _prepare_instances_v2 :: proc(
 			nil, nil, nil, nil, nil,
 			&inst.instance_data[decor_idx],
 			direct_color = dc,
+			background_opacity = r.background_opacity,
 		)
 		if emit_decor {
 			decor_count += 1
@@ -1288,11 +1858,58 @@ _renderer_frame_published :: proc(r: ^Renderer, view: ^termgrid.Terminal_View = 
 	r.last_view = view
 	r.last_view_fingerprint = _renderer_view_fingerprint(view)
 	r.last_view_valid = true
+	if r.staged_graphics_valid {
+		r.last_graphics_store = r.staged_graphics_store
+		r.last_graphics_namespace = r.staged_graphics_namespace
+		r.last_graphics_epoch = r.staged_graphics_epoch
+		r.last_graphics_placement_epoch = r.staged_graphics_placement_epoch
+		r.last_graphics_valid = true
+		r.staged_graphics_valid = false
+	}
+	r.image_count = 0
+	r.image_under_count = 0
+	r.image_focus_staged = false
+	r.image_focus_cache_slot = -1
+}
+
+_draw_image_range :: proc(r: ^Renderer, frame: ^Render_Frame_Transaction, start, count: u32) -> bool {
+	if count == 0 do return true
+	if r == nil || frame == nil || r.backend == nil || rawptr(frame.pass) == nil ||
+		rawptr(r.image_pipeline) == nil || rawptr(frame.cursor_buffer) == nil {
+		return false
+	}
+	if start + count > r.image_count do return false
+	for i in start ..< start + count {
+		draw := r.image_draws[i]
+		if !draw.used || draw.cache_slot < 0 || draw.cache_slot >= len(r.image_cache) do return false
+		slot := &r.image_cache[draw.cache_slot]
+		if !slot.used || rawptr(slot.bind_group) == nil do return false
+		r.backend.render_set_pipeline(frame.pass, r.image_pipeline)
+		r.backend.render_set_bind_group(frame.pass, 0, slot.bind_group)
+		r.backend.render_set_vertex_buffer(frame.pass, 0, frame.cursor_buffer, frame.image_offset + u64(draw.instance_index) * instance.INSTANCE_STRIDE)
+		r.backend.render_draw(frame.pass, instance.QUAD_VERTEX_COUNT, 1)
+	}
+	return true
 }
 
 // _draw_instance_buffer encodes bg, glyph, and optional cursor draws into the
 // transaction's single render pass. It does not finish, submit, present, or
 // release the acquired surface.
+_draw_image_focus :: proc(r: ^Renderer, frame: ^Render_Frame_Transaction) -> bool {
+	if r == nil || frame == nil || !r.image_focus_staged || frame.focus_image_count == 0 do return true
+	if r.backend == nil || rawptr(frame.pass) == nil || rawptr(r.image_pipeline) == nil ||
+		r.image_focus_cache_slot < 0 || r.image_focus_cache_slot >= len(r.image_cache) {
+		return false
+	}
+	slot := &r.image_cache[r.image_focus_cache_slot]
+	if !slot.used || rawptr(slot.bind_group) == nil do return false
+	r.backend.render_set_pipeline(frame.pass, r.image_pipeline)
+	r.backend.render_set_bind_group(frame.pass, 0, slot.bind_group)
+	r.backend.render_set_vertex_buffer(frame.pass, 0, frame.cursor_buffer, frame.focus_image_offset)
+	r.backend.render_draw(frame.pass, instance.QUAD_VERTEX_COUNT, 1)
+	return true
+}
+
 _draw_instance_buffer :: proc(
 	r: ^Renderer,
 	frame: ^Render_Frame_Transaction,
@@ -1304,15 +1921,22 @@ _draw_instance_buffer :: proc(
 	visual_mode: bool = false,
 	decor_count: u32 = 0,
 	decor_offset: u64 = 0,
+	transparent_clear: bool = false,
+	image_under_count: u32 = 0,
+	image_over_count: u32 = 0,
 ) -> bool {
 	if r == nil || frame == nil || frame.state != .Acquired || rawptr(frame.encoder) == nil {
 		return false
 	}
 	instance.instance_renderer_upload_uniforms(&r.instances)
-	pass := r.backend.begin_render_pass(frame.encoder, frame.view, _renderer_theme_clear_color(r.theme, visual_mode), .Clear)
+	clear_color := _renderer_theme_clear_color(r.theme, visual_mode, r.background_opacity)
+	if transparent_clear {
+		clear_color = {}
+	}
+	pass := r.backend.begin_render_pass(frame.encoder, frame.view, clear_color, .Clear)
 	if rawptr(pass) == nil { return false }
 	frame.pass = pass
-	ok := true
+	ok := _draw_image_range(r, frame, 0, image_under_count)
 	if bg_count > 0 || glyph_count > 0 || decor_count > 0 {
 		ok = rawptr(buffer) != nil && rawptr(r.instances.bg_pipeline) != nil && rawptr(r.instances.glyph_pipeline) != nil &&
 			rawptr(r.instances.bind_group_bg) != nil && rawptr(r.instances.bind_group_glyph) != nil
@@ -1351,6 +1975,7 @@ _draw_instance_buffer :: proc(
 			}
 		}
 	}
+	if ok { ok = _draw_image_range(r, frame, image_under_count, image_over_count) }
 	if ok { ok = _draw_cursor_overlay(r, frame) }
 	if ok && frame.scrollbar_count > 0 {
 		r.backend.render_set_pipeline(pass, r.instances.bg_pipeline)
@@ -1374,6 +1999,7 @@ _draw_instance_buffer :: proc(
 			r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, frame.ui_glyph_count[layer])
 		}
 	}
+	if ok { ok = _draw_image_focus(r, frame) }
 	r.backend.end_render_pass(pass)
 	frame.pass = gpu.Gpu_RenderPassEncoder(nil)
 	if !ok { return false }
@@ -1445,7 +2071,8 @@ _renderer_frame_v2_journal :: proc(
 	view_changed: bool = false,
 ) -> bool {
 	has_damage := _renderer_journal_has_damage(journal)
-	force_full := r.full_redraw_pending || view_changed || (view != nil && (view.scrollback_offset != 0 || view.selection.active)) || len(journal.scroll_ops) > 0
+	force_full := r.full_redraw_pending || view_changed || _renderer_graphics_changed(r, terminal) ||
+		(view != nil && (view.scrollback_offset != 0 || view.selection.active)) || len(journal.scroll_ops) > 0
 	alt_screen_changed := r.last_is_alt_screen != terminal.is_alt_screen
 	if alt_screen_changed {
 		r.last_is_alt_screen = terminal.is_alt_screen
@@ -1476,6 +2103,10 @@ _renderer_frame_v2_journal :: proc(
 		lut.bg_r5g6b5[0] = color_to_r5g6b5(terminal.grid.style_table.theme.background)
 	}
 
+	if !_renderer_stage_images_for_terminal(r, terminal) {
+		return _renderer_frame_unavailable(r, terminal, journal, .Instance)
+	}
+
 	if !force_full && len(journal.scroll_ops) == 0 && r.dirty.mirror != nil && !r.ui_staged && !r.interaction_staged {
 		if !r.dirty.armed {
 			render_compile_full_v2(&r.compiled_v2, terminal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster, view)
@@ -1498,10 +2129,10 @@ _renderer_frame_v2_journal :: proc(
 			n := u32(int(r.rows) * int(r.cols))
 			frame, ok := _renderer_surface_begin(r)
 			if !ok { return _renderer_frame_failed(r, terminal, journal, &frame, .Instance) }
-			if r.cursor_staged && !_renderer_upload_instances(r, 0, &frame) {
+			if (r.cursor_staged || r.image_count > 0) && !_renderer_upload_instances(r, 0, &frame, r.image_count) {
 				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
 			}
-			if !_draw_instance_buffer(r, &frame, r.dirty.buffer, n, n, u64(n) * instance.INSTANCE_STRIDE, emoji_count = n) {
+			if !_draw_instance_buffer(r, &frame, r.dirty.buffer, n, n, u64(n) * instance.INSTANCE_STRIDE, emoji_count = n, image_under_count = r.image_under_count, image_over_count = r.image_count - r.image_under_count) {
 				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
 			}
 			if !_renderer_surface_commit(r, &frame) {
@@ -1531,11 +2162,11 @@ _renderer_frame_v2_journal :: proc(
 	}
 	frame, ok := _renderer_surface_begin(r)
 	if !ok { return _renderer_frame_failed(r, terminal, journal, &frame, .Instance) }
-	if !_renderer_upload_instances(r, bg_count + glyph_count + decor_count, &frame) {
+	if !_renderer_upload_instances(r, bg_count + glyph_count + decor_count, &frame, r.image_count) {
 		return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
 	}
 	decor_offset := u64(bg_count + glyph_count) * instance.INSTANCE_STRIDE
-	if !_draw_instance_buffer(r, &frame, frame.cursor_buffer, bg_count, glyph_count, u64(bg_count) * instance.INSTANCE_STRIDE, emoji_count, is_visual, decor_count, decor_offset) {
+	if !_draw_instance_buffer(r, &frame, frame.cursor_buffer, bg_count, glyph_count, u64(bg_count) * instance.INSTANCE_STRIDE, emoji_count, is_visual, decor_count, decor_offset, false, r.image_under_count, r.image_count - r.image_under_count) {
 		return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
 	}
 	if !_renderer_surface_commit(r, &frame) {
@@ -1580,10 +2211,19 @@ renderer_set_strategy :: proc(r: ^Renderer, s: Render_Strategy) {
 	}
 }
 
+_renderer_terminal_has_direct_color :: proc(terminal: ^termgrid.Terminal) -> bool {
+	if terminal == nil do return false
+	for &row in terminal.grid.rows {
+		if .Direct_Color in row.ext.channels do return true
+	}
+	return false
+}
+
 // _renderer_frame_compute_journal owns one journal and one shared encoder for
 // dispatch, blit, optional cursor composition, and publication.
 _renderer_frame_compute_journal :: proc(r: ^Renderer, terminal: ^termgrid.Terminal, journal: ^termgrid.Damage_Journal, lut: ^Style_LUT) -> bool {
-	if r.strategy != .Compute_Tiles || !r.compute_tiles.available || r.tile_map.bits == nil {
+	if r.strategy != .Compute_Tiles || !r.compute_tiles.available || r.tile_map.bits == nil ||
+		_renderer_terminal_has_direct_color(terminal) || _renderer_terminal_has_graphics(r, terminal) {
 		return _renderer_frame_v2_journal(r, terminal, journal, lut)
 	}
 	if !_renderer_journal_has_damage(journal) {
@@ -1593,6 +2233,7 @@ _renderer_frame_compute_journal :: proc(r: ^Renderer, terminal: ^termgrid.Termin
 	if r.backend == nil || rawptr(r.device) == nil || rawptr(r.queue) == nil || lut == nil {
 		return _renderer_frame_unavailable(r, terminal, journal, .Compute_Tiles)
 	}
+	_renderer_sync_bg_opacity(r, terminal.grid.style_table.theme.background)
 	lut_rebuilt := _style_lut_needs_rebuild(lut, &terminal.grid.style_table)
 	if lut_rebuilt { style_lut_rebuild(lut, &terminal.grid.style_table) }
 	tile.tile_map_clear(&r.tile_map)
@@ -1658,7 +2299,8 @@ renderer_frame_compute :: proc(r: ^Renderer, terminal: ^termgrid.Terminal, lut: 
 // _renderer_frame_fullscreen_journal owns one journal and one shared encoder
 // for the fullscreen shade, optional cursor composition, and publication.
 _renderer_frame_fullscreen_journal :: proc(r: ^Renderer, terminal: ^termgrid.Terminal, journal: ^termgrid.Damage_Journal, lut: ^Style_LUT) -> bool {
-	if r.strategy != .Fullscreen || !r.fullscreen.available {
+	if r.strategy != .Fullscreen || !r.fullscreen.available || _renderer_terminal_has_direct_color(terminal) ||
+		_renderer_terminal_has_graphics(r, terminal) {
 		return _renderer_frame_v2_journal(r, terminal, journal, lut)
 	}
 	if !_renderer_journal_has_damage(journal) {
@@ -1669,6 +2311,7 @@ _renderer_frame_fullscreen_journal :: proc(r: ^Renderer, terminal: ^termgrid.Ter
 	if r.backend == nil || rawptr(r.device) == nil || rawptr(r.queue) == nil || lut == nil {
 		return _renderer_frame_unavailable(r, terminal, journal, .Fullscreen)
 	}
+	_renderer_sync_bg_opacity(r, terminal.grid.style_table.theme.background)
 	lut_rebuilt := _style_lut_needs_rebuild(lut, &terminal.grid.style_table)
 	if lut_rebuilt { style_lut_rebuild(lut, &terminal.grid.style_table) }
 	if len(journal.scroll_ops) > 0 {
@@ -1880,6 +2523,17 @@ _prepare_pane_style_clip :: proc(lut: ^Style_LUT, p: ^Pane_Viewport) -> [4]f32 {
 	return clip
 }
 
+// _apply_pane_dim fades an inactive pane's text-family quad (glyph, emoji,
+// decoration) by scaling its alpha. Background quads are deliberately left
+// untouched: the pane background is the terminal surface as authored, and
+// multiplying its RGB would darken the surface while leaving its translucency
+// intact, which makes faded text harder to read over a light desktop instead of
+// letting it recede. Matches kitty's inactive_text_alpha uniform.
+_apply_pane_dim :: proc(inst: ^instance.Instance_Data, dim: f32) {
+	if inst == nil || dim >= 1.0 do return
+	inst.a *= dim
+}
+
 _prepare_pane_instances_v2 :: proc(
 	r:              ^Renderer,
 	lut:            ^Style_LUT,
@@ -1905,14 +2559,15 @@ _prepare_pane_instances_v2 :: proc(
 		clip := _prepare_pane_style_clip(lut, p)
 		cells := compiled_panes[i].cells
 		cols := i32(p.cols)
-		dim := p.dim_factor
 		// Empty/default cells intentionally emit no quad. Fill the viewport
-		// first so every pane retains its own theme and dimmed background.
+		// first so every pane retains its own theme background. The background
+		// is never dimmed: see _apply_pane_dim.
 		if bg_count < grid_limit {
 			red, green, blue := instance.unpack_r5g6b5(lut.bg_r5g6b5[0])
+			background_alpha := _renderer_default_background_alpha(p.terminal.grid.style_table.theme.background, r.background_opacity)
 			inst.instance_data[bg_count] = instance.Instance_Data{
 				x = p.x, y = p.y, cw = p.w, ch = p.h,
-				r = red * dim, g = green * dim, b = blue * dim, a = 1,
+				r = red, g = green, b = blue, a = background_alpha,
 			}
 			if _clip_instance_rect(&inst.instance_data[bg_count], clip, false) { bg_count += 1 }
 		}
@@ -1929,13 +2584,9 @@ _prepare_pane_instances_v2 :: proc(
 				cells[idx], lut, atlas, x, y, cell_w, cell_h,
 				&inst.instance_data[bg_count], nil,
 				direct_color = dc,
+			background_opacity = r.background_opacity,
 			)
 			if emit_bg && _clip_instance_rect(&inst.instance_data[bg_count], clip, false) {
-				if dim < 1.0 {
-					inst.instance_data[bg_count].r *= dim
-					inst.instance_data[bg_count].g *= dim
-					inst.instance_data[bg_count].b *= dim
-				}
 				bg_count += 1
 			}
 		}
@@ -1975,20 +2626,13 @@ _prepare_pane_instances_v2 :: proc(
 				emoji_atlas_ptr,
 				&p.terminal.grapheme_store,
 				direct_color = dc,
+			background_opacity = r.background_opacity,
 			)
 			if emit_emoji && emoji_inst_ptr != nil && _clip_instance_rect(emoji_inst_ptr, clip, true) {
-				if dim < 1.0 && emoji_inst_ptr != nil {
-					emoji_inst_ptr.r *= dim
-					emoji_inst_ptr.g *= dim
-					emoji_inst_ptr.b *= dim
-				}
+				_apply_pane_dim(emoji_inst_ptr, dim)
 				emoji_count += 1
 			} else if emit_glyph && _clip_instance_rect(&inst.instance_data[glyph_idx], clip, true) {
-				if dim < 1.0 {
-					inst.instance_data[glyph_idx].r *= dim
-					inst.instance_data[glyph_idx].g *= dim
-					inst.instance_data[glyph_idx].b *= dim
-				}
+				_apply_pane_dim(&inst.instance_data[glyph_idx], dim)
 				glyph_count += 1
 			}
 		}
@@ -2017,13 +2661,10 @@ _prepare_pane_instances_v2 :: proc(
 				nil, nil, nil, nil, nil,
 				&inst.instance_data[decor_idx],
 				direct_color = dc,
+			background_opacity = r.background_opacity,
 			)
 			if emit_decor && _clip_instance_rect(&inst.instance_data[decor_idx], clip, false) {
-				if dim < 1.0 {
-					inst.instance_data[decor_idx].r *= dim
-					inst.instance_data[decor_idx].g *= dim
-					inst.instance_data[decor_idx].b *= dim
-				}
+				_apply_pane_dim(&inst.instance_data[decor_idx], dim)
 				decor_count += 1
 			}
 		}

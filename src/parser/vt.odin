@@ -10,6 +10,7 @@ Parser_State :: enum u8 {
 	OSC,
 	DCS,
 	Utf8,
+	APC,
 }
 
 // Action is the action to perform on a state transition.
@@ -31,6 +32,9 @@ Action :: enum u8 {
 	DcsUnhook,
 	Utf8,
 	Error,
+	ApcStart,
+	ApcPut,
+	ApcEnd,
 }
 
 // Transition is a state transition (action + next state).
@@ -198,7 +202,7 @@ init_transition_table :: proc() -> [len(Parser_State)][256]Transition {
 	table[1][0x5C] = Transition{.EscDispatch, .Ground}
 	table[1][0x5D] = Transition{.OscStart, .OSC} // OSC
 	table[1][0x5E] = Transition{.Ignore, .Ground} // PM
-	table[1][0x5F] = Transition{.Ignore, .Ground} // APC
+	table[1][0x5F] = Transition{.ApcStart, .APC} // APC
 	for byte in 0x60..=0x7E {
 		table[1][byte] = Transition{.EscDispatch, .Ground}
 	}
@@ -353,6 +357,28 @@ init_transition_table :: proc() -> [len(Parser_State)][256]Transition {
 	}
 	for byte in 0xC0..=0xFF {
 		table[7][byte] = Transition{.Utf8, .Utf8} // new lead byte
+	}
+	
+	// APC state
+	for byte in 0x00..=0x17 {
+		table[8][byte] = Transition{.Ignore, .APC}
+	}
+	table[8][0x18] = Transition{.Ignore, .Ground} // CAN
+	table[8][0x19] = Transition{.Ignore, .APC} // EM
+	table[8][0x1A] = Transition{.Ignore, .Ground} // SUB
+	for byte in 0x1C..=0x1F {
+		table[8][byte] = Transition{.Ignore, .APC}
+	}
+	table[8][0x1B] = Transition{.Ignore, .APC} // ESC (start of ST)
+	for byte in 0x20..=0x7E {
+		table[8][byte] = Transition{.ApcPut, .APC}
+	}
+	table[8][0x7F] = Transition{.Ignore, .APC} // DEL
+	table[8][0x9C] = Transition{.ApcEnd, .Ground} // ST
+	for byte in 0x80..=0xFF {
+		if byte != 0x9C {
+			table[8][byte] = Transition{.ApcPut, .APC}
+		}
 	}
 	
 	return table

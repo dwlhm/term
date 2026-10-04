@@ -160,6 +160,28 @@ _expr_to_lit_text :: proc(expr: ^odin_ast.Expr) -> (string, bool) {
 	return "", false
 }
 
+// _expr_to_signed_lit_text is _expr_to_lit_text plus a leading unary minus, so
+// `key = -1` reaches the numeric parsers instead of being dropped as an
+// unhandled Unary_Expr and silently leaving the field at its default.
+@(private="file")
+_expr_to_signed_lit_text :: proc(expr: ^odin_ast.Expr) -> (string, bool) {
+	if expr == nil {
+		return "", false
+	}
+	if lit, ok := _expr_to_lit_text(expr); ok {
+		return lit, true
+	}
+	if u, uok := expr.derived.(^odin_ast.Unary_Expr); uok && u.op.kind == .Sub {
+		if lit, ok := _expr_to_lit_text(u.expr); ok {
+			neg := strings.builder_make(context.temp_allocator)
+			strings.write_byte(&neg, '-')
+			strings.write_string(&neg, lit)
+			return strings.to_string(neg), true
+		}
+	}
+	return "", false
+}
+
 @(private="file")
 _parse_u32 :: proc(text: string) -> (u32, bool) {
 	s := strings.trim_space(text)
@@ -211,10 +233,10 @@ _parse_int :: proc(text: string) -> (int, bool) {
 @(private="file")
 _parse_bool :: proc(text: string) -> (bool, bool) {
 	s := strings.to_lower(strings.trim_space(text), context.temp_allocator)
-	if s == "true" || s == "1" || s == "yes" {
+	if s == "true" || s == "1" || s == "yes" || s == "on" {
 		return true, true
 	}
-	if s == "false" || s == "0" || s == "no" {
+	if s == "false" || s == "0" || s == "no" || s == "off" {
 		return false, true
 	}
 	return false, false
@@ -358,16 +380,18 @@ _apply_key_value :: proc(cfg: ^Config, key: string, val_expr: ^odin_ast.Expr) {
 				cfg.tab_max_title_len = v
 			}
 		}
-	case "window_opacity", "opacity":
-		if lit, ok := _expr_to_lit_text(val_expr); ok {
+	case "opacity", "background_opacity", "window_opacity", "bg_opacity":
+		if lit, ok := _expr_to_signed_lit_text(val_expr); ok {
 			if v, vok := _parse_f32(lit); vok {
-				cfg.window_opacity = clamp(v, 0.1, 1.0)
+				cfg.opacity = clamp(v, CONFIG_NORMALIZED_MIN, CONFIG_NORMALIZED_MAX)
 			}
 		}
 	case "window_blur", "blur":
-		if lit, ok := _expr_to_lit_text(val_expr); ok {
-			if v, vok := _parse_bool(lit); vok {
-				cfg.window_blur = v
+		if lit, ok := _expr_to_signed_lit_text(val_expr); ok {
+			if v, vok := _parse_f32(lit); vok {
+				cfg.window_blur = clamp(v, CONFIG_NORMALIZED_MIN, CONFIG_NORMALIZED_MAX)
+			} else if enabled, bok := _parse_bool(lit); bok {
+				cfg.window_blur = enabled ? CONFIG_NORMALIZED_MAX : CONFIG_NORMALIZED_MIN
 			}
 		}
 	case "allow_screensaver", "screensaver", "enable_screensaver":
@@ -375,6 +399,35 @@ _apply_key_value :: proc(cfg: ^Config, key: string, val_expr: ^odin_ast.Expr) {
 			if v, vok := _parse_bool(lit); vok {
 				cfg.allow_screensaver = v
 			}
+		}
+	case "devtools", "devtools_enabled":
+		if lit, ok := _expr_to_lit_text(val_expr); ok {
+			if v, vok := _parse_bool(lit); vok {
+				cfg.devtools_enabled = v
+			}
+		}
+	case "devtools_anchor":
+		if text, ok := _expr_to_lit_text(val_expr); ok {
+			if anchor, vok := devtools_anchor_parse(text); vok {
+				cfg.devtools_anchor = anchor
+			}
+		} else if sel, is_sel := val_expr.derived.(^odin_ast.Implicit_Selector_Expr); is_sel {
+			// Odin enum literal form: devtools_anchor = .Bottom_Left
+			hyphenated, _ := strings.replace(sel.field.name, "_", "-", -1, context.temp_allocator)
+			if anchor, vok := devtools_anchor_parse(hyphenated); vok {
+				cfg.devtools_anchor = anchor
+			}
+		}
+	case "devtools_columns", "devtools_width":
+		if lit, ok := _expr_to_lit_text(val_expr); ok {
+			if v, vok := _parse_int(lit); vok && v > 0 {
+				cfg.devtools_columns = v
+			}
+		}
+	case "devtools_log", "devtools_log_path":
+		if s, ok := _expr_to_string(val_expr); ok {
+			delete(cfg.devtools_log_path)
+			cfg.devtools_log_path = strings.clone(s)
 		}
 	case "ansi16":
 		if comp, ok := val_expr.derived.(^odin_ast.Comp_Lit); ok {

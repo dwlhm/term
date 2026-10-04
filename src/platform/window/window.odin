@@ -65,7 +65,7 @@ window_init :: proc(w: ^Window, title: string, width, height: i32, allow_screens
 		cstring(&w._title_buf[0]),
 		c.int(width),
 		c.int(height),
-		sdl3.WINDOW_HIGH_PIXEL_DENSITY | sdl3.WINDOW_RESIZABLE,
+		sdl3.WINDOW_HIGH_PIXEL_DENSITY | sdl3.WINDOW_RESIZABLE | sdl3.WINDOW_TRANSPARENT,
 	)
 
 	if w.handle == nil {
@@ -182,6 +182,11 @@ window_set_title :: proc(w: ^Window, title: string) -> bool {
 	}
 	w._title_buf[title_len] = 0
 	w.title = string(w._title_buf[:title_len])
+	// An empty title would hand SDL an empty C string; some SDL versions turn
+	// that into a nil NSString and -[NSWindow setTitle:nil] raises. Skip it.
+	if title_len == 0 {
+		return true
+	}
 	return sdl3.SetWindowTitle(w.handle, cstring(&w._title_buf[0]))
 }
 
@@ -362,9 +367,20 @@ window_restore_unified_titlebar :: proc(w: ^Window) -> bool {
 	return platform_restore_unified_titlebar(w.handle)
 }
 
+VIBRANCY_NORMALIZED_MIN: f32 : 0.0
+VIBRANCY_NORMALIZED_MAX: f32 : 1.0
+
+// window_vibrancy_is_opaque reports the exact normalized fast path shared by
+// the native window and its rendering layer.
+window_vibrancy_is_opaque :: proc(opacity: f32, blur: f32) -> bool {
+	normalized_opacity := clamp(opacity, VIBRANCY_NORMALIZED_MIN, VIBRANCY_NORMALIZED_MAX)
+	normalized_blur := clamp(blur, VIBRANCY_NORMALIZED_MIN, VIBRANCY_NORMALIZED_MAX)
+	return normalized_opacity == VIBRANCY_NORMALIZED_MAX && normalized_blur == VIBRANCY_NORMALIZED_MIN
+}
+
 // window_configure_vibrancy configures window translucency and platform-specific vibrancy blur.
 // On macOS, sets window opacity and attaches or detaches NSVisualEffectView.
-window_configure_vibrancy :: proc(w: ^Window, opacity: f32, blur: bool) -> bool {
+window_configure_vibrancy :: proc(w: ^Window, opacity: f32, blur: f32) -> bool {
 	if w == nil || w.handle == nil do return false
 	return platform_configure_window_vibrancy(w.handle, opacity, blur)
 }

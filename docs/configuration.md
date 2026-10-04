@@ -161,12 +161,35 @@ The table below lists every configuration setting recognized by `src/config/pars
 
 | Property | Type | Default | Description & Aliases |
 |---|---|---|---|
-| `window_opacity` | `float` | `1.0` | Window alpha transparency, clamped between `0.1` (translucent) and `1.0` (opaque). <br>Aliases: `opacity` |
-| `window_blur` | `bool` | `false` | Enables native macOS vibrancy blur behind the window. <br>Aliases: `blur` |
+| `opacity` | `float` | `1.0` | Terminal-background paint opacity, clamped to `0.0..1.0` (`0.0` is fully see-through; `1.0` is opaque). <br>Aliases: `background_opacity`, `window_opacity`, `bg_opacity` |
+| `blur` | `float` | `0.0` | macOS visual-effect intensity approximation, clamped to `0.0..1.0`. `true`/`yes`/`on` and `false`/`no`/`off` remain accepted compatibility syntax and map to the interval endpoints. <br>Alias: `window_blur` |
+
+`opacity` and `blur` are independent normalized controls. Lowering `opacity` does not enable blur.
+
+`opacity` scales every terminal background paint: the default viewport fill and ANSI, direct/true-color, and selected-cell background quads. Direct-color background alpha is multiplied by the configured opacity. Foreground glyphs, decorations, and app chrome do not inherit this setting; existing inactive-pane dimming remains independent. Background quads retain source-over compositing over the viewport fill, so overlapping paints can have a greater combined alpha than the configured per-paint opacity. At zero, terminal backgrounds are fully transparent while text remains visible.
+
+Every positive `blur` value attaches or updates the native effect view; there is no additional lower threshold. Zero removes the effect view.
 
 > [!NOTE]
-> **Native Cocoa Vibrancy (`NSVisualEffectView`)**:
-> When `window_blur` is set to `true` (or `window_opacity < 1.0`), Term dynamically attaches a native Apple AppKit `NSVisualEffectView` subview behind the Metal content layer. When `window_opacity = 1.0` and `window_blur = false`, the window runs in the **zero-overhead opaque path**: no `NSVisualEffectView` is allocated, conserving system resources.
+> **Opaque fast path and macOS effect intensity**:
+> The exact `opacity = 1.0` and `blur = 0.0` combination keeps both the window and Metal layer opaque and removes the `NSVisualEffectView`. Every other combination uses non-opaque compositing. macOS exposes no public continuous blur-radius API, so Term maps normalized `blur` to `NSVisualEffectView.alphaValue` as an effect blend/intensity approximation; it is not a blur radius.
+
+#### Ghostty-Style Transparency
+
+For a translucent, blurred terminal that stays readable over a busy desktop, copy this into `~/.config/term/config.odin`:
+
+```odin
+// Translucent + blurred, tuned for legibility over a busy wallpaper
+opacity = 0.15                     // 0.0 = fully see-through, 1.0 = opaque
+
+blur = 0.75                        // AppKit effect intensity approximation
+
+foreground           = 0xFFE6E9F5 // High-contrast text that survives the blur
+selection_foreground = 0xFF17181F // Dark glyphs on the selection highlight
+selection_background = 0xFF8A8FA8 // Light selection block that reads over transparency
+```
+
+**Picking the value:** `0.0` is fully see-through and barely legible; roughly `0.10`–`0.20` is the recommended readability range over a busy wallpaper; `1.0` is fully opaque. Raise the value if text starts to compete with the wallpaper, lower it if the window feels too heavy.
 
 ### Cursor Appearance & Animation
 
@@ -278,8 +301,8 @@ locale            = ""     // Empty string inherits system environment locale
 // =============================================================================
 // Window Translucency & Native macOS Vibrancy Blur
 // =============================================================================
-window_opacity = 0.95      // Window alpha: 0.1 (translucent) to 1.0 (opaque)
-window_blur    = true      // Enables native Cocoa NSVisualEffectView vibrancy
+opacity = 0.95             // Background alpha: 0.0 (see-through) to 1.0 (opaque)
+blur    = 0.75             // AppKit effect intensity approximation (0.0 to 1.0)
 
 // =============================================================================
 // Cursor Appearance & Animation

@@ -11,6 +11,17 @@ Parser_Response_Cb :: proc(data: []u8)
 // The callee owns delivery to the system clipboard.
 Parser_Clipboard_Cb :: proc(data: []u8)
 
+// Parser_Graphics_Cb is called when an APC (Application Program Command)
+// sequence completes. The Kitty Graphics Protocol arrives as
+// ESC _ G <control>;<payload> ST; the parser splits control/payload and
+// forwards both slices to this callback.
+Parser_Graphics_Cb :: proc(user_data: rawptr, t: ^termgrid.Terminal, control: []u8, payload: []u8)
+
+// APC_BUFFER_CAP is the fixed capacity of the APC string buffer. A single
+// KGP chunk is ≤4096 base64 bytes plus a small control header and ST; 8192
+// gives ample headroom.
+APC_BUFFER_CAP :: 8192
+
 // Parser is the top-level VT parser state.
 Parser :: struct {
 	state:             Parser_State,
@@ -51,6 +62,15 @@ Parser :: struct {
 	// Clipboard read callback for OSC 52 clipboard queries
 	clipboard_read_cb: #type proc(user_data: rawptr, out: []u8) -> int,
 	clipboard_read_user_data: rawptr,
+
+	// APC string buffer (Kitty Graphics Protocol)
+	apc_len:       int,
+	apc_buffer:    [APC_BUFFER_CAP]u8,
+	apc_truncated: bool,
+
+	// Graphics callback for APC (Kitty Graphics Protocol) sequences
+	graphics_cb:       Parser_Graphics_Cb,
+	graphics_user_data: rawptr,
 }
 
 // parser_init initializes a parser.
@@ -70,6 +90,8 @@ parser_init :: proc(p: ^Parser) {
 	p.osc_truncated = false
 	p.allow_clipboard_read = false
 	p.dcs_len = 0
+	p.apc_len = 0
+	p.apc_truncated = false
 
 	// Clear CSI values
 	for i in 0..<16 {
@@ -86,6 +108,8 @@ parser_init :: proc(p: ^Parser) {
 	p.clipboard_cb = nil
 	p.clipboard_read_cb = nil
 	p.clipboard_read_user_data = nil
+	p.graphics_cb = nil
+	p.graphics_user_data = nil
 }
 
 // parser_destroy frees parser state (currently no-op, but future-proof).
@@ -101,20 +125,25 @@ parse_chunk :: proc(p: ^Parser, t: ^termgrid.Terminal, input: []u8) {
 	for pos < len(input) {
 		// OSC/DCS strings are opaque to the terminal but their terminators
 		// are part of the parser state, including when split across reads.
-		if p.state == .OSC || p.state == .DCS {
+		if p.state == .OSC || p.state == .DCS || p.state == .APC {
 			byte := input[pos]
 			if p.string_esc_pending {
 				p.string_esc_pending = false
 				if byte == '\\' {
-					is_osc := p.state == .OSC
+					state := p.state
 					p.state = .Ground
-					if is_osc {
+					#partial switch state {
+					case .OSC:
 						osc_dispatch(p, t, p.osc_buffer[:p.osc_len])
 						p.osc_len = 0
 						p.osc_truncated = false
-					} else {
+					case .DCS:
 						dcs_dispatch(p, t, p.dcs_buffer[:p.dcs_len])
 						p.dcs_len = 0
+					case .APC:
+						apc_dispatch(p, t, p.apc_buffer[:p.apc_len])
+						p.apc_len = 0
+						p.apc_truncated = false
 					}
 					pos += 1
 					continue
@@ -124,25 +153,32 @@ parse_chunk :: proc(p: ^Parser, t: ^termgrid.Terminal, input: []u8) {
 					pos += 1
 					continue
 				}
-				// Any other byte after ESC: the OSC/DCS string is aborted by an escape sequence!
+				// Any other byte after ESC: the OSC/DCS/APC string is aborted by an escape sequence!
 				// Discard string buffer, enter Escape state, and re-parse current byte in Escape state.
 				p.osc_len = 0
 				p.osc_truncated = false
 				p.dcs_len = 0
+				p.apc_len = 0
+				p.apc_truncated = false
 				p.state = .Escape
 				// Do NOT increment pos: the loop will re-process 'byte' under p.state = .Escape
 				continue
 			}
 			if byte == 0x07 || byte == 0x9C {
-				is_osc := p.state == .OSC
+				state := p.state
 				p.state = .Ground
-				if is_osc {
+				#partial switch state {
+				case .OSC:
 					osc_dispatch(p, t, p.osc_buffer[:p.osc_len])
 					p.osc_len = 0
 					p.osc_truncated = false
-				} else {
+				case .DCS:
 					dcs_dispatch(p, t, p.dcs_buffer[:p.dcs_len])
 					p.dcs_len = 0
+				case .APC:
+					apc_dispatch(p, t, p.apc_buffer[:p.apc_len])
+					p.apc_len = 0
+					p.apc_truncated = false
 				}
 				pos += 1
 				continue
@@ -157,17 +193,25 @@ parse_chunk :: proc(p: ^Parser, t: ^termgrid.Terminal, input: []u8) {
 				pos += 1
 				continue
 			}
-			if p.state == .OSC {
+			#partial switch p.state {
+			case .OSC:
 				if p.osc_len < len(p.osc_buffer) {
 					p.osc_buffer[p.osc_len] = byte
 					p.osc_len += 1
 				} else {
 					p.osc_truncated = true
 				}
-			} else {
+			case .DCS:
 				if p.dcs_len < len(p.dcs_buffer) {
 					p.dcs_buffer[p.dcs_len] = byte
 					p.dcs_len += 1
+				}
+			case .APC:
+				if p.apc_len < len(p.apc_buffer) {
+					p.apc_buffer[p.apc_len] = byte
+					p.apc_len += 1
+				} else {
+					p.apc_truncated = true
 				}
 			}
 			pos += 1
@@ -294,6 +338,11 @@ parse_chunk :: proc(p: ^Parser, t: ^termgrid.Terminal, input: []u8) {
 			// Discard DCS payload
 		case .DcsUnhook:
 			p.state = .Ground
+		case .ApcStart:
+			p.state = .APC
+			p.string_esc_pending = false
+			p.apc_len = 0
+			p.apc_truncated = false
 		case .Utf8:
 			utf8_feed(p, t, byte)
 		case .Ignore:
@@ -307,7 +356,8 @@ parse_chunk :: proc(p: ^Parser, t: ^termgrid.Terminal, input: []u8) {
 		if transition.action != .OscStart &&
 		   transition.action != .OscEnd &&
 		   transition.action != .DcsHook &&
-		   transition.action != .DcsUnhook {
+		   transition.action != .DcsUnhook &&
+		   transition.action != .ApcStart {
 			p.state = transition.next_state
 		}
 
@@ -343,6 +393,8 @@ parser_reset :: proc(p: ^Parser) {
 	p.osc_len = 0
 	p.osc_truncated = false
 	p.dcs_len = 0
+	p.apc_len = 0
+	p.apc_truncated = false
 }
 
 // accumulate_print_run accumulates a byte into the print run buffer.
@@ -857,5 +909,33 @@ dcs_dispatch :: proc(p: ^Parser, t: ^termgrid.Terminal, payload: []u8) {
 		p.response_cb(resp[:n])
 		return
 	}
+}
+
+// apc_dispatch dispatches an Application Program Command (APC) string.
+// The Kitty Graphics Protocol arrives as ESC _ G <control>;<payload> ST.
+// The transport prefix is ESC _ G followed by one optional space; this strips
+// the 'G' identifier and optional space, then splits the remainder on the
+// first ';' and forwards control/payload to the graphics callback. APC
+// sequences whose identifier is not 'G' are not KGP and are ignored.
+// Control-key interpretation, base64 decoding, and chunk reassembly are the
+// responsibility of later task groups.
+apc_dispatch :: proc(p: ^Parser, t: ^termgrid.Terminal, body: []u8) {
+	if p == nil || p.graphics_cb == nil { return }
+	if len(body) < 1 { return }
+	if body[0] != 'G' { return } // APC identifier != 'G' → not KGP, ignore
+	rest := body[1:]
+	if len(rest) > 0 && rest[0] == ' ' {
+		rest = rest[1:]
+	}
+	control := rest
+	payload := []u8{}
+	for b, idx in rest {
+		if b == ';' {
+			control = rest[:idx]
+			payload = rest[idx + 1:]
+			break
+		}
+	}
+	p.graphics_cb(p.graphics_user_data, t, control, payload)
 }
 

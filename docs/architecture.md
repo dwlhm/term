@@ -480,11 +480,12 @@ macOS Window Composition Hierarchy:
 
 ### 7.1 Cocoa `NSVisualEffectView` Vibrancy Architecture
 
-- **Translucency & Blurring**: When window opacity is set below 1.0 or blur is enabled in the configuration (`window_opacity < 1.0` or `window_blur = true`), Term configures the underlying Cocoa `NSWindow`:
-  1. `[nswindow setOpaque:NO]`
-  2. `[nswindow setBackgroundColor:[NSColor clearColor]]`
-  3. Dynamically creates and attaches an `NSVisualEffectView` behind the window's `contentView`.
-- **Zero-Overhead Opaque Path**: When opacity is 1.0 and blur is disabled, any attached `NSVisualEffectView` is detached and released. The window is marked strictly opaque (`[nswindow setOpaque:YES]`), allowing the macOS WindowServer to bypass compositor alpha blending passes.
+- **Normalized controls**: `opacity` and `blur` are independent values in `0.0..1.0`. `frontend_apply_vibrancy` applies the same normalized values to the renderer, Cocoa window, and Metal layer. Opacity changes invalidate the frame; blur changes update the native effect view.
+- **Native compositing**: Every combination except `opacity = 1.0, blur = 0.0` makes the window and Metal layer non-opaque with a clear window background. A positive blur attaches an `NSVisualEffectView` below the Metal content, using `alphaValue` as an effect-intensity approximation. Zero blur removes it; transparency alone does not create it.
+- **Premultiplied destination**: Framebuffer clear RGB is multiplied by effective default-background alpha (theme alpha times opacity), exactly once. Straight-source instance blending adds glyph coverage over that destination. Fullscreen and compute shaders likewise compose premultiplied background RGB with glyph coverage, preserving glyph opacity; their output is copied without a second alpha multiplication.
+- **Terminal background paint**: Configured opacity scales default/pane fills and all emitted ANSI, selected, and direct-color background quads; direct-color authored alpha is preserved multiplicatively. Glyph/decor alpha and app chrome remain independent, including pre-existing inactive-pane dimming. Instance backgrounds use normal source-over blending over the viewport fill: overlapping paints can yield a higher combined alpha than the configured per-paint opacity. This is not a promise of uniform final pixel alpha.
+- **Sibling shader parameters**: `bg_opacity` carries effective default theme alpha, while `cell_opacity` carries configured opacity separately. Dormant fullscreen/compute shader sources use both to mirror layered background composition; those strategies are not activated by this change.
+- **Zero-Overhead Opaque Path**: The exact `opacity = 1.0, blur = 0.0` combination removes the effect view and marks the window and Metal layer opaque.
 
 ---
 

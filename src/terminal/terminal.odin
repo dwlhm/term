@@ -1,7 +1,9 @@
 package termgrid
 
 import "base:runtime"
+import "core:sync"
 import "core:unicode/utf8"
+import graphics_pkg "../graphics"
 
 // Kitty_Keyboard holds one screen's progressive-enhancement keyboard state
 // (kitty keyboard protocol). Progressive enhancement flags 0..31 (bits 0..4) are supported;
@@ -146,6 +148,9 @@ Mouse_Format :: enum u8 {
 	SGR, // 1006
 }
 
+@(private="file")
+_terminal_graphics_namespace_counter: u64
+
 // Terminal is the top-level terminal emulator state.
 Terminal :: struct {
 	grid:               Grid,
@@ -159,7 +164,12 @@ Terminal :: struct {
 	scroll_top:         int,
 	scroll_bottom:      int,
 	grapheme_store:     Grapheme_Store,
-	scrollback:         Scrollback,
+	scrollback:          Scrollback,
+	state_allocator:     runtime.Allocator,
+	state_allocator_set: bool,
+	graphics:           ^graphics_pkg.Store,
+	graphics_alt:       ^graphics_pkg.Store,
+	graphics_namespace: u64,
 	render_epoch:       u64,
 	in_prompt_zone:     bool,
 	has_osc_133:        bool,
@@ -245,8 +255,34 @@ terminal_init :: proc(
 	allocator: runtime.Allocator = context.allocator,
 	theme: Theme = THEME_CATPPUCCIN_MOCHA,
 ) {
+	if t == nil do return
+	t.graphics_namespace = sync.atomic_add(&_terminal_graphics_namespace_counter, 1)
+	if t.graphics_namespace == 0 {
+		t.graphics_namespace = sync.atomic_add(&_terminal_graphics_namespace_counter, 1)
+	}
+	t.state_allocator = allocator
+	t.state_allocator_set = true
+	t.graphics = nil
+	t.graphics_alt = nil
 	grid_init(&t.grid, rows, cols, allocator, theme)
 	grid_init(&t.alt_grid, rows, cols, allocator, theme)
+	t.graphics = new(graphics_pkg.Store, allocator)
+	if t.graphics == nil {
+		grid_destroy(&t.grid, allocator)
+		grid_destroy(&t.alt_grid, allocator)
+		return
+	}
+	graphics_pkg.store_init(t.graphics)
+	t.graphics_alt = new(graphics_pkg.Store, allocator)
+	if t.graphics_alt == nil {
+		graphics_pkg.store_destroy(t.graphics, allocator)
+		free(t.graphics, allocator)
+		t.graphics = nil
+		grid_destroy(&t.grid, allocator)
+		grid_destroy(&t.alt_grid, allocator)
+		return
+	}
+	graphics_pkg.store_init(t.graphics_alt)
 	t.is_alt_screen = false
 	cursor_init(&t.cursor)
 	t.saved_cursor = t.cursor
@@ -288,10 +324,66 @@ terminal_init :: proc(
 
 // terminal_destroy frees all terminal state.
 terminal_destroy :: proc(t: ^Terminal, allocator: runtime.Allocator = context.allocator) {
-	scrollback_destroy(&t.scrollback, &t.grapheme_store, allocator)
-	grid_destroy(&t.grid, allocator)
-	grid_destroy(&t.alt_grid, allocator)
-	damage_destroy(&t.damage, allocator)
+	if t == nil do return
+	owned_allocator := allocator
+	if t.state_allocator_set {
+		owned_allocator = t.state_allocator
+	}
+	previous_allocator := context.allocator
+	context.allocator = owned_allocator
+	defer context.allocator = previous_allocator
+	scrollback_destroy(&t.scrollback, &t.grapheme_store, owned_allocator)
+	if t.graphics != nil {
+		graphics_pkg.store_destroy(t.graphics, owned_allocator)
+		free(t.graphics, owned_allocator)
+		t.graphics = nil
+	}
+	if t.graphics_alt != nil {
+		graphics_pkg.store_destroy(t.graphics_alt, owned_allocator)
+		free(t.graphics_alt, owned_allocator)
+		t.graphics_alt = nil
+	}
+	grid_destroy(&t.grid, owned_allocator)
+	grid_destroy(&t.alt_grid, owned_allocator)
+	damage_destroy(&t.damage, owned_allocator)
+	t.state_allocator = {}
+	t.state_allocator_set = false
+}
+
+terminal_graphics_active :: proc(t: ^Terminal) -> ^graphics_pkg.Store {
+	if t == nil {
+		return nil
+	}
+	if t.is_alt_screen {
+		return t.graphics_alt
+	}
+	return t.graphics
+}
+
+terminal_graphics_sync :: proc(dst, src: ^Terminal, allocator: runtime.Allocator) {
+	if dst == nil || src == nil || dst == src do return
+	graphics_pkg.store_sync(dst.graphics, src.graphics, allocator)
+	graphics_pkg.store_sync(dst.graphics_alt, src.graphics_alt, allocator)
+	dst.graphics_namespace = src.graphics_namespace
+}
+
+terminal_graphics_feed :: proc(
+	t: ^Terminal,
+	control, payload: []u8,
+	sink: graphics_pkg.Response_Sink,
+) -> graphics_pkg.Feed_Result {
+	store := terminal_graphics_active(t)
+	if t == nil {
+		return graphics_pkg.store_feed(store, graphics_pkg.Feed_Context{allocator = runtime.heap_allocator()}, control, payload, sink)
+	}
+	ctx := graphics_pkg.Feed_Context{
+		cursor_row = t.cursor.row,
+		cursor_col = t.cursor.col,
+		grid_rows = t.grid.row_count,
+		grid_cols = t.grid.col_count,
+		allocator = t.state_allocator,
+	}
+	return graphics_pkg.store_feed(store, ctx, control, payload, sink)
 }
 
 // terminal_put_char writes a character at the cursor position and advances the cursor.
@@ -1252,6 +1344,8 @@ terminal_reset :: proc(t: ^Terminal) {
 		t.cursor = Cursor{row = 0, col = 0, visible = true}
 	}
 	t.current_style = 0
+	graphics_pkg.store_clear(t.graphics, t.state_allocator)
+	graphics_pkg.store_clear(t.graphics_alt, t.state_allocator)
 	t.scroll_top = 0
 	t.scroll_bottom = t.grid.row_count - 1
 	t.saved_cursor_valid = false
@@ -1366,6 +1460,7 @@ terminal_scroll_up :: proc(t: ^Terminal, n: int) {
 		}
 	}
 	scroll_up(&t.grid, &t.damage, t.scroll_top, t.scroll_bottom, n)
+	graphics_pkg.store_scroll(terminal_graphics_active(t), actual)
 	if t.in_prompt_zone {
 		phys := _grid_physical_row(&t.grid, t.cursor.row)
 		t.grid.rows[phys].is_prompt = true
@@ -1382,6 +1477,7 @@ terminal_scroll_down :: proc(t: ^Terminal, n: int) {
 	}
 	scroll_down(&t.grid, &t.damage, t.scroll_top, t.scroll_bottom, n)
 	if actual > 0 {
+		graphics_pkg.store_scroll(terminal_graphics_active(t), -actual)
 		t.render_epoch += 1
 	}
 }
@@ -1482,6 +1578,7 @@ terminal_enter_alt_screen :: proc(t: ^Terminal) {
 		_terminal_release_row_handles(t, i)
 	}
 	grid_clear(&t.grid)
+	graphics_pkg.store_clear(t.graphics_alt, t.state_allocator)
 	t.cursor = Cursor{row = 0, col = 0, visible = t.cursor.visible}
 	t.scroll_top = 0
 	t.scroll_bottom = t.grid.row_count - 1
@@ -1505,6 +1602,7 @@ terminal_leave_alt_screen :: proc(t: ^Terminal) {
 		return
 	}
 	t.grid, t.alt_grid = t.alt_grid, t.grid
+	graphics_pkg.store_clear(t.graphics_alt, t.state_allocator)
 	t.is_alt_screen = false
 	// If window was resized while in alt screen, reflow primary grid now on exit
 	if t.grid.row_count != t.alt_grid.row_count || t.grid.col_count != t.alt_grid.col_count {

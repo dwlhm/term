@@ -15,8 +15,8 @@
 // the pinned ranges (ASCII / box / block / powerline, mirroring
 // atlas_pinned_slot_index); anything else keeps the background
 // (GlyphSlotInvalid parity). Wide-lead glyphs span two cells: continuation
-// cells sample the left neighbor and draw the right half over black,
-// matching the instance path (continuations emit nothing there).
+// cells sample the left neighbor and draw the right half over their authored
+// background, matching the instance path (continuations emit no own glyph).
 
 struct Tile_Params {
     screen_w: f32,
@@ -33,12 +33,14 @@ struct Tile_Params {
     tiles_y: u32,
     atlas_w: u32,
     atlas_h: u32,
+    bg_opacity: f32,
+    cell_opacity: f32,
 };
 
 @group(0) @binding(0) var<uniform> params: Tile_Params;
 @group(0) @binding(1) var<storage, read> tile_list: array<u32>;
 @group(0) @binding(2) var<storage, read> cells: array<u32>;
-@group(0) @binding(3) var<storage, read> lut: array<u32, 1024>;
+@group(0) @binding(3) var<storage, read> lut: array<u32, 1025>;
 @group(0) @binding(4) var atlas_texture: texture_2d<f32>;
 @group(0) @binding(5) var atlas_sampler: sampler;
 @group(0) @binding(6) var framebuffer: texture_storage_2d<rgba8unorm, write>;
@@ -67,6 +69,40 @@ fn lut_bg(s: u32) -> u32 {
         return w & 0xFFFFu;
     }
     return (w >> 16u) & 0xFFFFu;
+}
+
+const CELL_FLAG_SELECTED: u32 = 2u;
+const CELL_FLAG_DIRECT_COLOR: u32 = 8u;
+const LUT_SELECTION_WORD: u32 = 1024u;
+const OPAQUE_ALPHA: f32 = 1.0;
+
+fn lut_selection_fg() -> u32 {
+    return lut[LUT_SELECTION_WORD] & 0xFFFFu;
+}
+
+fn lut_selection_bg() -> u32 {
+    return (lut[LUT_SELECTION_WORD] >> 16u) & 0xFFFFu;
+}
+
+fn cell_is_selected(cflags: u32) -> bool {
+    return (cflags & CELL_FLAG_SELECTED) != 0u;
+}
+
+fn cell_background(style: u32, cflags: u32, bg_rgb: vec3<f32>) -> vec4<f32> {
+    let has_authored_background = cell_is_selected(cflags) ||
+        (cflags & CELL_FLAG_DIRECT_COLOR) != 0u ||
+        lut_bg(style) != lut_bg(0u);
+    let base_rgb = r5g6b5_to_rgb(lut_bg(0u)) * params.bg_opacity;
+    if (has_authored_background) {
+        let alpha = params.cell_opacity;
+        return vec4<f32>(bg_rgb * alpha + base_rgb * (1.0 - alpha),
+            alpha + params.bg_opacity * (1.0 - alpha));
+    }
+    return vec4<f32>(base_rgb, params.bg_opacity);
+}
+
+fn composited_alpha(background_alpha: f32, glyph_coverage: f32) -> f32 {
+    return background_alpha + glyph_coverage * (OPAQUE_ALPHA - background_alpha);
 }
 
 // pinned_slot mirrors atlas_pinned_slot_index: ASCII 32..126 -> 0..94,
@@ -135,17 +171,21 @@ fn cs_main(
         let content = lo & 0x1FFFFFu;
         let style = (lo >> 21u) & 0x3FFu;
         let width = ((lo >> 31u) & 1u) | ((hi & 1u) << 1u);
+        let cflags = (hi >> 1u) & 0x7Fu;
         let slot = (hi >> 8u) & 0x1FFu;
 
-        let bg_rgb = r5g6b5_to_rgb(lut_bg(style));
+        let bg_packed = select(lut_bg(style), lut_selection_bg(), cell_is_selected(cflags));
+        let bg_rgb = r5g6b5_to_rgb(bg_packed);
+        let background = cell_background(style, cflags, bg_rgb);
+        let background_alpha = background.a;
 
         let x0 = max(i32(params.pad_x + f32(lc) * params.cell_w), 0);
         let y0 = max(i32(params.pad_y + f32(lr) * params.cell_h), 0);
         let x1 = min(x0 + i32(params.cell_w), fb_w);
         let y1 = min(y0 + i32(params.cell_h), fb_h);
 
-        // Continuation cell: black fill, plus the left neighbor's wide-lead
-        // right half when present (instance-path parity).
+        // Continuation cell: authored background plus the left neighbor's
+        // wide-lead right half when present (instance-path parity).
         if (width == 0u) {
             var fg_rgb = vec3<f32>(0.0);
             var uvs = vec4<f32>(0.0);
@@ -159,6 +199,7 @@ fn cs_main(
                 if (nwidth == 2u) {
                     let ncontent = nlo & 0x1FFFFFu;
                     let nstyle = (nlo >> 21u) & 0x3FFu;
+                    let ncflags = (nhi >> 1u) & 0x7Fu;
                     let nslot = (nhi >> 8u) & 0x1FFu;
                     if (ncontent != 0x20u && ncontent != 0u) {
                         var su = -1;
@@ -168,7 +209,8 @@ fn cs_main(
                             su = i32(nslot);
                         }
                         if (su >= 0) {
-                            fg_rgb = r5g6b5_to_rgb(lut_fg(nstyle));
+                            let nfg_packed = select(lut_fg(nstyle), lut_selection_fg(), cell_is_selected(ncflags));
+                            fg_rgb = r5g6b5_to_rgb(nfg_packed);
                             uvs = slot_uv(u32(su));
                             gw = params.cell_w * 2.0;
                             has_glyph = true;
@@ -178,7 +220,9 @@ fn cs_main(
             }
             for (var py = y0; py < y1; py++) {
                 for (var px = x0; px < x1; px++) {
-                    var col = vec3<f32>(0.0);
+                    // Store premultiplied color for the compositor; glyph coverage stays independent.
+                    var col = background.rgb;
+                    var glyph_coverage = 0.0;
                     if (has_glyph) {
                         let fx = (f32(px) - (f32(x0) - params.cell_w)) / gw;
                         let fy = (f32(py) - f32(y0)) / params.cell_h;
@@ -189,9 +233,10 @@ fn cs_main(
                                 atlas_texture, atlas_sampler,
                                 vec2<f32>(u, v), 0.0).r;
                             col = mix(col, fg_rgb, alpha);
+                            glyph_coverage = alpha;
                         }
                     }
-                    textureStore(framebuffer, vec2<i32>(px, py), vec4<f32>(col, 1.0));
+                    textureStore(framebuffer, vec2<i32>(px, py), vec4<f32>(col, composited_alpha(background_alpha, glyph_coverage)));
                 }
             }
             continue;
@@ -204,7 +249,8 @@ fn cs_main(
         } else if (slot < 512u) {
             su = i32(slot);
         }
-        let fg_rgb = r5g6b5_to_rgb(lut_fg(style));
+        let fg_packed = select(lut_fg(style), lut_selection_fg(), cell_is_selected(cflags));
+        let fg_rgb = r5g6b5_to_rgb(fg_packed);
         var has_glyph = false;
         var uvs = vec4<f32>(0.0);
         var gw = params.cell_w;
@@ -217,7 +263,9 @@ fn cs_main(
         }
         for (var py2 = y0; py2 < y1; py2++) {
             for (var px2 = x0; px2 < x1; px2++) {
-                var col = bg_rgb;
+                // Store premultiplied color for the compositor; glyph coverage stays independent.
+                var col = background.rgb;
+                var glyph_coverage = 0.0;
                 if (has_glyph) {
                     let fx = (f32(px2) - f32(x0)) / gw;
                     let fy = (f32(py2) - f32(y0)) / params.cell_h;
@@ -228,9 +276,10 @@ fn cs_main(
                             atlas_texture, atlas_sampler,
                             vec2<f32>(u, v), 0.0).r;
                         col = mix(col, fg_rgb, alpha);
+                        glyph_coverage = alpha;
                     }
                 }
-                textureStore(framebuffer, vec2<i32>(px2, py2), vec4<f32>(col, 1.0));
+                textureStore(framebuffer, vec2<i32>(px2, py2), vec4<f32>(col, composited_alpha(background_alpha, glyph_coverage)));
             }
         }
     }

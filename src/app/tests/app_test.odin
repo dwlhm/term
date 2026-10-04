@@ -40,6 +40,8 @@ import interaction "../../interaction"
 APP_TEST_ROWS :: 24
 APP_TEST_COLS :: 80
 APP_TEST_MAX  :: 64
+APP_TEST_OPACITY: f32 : 0.375
+APP_TEST_BLUR: f32 : 0.625
 
 // _dummy_video forces the SDL dummy driver so window_init works headless.
 _dummy_video :: proc() {
@@ -516,6 +518,8 @@ theme = "Catppuccin Mocha"
 background = 0xFF000000
 foreground = 0xFFFFFFFF
 font_size = 18.0
+opacity = 0.375
+blur = 0.625
 `
 	_ = os.write_entire_file(tmp_cfg, transmute([]u8)cfg_content)
 	defer os.remove(tmp_cfg)
@@ -527,9 +531,14 @@ font_size = 18.0
 	testing.expect_value(t, a.config.background, u32(0xFF000000))
 	testing.expect_value(t, a.config.foreground, u32(0xFFFFFFFF))
 	testing.expect_value(t, a.config.font_size, f32(18.0))
+	testing.expect_value(t, a.config.opacity, APP_TEST_OPACITY)
+	testing.expect_value(t, a.config.window_blur, APP_TEST_BLUR)
+	testing.expect_value(t, a.renderer.background_opacity, APP_TEST_OPACITY)
+	testing.expect(t, a.renderer.full_redraw_pending, "opacity reload must request a full redraw")
 	testing.expect_value(t, a.terminal.grid.style_table.theme.background, u32(0xFF000000))
 
 	// Now test reloading with syntax error in config
+	a.renderer.full_redraw_pending = false
 	bad_cfg_content := `
 background = = 1234
 `
@@ -539,7 +548,40 @@ background = = 1234
 	testing.expect(t, !bad_ok, "app_reload_config must fail on syntax error")
 	// State must be 100% retained
 	testing.expect_value(t, a.config.background, u32(0xFF000000))
+	testing.expect_value(t, a.config.opacity, APP_TEST_OPACITY)
+	testing.expect_value(t, a.config.window_blur, APP_TEST_BLUR)
+	testing.expect_value(t, a.renderer.background_opacity, APP_TEST_OPACITY)
+	testing.expect(t, !a.renderer.full_redraw_pending, "invalid reload must preserve redraw state")
 	testing.expect_value(t, a.terminal.grid.style_table.theme.background, u32(0xFF000000))
+}
+
+@(test)
+test_frontend_vibrancy_normalizes_and_invalidates_opacity_only :: proc(t: ^testing.T) {
+	f := new(app.Frontend)
+	defer free(f)
+	f.renderer.background_opacity = config.CONFIG_NORMALIZED_MAX
+
+	app.frontend_apply_vibrancy(f, APP_TEST_OPACITY, APP_TEST_BLUR)
+	testing.expect_value(t, f.renderer.background_opacity, APP_TEST_OPACITY)
+	testing.expect(t, f.renderer.full_redraw_pending, "opacity change must request a full redraw")
+
+	f.renderer.full_redraw_pending = false
+	app.frontend_apply_vibrancy(f, APP_TEST_OPACITY, config.CONFIG_NORMALIZED_MAX)
+	testing.expect(t, !f.renderer.full_redraw_pending, "blur-only change must not request a redraw")
+
+	app.frontend_apply_vibrancy(f, APP_TEST_BELOW_NORMALIZED, APP_TEST_ABOVE_NORMALIZED)
+	testing.expect_value(t, f.renderer.background_opacity, config.CONFIG_NORMALIZED_MIN)
+	testing.expect(t, f.renderer.full_redraw_pending, "clamped opacity change must request a redraw")
+}
+
+APP_TEST_BELOW_NORMALIZED: f32 : -0.5
+APP_TEST_ABOVE_NORMALIZED: f32 : 1.5
+
+@(test)
+test_window_vibrancy_opaque_fast_path :: proc(t: ^testing.T) {
+	testing.expect(t, win.window_vibrancy_is_opaque(config.CONFIG_NORMALIZED_MAX, config.CONFIG_NORMALIZED_MIN))
+	testing.expect(t, !win.window_vibrancy_is_opaque(APP_TEST_OPACITY, config.CONFIG_NORMALIZED_MIN))
+	testing.expect(t, !win.window_vibrancy_is_opaque(config.CONFIG_NORMALIZED_MAX, APP_TEST_BLUR))
 }
 
 @(test)
@@ -955,6 +997,21 @@ test_app_search_and_tab_sync :: proc(t: ^testing.T) {
 	testing.expect_value(t, a.tab_bar.hover_close_idx, -1)
 	testing.expect(t, !a.tab_bar.hover_new_tab, "hover_new_tab must be cleared")
 	testing.expect(t, a.renderer.full_redraw_pending, "full_redraw_pending must be triggered on hover clear")
+}
+
+@(test)
+test_app_image_focus_consumes_zoom_and_escape :: proc(t: ^testing.T) {
+	a := new(app.App)
+	defer free(a)
+	interaction.image_focus_open(&a.image_focus, 7, 9, 11)
+	before := a.image_focus.zoom
+	zoom := input.Input_Event{event_type = .Key, kind = .Printable, rune = '='}
+	_, ok := app.app_dispatch_input_events(a, {zoom})
+	testing.expect(t, ok, "focus zoom dispatch must remain accepted")
+	testing.expect(t, a.image_focus.active && a.image_focus.zoom > before, "active focus must consume zoom without PTY routing")
+	escape := input.Input_Event{event_type = .Key, kind = .Escape}
+	_, ok = app.app_dispatch_input_events(a, {escape})
+	testing.expect(t, ok && !a.image_focus.active, "Escape must close image focus")
 }
 
 @(test)

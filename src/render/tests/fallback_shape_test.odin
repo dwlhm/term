@@ -194,7 +194,7 @@ test_uncovered_tofu_fallback :: proc(t: ^testing.T) {
 	lut := _fb_lut(&term)
 	bg, glyph: instance.Instance_Data
 	emit_bg, emit_glyph, _, _ := render.render_cell_expand_instance(frame.cells[0], &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
-	testing.expect(t, emit_bg && emit_glyph, "tofu must emit bg+glyph")
+	testing.expect(t, !emit_bg && emit_glyph, "tofu must emit glyph (default bg)")
 }
 
 @(test)
@@ -281,7 +281,7 @@ test_vs16_mark_wide :: proc(t: ^testing.T) {
 	lut := _fb_lut(&term)
 	bg, glyph: instance.Instance_Data
 	emit_bg, emit_glyph, _, _ := render.render_cell_expand_instance(frame.cells[0], &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
-	testing.expect(t, emit_bg && emit_glyph, "wide lead must emit")
+	testing.expect(t, !emit_bg && emit_glyph, "wide lead must emit glyph (default bg)")
 	testing.expect(t, glyph.cw == 16.0, "wide lead spans double width")
 	emit_bg1, emit_glyph1, _, _ := render.render_cell_expand_instance(frame.cells[1], &lut, &atlas, 8, 0, 8, 16, &bg, &glyph)
 	testing.expect(t, !emit_bg1 && !emit_glyph1, "continuation emits nothing")
@@ -481,7 +481,7 @@ test_fifo_evict_heals :: proc(t: ^testing.T) {
 	lut := _fb_lut(&term)
 	bg, glyph: instance.Instance_Data
 	emit_bg, emit_glyph, _, _ := render.render_cell_expand_instance(frame.cells[0], &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
-	testing.expect(t, emit_bg && emit_glyph, "healed cell must emit")
+	testing.expect(t, !emit_bg && emit_glyph, "healed cell must emit glyph (default bg)")
 }
 
 @(test)

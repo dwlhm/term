@@ -144,12 +144,11 @@ bench-run: bench
 	@echo "\n=== Running Input Photon Latency Benchmarks ==="
 	@./$(OUT_DIR)/bench_input_photon
 
-bench-video:
+$(OUT_DIR)/term_video_player: scripts/term_video_player.swift
 	@mkdir -p $(OUT_DIR)
-	@if [ ! -f $(OUT_DIR)/term_video_player ]; then \
-		echo "Building $(OUT_DIR)/term_video_player..."; \
-		swiftc -O -o $(OUT_DIR)/term_video_player scripts/term_video_player.swift; \
-	fi
+	swiftc -O -o $@ $<
+
+bench-video: $(OUT_DIR)/term_video_player
 	./$(OUT_DIR)/term_video_player --fire --duration 5 --fps 60
 
 bench-vte:

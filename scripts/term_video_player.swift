@@ -16,7 +16,7 @@ public struct RGBColor: Equatable {
     public let r: UInt8
     public let g: UInt8
     public let b: UInt8
-    
+
     public init(r: UInt8, g: UInt8, b: UInt8) {
         self.r = r
         self.g = g
@@ -27,12 +27,12 @@ public struct RGBColor: Equatable {
 public struct TerminalSize {
     public let cols: Int
     public let rows: Int
-    
+
     public init(cols: Int, rows: Int) {
         self.cols = cols
         self.rows = rows
     }
-    
+
     public static func current() -> TerminalSize {
         var ws = winsize()
         if ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0 {
@@ -47,14 +47,14 @@ public struct PlayerConfig {
     public var targetFps: Double
     public var duration: Double?
     public var useHalfBlocks: Bool
-    
+
     public init(mode: PlaybackMode = .fire, targetFps: Double = 60.0, duration: Double? = nil, useHalfBlocks: Bool = true) {
         self.mode = mode
         self.targetFps = targetFps
         self.duration = duration
         self.useHalfBlocks = useHalfBlocks
     }
-    
+
     public static func parse(arguments: [String]) -> PlayerConfig {
         var mode: PlaybackMode = .fire
         var targetFps: Double = 60.0
@@ -63,7 +63,7 @@ public struct PlayerConfig {
         var videoPath: String? = nil
         var explicitFire = false
         var explicitPlasma = false
-        
+
         var i = 1
         while i < arguments.count {
             let arg = arguments[i]
@@ -96,7 +96,7 @@ public struct PlayerConfig {
             }
             i += 1
         }
-        
+
         if explicitPlasma {
             mode = .plasma
         } else if explicitFire {
@@ -112,10 +112,10 @@ public struct PlayerConfig {
         } else {
             mode = .fire
         }
-        
+
         return PlayerConfig(mode: mode, targetFps: targetFps, duration: duration, useHalfBlocks: useHalfBlocks)
     }
-    
+
     private static func printUsage() {
         let msg = """
         Usage: term_video_player [<video_file>] [options]
@@ -137,66 +137,102 @@ public struct PlayerConfig {
 }
 
 public struct TelemetryStats {
+    /// Terminal geometry is re-read from the tty every RESIZE_POLL_FRAMES frames
+    /// rather than on every frame, so a window resize is picked up within a
+    /// fraction of a second without paying an ioctl per frame.
+    public static let resizePollFrames: UInt64 = 30
     public var targetFps: Double
     public var totalFrames: UInt64
-    public var droppedFrames: UInt64
+    public var lateFrames: UInt64
+    public var totalPeriodNs: UInt64
     public var totalRenderTimeNs: UInt64
+    public var totalSimTimeNs: UInt64
+    public var totalFormatTimeNs: UInt64
+    public var totalWriteTimeNs: UInt64
+    public var maxSimTimeNs: UInt64
+    public var maxFormatTimeNs: UInt64
     public var minFps: Double
     public var maxFps: Double
-    
+
     public init(targetFps: Double) {
         self.targetFps = targetFps
         self.totalFrames = 0
-        self.droppedFrames = 0
+        self.lateFrames = 0
+        self.totalPeriodNs = 0
         self.totalRenderTimeNs = 0
+        self.totalSimTimeNs = 0
+        self.totalFormatTimeNs = 0
+        self.totalWriteTimeNs = 0
+        self.maxSimTimeNs = 0
+        self.maxFormatTimeNs = 0
         self.minFps = Double.infinity
         self.maxFps = 0.0
     }
-    
-    public mutating func recordFrame(renderDurationNs: UInt64, wasDropped: Bool) {
+
+    /// FPS measures completed-frame periods including pacing and loop overhead.
+    /// Work phases exclude pacing and remain independently accumulated.
+    public mutating func recordFrame(periodNs: UInt64, renderDurationNs: UInt64, simNs: UInt64 = 0, formatNs: UInt64 = 0, wasLate: Bool) {
+        totalPeriodNs += periodNs
         totalFrames += 1
-        if wasDropped {
-            droppedFrames += 1
+        if wasLate {
+            lateFrames += 1
         }
         totalRenderTimeNs += renderDurationNs
-        
-        if renderDurationNs > 0 {
-            let fps = 1_000_000_000.0 / Double(renderDurationNs)
+        totalSimTimeNs += simNs
+        totalFormatTimeNs += formatNs
+        // The write is whatever work remains after the simulation and the ANSI
+        // formatting have both been accounted for, so the three phases always sum
+        // to the reported total.
+        totalWriteTimeNs += renderDurationNs > simNs + formatNs ? renderDurationNs - simNs - formatNs : 0
+        if simNs > maxSimTimeNs { maxSimTimeNs = simNs }
+        if formatNs > maxFormatTimeNs { maxFormatTimeNs = formatNs }
+
+        if periodNs > 0 {
+            let fps = 1_000_000_000.0 / Double(periodNs)
             if fps < minFps { minFps = fps }
             if fps > maxFps { maxFps = fps }
         }
     }
-    
+
     public func statusLine(currentFps: Double, frameDurationMs: Double) -> String {
-        let dropRate = totalFrames > 0 ? (Double(droppedFrames) / Double(totalFrames)) * 100.0 : 0.0
+        let lateRate = totalFrames > 0 ? (Double(lateFrames) / Double(totalFrames)) * 100.0 : 0.0
         return String(
-            format: "FPS: %5.1f / %-4.0f | Frames: %5llu | Dropped: %llu (%4.1f%%) | FrameTime: %5.2f ms",
+            format: "FPS: %5.1f / %-4.0f | Frames: %5llu | Late: %llu (%4.1f%%) | Work: %5.2f ms",
             currentFps,
             targetFps,
             totalFrames,
-            droppedFrames,
-            dropRate,
+            lateFrames,
+            lateRate,
             frameDurationMs
         )
     }
-    
+
     public func summaryReport() -> String {
         let meanFps: Double
-        if totalFrames > 0 && totalRenderTimeNs > 0 {
-            meanFps = Double(totalFrames) / (Double(totalRenderTimeNs) / 1_000_000_000.0)
+        if totalFrames > 0 && totalPeriodNs > 0 {
+            meanFps = Double(totalFrames) / (Double(totalPeriodNs) / 1_000_000_000.0)
         } else {
             meanFps = 0.0
         }
         let safeMinFps = minFps.isInfinite ? 0.0 : minFps
-        let dropRate = totalFrames > 0 ? (Double(droppedFrames) / Double(totalFrames)) * 100.0 : 0.0
-        
+        let lateRate = totalFrames > 0 ? (Double(lateFrames) / Double(totalFrames)) * 100.0 : 0.0
+
         var report = "=== Video & TrueColor Telemetry Summary ===\u{1b}[K\n"
         report += String(format: "Target FPS:       %.1f\u{1b}[K\n", targetFps)
         report += String(format: "Total Frames:     %llu\u{1b}[K\n", totalFrames)
-        report += String(format: "Dropped Frames:   %llu (%.2f%%)\u{1b}[K\n", droppedFrames, dropRate)
+        report += String(format: "Late Frames:      %llu (%.2f%%)\u{1b}[K\n", lateFrames, lateRate)
         report += String(format: "Mean FPS:         %.2f\u{1b}[K\n", meanFps)
         report += String(format: "Min FPS:          %.2f\u{1b}[K\n", safeMinFps)
         report += String(format: "Max FPS:          %.2f\u{1b}[K\n", maxFps)
+        // Frame cost broken down, so a late frame can be attributed to the simulation
+        // or to the ANSI/write path instead of guessed at.
+        let meanWorkMs = totalFrames > 0 ? Double(totalRenderTimeNs) / Double(totalFrames) / 1_000_000.0 : 0.0
+        let meanSimMs = totalFrames > 0 ? Double(totalSimTimeNs) / Double(totalFrames) / 1_000_000.0 : 0.0
+        let meanFmtMs = totalFrames > 0 ? Double(totalFormatTimeNs) / Double(totalFrames) / 1_000_000.0 : 0.0
+        let meanWriteMs = totalFrames > 0 ? Double(totalWriteTimeNs) / Double(totalFrames) / 1_000_000.0 : 0.0
+        report += String(format: "Mean Work:        %.3f ms  (sim %.3f + ansi %.3f + write %.3f)\u{1b}[K\n", meanWorkMs, meanSimMs, meanFmtMs, meanWriteMs)
+        report += String(format: "Worst Sim:        %.3f ms\u{1b}[K\n", Double(maxSimTimeNs) / 1_000_000.0)
+        report += String(format: "Worst Format:     %.3f ms\u{1b}[K\n", Double(maxFormatTimeNs) / 1_000_000.0)
         return report
     }
 }
@@ -207,11 +243,11 @@ public final class VideoStreamer: @unchecked Sendable {
     private var videoTrack: AVAssetTrack?
     private var reader: AVAssetReader?
     private var trackOutput: AVAssetReaderTrackOutput?
-    
+
     public init?(url: URL, targetSize: TerminalSize) {
         self.url = url
         self.asset = AVURLAsset(url: url)
-        
+
         var foundTrack: AVAssetTrack? = nil
         let group = DispatchGroup()
         group.enter()
@@ -220,17 +256,17 @@ public final class VideoStreamer: @unchecked Sendable {
             group.leave()
         }
         group.wait()
-        
+
         guard let track = foundTrack else {
             return nil
         }
         self.videoTrack = track
-        
+
         if !setupReader() {
             return nil
         }
     }
-    
+
     @discardableResult
     private func setupReader() -> Bool {
         guard let track = videoTrack else { return false }
@@ -254,10 +290,10 @@ public final class VideoStreamer: @unchecked Sendable {
         self.trackOutput = out
         return true
     }
-    
+
     public func nextFrameRGB(targetSize: TerminalSize) -> [RGBColor]? {
         guard let output = trackOutput else { return nil }
-        
+
         var sampleBuffer = output.copyNextSampleBuffer()
         if sampleBuffer == nil {
             // Loop video cleanly
@@ -265,29 +301,29 @@ public final class VideoStreamer: @unchecked Sendable {
             sampleBuffer = trackOutput?.copyNextSampleBuffer()
             if sampleBuffer == nil { return nil }
         }
-        
+
         guard let sBuf = sampleBuffer,
               let imageBuffer = CMSampleBufferGetImageBuffer(sBuf) else {
             return nil
         }
-        
+
         CVPixelBufferLockBaseAddress(imageBuffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(imageBuffer, .readOnly) }
-        
+
         guard let baseAddress = CVPixelBufferGetBaseAddress(imageBuffer) else {
             return nil
         }
-        
+
         let bytesPerRow = CVPixelBufferGetBytesPerRow(imageBuffer)
         let bufferWidth = CVPixelBufferGetWidth(imageBuffer)
         let bufferHeight = CVPixelBufferGetHeight(imageBuffer)
         let ptr = baseAddress.assumingMemoryBound(to: UInt8.self)
-        
+
         let outWidth = targetSize.cols
         let outHeight = targetSize.rows
         var result = [RGBColor]()
         result.reserveCapacity(outWidth * outHeight)
-        
+
         for y in 0..<outHeight {
             let srcY = (y * bufferHeight) / outHeight
             let rowOffset = srcY * bytesPerRow
@@ -309,7 +345,7 @@ public final class DoomFireSim {
     public private(set) var height: Int
     private var firePixels: [UInt8]
     private var rngState: UInt32 = 0x87654321
-    
+
     private static let firePalette: [RGBColor] = [
         RGBColor(r: 0x07, g: 0x07, b: 0x07),
         RGBColor(r: 0x1F, g: 0x07, b: 0x07),
@@ -349,7 +385,7 @@ public final class DoomFireSim {
         RGBColor(r: 0xFF, g: 0xFF, b: 0xFF),
         RGBColor(r: 0xFF, g: 0xFF, b: 0xFF)
     ]
-    
+
     public init(width: Int, height: Int) {
         self.width = max(1, width)
         self.height = max(1, height)
@@ -357,14 +393,14 @@ public final class DoomFireSim {
         self.firePixels = [UInt8](repeating: 0, count: total)
         resetBottomRow()
     }
-    
+
     private func resetBottomRow() {
         let bottomStart = (height - 1) * width
         for x in 0..<width {
             firePixels[bottomStart + x] = 36
         }
     }
-    
+
     public func resize(width: Int, height: Int) {
         let w = max(1, width)
         let h = max(1, height)
@@ -374,7 +410,7 @@ public final class DoomFireSim {
         self.firePixels = [UInt8](repeating: 0, count: w * h)
         resetBottomRow()
     }
-    
+
     @inline(__always)
     private func xorshift32() -> UInt32 {
         rngState ^= rngState << 13
@@ -382,7 +418,7 @@ public final class DoomFireSim {
         rngState ^= rngState << 5
         return rngState
     }
-    
+
     public func step() -> [RGBColor] {
         let total = firePixels.count
         for x in 0..<width {
@@ -404,7 +440,7 @@ public final class DoomFireSim {
                 }
             }
         }
-        
+
         var result = [RGBColor]()
         result.reserveCapacity(total)
         let pal = Self.firePalette
@@ -421,24 +457,24 @@ public final class PlasmaSim {
     public private(set) var width: Int
     public private(set) var height: Int
     private var time: Double = 0.0
-    
+
     public init(width: Int, height: Int) {
         self.width = max(1, width)
         self.height = max(1, height)
     }
-    
+
     public func resize(width: Int, height: Int) {
         self.width = max(1, width)
         self.height = max(1, height)
     }
-    
+
     public func step() -> [RGBColor] {
         time += 0.04
         let w = Double(width)
         let h = Double(height)
         var result = [RGBColor]()
         result.reserveCapacity(width * height)
-        
+
         for y in 0..<height {
             let dy = Double(y)
             let v1 = sin(dy * 0.12 + time)
@@ -450,7 +486,7 @@ public final class PlasmaSim {
                 let cy = dy - h * 0.5
                 let dist = sqrt(cx * cx + cy * cy)
                 let v4 = sin(dist * 0.1 + time * 1.8)
-                
+
                 let v = (v1 + v2 + v3 + v4) * 0.25
                 let r = UInt8(clamping: Int((sin(v * .pi) * 0.5 + 0.5) * 255.0))
                 let g = UInt8(clamping: Int((cos(v * .pi) * 0.5 + 0.5) * 255.0))
@@ -476,28 +512,36 @@ public struct ANSIFormatter {
             bytes.append(48 + val)
         }
     }
-    
-    public static func formatHalfBlocks(pixels: [RGBColor], width: Int, height: Int, overlay: String?) -> String {
+
+    /// Renders one half-block frame into `buffer`.
+    ///
+    /// The buffer is owned by the caller and reused across frames, so the render
+    /// loop performs no allocation and, critically, no copy: the previous
+    /// `-> String` signature forced a full second copy here via
+    /// `String(decoding:)` and a third via `.utf8CString` at the write site.
+    /// Returns the number of bytes written.
+    @discardableResult
+    public static func formatHalfBlocks(pixels: [RGBColor], width: Int, height: Int, overlay: String?, into buffer: inout [UInt8]) -> Int {
         let textRows = (height + 1) / 2
-        var buffer = [UInt8]()
+        buffer.removeAll(keepingCapacity: true)
         buffer.reserveCapacity(width * textRows * 25 + 256)
-        
+
         // Cursor home \033[H
         buffer.append(contentsOf: [0x1B, 0x5B, 0x48])
-        
+
         var lastFg: RGBColor? = nil
         var lastBg: RGBColor? = nil
-        
+
         for tr in 0..<textRows {
             let topY = tr * 2
             let botY = topY + 1
             let topRowOffset = topY * width
             let botRowOffset = botY * width
-            
+
             for col in 0..<width {
                 let topColor = (topRowOffset + col < pixels.count) ? pixels[topRowOffset + col] : RGBColor(r: 0, g: 0, b: 0)
                 let botColor = (botY < height && botRowOffset + col < pixels.count) ? pixels[botRowOffset + col] : RGBColor(r: 0, g: 0, b: 0)
-                
+
                 if lastFg != topColor {
                     // \033[38;2;R;G;Bm
                     buffer.append(contentsOf: [0x1B, 0x5B, 0x33, 0x38, 0x3B, 0x32, 0x3B])
@@ -509,7 +553,7 @@ public struct ANSIFormatter {
                     buffer.append(0x6D)
                     lastFg = topColor
                 }
-                
+
                 if lastBg != botColor {
                     // \033[48;2;R;G;Bm
                     buffer.append(contentsOf: [0x1B, 0x5B, 0x34, 0x38, 0x3B, 0x32, 0x3B])
@@ -521,36 +565,39 @@ public struct ANSIFormatter {
                     buffer.append(0x6D)
                     lastBg = botColor
                 }
-                
+
                 // UTF-8 bytes for '▀' (U+2580)
                 buffer.append(contentsOf: [0xE2, 0x96, 0x80])
             }
-            
+
             // Reset at end of line \033[0m\n
             buffer.append(contentsOf: [0x1B, 0x5B, 0x30, 0x6D, 0x0A])
             lastFg = nil
             lastBg = nil
         }
-        
+
         if let ov = overlay {
             // \033[0m + overlay + \033[K (no newline on last terminal line to avoid scrolling)
             buffer.append(contentsOf: [0x1B, 0x5B, 0x30, 0x6D])
             buffer.append(contentsOf: ov.utf8)
             buffer.append(contentsOf: [0x1B, 0x5B, 0x4B])
         }
-        
-        return String(decoding: buffer, as: UTF8.self)
+
+        return buffer.count
     }
-    
-    public static func formatFullCells(pixels: [RGBColor], width: Int, height: Int, overlay: String?) -> String {
-        var buffer = [UInt8]()
+
+    /// Full-cell twin of `formatHalfBlocks`, writing into the caller's buffer for
+    /// the same reason: no allocation and no copy per frame.
+    @discardableResult
+    public static func formatFullCells(pixels: [RGBColor], width: Int, height: Int, overlay: String?, into buffer: inout [UInt8]) -> Int {
+        buffer.removeAll(keepingCapacity: true)
         buffer.reserveCapacity(width * height * 20 + 256)
-        
+
         // Cursor home \033[H
         buffer.append(contentsOf: [0x1B, 0x5B, 0x48])
-        
+
         var lastBg: RGBColor? = nil
-        
+
         for y in 0..<height {
             let rowOffset = y * width
             for x in 0..<width {
@@ -571,14 +618,14 @@ public struct ANSIFormatter {
             buffer.append(contentsOf: [0x1B, 0x5B, 0x30, 0x6D, 0x0A])
             lastBg = nil
         }
-        
+
         if let ov = overlay {
             buffer.append(contentsOf: [0x1B, 0x5B, 0x30, 0x6D])
             buffer.append(contentsOf: ov.utf8)
             buffer.append(contentsOf: [0x1B, 0x5B, 0x4B])
         }
-        
-        return String(decoding: buffer, as: UTF8.self)
+
+        return buffer.count
     }
 }
 
@@ -586,10 +633,10 @@ public final class SignalHandler: @unchecked Sendable {
     nonisolated(unsafe) private static var cleanupCallback: (() -> Void)? = nil
     nonisolated(unsafe) private static var isRestored = false
     nonisolated(unsafe) public static var shouldExit = false
-    
+
     public static func setup(cleanup: @escaping () -> Void) {
         cleanupCallback = cleanup
-        
+
         Darwin.signal(SIGINT) { _ in
             SignalHandler.shouldExit = true
             SignalHandler.restoreTerminal()
@@ -603,7 +650,7 @@ public final class SignalHandler: @unchecked Sendable {
             Darwin.exit(0)
         }
     }
-    
+
     public static func restoreTerminal() {
         if !isRestored {
             isRestored = true
@@ -613,7 +660,7 @@ public final class SignalHandler: @unchecked Sendable {
             }
         }
     }
-    
+
     public static func clear() {
         cleanupCallback = nil
     }
@@ -628,33 +675,33 @@ private final class StatsBox: @unchecked Sendable {
 
 public final class Engine {
     public let config: PlayerConfig
-    
+
     public init(config: PlayerConfig) {
         self.config = config
     }
-    
+
     public func start() {
         let box = StatsBox(stats: TelemetryStats(targetFps: config.targetFps))
-        
+
         SignalHandler.setup { [box] in
             print("\n" + box.stats.summaryReport())
         }
-        
+
         // Hide cursor and clear screen
         let initSeq = "\u{1b}[?25l\u{1b}[2J\u{1b}[H"
         initSeq.utf8CString.withUnsafeBufferPointer { buf in
             _ = Darwin.write(STDOUT_FILENO, buf.baseAddress!, buf.count - 1)
         }
-        
+
         let initialSize = TerminalSize.current()
         let initialTextRows = max(1, initialSize.rows - 1)
         let initialCols = max(1, initialSize.cols)
         let initialPixelHeight = config.useHalfBlocks ? (initialTextRows * 2) : initialTextRows
-        
+
         var streamer: VideoStreamer? = nil
         var fireSim: DoomFireSim? = nil
         var plasmaSim: PlasmaSim? = nil
-        
+
         switch config.mode {
         case .video(let url):
             streamer = VideoStreamer(url: url, targetSize: TerminalSize(cols: initialCols, rows: initialPixelHeight))
@@ -668,14 +715,24 @@ public final class Engine {
         case .plasma:
             plasmaSim = PlasmaSim(width: initialCols, height: initialPixelHeight)
         }
-        
+
         let targetIntervalSec = 1.0 / config.targetFps
         let targetIntervalNs = UInt64(targetIntervalSec * 1_000_000_000.0)
         let startTimeNs = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)
+        var previousCompletionNs = startTimeNs
         var smoothedFps = config.targetFps
         var lastOverlayUpdateNs = startTimeNs
         var cachedOverlay = box.stats.statusLine(currentFps: config.targetFps, frameDurationMs: 0.0)
-        
+
+        // Render state reused across frames: one allocation for the whole run
+        // instead of three full-frame allocations and copies per frame.
+        var frameBuffer = [UInt8]()
+        var frameIndex: UInt64 = 0
+        // Terminal size comes from an ioctl on the tty. A resize is rare, so the
+        // query is amortised instead of being issued on every single frame.
+        var cachedSize = TerminalSize.current()
+        var framesSinceSizeCheck: UInt64 = 0
+
         while !SignalHandler.shouldExit {
             let nowNs = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)
             if let dur = config.duration {
@@ -684,21 +741,26 @@ public final class Engine {
                     break
                 }
             }
-            
-            let currentSize = TerminalSize.current()
+
+            framesSinceSizeCheck += 1
+            if framesSinceSizeCheck >= TelemetryStats.resizePollFrames {
+                framesSinceSizeCheck = 0
+                cachedSize = TerminalSize.current()
+            }
+            let currentSize = cachedSize
             let textRows = max(1, currentSize.rows - 1)
             let cols = max(1, currentSize.cols)
             let pixelHeight = config.useHalfBlocks ? (textRows * 2) : textRows
-            
+
             if let fire = fireSim, (fire.width != cols || fire.height != pixelHeight) {
                 fire.resize(width: cols, height: pixelHeight)
             }
             if let plasma = plasmaSim, (plasma.width != cols || plasma.height != pixelHeight) {
                 plasma.resize(width: cols, height: pixelHeight)
             }
-            
+
             let frameStartNs = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)
-            
+
             let framePixels: [RGBColor]?
             switch config.mode {
             case .video:
@@ -712,45 +774,68 @@ public final class Engine {
             case .plasma:
                 framePixels = plasmaSim?.step()
             }
-            
+
             guard let pixels = framePixels else { break }
-            
-            let workNs = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - frameStartNs
-            let workMs = Double(workNs) / 1_000_000.0
-            
-            let frameString: String
+
+            let simNs = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - frameStartNs
+
             if config.useHalfBlocks {
-                frameString = ANSIFormatter.formatHalfBlocks(pixels: pixels, width: cols, height: pixelHeight, overlay: cachedOverlay)
+                _ = ANSIFormatter.formatHalfBlocks(pixels: pixels, width: cols, height: pixelHeight, overlay: cachedOverlay, into: &frameBuffer)
             } else {
-                frameString = ANSIFormatter.formatFullCells(pixels: pixels, width: cols, height: pixelHeight, overlay: cachedOverlay)
+                _ = ANSIFormatter.formatFullCells(pixels: pixels, width: cols, height: pixelHeight, overlay: cachedOverlay, into: &frameBuffer)
             }
-            
-            frameString.utf8CString.withUnsafeBufferPointer { buf in
-                _ = Darwin.write(STDOUT_FILENO, buf.baseAddress!, buf.count - 1)
+            let formatNs = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - frameStartNs - simNs
+
+            // Write straight out of the reusable byte buffer. The old path built
+            // a String from the buffer and then asked for .utf8CString, copying
+            // the whole frame twice more before a single byte reached the tty.
+            frameBuffer.withUnsafeBufferPointer { buf in
+                if let base = buf.baseAddress, buf.count > 0 {
+                    var offset = 0
+                    while offset < buf.count {
+                        let n = Darwin.write(STDOUT_FILENO, base + offset, buf.count - offset)
+                        if n <= 0 { break }
+                        offset += n
+                    }
+                }
             }
-            
+
             let computeAndWriteNs = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - frameStartNs
-            let wasDropped = computeAndWriteNs > targetIntervalNs
-            
-            if computeAndWriteNs < targetIntervalNs {
-                let sleepNs = targetIntervalNs - computeAndWriteNs
+            let wasLate = computeAndWriteNs > targetIntervalNs
+
+            // Absolute deadline pacing. The previous code slept for whatever was
+            // left of the budget measured from the START of this frame, so every
+            // overrun pushed the next deadline back by the same amount and was
+            // never recovered: one slow frame cascaded into the frames after it.
+            frameIndex += 1
+            let deadlineNs = startTimeNs + frameIndex * targetIntervalNs
+            let afterWorkNs = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)
+            if deadlineNs > afterWorkNs {
+                let sleepNs = deadlineNs - afterWorkNs
                 var ts = timespec(tv_sec: Int(sleepNs / 1_000_000_000), tv_nsec: Int(sleepNs % 1_000_000_000))
                 nanosleep(&ts, nil)
             }
-            
-            let totalFrameNs = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - frameStartNs
-            box.stats.recordFrame(renderDurationNs: totalFrameNs, wasDropped: wasDropped)
-            
+
             let endNs = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)
-            let instantFps = totalFrameNs > 0 ? (1_000_000_000.0 / Double(totalFrameNs)) : config.targetFps
+            let totalFrameNs = endNs - previousCompletionNs
+            previousCompletionNs = endNs
+            box.stats.recordFrame(
+                periodNs: totalFrameNs,
+                renderDurationNs: computeAndWriteNs,
+                simNs: simNs,
+                formatNs: formatNs,
+                wasLate: wasLate
+            )
+
+            let instantFps = totalFrameNs > 0 ? (1_000_000_000.0 / Double(totalFrameNs)) : 0.0
             smoothedFps = (smoothedFps * 0.85) + (instantFps * 0.15)
-            
+
             if endNs - lastOverlayUpdateNs >= 100_000_000 {
-                cachedOverlay = box.stats.statusLine(currentFps: smoothedFps, frameDurationMs: workMs)
+                cachedOverlay = box.stats.statusLine(currentFps: smoothedFps, frameDurationMs: Double(computeAndWriteNs) / 1_000_000.0)
                 lastOverlayUpdateNs = endNs
             }
         }
-        
+
         SignalHandler.clear()
         SignalHandler.restoreTerminal()
         let eraseSeq = "\u{1b}[0m\u{1b}[J"

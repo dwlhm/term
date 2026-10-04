@@ -16,6 +16,9 @@ GRAPHEME_STORE_CAP :: 256
 // CONTENT_GRAPHEME_BASE partitions Content_Handle: >= base is a pool index.
 CONTENT_GRAPHEME_BASE :: u32(0x110000)
 
+// KITTY_GRAPHICS_PLACEHOLDER is the cell glyph emitted behind a KGP image.
+KITTY_GRAPHICS_PLACEHOLDER :: rune(0x10EEEE)
+
 // Grapheme_Cluster is a sequence of up to GRAPHEME_INLINE_CAP runes.
 Grapheme_Cluster :: struct {
 	runes:      [GRAPHEME_INLINE_CAP]rune,

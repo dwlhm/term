@@ -71,8 +71,9 @@ test_dirty_upload_1cell :: proc(t: ^testing.T) {
 	testing.expect(t, bytes == u64(3 * 2) * instance.INSTANCE_STRIDE, "1-cell bytes must equal one widened run")
 	testing.expect(t, bytes < u64(2 * DIRTY_TEST_N * 48), "1-cell bytes must be << fullscreen bytes")
 
-	// Stable slots: bg slot i=3, glyph slot N+3.
-	testing.expect(t, d.mirror[3] != instance.Instance_Data{}, "dirty bg slot must hold the cell instance")
+	// Stable slots: glyph slot N+3. The cell carries the default background,
+	// so it owns no bg slot at all.
+	testing.expect(t, d.mirror[3] == instance.Instance_Data{}, "default-bg cell must leave its bg slot degenerate")
 	testing.expect(t, d.mirror[DIRTY_TEST_N+3] != instance.Instance_Data{}, "dirty glyph slot must hold the cell instance")
 	testing.expect(t, render.dirty_upload_validate_mirror(&d, &r), "single-cell update must keep mirror valid")
 }
@@ -102,7 +103,7 @@ test_dirty_upload_empty_to_occupied :: proc(t: ^testing.T) {
 	flushed, _, fell_back := _dirty_test_frame(&d, &r, &term, &lut, &ranges)
 	testing.expect(t, !fell_back, "occupied frame must not fall back")
 	testing.expect_value(t, flushed, 2)
-	testing.expect(t, d.mirror[0] != instance.Instance_Data{}, "newly occupied bg slot must be written")
+	testing.expect(t, d.mirror[0] == instance.Instance_Data{}, "default-bg cell must not occupy a bg slot")
 	testing.expect(t, d.mirror[DIRTY_TEST_N] != instance.Instance_Data{}, "newly occupied glyph slot must be written")
 }
 
@@ -124,7 +125,7 @@ test_dirty_upload_occupied_to_empty :: proc(t: ^testing.T) {
 
 	termgrid.terminal_put_string(&term, "AB")
 	_, _, _ = _dirty_test_frame(&d, &r, &term, &lut, &ranges)
-	testing.expect(t, d.mirror[0] != instance.Instance_Data{}, "occupied bg slot must be live before erase")
+	testing.expect(t, d.mirror[0] == instance.Instance_Data{}, "default-bg cell has no bg slot to keep live")
 
 	// Erase cell (0,0) back to default and mark it dirty.
 	termgrid.grid_set_cell(&term.grid, 0, 0, termgrid.CELL_DEFAULT)
@@ -215,8 +216,9 @@ test_dirty_upload_orphan_continuation_widen :: proc(t: ^testing.T) {
 	flushed, _, fell_back := _dirty_test_frame(&d, &r, &term, &lut, &ranges)
 	testing.expect(t, !fell_back, "orphan frame must not fall back")
 	testing.expect_value(t, flushed, 2)
-	// Widen pulled the lead in: lead expanded, stray continuation zeroed.
-	testing.expect(t, d.mirror[4] != instance.Instance_Data{}, "widened lead bg slot must be expanded")
+	// Widen pulled the lead in: its glyph expanded, the stray continuation
+	// zeroed. The lead carries the default background, so no bg slot.
+	testing.expect(t, d.mirror[4] == instance.Instance_Data{}, "default-bg lead must leave its bg slot degenerate")
 	testing.expect(t, d.mirror[5] == instance.Instance_Data{}, "orphan continuation bg slot must stay degenerate")
 	testing.expect(t, d.mirror[DIRTY_TEST_N+5] == instance.Instance_Data{}, "orphan continuation glyph slot must stay degenerate")
 }
@@ -322,4 +324,49 @@ _dirty_test_lut :: proc() -> render.Style_LUT {
 	lut: render.Style_LUT
 	render.style_lut_rebuild(&lut, &table)
 	return lut
+}
+
+@(test)
+test_terminal_background_opacity_reaches_full_and_dirty_instances :: proc(t: ^testing.T) {
+	term: termgrid.Terminal
+	termgrid.terminal_init(&term, 1, 3)
+	defer termgrid.terminal_destroy(&term)
+	termgrid.terminal_set_direct_bg(&term, 0x80604020)
+	termgrid.terminal_put_char(&term, 'D')
+	r := _dirty_test_renderer(1, 3)
+	defer render.render_compiler_destroy_v2(&r.compiled_v2)
+	r.instances.instance_data = make([]instance.Instance_Data, 16)
+	defer delete(r.instances.instance_data)
+	r.instances.max_instances = 16
+	lut := _test_lut()
+	r.compiled_v2.cells[0] = render.render_cell_pack_v2('D', 0, 1, render.RENDER_CELL_V2_CFLAG_DIRECT_COLOR, render.RENDER_CELL_V2_SLOT_UNRESOLVED)
+	r.compiled_v2.cells[1] = render.render_cell_pack_v2('A', 1, 1, 0, render.RENDER_CELL_V2_SLOT_UNRESOLVED)
+	r.compiled_v2.cells[2] = render.render_cell_pack_v2('S', 0, 1, render.RENDER_CELL_V2_CFLAG_SELECTED, render.RENDER_CELL_V2_SLOT_UNRESOLVED)
+	d: render.Dirty_Upload
+	testing.expect(t, render.dirty_upload_init(&d, &r))
+	defer render.dirty_upload_destroy(&d)
+	opacities := [3]f32{0, 0.375, 1}
+	for opacity in opacities {
+		r.background_opacity = opacity
+		bg_count, glyph_count, _, _ := render._prepare_instances_v2(&r, &lut, terminal = &term)
+		testing.expect_value(t, bg_count, u32(3))
+		testing.expect_value(t, glyph_count, u32(3))
+		render.dirty_upload_rebase(&d, &r, &lut, terminal = &term)
+		for col in 0..<3 {
+			authored_alpha := col == 0 ? f32(0x80) / 255.0 : f32(1)
+			want := authored_alpha * opacity
+			testing.expect(t, abs(r.instances.instance_data[col].a - want) < 0.0001, "full frame background must follow configured opacity")
+			testing.expect(t, abs(d.mirror[col].a - want) < 0.0001, "rebased background must follow configured opacity")
+			testing.expect_value(t, r.instances.instance_data[int(bg_count)+col].a, f32(1))
+			testing.expect_value(t, d.mirror[3+col].a, f32(1))
+			d.mirror[col].a = -1
+		}
+		ranges: [render.DIRTY_UPLOAD_MAX_RANGES]render.Dirty_Upload_Range
+		count := 0
+		testing.expect(t, render._dirty_expand_row(&d, &r, &term, &lut, 0, 0, 3, &ranges, &count))
+		for col in 0..<3 {
+			authored_alpha := col == 0 ? f32(0x80) / 255.0 : f32(1)
+			testing.expect(t, abs(d.mirror[col].a - authored_alpha * opacity) < 0.0001, "dirty background update must follow configured opacity")
+		}
+	}
 }

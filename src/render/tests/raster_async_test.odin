@@ -204,7 +204,7 @@ test_raster_pop_in :: proc(t: ^testing.T) {
 	lut := _fb_lut(&term)
 	bg, glyph: instance.Instance_Data
 	emit_bg, emit_glyph, _, _ := render.render_cell_expand_instance(frame.cells[0], &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
-	testing.expect(t, emit_bg && emit_glyph, "pop-in cell must emit bg+glyph")
+	testing.expect(t, !emit_bg && emit_glyph, "pop-in cell must emit glyph (default bg)")
 }
 
 @(test)

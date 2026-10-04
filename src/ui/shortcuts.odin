@@ -36,6 +36,7 @@ Shortcut_Action :: enum u8 {
 	Pane_Zoom,
 	Pane_Prev,
 	Pane_Next,
+	Toggle_Devtools,
 }
 
 // ui_shortcut_label returns the display label for an action. All glyphs used
@@ -72,6 +73,7 @@ ui_shortcut_label :: proc(a: Shortcut_Action) -> string {
 	case .Pane_Zoom:         return "\u21E7\u2318\u21B5"
 	case .Pane_Prev:         return "\u2318["
 	case .Pane_Next:         return "\u2318]"
+	case .Toggle_Devtools:   return "\u2325\u2318I"
 	}
 	return ""
 }
@@ -129,6 +131,8 @@ ui_shortcut_matches :: proc(action: Shortcut_Action, ev: input.Input_Event) -> b
 		gui = false
 		ctrl = true
 		shift = true
+	case .Toggle_Devtools: key = ev.rune == 'i'
+		alt = true
 	case: return false
 	}
 	return key && ev.gui == gui && ev.alt == alt && ev.shift == shift && ev.ctrl == ctrl

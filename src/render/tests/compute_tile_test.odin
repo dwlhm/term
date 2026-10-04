@@ -14,12 +14,31 @@ import termgrid "../../terminal"
 
 COMPUTE_TILE_TEST_ROWS :: 24
 COMPUTE_TILE_TEST_COLS :: 80
+COMPUTE_TILE_TEST_FRACTIONAL_OPACITY: f32 : 0.375
 
 // _compute_tile_journal writes one cell and takes its damage journal.
 _compute_tile_journal :: proc(term: ^termgrid.Terminal, row, col: int, c: rune) -> termgrid.Damage_Journal {
 	termgrid.terminal_move_cursor(term, row, col)
 	termgrid.terminal_put_char(term, c)
 	return termgrid.terminal_take_damage(term)
+}
+
+@(test)
+test_compute_tile_params_preserve_normalized_opacity :: proc(t: ^testing.T) {
+	r := tile.Compute_Tile_Renderer{
+		rows = COMPUTE_TILE_TEST_ROWS,
+		cols = COMPUTE_TILE_TEST_COLS,
+		tile_w = 8,
+		tile_h = 4,
+	}
+	values := [3]f32{0, COMPUTE_TILE_TEST_FRACTIONAL_OPACITY, 1}
+	for value in values {
+		r.bg_opacity = value
+		r.cell_opacity = value
+		params := tile._compute_tile_params(&r)
+		testing.expect_value(t, params.bg_opacity, value)
+		testing.expect_value(t, params.cell_opacity, value)
+	}
 }
 
 @(test)
@@ -147,14 +166,15 @@ test_compute_tile_fallback_nil_pipeline :: proc(t: ^testing.T) {
 	testing.expect_value(t, invocations, u32(0))
 
 	// Expand reference parity: the fallback instance path expands 'Q' to
-	// one bg + one glyph instance with the pinned slot UVs and LUT colors.
+	// a glyph instance with the pinned slot UVs and LUT colors. Style 0 is
+	// the default background, so no bg quad is emitted alongside it.
 	lut := _dirty_test_lut()
 	atlas := _dirty_test_atlas()
 	cell := render.render_cell_from_semantic(termgrid.Semantic_Cell{content = u32('Q'), style = 0, width = 1, flags = .None})
 	bg_inst, glyph_inst: instance.Instance_Data
 	emit_bg, emit_glyph, _, _ := render.render_cell_expand_instance(cell, &lut, &atlas, 40 * 8, 12 * 16, 8, 16, &bg_inst, &glyph_inst)
-	testing.expect(t, emit_bg && emit_glyph, "reference expand must emit bg + glyph")
-	testing.expect(t, bg_inst != instance.Instance_Data{}, "reference bg instance must be written")
+	testing.expect(t, !emit_bg && emit_glyph, "reference expand must emit glyph only (default bg)")
+	testing.expect(t, bg_inst == instance.Instance_Data{}, "default-background cell must leave bg unwritten")
 	testing.expect(t, glyph_inst != instance.Instance_Data{}, "reference glyph instance must be written")
 	testing.expect(t, glyph_inst.x == 40 * 8 && glyph_inst.y == 12 * 16, "reference glyph must sit on its cell origin")
 	testing.expect(t, glyph_inst.cw == 8 && glyph_inst.ch == 16, "reference glyph must span one cell")

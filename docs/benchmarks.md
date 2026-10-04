@@ -339,6 +339,53 @@ To run with custom durations, framerates, or test a $120\,\text{Hz}$ ProMotion d
 ./bin/term_video_player /path/to/video.mp4 --fps 60
 ```
 
+### Repeatable telemetry capture
+
+Build both binaries before comparing runs: `make build bin/term_video_player`.
+Keep terminal geometry, player mode, target FPS, duration, build flags, and
+DevTools settings identical. Record `stty size` inside the tested terminal.
+The last terminal row is reserved for the player overlay; half-block fire uses
+`columns × (rows - 1) × 2` pixels. Historical tables above used older telemetry
+and are not controlled evidence for the current implementation.
+
+Start each session from an existing shell with a fresh directory (the JSONL
+writer appends to existing files):
+
+```bash
+bench_dir=$(mktemp -d /tmp/term-bench.XXXXXX)
+export TERM_BENCH_MARKERS="$bench_dir/segments.txt"
+date -u '+%Y-%m-%dT%H:%M:%SZ session-start' >> "$TERM_BENCH_MARKERS"
+TERM_DEVTOOLS=1 TERM_DEVTOOLS_LOG="$bench_dir/devtools.jsonl" ./bin/term
+```
+
+Inside that Term window, from the repository directory:
+
+```bash
+stty size >> "$TERM_BENCH_MARKERS"
+date -u '+%Y-%m-%dT%H:%M:%SZ fire-60-start' >> "$TERM_BENCH_MARKERS"
+./bin/term_video_player --fire --duration 10 --fps 60
+date -u '+%Y-%m-%dT%H:%M:%SZ fire-60-end' >> "$TERM_BENCH_MARKERS"
+```
+
+Use a separate fresh session for each comparison run (old/new or target FPS). The sidecar records wall-clock
+boundaries and order only: JSONL `t_ns` is monotonic, so these timestamps cannot
+be directly subtracted or used for exact per-sample alignment. Save the player
+summary and quit Term cleanly to close the capture.
+
+Player Mean/Min/Max FPS and its smoothed overlay measure completed-frame periods,
+including pacing and loop overhead. Mean Work measures simulation + ANSI format
++ stdout write cost separately; it is not display latency. Late Frames count
+work exceeding the requested budget, not discarded frames. Absolute pacing can
+produce brief catch-up intervals above target FPS.
+
+DevTools FPS uses presentation-count deltas over actual monotonic sampling
+intervals; CPU uses counter deltas over the same interval. The shared cadence
+still controls refresh and idle suppression. DevTools drop percentage counts
+late loop iterations cumulatively, not lost player frames. Frame percentiles
+cover the latest 256 loop samples; parse p95 includes only positive drain/poll
+measurements in that window, not isolated parser execution. Player frames,
+terminal loop samples, and terminal presentations are different counts.
+
 ### 7.3 Model Context Protocol Benchmark (`make bench-mcp`)
 
 To build the release MCP daemon and run the comprehensive 11-suite comparative evaluation against Node.js and Python:

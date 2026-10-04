@@ -3,6 +3,79 @@ package config
 import "core:strings"
 import termgrid "../terminal"
 
+// Devtools_Anchor selects the corner of the window surface the DevTools panel
+// is pinned to. The panel is draw-only chrome (see render/devtools_panel.odin),
+// so the anchor is purely a geometry choice: it decides which edges the panel
+// is clamped against, never which inputs it sees.
+//
+// The textual spelling used by the config file and by the environment override
+// is the lower-case hyphenated form, e.g. "bottom-left"; devtools_anchor_parse
+// is the single place that maps text to a value.
+Devtools_Anchor :: enum u8 {
+	Top_Right     = 0,
+	Top_Left      = 1,
+	Bottom_Right  = 2,
+	Bottom_Left   = 3,
+}
+
+// DEVTOOLS_DEFAULT_COLUMNS is the default panel width in cells.
+//
+// It mirrors render.DEVTOOLS_PANEL_COLUMNS rather than importing it: render
+// depends on config, not the other way round, so the constant cannot be shared
+// by reference without inverting the dependency. To stop the two copies from
+// drifting, render/devtools_panel.odin carries a compile-time #assert that this
+// value still equals DEVTOOLS_PANEL_COLUMNS, which is where the panel's
+// fallback width is actually applied.
+DEVTOOLS_DEFAULT_COLUMNS :: 64
+
+// devtools_env_enabled applies the TERM_DEVTOOLS environment value to out.
+//
+// Recognised values are "1"/"0" and "true"/"false", compared after trimming
+// and case folding. Anything else reports ok == false and leaves out
+// untouched, so a typo in the environment degrades to the config file value
+// instead of silently disabling the collector.
+//
+// Pure by construction: it takes the value as an argument rather than reading
+// the environment, which is what makes the precedence testable without
+// launching the app.
+devtools_env_enabled :: proc(value: string, out: ^bool) -> bool {
+	s := strings.trim_space(value)
+	if strings.equal_fold(s, "1") || strings.equal_fold(s, "true") {
+		out^ = true
+		return true
+	}
+	if strings.equal_fold(s, "0") || strings.equal_fold(s, "false") {
+		out^ = false
+		return true
+	}
+	return false
+}
+
+// devtools_anchor_parse maps a textual anchor name to its enum value, case
+// insensitively and ignoring surrounding whitespace. An unrecognised name
+// reports ok == false and yields the default anchor, which callers must not
+// apply: the point of the false is that the caller's existing value survives.
+devtools_anchor_parse :: proc(value: string) -> (Devtools_Anchor, bool) {
+	s := strings.trim_space(value)
+	if strings.equal_fold(s, "top-right") {
+		return .Top_Right, true
+	}
+	if strings.equal_fold(s, "top-left") {
+		return .Top_Left, true
+	}
+	if strings.equal_fold(s, "bottom-right") {
+		return .Bottom_Right, true
+	}
+	if strings.equal_fold(s, "bottom-left") {
+		return .Bottom_Left, true
+	}
+	return .Top_Right, false
+}
+
+// Public normalized configuration values share one closed interval.
+CONFIG_NORMALIZED_MIN: f32 : 0.0
+CONFIG_NORMALIZED_MAX: f32 : 1.0
+
 // Config represents terminal configuration parameters loaded from config file or defaults.
 Config :: struct {
 	cols:                     int,
@@ -28,9 +101,13 @@ Config :: struct {
 	padding_y:                int,
 	locale:                   string,
 	tab_max_title_len:        int,
-	window_opacity:           f32,
-	window_blur:              bool,
+	opacity:                  f32,
+	window_blur:              f32,
 	allow_screensaver:        bool,
+	devtools_enabled:         bool,
+	devtools_anchor:          Devtools_Anchor,
+	devtools_columns:         int,
+	devtools_log_path:        string,
 }
 
 // config_default returns a default terminal configuration struct matching standard defaults.
@@ -59,9 +136,13 @@ config_default :: proc() -> Config {
 		padding_y                = 4,
 		locale                   = strings.clone(""),
 		tab_max_title_len        = 16,
-		window_opacity           = 1.0,
-		window_blur              = false,
+		opacity                  = CONFIG_NORMALIZED_MAX,
+		window_blur              = CONFIG_NORMALIZED_MIN,
 		allow_screensaver        = true,
+		devtools_enabled         = false,
+		devtools_anchor          = .Top_Right,
+		devtools_columns         = DEVTOOLS_DEFAULT_COLUMNS,
+		devtools_log_path        = strings.clone(""),
 	}
 }
 
@@ -76,5 +157,6 @@ config_destroy :: proc(cfg: ^Config) {
 	delete(cfg.working_directory)
 	delete(cfg.theme_name)
 	delete(cfg.locale)
+	delete(cfg.devtools_log_path)
 	cfg^ = {}
 }

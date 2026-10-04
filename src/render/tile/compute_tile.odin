@@ -23,16 +23,16 @@ import "base:runtime"
 import gpu "../gpu"
 
 // TILE_PARAMS_SIZE is the params uniform buffer size in bytes.
-// size_of(Tile_Params) == 56; the trailing 8 bytes stay zero.
+// size_of(Tile_Params) == 64; the trailing 4 bytes stay zero.
 TILE_PARAMS_SIZE :: 64
 
 // TILE_CELL_BYTES is one packed V2 cell (u64).
 TILE_CELL_BYTES :: 8
 
-// TILE_LUT_WORDS / TILE_LUT_BYTES cover the raw Style_LUT fg+bg bytes
-// (1024 u16 fg + 1024 u16 bg = 1024 u32 words).
-TILE_LUT_WORDS :: 1024
-TILE_LUT_BYTES :: 4096
+// TILE_LUT_WORDS / TILE_LUT_BYTES cover the raw Style_LUT fg+bg arrays
+// plus the packed selection foreground/background word.
+TILE_LUT_WORDS :: 1025
+TILE_LUT_BYTES :: TILE_LUT_WORDS * size_of(u32)
 
 // TILE_FRAMEBUFFER_FORMAT is the compute framebuffer format. BGRA8Unorm is
 // not storage-capable in WebGPU, so the framebuffer is always RGBA8Unorm
@@ -52,8 +52,9 @@ TILE_COMPUTE_ENTRY :: "cs_main"
 TILE_BLIT_VERTEX_ENTRY :: "vs_main"
 TILE_BLIT_FRAGMENT_ENTRY :: "fs_main"
 
-// Tile_Params mirrors the WGSL Tile_Params struct field for field (56 bytes,
-// all 4-byte scalars, no padding). screen_w/h carry the framebuffer size.
+// Tile_Params mirrors the WGSL Tile_Params struct field for field (64 bytes,
+// all 4-byte scalars, no padding). screen_w/h carry the framebuffer size;
+// bg_opacity carries default-background alpha; cell_opacity scales authored backgrounds.
 Tile_Params :: struct {
 	screen_w: f32,
 	screen_h: f32,
@@ -69,9 +70,11 @@ Tile_Params :: struct {
 	tiles_y:  u32,
 	atlas_w:  u32,
 	atlas_h:  u32,
+	bg_opacity: f32,
+	cell_opacity: f32,
 }
 
-#assert(size_of(Tile_Params) == 56)
+#assert(size_of(Tile_Params) == 64)
 
 // Compute_Tile_Renderer holds the tiled compute path GPU state.
 // available == false means every frame must take the instance fallback;
@@ -105,6 +108,8 @@ Compute_Tile_Renderer :: struct {
 	blit_layout:        gpu.Gpu_BindGroupLayout,
 	fb_w_px:            u32,
 	fb_h_px:            u32,
+	bg_opacity:         f32,
+	cell_opacity: f32,
 	format:             gpu.Gpu_Format,
 }
 
@@ -126,6 +131,8 @@ _compute_tile_params :: proc(r: ^Compute_Tile_Renderer) -> Tile_Params {
 		tiles_y  = tiles_y,
 		atlas_w  = TILE_ATLAS_TEX_W,
 		atlas_h  = TILE_ATLAS_TEX_H,
+		bg_opacity = r.bg_opacity,
+		cell_opacity = r.cell_opacity,
 	}
 }
 
@@ -494,7 +501,7 @@ compute_tile_set_tile_size :: proc(r: ^Compute_Tile_Renderer, tile_w: u32, tile_
 
 // compute_tile_upload_cells writes dirty tile cell rows at byte offsets, the
 // tile list, and (when rebuilt) the LUT. cells holds packed V2 u64s in
-// row-major order; lut_words views the raw Style_LUT fg+bg bytes as
+// row-major order; lut_words views the raw Style_LUT color bytes as
 // TILE_LUT_WORDS u32s. Byte math runs even with a nil backend (CPU-only
 // accounting); write_buffer is issued only when backend, queue, and buffers
 // are live. Returns total bytes that would be / were uploaded.

@@ -497,7 +497,12 @@ test_parser_memory_layout :: proc(t: ^testing.T) {
 	testing.expect(t, offset_of(p.Parser, clipboard_cb) == 1144, "offset clipboard_cb == 1144")
 	testing.expect(t, offset_of(p.Parser, clipboard_read_cb) == 1152, "offset clipboard_read_cb == 1152")
 	testing.expect(t, offset_of(p.Parser, clipboard_read_user_data) == 1160, "offset clipboard_read_user_data == 1160")
-	testing.expect(t, size_of(p.Parser) == 1168, "size_of(Parser) == 1168")
+	testing.expect(t, offset_of(p.Parser, apc_len) == 1168, "offset apc_len == 1168")
+	testing.expect(t, offset_of(p.Parser, apc_buffer) == 1176, "offset apc_buffer == 1176")
+	testing.expect(t, offset_of(p.Parser, apc_truncated) == 9368, "offset apc_truncated == 9368")
+	testing.expect(t, offset_of(p.Parser, graphics_cb) == 9376, "offset graphics_cb == 9376")
+	testing.expect(t, offset_of(p.Parser, graphics_user_data) == 9384, "offset graphics_user_data == 9384")
+	testing.expect(t, size_of(p.Parser) == 9392, "size_of(Parser) == 9392")
 }
 
 @(test)

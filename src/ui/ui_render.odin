@@ -349,7 +349,11 @@ ui_render_stage :: proc(
 	render.renderer_ui_begin_layer(r, .Tab_Chrome)
 
 	// 1. Tab Bar Background
-	emit_bg(r, tab_state.rect.x, tab_state.rect.y, tab_state.rect.w, tab_state.rect.h, theme.surface_bar)
+	// The tab bar follows the terminal's background opacity so the vibrancy
+	// blur shows through uniformly across the whole window.
+	bar_col := theme.surface_bar
+	bar_col[3] = bar_col[3] * r.background_opacity
+	emit_bg(r, tab_state.rect.x, tab_state.rect.y, tab_state.rect.w, tab_state.rect.h, bar_col)
 	emit_bg(r, 0, TAB_BAR_HEIGHT - 1.0, window_w, 1.0, theme.border_subtle)
 
 	// 2. Typographic Tab Strip

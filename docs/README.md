@@ -53,7 +53,7 @@ When no PTY events arrive, no animations are active, and no damaged spans exist:
 
 ### 🪟 Native macOS Vibrancy Blur & Translucency
 - **NSVisualEffectView Integration**: Attaches a native Cocoa visual effect view behind the `CAMetalLayer` content view to render smooth system vibrancy blur.
-- **Configurable Material & Opacity**: Managed declaratively via `window_opacity` ($0.1 \le \alpha \le 1.0$) and `window_blur` (`true`/`false`).
+- **Independent Opacity & Blur**: `opacity` and `blur` are independent controls in `0.0..1.0`. Opacity scales every terminal background paint while preserving foreground and app chrome; blur approximates AppKit effect intensity. Legacy aliases and boolean blur values remain accepted.
 - **Zero-Overhead Opaque Path**: When opacity is $1.0$ and blur is disabled, no `NSVisualEffectView` is allocated, preserving maximum rendering performance.
 
 ### 🔄 Session Persistence, Detachment & Attachment

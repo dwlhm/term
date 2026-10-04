@@ -15,6 +15,7 @@ import termgrid "../../terminal"
 FULLSCREEN_TEST_ROWS :: 24
 FULLSCREEN_TEST_COLS :: 80
 FULLSCREEN_TEST_N :: FULLSCREEN_TEST_ROWS * FULLSCREEN_TEST_COLS
+FULLSCREEN_TEST_FRACTIONAL_OPACITY: f32 : 0.375
 
 // _fullscreen_test_state builds a CPU-only fullscreen renderer state:
 // nil backend, valid geometry. No GPU resources.
@@ -27,6 +28,19 @@ _fullscreen_test_state :: proc() -> fullscreen.Fullscreen_Renderer {
 		fb_w_px = FULLSCREEN_TEST_COLS * 8,
 		fb_h_px = FULLSCREEN_TEST_ROWS * 16,
 		format  = gpu.Gpu_Format.BGRA8_Unorm,
+	}
+}
+
+@(test)
+test_fullscreen_params_preserve_normalized_opacity :: proc(t: ^testing.T) {
+	fr := _fullscreen_test_state()
+	values := [3]f32{0, FULLSCREEN_TEST_FRACTIONAL_OPACITY, 1}
+	for value in values {
+		fr.bg_opacity = value
+		fr.cell_opacity = value
+		params := fullscreen._fullscreen_params(&fr)
+		testing.expect_value(t, params.bg_opacity, value)
+		testing.expect_value(t, params.cell_opacity, value)
 	}
 }
 

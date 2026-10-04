@@ -94,14 +94,15 @@ test_style_overflow_fallback :: proc(t: ^testing.T) {
 	testing.expect_value(t, style, u16(2000 & 0x3FF))
 
 	// StyleIdStale → entry-0 fallback at expand (464 >= lut.count == 2).
+	// Entry 0 carries the default background, so no bg quad is emitted;
+	// the glyph still is.
 	lut := _test_lut()
 	atlas := _test_atlas()
 	bg, glyph: instance.Instance_Data
 	emit_bg, emit_glyph, _, _ := render.render_cell_expand_instance(v, &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
-	testing.expect(t, emit_bg, "stale style must keep bg")
+	testing.expect(t, !emit_bg, "stale style falls back to the default background and must skip bg")
 	testing.expect(t, emit_glyph, "valid 'A' slot must emit glyph")
-	er, eg, eb := instance.unpack_r5g6b5(lut.bg_r5g6b5[0])
-	testing.expect(t, bg.r == er && bg.g == eg && bg.b == eb, "bg must use LUT entry 0")
+	testing.expect(t, bg == instance.Instance_Data{}, "skipped bg must stay unwritten")
 
 	// Style 1023 (max valid) packs exactly.
 	vmax := render.render_cell_pack_v2(0x41, 1023, 1, 0, render.RENDER_CELL_V2_SLOT_UNRESOLVED)
@@ -116,19 +117,21 @@ test_slot_overflow_unresolved :: proc(t: ^testing.T) {
 	_, _, _, _, slot := render.render_cell_unpack_v2(v)
 	testing.expect_value(t, slot, render.RENDER_CELL_V2_SLOT_UNRESOLVED)
 
-	// Expand resolves UNRESOLVED via atlas fallback → glyph emitted for valid 'A'.
+	// Expand resolves UNRESOLVED via atlas fallback → glyph emitted for valid
+	// 'A'. Style 0 is the default background, so no bg quad accompanies it.
 	lut := _test_lut()
 	atlas := _test_atlas()
 	bg, glyph: instance.Instance_Data
 	emit_bg, emit_glyph, _, _ := render.render_cell_expand_instance(v, &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
-	testing.expect(t, emit_bg && emit_glyph, "atlas fallback must emit bg+glyph")
+	testing.expect(t, !emit_bg && emit_glyph, "atlas fallback must emit glyph only")
 
-	// Invalid slot (valid bit clear) → skip glyph, keep bg.
+	// Invalid slot (valid bit clear) → skip glyph; the default background
+	// means there is no bg to keep either.
 	if a_idx, a_ok := render.atlas_pinned_slot_index(0x41); a_ok {
 		atlas.slots[a_idx] = render.Atlas_Slot{valid = false}
 	}
 	emit_bg2, emit_glyph2, _, _ := render.render_cell_expand_instance(v, &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
-	testing.expect(t, emit_bg2 && !emit_glyph2, "invalid slot must skip glyph and keep bg")
+	testing.expect(t, !emit_bg2 && !emit_glyph2, "invalid slot must skip both bg and glyph")
 }
 
 @(test)
@@ -190,6 +193,64 @@ test_empty_skip :: proc(t: ^testing.T) {
 	cell := render.render_cell_pack_v2(0x41, 1, 1, 0, render.RENDER_CELL_V2_SLOT_UNRESOLVED)
 	eb3, eg3, _, _ := render.render_cell_expand_instance(cell, &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
 	testing.expect(t, eb3 && eg3, "printable must emit bg+glyph")
+}
+
+@(test)
+test_default_bg_printable_emits_glyph_only :: proc(t: ^testing.T) {
+	lut := _test_lut()
+	atlas := _test_atlas()
+	bg, glyph: instance.Instance_Data
+
+	// Style 0 carries the theme default background. The pane viewport fill
+	// already paints it, so the cell must not emit a second, opaque quad —
+	// but its glyph must still be drawn.
+	cell := render.render_cell_pack_v2(0x41, 0, render.RENDER_CELL_V2_WIDTH_NARROW, 0, render.RENDER_CELL_V2_SLOT_UNRESOLVED)
+	emit_bg, emit_glyph, emit_emoji, emit_decor := render.render_cell_expand_instance(cell, &lut, &atlas, 4, 6, 8, 16, &bg, &glyph)
+	testing.expect(t, !emit_bg, "default-background printable must emit no bg quad")
+	testing.expect(t, emit_glyph, "default-background printable must still emit its glyph")
+	testing.expect(t, !emit_emoji && !emit_decor, "plain printable must emit neither emoji nor decor")
+	testing.expect(t, bg == instance.Instance_Data{}, "no bg instance may be written")
+	testing.expect(t, glyph.x == 4.0 && glyph.y == 6.0 && glyph.cw == 8.0 && glyph.ch == 16.0, "glyph must sit on its cell origin")
+	fr, fg_c, fb := instance.unpack_r5g6b5(lut.fg_r5g6b5[0])
+	testing.expect(t, glyph.r == fr && glyph.g == fg_c && glyph.b == fb, "glyph must use LUT entry 0 fg")
+
+	// A wide lead with the default background likewise emits no bg quad.
+	wide := render.render_cell_pack_v2(0x57, 0, render.RENDER_CELL_V2_WIDTH_WIDE_LEAD, 0, render.RENDER_CELL_V2_SLOT_UNRESOLVED)
+	wbg, wglyph: instance.Instance_Data
+	w_emit_bg, w_emit_glyph, _, _ := render.render_cell_expand_instance(wide, &lut, &atlas, 0, 0, 8, 16, &wbg, &wglyph)
+	testing.expect(t, !w_emit_bg && w_emit_glyph, "default-background wide lead must emit glyph only")
+	testing.expect(t, wglyph.cw == 16.0, "wide lead glyph must span double width")
+}
+
+@(test)
+test_selected_default_looking_bg_still_emits :: proc(t: ^testing.T) {
+	// Regression guard for the selected carve-out: even when the selection
+	// background is byte-identical to the theme default, the cell must keep
+	// its bg quad, otherwise a matching selection highlight would vanish.
+	lut := _test_lut()
+	lut.selection_bg_r5g6b5 = lut.bg_r5g6b5[0]
+	atlas := _test_atlas()
+	bg, glyph: instance.Instance_Data
+
+	selected := render.render_cell_pack_v2(
+		0x41, 0, render.RENDER_CELL_V2_WIDTH_NARROW,
+		render.RENDER_CELL_V2_CFLAG_SELECTED,
+		render.RENDER_CELL_V2_SLOT_UNRESOLVED,
+	)
+	emit_bg, emit_glyph, _, _ := render.render_cell_expand_instance(selected, &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
+	testing.expect(t, emit_bg, "selected cell must emit bg even when the selection bg equals the default")
+	testing.expect(t, emit_glyph, "selected cell must emit its glyph")
+	er, eg, eb := instance.unpack_r5g6b5(lut.selection_bg_r5g6b5)
+	testing.expect(t, bg.r == er && bg.g == eg && bg.b == eb, "bg must carry the selection background")
+	testing.expect(t, bg.a == 1.0, "selected bg must stay opaque")
+
+	// Dropping the selected flag on the same cell restores the default skip.
+	plain := render.render_cell_pack_v2(
+		0x41, 0, render.RENDER_CELL_V2_WIDTH_NARROW, 0, render.RENDER_CELL_V2_SLOT_UNRESOLVED,
+	)
+	plain_bg, plain_glyph: instance.Instance_Data
+	p_emit_bg, p_emit_glyph, _, _ := render.render_cell_expand_instance(plain, &lut, &atlas, 0, 0, 8, 16, &plain_bg, &plain_glyph)
+	testing.expect(t, !p_emit_bg && p_emit_glyph, "unselected twin must fall back to the default-background skip")
 }
 
 @(test)
@@ -459,6 +520,19 @@ test_expand_instance_decor_underline_and_strike :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_sibling_renderers_detect_direct_color_fallback :: proc(t: ^testing.T) {
+	term: termgrid.Terminal
+	termgrid.terminal_init(&term, 1, 1)
+	defer termgrid.terminal_destroy(&term)
+	testing.expect(t, !render._renderer_terminal_has_direct_color(&term), "plain grid must remain eligible for sibling renderers")
+
+	termgrid.terminal_set_direct_fg(&term, 0xFF123456)
+	termgrid.terminal_set_direct_bg(&term, 0xFF654321)
+	termgrid.terminal_put_char(&term, 'X')
+	testing.expect(t, render._renderer_terminal_has_direct_color(&term), "direct colors must fall back to the instance renderer")
+}
+
+@(test)
 test_render_cell_direct_color :: proc(t: ^testing.T) {
 	lut := _test_lut()
 	atlas := _test_atlas()
@@ -483,6 +557,7 @@ test_render_cell_direct_color :: proc(t: ^testing.T) {
 	testing.expect(t, abs(bg.r - want_bg_r) < 0.001, "bg.r must match direct ARGB")
 	testing.expect(t, abs(bg.g - want_bg_g) < 0.001, "bg.g must match direct ARGB")
 	testing.expect(t, abs(bg.b - want_bg_b) < 0.001, "bg.b must match direct ARGB")
+	testing.expect(t, bg.a == f32(1), "direct background must retain authored opacity")
 
 	want_fg_r := f32(0xFF) / 255.0
 	want_fg_g := f32(0x80) / 255.0
@@ -490,6 +565,23 @@ test_render_cell_direct_color :: proc(t: ^testing.T) {
 	testing.expect(t, abs(glyph.r - want_fg_r) < 0.001, "glyph.r must match direct ARGB")
 	testing.expect(t, abs(glyph.g - want_fg_g) < 0.001, "glyph.g must match direct ARGB")
 	testing.expect(t, abs(glyph.b - want_fg_b) < 0.001, "glyph.b must match direct ARGB")
+	testing.expect(t, glyph.a == f32(1), "glyph opacity must not inherit default-background opacity")
+}
+
+@(test)
+test_render_cell_black_background_over_nonblack_default :: proc(t: ^testing.T) {
+	lut := _test_lut()
+	lut.bg_r5g6b5[0] = render.color_to_r5g6b5(0xFF284868)
+	lut.bg_r5g6b5[1] = render.color_to_r5g6b5(0xFF000000)
+	atlas := _test_atlas()
+	bg, glyph: instance.Instance_Data
+	cell := render.render_cell_pack_v2(0x20, 1, render.RENDER_CELL_V2_WIDTH_NARROW, 0, render.RENDER_CELL_V2_SLOT_UNRESOLVED)
+	emit_bg, _, _, _ := render.render_cell_expand_instance(cell, &lut, &atlas, 0, 0, 8, 16, &bg, &glyph)
+	testing.expect(t, emit_bg, "ANSI black must remain visible over a nonblack default background")
+	testing.expect_value(t, bg.r, f32(0))
+	testing.expect_value(t, bg.g, f32(0))
+	testing.expect_value(t, bg.b, f32(0))
+	testing.expect_value(t, bg.a, f32(1))
 }
 
 @(test)
@@ -499,6 +591,7 @@ test_prepare_pane_instances_v2_dimming :: proc(t: ^testing.T) {
 	defer free(r)
 	r.cell_width = 8.0
 	r.cell_height = 16.0
+	r.background_opacity = 0.5
 	r.atlas = _test_atlas()
 	max_inst: u32 = 128
 	r.instances.max_instances = max_inst
@@ -511,6 +604,8 @@ test_prepare_pane_instances_v2_dimming :: proc(t: ^testing.T) {
 	defer termgrid.terminal_destroy(&t2)
 	termgrid.terminal_init(&t1, 2, 2)
 	termgrid.terminal_init(&t2, 2, 2)
+	t1.grid.style_table.theme.background = 0x80102030
+	t2.grid.style_table.theme.background = 0x80102030
 
 	style := termgrid.Style{fg = 0xFFFF0000, bg = 0xFF0000FF}
 	_ = termgrid.style_table_insert(&t1.grid.style_table, style)
@@ -559,27 +654,64 @@ test_prepare_pane_instances_v2_dimming :: proc(t: ^testing.T) {
 	testing.expect(t, bg_count >= 2, "must have at least 2 backgrounds")
 	testing.expect(t, glyph_count >= 2, "must have at least 2 glyphs")
 
+	want_fill_alpha := f32(0x80) / 255.0 * r.background_opacity
+	testing.expect(t, abs(r.instances.instance_data[0].a - want_fill_alpha) < 0.001, "pane default fill applies theme alpha and opacity exactly once")
+	testing.expect(t, abs(r.instances.instance_data[2].a - want_fill_alpha) < 0.001, "every pane default fill uses the same alpha rule")
+
 	// Pane 1 background: active (offset x=0, y=28, 100% color)
 	bg1 := r.instances.instance_data[1]
+	testing.expect_value(t, bg1.a, r.background_opacity)
 	testing.expect_value(t, bg1.x, f32(0))
 	testing.expect_value(t, bg1.y, f32(28))
 
-	// Pane 2 background: inactive (offset x=400, y=28, 75% dimmed color)
+	// Pane 2 background: inactive (offset x=400, y=28). Backgrounds are not
+	// dimmed at all, so the inactive pane keeps the authored RGB.
 	bg2 := r.instances.instance_data[3]
+	testing.expect_value(t, bg2.a, r.background_opacity)
 	testing.expect_value(t, bg2.x, f32(400))
 	testing.expect_value(t, bg2.y, f32(28))
-	testing.expect(t, abs(bg2.b - bg1.b * 0.75) < 0.01, "inactive bg.b must be dimmed to 75%")
+	testing.expect(t, abs(bg2.r - bg1.r) < 0.001, "inactive bg.r must match active bg.r (backgrounds are never dimmed)")
+	testing.expect(t, abs(bg2.g - bg1.g) < 0.001, "inactive bg.g must match active bg.g (backgrounds are never dimmed)")
+	testing.expect(t, abs(bg2.b - bg1.b) < 0.001, "inactive bg.b must match active bg.b (backgrounds are never dimmed)")
 
-	// Pane 1 glyph: active (offset x=0, y=28, 100% color)
+	// Pane 1 glyph: active (offset x=0, y=28, undimmed)
 	g1 := r.instances.instance_data[bg_count]
 	testing.expect_value(t, g1.x, f32(0))
 	testing.expect_value(t, g1.y, f32(28))
+	testing.expect_value(t, g1.a, f32(1))
 
-	// Pane 2 glyph: inactive (offset x=400, y=28, 75% dimmed color)
+	// Pane 2 glyph: inactive (offset x=400, y=28). Text fades through alpha,
+	// RGB is untouched.
 	g2 := r.instances.instance_data[bg_count + 1]
 	testing.expect_value(t, g2.x, f32(400))
 	testing.expect_value(t, g2.y, f32(28))
-	testing.expect(t, abs(g2.r - g1.r * 0.75) < 0.01, "inactive glyph.r must be dimmed to 75%")
+	testing.expect(t, abs(g2.r - g1.r) < 0.001, "inactive glyph.r must match active glyph.r (only alpha is dimmed)")
+	testing.expect(t, abs(g2.g - g1.g) < 0.001, "inactive glyph.g must match active glyph.g (only alpha is dimmed)")
+	testing.expect(t, abs(g2.b - g1.b) < 0.001, "inactive glyph.b must match active glyph.b (only alpha is dimmed)")
+	testing.expect(t, abs(g2.a - g1.a * 0.75) < 0.001, "inactive glyph.a must be faded to 75% of the active alpha")
+}
+
+@(test)
+test_apply_pane_dim_fades_alpha_only :: proc(t: ^testing.T) {
+	full := instance.Instance_Data{r = 0.9, g = 0.8, b = 0.7, a = 1.0}
+
+	dimmed := full
+	render._apply_pane_dim(&dimmed, 0.75)
+	testing.expect(t, abs(dimmed.a - 0.75) < 0.001, "alpha must be multiplied by dim")
+	testing.expect(t, abs(dimmed.r - full.r) < 0.001, "r must be untouched")
+	testing.expect(t, abs(dimmed.g - full.g) < 0.001, "g must be untouched")
+	testing.expect(t, abs(dimmed.b - full.b) < 0.001, "b must be untouched")
+
+	active := full
+	render._apply_pane_dim(&active, 1.0)
+	testing.expect_value(t, active.a, full.a)
+	testing.expect_value(t, active.r, full.r)
+
+	translucent := instance.Instance_Data{a = 0.5}
+	render._apply_pane_dim(&translucent, 0.5)
+	testing.expect(t, abs(translucent.a - 0.25) < 0.001, "dim must scale an already translucent alpha")
+
+	render._apply_pane_dim(nil, 0.5) // must not crash
 }
 
 @(test)

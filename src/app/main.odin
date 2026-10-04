@@ -38,6 +38,12 @@ PTY_DATA_READY :: sdl3.EventType(cast(u32)sdl3.EventType.USER + 1)
 TARGET_FRAME_INTERVAL_120HZ_NS :: 8_333_333 // 8.33ms for 120Hz display
 TARGET_FRAME_INTERVAL_60HZ_NS  :: 16_666_667 // 16.66ms for 60Hz display
 
+// APP_INSTANCE_RECORDS_PER_CELL is how many vertex instances the renderer
+// uploads per dirty cell: one background record and one glyph record. It is the
+// factor behind the app_debug `upload_est` figure and behind the DevTools
+// upload_bytes sample, so the two report the same estimate.
+APP_INSTANCE_RECORDS_PER_CELL :: 2
+
 when ODIN_OS == .Darwin {
 	foreign import AppKit "system:AppKit.framework"
 	@(default_calling_convention="c")
@@ -369,14 +375,25 @@ App :: struct {
 	confirm_session_len: int,
 	drag_region:         win.Drag_Region,
 	drop_fx:             Drop_Fx_State,
+	image_focus:         inter.Image_Focus_State,
 	pty_event_pending:   b32,
 	pending_wake_event:  sdl3.Event,
 	has_wake_event:      bool,
 	frame_probe:              probe.Frame_Probe,
 	alloc_probe:              probe.Alloc_Probe,
 	last_present_time_ns:     u64,
+	// pending_window_zoom defers the native zoom action out of event dispatch.
+	// See the handling site in app_frame: performing it inside the dispatch path
+	// spins a nested AppKit run loop that re-enters the SDL event queue and
+	// deadlocks the main thread permanently.
+	pending_window_zoom:      bool,
 	target_frame_interval_ns: u64,
 	has_deferred_render:      bool,
+	// devtools_pty_last is the DevTools PTY byte counter reading observed on
+	// the previous frame, for the backend that was active at the time. The
+	// counter itself lives on the Backend (it is written on the worker
+	// thread); this is only the frame loop's baseline for the delta.
+	devtools_pty_last:        u64,
 }
 
 _app_on_backend_data_ready :: proc(user_data: rawptr) {
@@ -391,6 +408,20 @@ _app_on_backend_data_ready :: proc(user_data: rawptr) {
 }
 
 
+// _app_gpu_frame_complete receives one frame's GPU execution time from the GPU
+// backend and hands it to DevTools.
+//
+// It is invoked from the backend's command buffer completion handler, on a
+// driver-internal thread, after the buffer has finished; it never runs on the
+// frame path and it must stay that way: obtaining GPU timing by blocking on the
+// command buffer would serialise CPU encoding against GPU execution and destroy
+// drawable triple buffering. It therefore touches no App state, only the
+// DevTools ring, and the disabled path is a single atomic load.
+_app_gpu_frame_complete :: proc(gpu_ns: u64, valid: bool) {
+	if !diag.devtools_enabled() do return
+	diag.devtools_record_gpu(gpu_ns, valid)
+}
+
 // app_active_backend resolves the currently active session backend.
 app_active_backend :: proc(a: ^App) -> ^Backend {
 	if a == nil do return nil
@@ -398,6 +429,64 @@ app_active_backend :: proc(a: ^App) -> ^Backend {
 		return tab_active_backend(&a.session_mgr.tabs[a.session_mgr.active_idx])
 	}
 	return &a.backend
+}
+
+// _app_resolve_devtools_config layers the environment over the loaded config
+// file, in place, before anything reads a DevTools value.
+//
+// Precedence, highest first:
+//   1. TERM_DEVTOOLS         "1"/"0"/"true"/"false" override the config file.
+//   2. TERM_DEVTOOLS_ANCHOR  "top-right", "top-left", "bottom-right",
+//                            "bottom-left" (case-insensitive).
+//   3. TERM_DEVTOOLS_LOG     a log file path, overriding devtools_log_path.
+//   4. otherwise the config file value stands.
+//
+// An unrecognised value at any level is ignored rather than diagnosed: an
+// environment variable is not a place to print a warning on every launch, and
+// the config file already has a value to fall back to. The parsing itself
+// lives in the config package as pure functions on strings, which is what
+// makes this precedence testable without launching the app.
+//
+// Called right after config load rather than at the devtools_init call site,
+// because the anchor and column count must already be resolved when
+// frontend_init snapshots them into the Frontend.
+_app_resolve_devtools_config :: proc(a: ^App) {
+	if a == nil do return
+	cfg := &a.config
+	if value, ok := os.lookup_env("TERM_DEVTOOLS", context.temp_allocator); ok {
+		config.devtools_env_enabled(value, &cfg.devtools_enabled)
+	}
+	if value, ok := os.lookup_env("TERM_DEVTOOLS_ANCHOR", context.temp_allocator); ok {
+		if anchor, valid := config.devtools_anchor_parse(value); valid {
+			cfg.devtools_anchor = anchor
+		}
+	}
+	if value, ok := os.lookup_env("TERM_DEVTOOLS_LOG", context.temp_allocator); ok {
+		if len(value) > 0 {
+			delete(cfg.devtools_log_path)
+			cfg.devtools_log_path = strings.clone(value)
+		}
+	}
+}
+
+// _app_toggle_devtools flips DevTools collection from the keyboard.
+//
+// devtools_toggle clears the sample ring on the off->on transition, so the
+// panel never opens onto history recorded before the toggle; on the on->off
+// transition it keeps the last numbers. This proc re-baselines the PTY byte
+// counter for the same reason: the ring is empty, so the first delta after
+// re-enabling must be measured from here rather than from the last frame that
+// ran with collection on, or every byte drained in between would be reported
+// as if it arrived in that one frame.
+//
+// full_redraw_pending is required because the panel is the only thing that
+// changes on screen: without a repaint request the surface keeps the last
+// frame, including a panel that should have disappeared.
+_app_toggle_devtools :: proc(a: ^App) {
+	if a == nil do return
+	_ = diag.devtools_toggle()
+	a.devtools_pty_last = backend_pty_bytes_total(app_active_backend(a))
+	a.renderer.full_redraw_pending = true
 }
 
 // app_global holds the active App pointer for callbacks.
@@ -671,6 +760,7 @@ app_init :: proc(a: ^App, rows, cols: int, prog: string, argv: []string) -> bool
 	if !load_ok {
 		a.config = config.config_default()
 	}
+	_app_resolve_devtools_config(a)
 
 	if len(a.config.locale) > 0 {
 		i18n.i18n_init(i18n.i18n_locale_from_string(a.config.locale))
@@ -783,12 +873,54 @@ app_init :: proc(a: ^App, rows, cols: int, prog: string, argv: []string) -> bool
 	sync.atomic_store(&a.pty_event_pending, false)
 
 	probe.frame_probe_init(&a.frame_probe)
+	// The enabled flag is resolved by _app_resolve_devtools_config above, which
+	// layers TERM_DEVTOOLS over the config file and the built-in default.
+	diag.devtools_init(a.config.devtools_enabled)
+	// The JSONL telemetry writer is pointed at the resolved path here (config
+	// file, or the TERM_DEVTOOLS_LOG override applied above). The file itself
+	// is opened lazily on the first sample, so a run that never reaches the
+	// cadence does not create an empty one.
+	if len(a.config.devtools_log_path) > 0 {
+		_ = diag.devtools_log_open(a.config.devtools_log_path)
+	}
+	// DevTools gets GPU timing through the backend's completion handler rather
+	// than a blocking wait on the command buffer. Registered here, next to the
+	// initialisation, because the handler reports on a driver thread and must be
+	// wired before the first submit.
+	if a.renderer.backend != nil {
+		a.renderer.backend.gpu_frame_complete = _app_gpu_frame_complete
+	}
 	if debug_env, ok := os.lookup_env("TERM_DEBUG", context.temp_allocator); ok && debug_env == "1" {
 		probe.alloc_probe_init(&a.alloc_probe, context.allocator)
 		probe.alloc_probe_mark_init_done(&a.alloc_probe)
 	}
 
 	return true
+}
+
+// _app_devtools_frame_active reports whether this frame did real work that
+// DevTools telemetry should record.
+//
+// It is the idle signal for the whole subsystem, and it is reported to diag
+// once per frame BEFORE the present, so the on-screen panel and the JSONL log
+// decide against the same reading and cannot disagree about whether the app
+// was working.
+//
+// Two conditions, both observed rather than approximated:
+//   - is_dirty: a frame that rendered nothing (no damage, no events, no
+//     animation) is not evidence about the frame budget, so it is not
+//     sampled.
+//   - window focus: SDL3's window flags are the app's own focus signal, the
+//     same query _app_sync_focus and pane_manager's drag path already use.
+//     An unfocused window produces frames for teardown, resize and
+//     macOS-driven repaints, none of which reflect user-visible performance.
+//
+// A headless run with no window handle has no focus to consult and is taken
+// at face value.
+_app_devtools_frame_active :: proc(a: ^App, is_dirty: bool) -> bool {
+	if !is_dirty do return false
+	if a == nil || a.window.handle == nil do return true
+	return .INPUT_FOCUS in sdl3.GetWindowFlags(a.window.handle)
 }
 
 // app_destroy tears down Session Manager and Frontend in order.
@@ -805,6 +937,11 @@ app_destroy :: proc(a: ^App) {
 	report := probe.frame_probe_report(&a.frame_probe)
 	diag.diag_info("[telemetry] %s", report)
 	delete(report)
+
+	// DevTools end-of-run summary, then the writer close. The summary runs
+	// first because it reports the destination path, which the close releases.
+	diag.devtools_log_summary()
+	diag.devtools_log_close()
 
 	probe.profile_ring_stop_and_join(&probe._profile_ring)
 	if _profile_scenario_initialized {
@@ -882,6 +1019,72 @@ _app_pointer_point :: proc(a: ^App, x, y: f32) -> termgrid.Terminal_Point {
 
 _app_pointer_wheel_delta :: backend_pointer_wheel_delta
 _app_pointer_selection_changed :: backend_pointer_selection_changed
+
+_app_dispatch_image_focus :: proc(a: ^App, ev: input.Input_Event) -> bool {
+	if a == nil || !a.image_focus.active do return false
+	if ev.event_type == .Key {
+		if ev.is_release do return true
+		if ev.kind == .Escape {
+			inter.image_focus_close(&a.image_focus)
+			a.renderer.full_redraw_pending = true
+			return true
+		}
+		if !ev.ctrl && !ev.alt && !ev.gui {
+			if ev.rune == '+' || ev.rune == '=' {
+				_ = inter.image_focus_zoom(&a.image_focus, 1)
+				a.renderer.full_redraw_pending = true
+				return true
+			}
+			if ev.rune == '-' {
+				_ = inter.image_focus_zoom(&a.image_focus, -1)
+				a.renderer.full_redraw_pending = true
+				return true
+			}
+		}
+		#partial switch ev.kind {
+		case .Arrow_Left:
+			_ = inter.image_focus_pan(&a.image_focus, -inter.IMAGE_FOCUS_KEY_PAN_STEP, 0)
+		case .Arrow_Right:
+			_ = inter.image_focus_pan(&a.image_focus, inter.IMAGE_FOCUS_KEY_PAN_STEP, 0)
+		case .Arrow_Up:
+			_ = inter.image_focus_pan(&a.image_focus, 0, -inter.IMAGE_FOCUS_KEY_PAN_STEP)
+		case .Arrow_Down:
+			_ = inter.image_focus_pan(&a.image_focus, 0, inter.IMAGE_FOCUS_KEY_PAN_STEP)
+		case:
+			return true
+		}
+		a.renderer.full_redraw_pending = true
+		return true
+	}
+	if ev.event_type == .Pointer {
+		p := ev.pointer
+		#partial switch p.kind {
+		case .Wheel:
+			delta := p.wheel_y
+			if delta == 0 { delta = f32(p.wheel_integer_y) }
+			if delta > 0 {
+				_ = inter.image_focus_zoom(&a.image_focus, 1)
+			} else if delta < 0 {
+				_ = inter.image_focus_zoom(&a.image_focus, -1)
+			}
+			a.renderer.full_redraw_pending = true
+		case .Motion:
+			if p.primary_down {
+				_ = inter.image_focus_pan(&a.image_focus, p.dx, p.dy)
+				a.renderer.full_redraw_pending = true
+			}
+		case .Button_Down:
+			if p.button == sdl3.BUTTON_LEFT && !_app_image_focus_contains(a, p) {
+				// The focus surface has no terminal target: a click outside it
+				// dismisses the focus and is never forwarded to the PTY.
+				inter.image_focus_close(&a.image_focus)
+				a.renderer.full_redraw_pending = true
+			}
+		}
+		return true
+	}
+	return true
+}
 
 _app_route_pointer :: proc(a: ^App, pointer: input.Input_Pointer_Event) -> bool {
 	b := app_active_backend(a)
@@ -1028,6 +1231,12 @@ app_reload_config :: proc(a: ^App) -> bool {
 		_ = _app_apply_zoom(a)
 	}
 
+	// Background transparency is not part of the theme reload path; re-apply it
+	// through the single vibrancy call site whenever the knob changes.
+	if new_cfg.opacity != a.config.opacity || new_cfg.window_blur != a.config.window_blur {
+		frontend_apply_vibrancy(&a.frontend, new_cfg.opacity, new_cfg.window_blur)
+	}
+
 	config.config_destroy(&a.config)
 	a.config = new_cfg
 	return true
@@ -1169,6 +1378,18 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 			}
 
 			if ev.gui {
+				// alt+cmd+i. Tested before every other gui branch because the
+				// router below matches runes positionally and several of them
+				// (d, t, f, r, digits) ignore the modifier combination that
+				// identifies this shortcut. A dedicated rune ('i' is
+				// unclaimed) plus the exact ui_shortcut_matches test is what
+				// keeps it from colliding: no existing branch reads 'i', so
+				// nothing below can shadow it and nothing above can, because
+				// this is the first gui branch in the chain.
+				if ui.ui_shortcut_matches(.Toggle_Devtools, ev) {
+					_app_toggle_devtools(a)
+					continue
+				}
 				if ev.alt && (ev.rune == 'd' || ev.rune == 'D') {
 					if ev.shift {
 						_ = session_close_to_right(&a.session_mgr, a.session_mgr.active_idx)
@@ -1186,9 +1407,8 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 				}
 				if _app_dispatch_pane_shortcut(a, ev) do continue
 				if ev.ctrl && (ev.rune == 'z' || ev.rune == 'Z') {
-					_ = win.window_zoom(&a.window)
-					win.window_update_pixel_size(&a.window)
-					a.renderer.full_redraw_pending = true
+					// Deferred: see pending_window_zoom below.
+					a.pending_window_zoom = true
 					continue
 				}
 				if !ev.shift && !ev.alt && !ev.ctrl && (ev.rune == 'r' || ev.rune == 'R') {
@@ -1237,6 +1457,13 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 					}
 				}
 			}
+		}
+
+		// Focus gestures are screen-only after global shortcuts have had their
+		// normal opportunity to run. Unclaimed terminal keys remain consumed.
+		if a.image_focus.active && ev.event_type == .Key {
+			_ = _app_dispatch_image_focus(a, ev)
+			continue
 		}
 
 		// (2) Search Bar Key Dispatch
@@ -1295,6 +1522,10 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 			// Pointer Hit & Focus Gate
 			px := ev.pointer.x
 			py := ev.pointer.y
+			if a.image_focus.active {
+				_ = _app_dispatch_image_focus(a, ev)
+				continue
+			}
 
 			// (0a) Modal tab chrome: context menu, inline rename, then drag. Each
 			// branch consumes before terminal routing so nothing leaks to the PTY.
@@ -1465,8 +1696,8 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 					case .Show_Overflow:
 						_app_open_tab_overflow(a)
 					case .Window_Zoom:
-						_ = win.window_zoom(&a.window)
-						win.window_update_pixel_size(&a.window)
+						// Deferred: see pending_window_zoom below.
+						a.pending_window_zoom = true
 					case .None:
 					}
 					continue
@@ -1483,6 +1714,19 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 
 			if _app_route_pane_pointer(a, ev.pointer) do continue
 			active_b = app_active_backend(a)
+
+			// A plain left click on a rendered KGP image opens the screen-only
+			// focus overlay. A miss continues through the existing scrollbar,
+			// selection, link, and terminal mouse paths unchanged.
+			if !a.image_focus.active && primary_click && !ev.pointer.gui {
+				hit, namespace, hit_ok := _app_image_focus_hit(a, ev.pointer)
+				if hit_ok {
+					inter.image_focus_open(&a.image_focus, namespace, hit.image_id, hit.generation)
+					a.renderer.full_redraw_pending = true
+					continue
+				}
+			}
+
 			// Singleton scrollbar presentation belongs to the frontend, scrolling to its backend.
 			tab := _app_active_tab(a)
 			if (tab == nil || tab.tree.node_count == 1) && a.frontend.scrollbar.visible {
@@ -1791,6 +2035,10 @@ _app_stage_ui :: proc(a: ^App) {
 _e2e_resize_frame: int = 0
 _last_frame_ticks: i64 = 0
 _has_last_frame_ticks: bool = false
+// Unclamped frame interval of the last frame, in nanoseconds. dt_ms is capped
+// for animation safety; instrumentation needs the real value so a long stall
+// stays visible in the DevTools frame-time percentiles.
+_last_frame_dt_ns: i64 = 0
 
 // _app_frame_dt_ms returns the elapsed time since the previous frame in milliseconds,
 // clamped to [0, TAB_BAR_ANIM_DT_MAX_MS] so stalls never produce oversized animation jumps.
@@ -1803,8 +2051,19 @@ _app_frame_dt_ms :: proc() -> f32 {
 	}
 	dt_ns := platform.platform_ticks_to_ns(now - _last_frame_ticks)
 	_last_frame_ticks = now
+	_last_frame_dt_ns = dt_ns
 	dt_ms := f32(dt_ns) / 1_000_000.0
 	return clamp(dt_ms, 0, platform_tabs.TAB_BAR_ANIM_DT_MAX_MS)
+}
+
+// _app_ns_since returns the wall-clock nanoseconds elapsed since a start stamp
+// taken with the same platform_now/platform_ticks_to_ns pair _app_frame_dt_ms
+// uses, so DevTools durations and frame times share one clock and one unit.
+// Clamped at zero: a non-monotonic reading must never underflow a sample into
+// an enormous duration.
+_app_ns_since :: proc(start_ns: u64) -> u64 {
+	now_ns := u64(platform.platform_ticks_to_ns(platform.platform_now()))
+	return now_ns - start_ns if now_ns > start_ns else 0
 }
 
 app_frame :: proc(a: ^App) -> bool {
@@ -1858,11 +2117,26 @@ app_frame :: proc(a: ^App) -> bool {
 	// (1) Drain and poll all active sessions (fair scheduling 64KB/tick)
 	any_damaged := false
 	had_tabs := len(a.session_mgr.tabs) > 0
+	// DevTools: wall-clock cost of the PTY drain, the one section of the frame
+	// that turns PTY bytes into terminal state. The clock is read before and
+	// after the drain only; nothing is added to the frame path beyond two
+	// platform_now reads, which are vDSO reads rather than syscalls. Gated on
+	// devtools_enabled so the disabled path pays nothing at all.
+	measure_drain := diag.devtools_enabled()
+	frame_parse_ns: u64 = 0
+	frame_pty_bytes: u64 = 0
+	drain_start_ns := u64(platform.platform_ticks_to_ns(platform.platform_now())) if measure_drain else 0
 	if had_tabs {
 		any_damaged = session_poll_all(&a.session_mgr, 65536)
 		if len(a.session_mgr.tabs) == 0 {
 			a.should_quit = true
 			return false
+		}
+		// A session with no pending PTY data did no parsing, so its poll cost
+		// is scheduling overhead, not parse time: report 0 rather than the
+		// price of an idle loop.
+		if measure_drain && any_damaged {
+			frame_parse_ns = _app_ns_since(drain_start_ns)
 		}
 	}
 	sync.atomic_store(&a.pty_event_pending, false)
@@ -1899,9 +2173,11 @@ app_frame :: proc(a: ^App) -> bool {
 			return false
 		}
 		if win.window_take_titlebar_double_click(&a.drag_region) {
-			_ = win.window_zoom(&a.window)
-			win.window_update_pixel_size(&a.window)
-			a.renderer.full_redraw_pending = true
+			// Deferred for the same reason as the other two zoom sites: a native
+			// zoom animates the frame change through a nested CFRunLoop, which
+			// re-enters the SDL event queue from inside the event pump and parks
+			// the main thread on a futex with no way out.
+			a.pending_window_zoom = true
 		}
 		active_b = app_active_backend(a)
 		if active_b == nil do return false
@@ -1915,10 +2191,30 @@ app_frame :: proc(a: ^App) -> bool {
 		}
 	}
 
+	if a.pending_window_zoom {
+		// The window zoom is performed here, outside event dispatch, never in the
+		// handler that requested it. performZoom: animates the frame change, and an
+		// animated setFrame: spins a nested CFRunLoop. If that happens inside event
+		// dispatch, the nested loop re-enters AppKit, the display link fires, and the
+		// view update calls back into SDL_PushEvent while the SDL event queue is
+		// already in play. The result is a main thread parked in a futex with no way
+		// out: the window freezes permanently and never recovers.
+		a.pending_window_zoom = false
+		if win.window_zoom(&a.window) {
+			win.window_update_pixel_size(&a.window)
+			_app_apply_resize(a)
+			a.renderer.full_redraw_pending = true
+		}
+	}
+
 	// Legacy headless callers do not use the session manager.
 	if len(a.session_mgr.tabs) == 0 {
-		if backend_drain_pty(active_b) > 0 {
+		drained := backend_drain_pty(active_b)
+		if drained > 0 {
 			any_damaged = true
+			if measure_drain {
+				frame_parse_ns = _app_ns_since(drain_start_ns)
+			}
 		}
 	}
 	threaded := backend_is_threaded(active_b)
@@ -1958,6 +2254,23 @@ app_frame :: proc(a: ^App) -> bool {
 	}
 
 	is_dirty := any_damaged || n_events > 0 || a.renderer.full_redraw_pending || anim_active || a.has_deferred_render
+	// Publish the idle signal to the DevTools cadence BEFORE the present, so
+	// the panel's refresh decision and the log's write decision in this frame
+	// are made against the same reading.
+	devtools_active := diag.devtools_enabled() && _app_devtools_frame_active(a, is_dirty)
+	diag.devtools_set_active(devtools_active)
+	// Read the damage extent before present consumes the journal; only when
+	// DevTools is collecting, and never on the hot path.
+	devtools_dirty_cells: u32 = 0
+	if diag.devtools_enabled() {
+		dirty := render.strategy_estimate_inputs(&active_term.damage, a.renderer.rows, a.renderer.cols).dirty_cells
+		devtools_dirty_cells = u32(max(dirty, 0))
+	}
+	// True only when this iteration actually put a frame on the display. The
+	// loop runs continuously and skips presentation when nothing is dirty, so
+	// DevTools needs the distinction to report a frame rate rather than a
+	// loop-iteration rate.
+	devtools_presented: bool = false
 	if is_dirty {
 		should_render := true
 		now_ns := u64(platform.platform_ticks_to_ns(platform.platform_now()))
@@ -1971,19 +2284,79 @@ app_frame :: proc(a: ^App) -> bool {
 
 		if should_render {
 			a.has_deferred_render = false
-			_ = _app_present(a)
+			devtools_presented = _app_present(a)
 			a.last_present_time_ns = u64(platform.platform_ticks_to_ns(platform.platform_now()))
 		}
 	}
 
 	strategy_str := fmt.tprintf("%v", a.renderer.strategy)
 	probe.frame_probe_record(&a.frame_probe, is_dirty, strategy_str, 0)
+	// PTY bytes are read from the active backend's cumulative counter rather
+	// than from a drain return value, because on the normal tabbed path the
+	// drain runs inside the backend worker thread (or inside
+	// session_poll_all for a non-threaded tab) and its return value never
+	// reaches this frame. A negative delta means the counter went backwards:
+	// a tab switch, a backend reset, or a re-baseline after the DevTools
+	// toggle. Report 0 for that frame instead of feeding a negative count
+	// into the rate. Gated on devtools_enabled so the disabled path pays
+	// nothing at all.
+	if diag.devtools_enabled() {
+		pty_total := backend_pty_bytes_total(active_b)
+		if pty_total >= a.devtools_pty_last {
+			frame_pty_bytes = pty_total - a.devtools_pty_last
+		} else {
+			frame_pty_bytes = 0
+		}
+		a.devtools_pty_last = pty_total
+	}
+	// DevTools records one fixed-size sample per frame; the disabled cost is a
+	// single atomic load in devtools_enabled. parse_ns and upload_bytes are
+	// derived from values the frame already computed, and GPU time arrives
+	// separately through devtools_record_gpu, pushed by the backend's command
+	// buffer completion handler once the buffer has finished.
+	if diag.devtools_enabled() {
+		frame_ns := u64(max(_last_frame_dt_ns, 0))
+		target_ns := a.target_frame_interval_ns
+		diag.devtools_record_frame(&diag.Frame_Sample{
+			frame_ns = frame_ns,
+			parse_ns = frame_parse_ns,
+			// Two instance records per dirty cell, background then glyph, at the
+			// same INSTANCE_STRIDE the app_debug upload estimate reports.
+			upload_bytes = u64(devtools_dirty_cells) * APP_INSTANCE_RECORDS_PER_CELL * u64(instance.INSTANCE_STRIDE),
+			pty_bytes    = frame_pty_bytes,
+			dirty_cells  = devtools_dirty_cells,
+			strategy     = strategy_str,
+			dropped      = target_ns > 0 && frame_ns > target_ns,
+			presented    = devtools_presented,
+		})
+	}
 	diag.diag_set_snapshot(diag.Diag_Snapshot{
 		strategy  = strategy_str,
 		tab_count = len(a.session_mgr.tabs),
 		grid_rows = int(a.renderer.rows),
 		grid_cols = int(a.renderer.cols),
 	})
+
+	// DevTools JSONL telemetry: exactly one line per cadence tick, never per
+	// frame. The guard chain is, in order: collection is on, the app reported
+	// real work this frame (devtools_active, which the cadence itself also
+	// enforces), the shared cadence is due, and a destination was configured.
+	//
+	// devtools_cadence_due is the same non-mutating predicate the on-screen
+	// panel asked a few microseconds earlier inside frontend_render, against
+	// the same clock, so the panel text and this line are always built from
+	// the same sampling instant. The tick is taken AFTER both have asked, and
+	// once per due tick; taking it earlier would starve one of them.
+	if diag.devtools_enabled() && devtools_active {
+		devtools_now_ns := u64(platform.platform_ticks_to_ns(platform.platform_now()))
+		if diag.devtools_cadence_due(devtools_now_ns) {
+			if diag.devtools_log_active() {
+				devtools_snap := diag.devtools_snapshot()
+				_ = diag.devtools_log_write_sample(&devtools_snap, devtools_now_ns)
+			}
+			_ = diag.devtools_cadence_tick()
+		}
+	}
 
 	if !backend_is_threaded(active_b) do backend_poll_exit(active_b)
 

@@ -24,14 +24,27 @@ import pinnacle_wgpu "../pinnacle_ui/wgpu_adapter"
 import pinnacle_app "../pinnacle_ui/adapters"
 
 import input "../platform/input"
+import interaction "../interaction"
 import pty "../platform/pty"
 import config "../config"
+import diag "../diag"
 import platform "../platform"
 import platform_tabs "../platform/tabs"
 import ui "../ui"
 
 UI_MAX_INSTANCES :: ui.UI_MAX_INSTANCES
 FRONTEND_CONTENT_PADDING: f32 : 4.0
+
+// Last DevTools snapshot taken by frontend_render, plus whether one has been
+// taken yet. diag.devtools_snapshot is the expensive call in this path (it
+// copies the ring and sorts it), so it runs on the render package's refresh
+// cadence instead of every frame. The snapshot therefore persists between
+// ticks: the panel keeps painting the cached text from it rather than
+// blanking. Written only from the render thread, inside frontend_render.
+@(private)
+_devtools_panel_snap: diag.Devtools_Snapshot
+@(private)
+_devtools_panel_snap_valid: bool
 
 
 // Font paths to try (in order).
@@ -93,6 +106,12 @@ Frontend :: struct {
 	last_px_w:                i32,
 	last_px_h:                i32,
 	debug_frames:             bool,
+	// DevTools panel geometry resolved from the config (and, above it, the
+	// environment) at init time. The frontend does not own a Config, so the
+	// two values the render path needs are copied here once rather than
+	// threaded through every call between app_init and the draw.
+	devtools_anchor:          config.Devtools_Anchor,
+	devtools_columns:         int,
 }
 
 // Window events and chrome use logical units; renderer geometry uses pixels.
@@ -194,6 +213,14 @@ frontend_init :: proc(
 		return 0, 0, 0, 0, false
 	}
 
+	// Snapshot the DevTools geometry from the already-resolved config. The
+	// render package applies its own fallback when devtools_columns is not
+	// positive, so a config that never set the field still draws correctly.
+	if cfg != nil {
+		f.devtools_anchor = cfg.devtools_anchor
+		f.devtools_columns = cfg.devtools_columns
+	}
+
 	window_w := i32(cols) * i32(APP_CELL_W)
 	window_h := i32(rows) * i32(APP_CELL_H)
 	if window_w < 1 {
@@ -250,9 +277,6 @@ frontend_init :: proc(
 			return 0, 0, 0, 0, false
 		}
 
-		opacity: f32 = cfg.window_opacity if cfg != nil else 1.0
-		blur: bool = cfg.window_blur if cfg != nil else false
-		frontend_apply_vibrancy(f, opacity, blur)
 	} else {
 		#panic("Unsupported platform: Term currently only supports macOS (Metal)")
 	}
@@ -340,6 +364,9 @@ frontend_init :: proc(
 
 	win.window_update_pixel_size(&f.window)
 	render.renderer_attach_surface(&f.renderer, f.surface, u32(f.window.pixel_w), u32(f.window.pixel_h))
+	opacity := cfg.opacity if cfg != nil else config.CONFIG_NORMALIZED_MAX
+	blur := cfg.window_blur if cfg != nil else config.CONFIG_NORMALIZED_MIN
+	frontend_apply_vibrancy(f, opacity, blur)
 	f.last_px_w = f.window.pixel_w
 	f.last_px_h = f.window.pixel_h
 
@@ -380,6 +407,9 @@ frontend_destroy :: proc(f: ^Frontend) {
 	if f == nil {
 		return
 	}
+	// The DevTools panel text cache is module-owned in the render package;
+	// this is the one place it is freed.
+	render.devtools_panel_release()
 	render.renderer_destroy(&f.renderer)
 	if rawptr(f.surface) != nil {
 		when ODIN_OS == .Darwin {
@@ -441,7 +471,12 @@ _frontend_debug_dump_grid :: proc(t: ^termgrid.Terminal) {
 }
 
 // frontend_render stages the cursor and presents a frame from the Render_State snapshot.
-frontend_render :: proc(f: ^Frontend, state: ^Render_State, panes: []render.Pane_Viewport = nil) -> bool {
+frontend_render :: proc(
+	f: ^Frontend,
+	state: ^Render_State,
+	panes: []render.Pane_Viewport = nil,
+	focus: ^interaction.Image_Focus_State = nil,
+) -> bool {
 	if f == nil || state == nil || state.terminal == nil {
 		return false
 	}
@@ -484,6 +519,42 @@ frontend_render :: proc(f: ^Frontend, state: ^Render_State, panes: []render.Pane
 		viewport_h := f32(f.renderer.surface_h)
 		termgrid.scrollbar_update(&f.scrollbar, total_lines, visible_lines, offset, viewport_w, viewport_h)
 		_ = render.scrollbar_overlay_draw(&f.renderer, &f.scrollbar)
+	}
+
+	// Stage the DevTools panel last, on its own layer, so it composites above
+	// every other overlay. Both expensive halves are off the per-frame path:
+	// devtools_snapshot copies and sorts the sample ring to compute order
+	// statistics, and the snapshot formatter allocates a fresh string.
+	// Running either per frame at 120 fps would make this instrumentation the
+	// dominant cost of the frame it exists to measure. The enabled guard
+	// excludes headless runs; the refresh-due guard bounds the rate. Ask
+	// before taking the snapshot, but draw every frame, so the panel keeps
+	// painting cached text between ticks.
+	if diag.devtools_enabled() {
+		panel_now_ns := u64(platform.platform_ticks_to_ns(platform.platform_now()))
+		if render.devtools_panel_refresh_due(panel_now_ns) {
+			_devtools_panel_snap = diag.devtools_snapshot()
+			_devtools_panel_snap_valid = true
+		}
+		if _devtools_panel_snap_valid {
+			// The tab bar height is chrome-owned and lives in logical units; the
+			// renderer works in device pixels, so convert it here. It only
+			// applies to the top anchors; devtools_panel_rect drops it for the
+			// bottom ones, which sit at the opposite edge of the surface.
+			_ = render.devtools_panel_draw(
+				&f.renderer,
+				&_devtools_panel_snap,
+				platform_tabs.TAB_BAR_HEIGHT * frontend_content_scale(f),
+				panel_now_ns,
+				f.devtools_anchor,
+				f.devtools_columns,
+			)
+		}
+	}
+
+	if !render.renderer_image_focus_draw(&f.renderer, focus, panes, state.terminal) {
+		f.renderer.full_redraw_pending = true
+		return false
 	}
 
 	dbg_dmg, dbg_total := 0, 0
@@ -709,15 +780,25 @@ frontend_apply_theme :: proc(f: ^Frontend, theme: termgrid.Theme) {
 }
 
 // frontend_apply_vibrancy configures window opacity and blur vibrancy dynamically.
-frontend_apply_vibrancy :: proc(f: ^Frontend, opacity: f32, blur: bool) {
+// It is the single source of truth for background translucency: the renderer's
+// background_opacity is set from the same value that drives the platform layer.
+frontend_apply_vibrancy :: proc(f: ^Frontend, opacity: f32, blur: f32) {
 	if f == nil do return
+	normalized_opacity := clamp(opacity, config.CONFIG_NORMALIZED_MIN, config.CONFIG_NORMALIZED_MAX)
+	normalized_blur := clamp(blur, config.CONFIG_NORMALIZED_MIN, config.CONFIG_NORMALIZED_MAX)
+	if f.renderer.background_opacity != normalized_opacity {
+		f.renderer.background_opacity = normalized_opacity
+		f.renderer.full_redraw_pending = true
+	}
 	if f.window.handle != nil {
-		win.window_configure_vibrancy(&f.window, opacity, blur)
+		if !win.window_configure_vibrancy(&f.window, normalized_opacity, normalized_blur) {
+			diag.diag_warn("Failed to configure native window vibrancy (opacity=%f, blur=%f)", normalized_opacity, normalized_blur)
+		}
 	}
 	when ODIN_OS == .Darwin {
 		if rawptr(f.surface) != nil {
 			metal_surf := (^metal_backend.Metal_Surface)(rawptr(f.surface))
-			metal_backend.configure_surface_vibrancy(metal_surf, opacity, blur)
+			metal_backend.configure_surface_vibrancy(metal_surf, normalized_opacity, normalized_blur)
 		}
 	}
 }

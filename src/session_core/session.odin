@@ -11,6 +11,7 @@ import "core:thread"
 import "core:time"
 
 import parser "../parser"
+import graphics "../graphics"
 import pty "../platform/pty"
 import termgrid "../terminal"
 
@@ -127,6 +128,8 @@ session_create :: proc(id: string, cfg: Session_Config) -> (^Core_Session, bool)
 
 	termgrid.terminal_init(&s.term, r, c_cols)
 	parser.parser_init(&s.vt_parser)
+	s.vt_parser.graphics_cb = _session_graphics_cb
+	s.vt_parser.graphics_user_data = s
 
 	s.last_exit_code = 0
 	s.has_active_command = false
@@ -202,11 +205,31 @@ _session_response_cb :: proc(data: []u8) {
 	}
 }
 
+@(private="file")
+_session_graphics_write :: proc(user_data: rawptr, data: []u8) {
+	s := (^Core_Session)(user_data)
+	if s == nil || s.pty_handle.master < 0 || s.pty_handle.state != .Running do return
+	_ = pty.pty_write(&s.pty_handle, data)
+}
+
+@(private="file")
+_session_graphics_cb :: proc(user_data: rawptr, t: ^termgrid.Terminal, control, payload: []u8) {
+	s := (^Core_Session)(user_data)
+	if s == nil || t == nil || t != &s.term do return
+	sink := graphics.Response_Sink{
+		user_data = user_data,
+		write = _session_graphics_write,
+	}
+	_ = termgrid.terminal_graphics_feed(t, control, payload, sink)
+}
+
 // session_start_drain_loop launches the background thread reading PTY output.
 session_start_drain_loop :: proc(s: ^Core_Session) -> bool {
 	if s == nil do return false
 	if s.thread != nil do return sync.atomic_load(&s.is_running)
 	s.vt_parser.response_cb = _session_response_cb
+	s.vt_parser.graphics_cb = _session_graphics_cb
+	s.vt_parser.graphics_user_data = s
 	if s.is_detached {
 		// A transferred parser must never call the former GUI backend or clipboard.
 		s.vt_parser.clipboard_cb = nil
@@ -444,6 +467,8 @@ session_destroy :: proc(s: ^Core_Session) {
 		return
 	}
 	session_stop(s)
+	s.vt_parser.graphics_cb = nil
+	s.vt_parser.graphics_user_data = nil
 	termgrid.terminal_destroy(&s.term)
 	parser.parser_destroy(&s.vt_parser)
 	delete(s.id)

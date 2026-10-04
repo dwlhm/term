@@ -1,7 +1,8 @@
 // Phase 14 framebuffer blit shader: samples the compute framebuffer onto the
 // surface with a fullscreen triangle generated from vertex_index (no vertex
 // buffers). UV (0, 0) is the top-left texel; the oversized triangle corners
-// are absorbed by ClampToEdge sampling. Opaque output.
+// are absorbed by ClampToEdge sampling. Output alpha is the sampled alpha
+// (the compute pass already wrote params.bg_opacity; 1.0 = opaque).
 
 @group(0) @binding(0) var fb_texture: texture_2d<f32>;
 @group(0) @binding(1) var fb_sampler: sampler;
@@ -34,5 +35,5 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> Blit_Output {
 @fragment
 fn fs_main(input: Blit_Output) -> @location(0) vec4<f32> {
     let sampled = textureSample(fb_texture, fb_sampler, input.tex_coord);
-    return vec4<f32>(sampled.rgb, 1.0);
+    return vec4<f32>(sampled.rgb, sampled.a);
 }
