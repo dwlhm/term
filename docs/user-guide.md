@@ -266,7 +266,7 @@ row 8 ── └──────────────┘
 
 ### Clipboard Operations (Copy & Paste)
 
-- **Copy (`⌘C` / `Cmd+C`)**: Extracts the currently highlighted selection (Char, Line, or Block) and copies the UTF-8 text directly to the native macOS system pasteboard.
+- **Copy (`⌘C` / `Cmd+C`)**: Extracts the currently highlighted selection (Char, Line, or Block) and copies the UTF-8 text directly to the native macOS system pasteboard. The clipboard bridge transfers the complete selection, including multi-line text; platform or application policies may still limit what can be stored.
 - **Paste (`⌘V` / `Cmd+V`)**: Reads UTF-8 text from the macOS system pasteboard and writes it directly to the active tab's PTY.
   - If the active program has enabled **Bracketed Paste Mode**, the text is safely wrapped in control markers (`\x1b[200~` ... `\x1b[201~`).
 
