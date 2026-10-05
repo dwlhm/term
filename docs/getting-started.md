@@ -48,7 +48,7 @@ Term provides dedicated targets for both the native desktop GUI and the standalo
 | `make release` | `bin/term` | Highly optimized GUI binary (`-o:speed -no-bounds-check`) |
 | `make bundle` | `bin/Term.app` | Standalone macOS application bundle with embedded dylibs and fonts |
 | `make install` | `/Applications/Term.app` | Installs bundled application to your system Applications folder |
-| `make dmg` | `bin/Term.dmg` | Distributable compressed Apple Disk Image (DMG) |
+| `make dmg` | `bin/Term.dmg` | Drag-and-drop app bundle and Applications alias |
 | `make build-mcp` | `bin/term-mcp` | Debug standalone headless MCP server |
 | `make release-mcp` | `bin/term-mcp` | Optimized release standalone headless MCP server |
 
@@ -86,6 +86,18 @@ To generate a distributable compressed disk image (`Term.dmg`):
 ```bash
 make dmg
 ```
+
+The DMG contains `Term.app` and an **Applications** alias. Copy the app to **Applications** to install it. The Finder actions are native macOS Services declared in the app bundle; no separate installer or Automator workflow is required.
+
+#### Using Finder Services
+
+In Finder, select exactly one folder and choose **Open Term Here (Default Workspace)**, or select exactly one workspace file and choose **Restore Term Workspace**. The folder action searches supported folder-local defaults (`.default.term.odin`, `.term/default.odin`, `default.term.odin`, and their `.json` equivalents), then falls back to configured global defaults. If no valid default exists, Term logs a diagnostic and keeps running normally.
+
+The workspace action accepts supported `.term.odin` and `.term.json` named layouts and `.term/<name>.odin` or `.term/<name>.json` layouts. Term validates the selected file contents. A missing or invalid workspace logs a diagnostic without disturbing existing tabs. When Term is already running, a valid selection opens in a new tab. On a cold launch, Term starts its ordinary initial session and also opens the requested workspace tab.
+
+Relative layout and pane working directories resolve from the selected folder, or from the selected workspace file's containing folder. Explicitly stored absolute working directories remain authoritative. Finder passes paths as file URLs, so spaces and non-ASCII paths are supported. The legacy `--restore [name]`, `--restore-default-for <folder-path>`, and `--restore-file <workspace-file-path>` command-line options remain available.
+
+If you previously installed the old `Open Term Here.workflow` or `Restore Term Workspace.workflow` manually, you may remove those old copies from `~/Library/Services`; Term does not modify that directory. If the bundled services do not appear in Finder after installing or updating Term, relaunch Finder (for example, Option-click Finder in the Dock and choose **Relaunch**) or log out and back in. Finder/Services GUI registration and refresh behavior should be verified on the target macOS version.
 
 ### 3. Building the Standalone Headless MCP Server (`term-mcp`)
 

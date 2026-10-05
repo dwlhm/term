@@ -11,6 +11,7 @@ import "base:runtime"
 import posix "core:sys/posix"
 import "core:fmt"
 import "core:os"
+import "core:path/filepath"
 import "core:strings"
 import "core:sync"
 import "core:time"
@@ -50,6 +51,9 @@ when ODIN_OS == .Darwin {
 	@(default_calling_convention="c")
 	foreign AppKit {
 		NSBeep :: proc() ---
+		term_macos_services_init :: proc() -> bool ---
+		term_macos_services_pop :: proc(kind: ^i32, path: ^cstring) -> i32 ---
+		term_macos_services_free_path :: proc(path: cstring) ---
 	}
 }
 
@@ -747,7 +751,7 @@ _app_clipboard_cb :: _backend_clipboard_cb
 _app_clipboard_read_cb :: _backend_clipboard_read_cb
 
 // app_init initializes Frontend and Backend subsystems in order.
-app_init :: proc(a: ^App, rows, cols: int, prog: string, argv: []string) -> bool {
+app_init :: proc(a: ^App, rows, cols: int, prog: string, argv: []string, spawn_initial: bool = true) -> bool {
 	if a == nil {
 		return false
 	}
@@ -821,37 +825,37 @@ app_init :: proc(a: ^App, rows, cols: int, prog: string, argv: []string) -> bool
 	// and let each layout pass refresh its bounds.
 	_ = win.window_set_drag_region(&a.window, &a.drag_region)
 
-	// (3) Spawn initial Tab Session
+	// (3) Spawn initial Tab Session unless a validated restore request owns startup.
 	init_pixel_w, init_pixel_h := grid_pixel_extent_for_cells(init_rows, init_cols, cell_w, cell_h)
-	spawn_idx, spawn_ok := session_spawn(&a.session_mgr, prog, argv, init_rows, init_cols, &a.config, app_theme, init_pixel_w, init_pixel_h)
-	if !spawn_ok {
-		session_manager_destroy(&a.session_mgr)
-		frontend_destroy(&a.frontend)
-		config.config_destroy(&a.config)
-		return false
+	active_b: ^Backend = nil
+	if spawn_initial {
+		spawn_idx, spawn_ok := session_spawn(&a.session_mgr, prog, argv, init_rows, init_cols, &a.config, app_theme, init_pixel_w, init_pixel_h)
+		if !spawn_ok {
+			session_manager_destroy(&a.session_mgr)
+			frontend_destroy(&a.frontend)
+			config.config_destroy(&a.config)
+			return false
+		}
+		active_b = &a.session_mgr.tabs[spawn_idx].backend
+		platform_tabs.tab_bar_anim_activate(&a.tab_bar)
 	}
-	active_b := &a.session_mgr.tabs[spawn_idx].backend
-	platform_tabs.tab_bar_anim_activate(&a.tab_bar)
 
 	// Connect decoupled clipboard callbacks from Backend to Frontend
-	backend_set_clipboard_callbacks(
-		active_b,
-		&a.frontend,
-		_frontend_clipboard_write_cb,
-		_frontend_clipboard_read_cb,
-	)
-	backend_set_notify_data_ready(active_b, a, _app_on_backend_data_ready)
+	if active_b != nil {
+		backend_set_clipboard_callbacks(active_b, &a.frontend, _frontend_clipboard_write_cb, _frontend_clipboard_read_cb)
+		backend_set_notify_data_ready(active_b, a, _app_on_backend_data_ready)
+		render.renderer_resize_grid(&a.renderer, &active_b.terminal, i32(init_rows), i32(init_cols))
+	}
 	backend_set_notify_data_ready(&a.backend, a, _app_on_backend_data_ready)
 	app_global = a
 
-	render.renderer_resize_grid(&a.renderer, &active_b.terminal, i32(init_rows), i32(init_cols))
-	_app_sync_focus(a)
+	if active_b != nil do _app_sync_focus(a)
 	a.last_px_w = a.window.pixel_w
 	a.last_px_h = a.window.pixel_h
 	a.base_title = app_title
 	a.hud_active = false
 
-	if a.debug_frames {
+	if a.debug_frames && active_b != nil {
 		valid := 0
 		for i in 0..<len(a.renderer.atlas.slots) {
 			if a.renderer.atlas.slots[i].valid {
@@ -2083,6 +2087,7 @@ app_frame :: proc(a: ^App) -> bool {
 	defer _app_sync_pane_cursor(a)
 	defer free_all(context.temp_allocator)
 
+	_app_dispatch_macos_service_requests(a)
 	if ! _profile_scenario_step(a) { return false }
 
 	if e2e_val, ok := os.lookup_env("TERM_E2E_RESIZE", context.temp_allocator); ok && e2e_val == "1" {
@@ -2369,6 +2374,77 @@ app_frame :: proc(a: ^App) -> bool {
 	return !a.should_quit
 }
 
+_app_dispatch_macos_service_requests :: proc(a: ^App) {
+	when ODIN_OS == .Darwin {
+		for {
+			kind: i32
+			path: cstring
+			if term_macos_services_pop(&kind, &path) == 0 do break
+			request_path := strings.clone(string(path), context.temp_allocator)
+			term_macos_services_free_path(path)
+			layout: Persisted_Layout
+			loaded := false
+			context_dir := request_path
+			if kind == 1 {
+				layout, loaded = persistence_load_default_for_folder(request_path)
+				if !loaded do fmt.eprintf("[term] Finder service: no valid default workspace for '%s'\n", request_path)
+			} else if kind == 2 {
+				layout, loaded = persistence_load_layout_file(request_path)
+				context_dir = filepath.dir(request_path)
+				if !loaded do fmt.eprintf("[term] Finder service: workspace file '%s' is missing or invalid\n", request_path)
+			}
+			if loaded {
+				restored_idx, restored := persistence_restore_tab(a, layout, context_dir)
+				if restored && session_switch_tab(&a.session_mgr, restored_idx) {
+					tab := &a.session_mgr.tabs[restored_idx]
+					backend_set_clipboard_callbacks(&tab.backend, &a.frontend, _frontend_clipboard_write_cb, _frontend_clipboard_read_cb)
+					backend_set_notify_data_ready(&tab.backend, a, _app_on_backend_data_ready)
+					render.renderer_resize_grid(&a.renderer, &tab.backend.terminal, i32(a.renderer.rows), i32(a.renderer.cols))
+					_app_resync_tab_modals(a)
+					_app_layout_ui(a)
+					_app_sync_focus(a)
+					platform_tabs.tab_bar_anim_activate(&a.tab_bar)
+				} else {
+					fmt.eprintf("[term] Finder service: workspace '%s' could not be restored\n", request_path)
+				}
+				persistence_free_layout(&layout)
+			}
+		}
+	}
+}
+
+Restore_Mode :: enum { None, Legacy, Folder_Default, Exact_File, Invalid }
+Restore_Request :: struct { mode: Restore_Mode, value: string }
+
+parse_restore_args :: proc(args: []string) -> (request: Restore_Request, ok: bool) {
+	if len(args) <= 1 do return Restore_Request{}, true
+	mode := Restore_Mode.None
+	value := ""
+	for i := 1; i < len(args); i += 1 {
+		arg := args[i]
+		if arg == "--restore" || arg == "-r" {
+			if mode != .None do return Restore_Request{.Invalid, "multiple restore inputs"}, false
+			mode = .Legacy
+			if i + 1 < len(args) && !strings.has_prefix(args[i + 1], "-") {
+				value = args[i + 1]
+				i += 1
+			} else {
+				value = DEFAULT_LAYOUT_NAME
+			}
+		} else if arg == "--restore-default-for" || arg == "--restore-file" {
+			if mode != .None || i + 1 >= len(args) || strings.has_prefix(args[i + 1], "-") {
+				return Restore_Request{.Invalid, "missing, extra, or multiple restore inputs"}, false
+			}
+			mode = .Folder_Default if arg == "--restore-default-for" else .Exact_File
+			value = args[i + 1]
+			i += 1
+		} else {
+			return Restore_Request{.Invalid, "unexpected argument"}, false
+		}
+	}
+	return Restore_Request{mode, value}, true
+}
+
 main :: proc() {
 	debug_mode := false
 	if val, ok := os.lookup_env("TERM_DEBUG", context.temp_allocator); ok && val == "1" {
@@ -2388,8 +2464,27 @@ main :: proc() {
 	shell_argv := _resolve_shell_argv(shell)
 	fmt.printf("Term: starting %s (%dx%d)\n", shell, APP_DEFAULT_COLS, APP_DEFAULT_ROWS)
 
+	restore_request, args_ok := parse_restore_args(os.args)
+	restore_layout: Persisted_Layout
+	restore_layout_ok := false
+	restore_context := ""
+	if !args_ok {
+		fmt.eprintf("[term] Error: %s; starting default session\n", restore_request.value)
+	} else if restore_request.mode == .Folder_Default {
+		restore_layout, restore_layout_ok = persistence_load_default_for_folder(restore_request.value)
+		restore_context = restore_request.value
+		if !restore_layout_ok do fmt.eprintf("[term] Error: no valid default workspace for '%s'; starting default session\n", restore_request.value)
+	} else if restore_request.mode == .Exact_File {
+		restore_layout, restore_layout_ok = persistence_load_layout_file(restore_request.value)
+		restore_context = filepath.dir(restore_request.value)
+		if !restore_layout_ok do fmt.eprintf("[term] Error: workspace file '%s' is missing or invalid; starting default session\n", restore_request.value)
+	} else if restore_request.mode == .Legacy {
+		restore_layout, restore_layout_ok = persistence_load_layout(restore_request.value)
+		if !restore_layout_ok do fmt.eprintf("[term] Warning: layout '%s' not found or invalid; using default session\n", restore_request.value)
+	}
+
 	app := new(App, runtime.heap_allocator())
-	if !app_init(app, APP_DEFAULT_ROWS, APP_DEFAULT_COLS, shell, shell_argv) {
+	if !app_init(app, APP_DEFAULT_ROWS, APP_DEFAULT_COLS, shell, shell_argv, !restore_layout_ok) {
 		free(app, runtime.heap_allocator())
 		fmt.println("ERROR: app_init failed")
 		return
@@ -2397,6 +2492,43 @@ main :: proc() {
 	defer {
 		app_destroy(app)
 		free(app, runtime.heap_allocator())
+	}
+
+	if restore_layout_ok {
+		restored_idx, restore_ok := persistence_restore_tab(app, restore_layout, restore_context)
+		if restore_ok && session_switch_tab(&app.session_mgr, restored_idx) {
+			tab := &app.session_mgr.tabs[restored_idx]
+			active_b := &tab.backend
+			backend_set_clipboard_callbacks(active_b, &app.frontend, _frontend_clipboard_write_cb, _frontend_clipboard_read_cb)
+			backend_set_notify_data_ready(active_b, app, _app_on_backend_data_ready)
+			render.renderer_resize_grid(&app.renderer, &active_b.terminal, i32(app.renderer.rows), i32(app.renderer.cols))
+			_app_resync_tab_modals(app)
+			_app_layout_ui(app)
+			_app_sync_focus(app)
+			platform_tabs.tab_bar_anim_activate(&app.tab_bar)
+		} else {
+			fmt.eprintf("[term] Warning: requested layout could not be restored; using default session\n")
+			if len(app.session_mgr.tabs) == 0 {
+				rows := int(app.renderer.rows)
+				cols := int(app.renderer.cols)
+				pixel_w, pixel_h := grid_pixel_extent_for_cells(rows, cols, app.renderer.cell_width, app.renderer.cell_height)
+				idx, spawned := session_spawn(&app.session_mgr, shell, shell_argv, rows, cols, &app.config, app.renderer.theme, pixel_w, pixel_h)
+				if spawned {
+					b := &app.session_mgr.tabs[idx].backend
+					backend_set_clipboard_callbacks(b, &app.frontend, _frontend_clipboard_write_cb, _frontend_clipboard_read_cb)
+					backend_set_notify_data_ready(b, app, _app_on_backend_data_ready)
+					render.renderer_resize_grid(&app.renderer, &b.terminal, i32(rows), i32(cols))
+					_app_sync_focus(app)
+				} else {
+					fmt.eprintf("[term] Error: default session could not be started\n")
+				}
+			}
+		}
+		persistence_free_layout(&restore_layout)
+	}
+
+	when ODIN_OS == .Darwin {
+		if !term_macos_services_init() do fmt.eprintf("[term] Finder Services could not be registered\n")
 	}
 
 	for !app.should_quit {

@@ -479,7 +479,7 @@ parse_layout_odin :: proc(source: string, file_path: string = "") -> (layout: Pe
 
 	layout.name = strings.clone(DEFAULT_LAYOUT_NAME)
 	layout.title = strings.clone("")
-	layout.cwd = strings.clone(".")
+	layout.cwd = strings.clone("")
 	layout.source_file = strings.clone(file_path)
 
 	for decl in file.decls {
@@ -660,7 +660,7 @@ parse_layout_json :: proc(source: string, file_path: string = "") -> (layout: Pe
 
 	layout.name = strings.clone(DEFAULT_LAYOUT_NAME)
 	layout.title = strings.clone("")
-	layout.cwd = strings.clone(".")
+	layout.cwd = strings.clone("")
 	layout.source_file = strings.clone(file_path)
 
 	if nv, nok := root_obj["name"]; nok {
@@ -739,6 +739,112 @@ persistence_load_layout :: proc(name: string = DEFAULT_LAYOUT_NAME) -> (layout: 
 	return parsed_layout, pok
 }
 
+// persistence_load_layout_file parses exactly the supplied workspace path.
+persistence_load_layout_file :: proc(path: string) -> (layout: Persisted_Layout, ok: bool) {
+	if !strings.has_suffix(path, ".odin") && !strings.has_suffix(path, ".json") do return Persisted_Layout{}, false
+	data, rerr := os.read_entire_file(path, context.allocator)
+	if rerr != nil {
+		delete(data)
+		return Persisted_Layout{}, false
+	}
+	defer delete(data)
+	src := string(data)
+	if strings.has_suffix(path, ".json") {
+		layout, ok := parse_layout_json(src, path)
+		if !ok {
+			persistence_free_layout(&layout)
+			return Persisted_Layout{}, false
+		}
+		return layout, true
+	}
+	parsed_layout, pok, _ := parse_layout_odin(src, path)
+	if !pok {
+		persistence_free_layout(&parsed_layout)
+		return Persisted_Layout{}, false
+	}
+	return parsed_layout, true
+}
+
+// persistence_resolve_default_for_folder searches all supported folder-local formats before global candidates.
+persistence_resolve_default_for_folder :: proc(folder: string) -> (path: string, ok: bool) {
+	local_candidates := [?]string{
+		fmt.tprintf("%s/.%s.term.odin", folder, DEFAULT_LAYOUT_NAME),
+		fmt.tprintf("%s/.term/%s.odin", folder, DEFAULT_LAYOUT_NAME),
+		fmt.tprintf("%s/%s.term.odin", folder, DEFAULT_LAYOUT_NAME),
+		fmt.tprintf("%s/.%s.term.json", folder, DEFAULT_LAYOUT_NAME),
+		fmt.tprintf("%s/.term/%s.json", folder, DEFAULT_LAYOUT_NAME),
+		fmt.tprintf("%s/%s.term.json", folder, DEFAULT_LAYOUT_NAME),
+	}
+	for candidate in local_candidates {
+		if os.exists(candidate) do return strings.clone(candidate), true
+	}
+	return persistence_resolve_global_layout_path(DEFAULT_LAYOUT_NAME)
+}
+
+@(private="file")
+_persistence_temp_join :: proc(parts: ..string) -> string {
+	path, _ := filepath.join(parts[:], context.temp_allocator)
+	return path
+}
+
+// persistence_load_default_for_folder tries each local and global candidate until one parses successfully.
+persistence_load_default_for_folder :: proc(folder: string) -> (layout: Persisted_Layout, ok: bool) {
+	candidates := make([dynamic]string, context.temp_allocator)
+	append(&candidates, _persistence_temp_join(folder, ".default.term.odin"))
+	append(&candidates, _persistence_temp_join(folder, ".term", "default.odin"))
+	append(&candidates, _persistence_temp_join(folder, "default.term.odin"))
+	append(&candidates, _persistence_temp_join(folder, ".default.term.json"))
+	append(&candidates, _persistence_temp_join(folder, ".term", "default.json"))
+	append(&candidates, _persistence_temp_join(folder, "default.term.json"))
+	if env_dir, found := os.lookup_env("TERM_PERSISTENCE_DIR", context.temp_allocator); found && len(env_dir) > 0 {
+		append(&candidates, _persistence_temp_join(env_dir, "default.odin"))
+		append(&candidates, _persistence_temp_join(env_dir, ".default.term.odin"))
+	}
+	if home, found := os.lookup_env("HOME", context.temp_allocator); found && len(home) > 0 {
+		append(&candidates, _persistence_temp_join(home, ".config", "term", "default.odin"))
+		append(&candidates, _persistence_temp_join(home, ".config", "term", "persistence", "default.odin"))
+		append(&candidates, _persistence_temp_join(home, ".config", "term", ".default.term.odin"))
+	}
+	if env_dir, found := os.lookup_env("TERM_PERSISTENCE_DIR", context.temp_allocator); found && len(env_dir) > 0 {
+		append(&candidates, _persistence_temp_join(env_dir, "default.json"))
+	}
+	if home, found := os.lookup_env("HOME", context.temp_allocator); found && len(home) > 0 {
+		append(&candidates, _persistence_temp_join(home, ".config", "term", "default.json"))
+		append(&candidates, _persistence_temp_join(home, ".config", "term", "persistence", "default.json"))
+	}
+	for candidate in candidates {
+		loaded, loaded_ok := persistence_load_layout_file(candidate)
+		if loaded_ok do return loaded, true
+	}
+	return Persisted_Layout{}, false
+}
+
+// persistence_resolve_global_layout_path searches configured persistence locations, excluding process CWD.
+persistence_resolve_global_layout_path :: proc(name: string) -> (path: string, ok: bool) {
+	eff_name := name if len(name) > 0 else DEFAULT_LAYOUT_NAME
+	candidates := make([dynamic]string, context.temp_allocator)
+	if env_dir, found := os.lookup_env("TERM_PERSISTENCE_DIR", context.temp_allocator); found && len(env_dir) > 0 {
+		append(&candidates, fmt.tprintf("%s/%s.odin", env_dir, eff_name))
+		append(&candidates, fmt.tprintf("%s/.%s.term.odin", env_dir, eff_name))
+	}
+	if home, hok := os.lookup_env("HOME", context.temp_allocator); hok && len(home) > 0 {
+		append(&candidates, fmt.tprintf("%s/.config/term/%s.odin", home, eff_name))
+		append(&candidates, fmt.tprintf("%s/.config/term/persistence/%s.odin", home, eff_name))
+		append(&candidates, fmt.tprintf("%s/.config/term/.%s.term.odin", home, eff_name))
+	}
+	if env_dir, found := os.lookup_env("TERM_PERSISTENCE_DIR", context.temp_allocator); found && len(env_dir) > 0 {
+		append(&candidates, fmt.tprintf("%s/%s.json", env_dir, eff_name))
+	}
+	if home, hok := os.lookup_env("HOME", context.temp_allocator); hok && len(home) > 0 {
+		append(&candidates, fmt.tprintf("%s/.config/term/%s.json", home, eff_name))
+		append(&candidates, fmt.tprintf("%s/.config/term/persistence/%s.json", home, eff_name))
+	}
+	for candidate in candidates {
+		if os.exists(candidate) do return strings.clone(candidate), true
+	}
+	return "", false
+}
+
 // _find_first_persisted_leaf locates the first leaf in depth-first order.
 _find_first_persisted_leaf :: proc(node: ^Persisted_Pane_Node) -> ^Persisted_Pane_Leaf {
 	if node == nil do return nil
@@ -793,7 +899,7 @@ _reconstruct_node :: proc(a: ^App, tab: ^Tab_Session, target_id: Pane_Id, node: 
 
 // persistence_restore_tab creates a new tab divided into panes according to layout,
 // starts backends in their respective directories, and dispatches initial commands.
-persistence_restore_tab :: proc(a: ^App, layout: Persisted_Layout) -> (tab_idx: int, ok: bool) {
+persistence_restore_tab :: proc(a: ^App, layout: Persisted_Layout, context_dir: string = "") -> (tab_idx: int, ok: bool) {
 	if a != nil && a.frontend.use_pinnacle && layout.root != nil && layout.root.is_split {
 		fmt.eprintln("layout restore rejected: experimental Pinnacle renderer supports one terminal")
 		return -1, false
@@ -803,17 +909,22 @@ persistence_restore_tab :: proc(a: ^App, layout: Persisted_Layout) -> (tab_idx: 
 	base_dir := layout.cwd
 	base_alloc := false
 	if len(base_dir) == 0 {
-		curr, err := os.get_working_directory(context.allocator)
-		if err == nil {
-			base_dir = curr
-			base_alloc = true
+		if len(context_dir) > 0 {
+			base_dir = context_dir
 		} else {
-			base_dir = "."
+			curr, err := os.get_working_directory(context.allocator)
+			if err == nil {
+				base_dir = curr
+				base_alloc = true
+			} else {
+				base_dir = "."
+			}
 		}
 	}
 	defer if base_alloc do delete(base_dir)
 
-	expanded_base := persistence_expand_path(base_dir, ".")
+	path_base := context_dir if len(context_dir) > 0 else "."
+	expanded_base := persistence_expand_path(base_dir, path_base)
 	defer delete(expanded_base)
 
 	first_leaf := _find_first_persisted_leaf(layout.root)
