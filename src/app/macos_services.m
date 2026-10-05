@@ -1,4 +1,11 @@
+#include <stddef.h>
+#include <stdint.h>
+#include <objc/objc.h>
+#include <objc/NSObjCRuntime.h>
+#import <CoreFoundation/CoreFoundation.h>
+#import <CoreGraphics/CoreGraphics.h>
 #import <Foundation/Foundation.h>
+#import <AppKit/AppKit.h>
 #import <Cocoa/Cocoa.h>
 #import <SDL3/SDL.h>
 

@@ -34,7 +34,7 @@ version-info:
 ifeq ($(UNAME_S),Darwin)
 $(OUT_DIR)/macos_services.o: src/app/macos_services.m
 	@mkdir -p $(OUT_DIR)
-	clang -fobjc-arc -mmacosx-version-min=$(MIN_OS_VERSION) -c $< -o $@ -isysroot $(shell xcrun --show-sdk-path) -isystem $(HOMEBREW_PREFIX)/include
+	clang -fobjc-arc -mmacosx-version-min=$(MIN_OS_VERSION) -c $< -o $@ -x objective-c -isysroot $(shell xcrun --show-sdk-path) -isystem $(HOMEBREW_PREFIX)/include
 
 build: version-info $(OUT_DIR)/macos_services.o
 	@mkdir -p $(OUT_DIR)
