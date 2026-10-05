@@ -777,10 +777,20 @@ session_close_to_right :: proc(sm: ^Session_Manager, idx: int) -> int {
 // session_switch_tab transitions active focus to the designated tab index and schedules damage refresh.
 session_switch_tab :: proc(sm: ^Session_Manager, idx: int) -> bool {
 	if sm == nil || idx < 0 || idx >= len(sm.tabs) do return false
+
+	s := &sm.tabs[idx]
+	s.has_bell = false
+	leaves: [MAX_PANE_NODES]^Pane_Node
+	leaf_count := tab_leaf_panes(s, leaves[:])
+	for i in 0 ..< leaf_count {
+		if leaves[i] != nil {
+			leaves[i].has_bell = false
+		}
+	}
+
 	if idx == sm.active_idx do return true
 
 	sm.active_idx = idx
-	s := &sm.tabs[idx]
 	curr_b := tab_active_backend(s)
 
 	if curr_b != nil {
@@ -805,6 +815,9 @@ session_poll_all :: proc(sm: ^Session_Manager, max_chunk_budget: int = 65536) ->
 		s := &sm.tabs[idx]
 		switch s.status {
 		case .Running, .Terminating:
+			if idx == sm.active_idx {
+				s.has_bell = false
+			}
 			leaves: [MAX_PANE_NODES]^Pane_Node
 			leaf_count := tab_leaf_panes(s, leaves[:])
 			if leaf_count == 0 {
@@ -815,7 +828,7 @@ session_poll_all :: proc(sm: ^Session_Manager, max_chunk_budget: int = 65536) ->
 					}
 				}
 				if session_refresh_title(s) do any_damaged = true
-				if s.backend.terminal.bell_event {
+				if idx != sm.active_idx && s.backend.terminal.bell_event {
 					s.has_bell = true
 				}
 				if backend_snapshot_exited(&s.backend) {
@@ -830,6 +843,9 @@ session_poll_all :: proc(sm: ^Session_Manager, max_chunk_budget: int = 65536) ->
 			tab_closed := false
 			for i in 0 ..< leaf_count {
 				leaf := leaves[i]
+				if leaf != nil && idx == sm.active_idx {
+					leaf.has_bell = false
+				}
 				b := leaf.backend
 				if b == nil do continue
 
@@ -842,7 +858,7 @@ session_poll_all :: proc(sm: ^Session_Manager, max_chunk_budget: int = 65536) ->
 				if backend_is_threaded(b) do backend_lock_render(b)
 				snapshot := &b.front_terminal if backend_is_threaded(b) else &b.terminal
 				if idx == sm.active_idx && _damage_cells(snapshot) > 0 do any_damaged = true
-				if snapshot.bell_event {
+				if idx != sm.active_idx && snapshot.bell_event {
 					s.has_bell = true
 					leaf.has_bell = true
 				}

@@ -137,3 +137,52 @@ test_session_title_recency :: proc(t: ^testing.T) {
 	app.session_update_title(s, "vim file.txt", "/project", "vim", true)
 	testing.expect_value(t, app.session_title_display(s), "vim")
 }
+
+@(test)
+test_session_switch_tab_clears_bell :: proc(t: ^testing.T) {
+	sm: app.Session_Manager
+	_seeded_manager(&sm, 3, 0)
+	defer app.session_manager_destroy(&sm)
+	sm.active_idx = 0
+
+	// 1. Single pane tab with has_bell = true.
+	_ = app.pane_tree_init(&sm.tabs[1].tree, nil)
+	leaf_single := app.pane_tree_find_pane(&sm.tabs[1].tree, sm.tabs[1].tree.focused_pane_id)
+	testing.expect(t, leaf_single != nil)
+	leaf_single.has_bell = true
+	sm.tabs[1].has_bell = true
+
+	// Switching to tab 1 must clear both tab.has_bell and leaf.has_bell.
+	testing.expect(t, app.session_switch_tab(&sm, 1))
+	testing.expect_value(t, sm.active_idx, 1)
+	testing.expect(t, !sm.tabs[1].has_bell, "tab 1 has_bell must be cleared on switch")
+	testing.expect(t, !leaf_single.has_bell, "tab 1 leaf has_bell must be cleared on switch")
+
+	// 2. Already active tab with has_bell = true.
+	sm.tabs[1].has_bell = true
+	leaf_single.has_bell = true
+	testing.expect(t, app.session_switch_tab(&sm, 1))
+	testing.expect_value(t, sm.active_idx, 1)
+	testing.expect(t, !sm.tabs[1].has_bell, "already active tab has_bell must be cleared")
+	testing.expect(t, !leaf_single.has_bell, "already active tab leaf has_bell must be cleared")
+
+	// 3. Tab with split panes (multiple leaves) with has_bell = true.
+	root_id := app.pane_tree_init(&sm.tabs[2].tree, nil)
+	child_id, ok_v := app.pane_tree_split(&sm.tabs[2].tree, root_id, .Vertical, nil)
+	testing.expect(t, ok_v, "split must succeed")
+	leaf_a := app.pane_tree_find_pane(&sm.tabs[2].tree, root_id)
+	leaf_b := app.pane_tree_find_pane(&sm.tabs[2].tree, child_id)
+	testing.expect(t, leaf_a != nil && leaf_b != nil)
+
+	sm.tabs[2].has_bell = true
+	leaf_a.has_bell = true
+	leaf_b.has_bell = true
+
+	// Switching to tab 2 must clear tab.has_bell and all split leaf panes' has_bell.
+	testing.expect(t, app.session_switch_tab(&sm, 2))
+	testing.expect_value(t, sm.active_idx, 2)
+	testing.expect(t, !sm.tabs[2].has_bell, "split tab has_bell must be cleared on switch")
+	testing.expect(t, !leaf_a.has_bell, "split leaf A has_bell must be cleared on switch")
+	testing.expect(t, !leaf_b.has_bell, "split leaf B has_bell must be cleared on switch")
+}
+
