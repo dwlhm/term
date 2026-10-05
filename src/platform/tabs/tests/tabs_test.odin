@@ -144,3 +144,83 @@ test_tabs_detached_badge_hidden_without_sessions :: proc(t: ^testing.T) {
 	target, _ := tabs.tab_bar_hit_test(&state, 3, rects[:], 799.0, tabs.TAB_BAR_HEIGHT * 0.5)
 	testing.expect_value(t, target, tabs.Tab_Hit_Target.None)
 }
+
+@(test)
+test_tabs_overflow_backfill_scrolled_display_start :: proc(t: ^testing.T) {
+	state: tabs.Tab_Bar_State
+	tabs.tabs_init(&state)
+
+	rects: [10]tabs.Rect_f32
+	titles := []string{"Tab 1", "Tab 2", "Tab 3", "Tab 4", "Tab 5", "Tab 6"}
+	// Layout with active tab at index 5 to shift display_start forward.
+	_ = tabs.tabs_layout(&state, 500, 6, rects[:], 5, titles[:6])
+
+	testing.expect(t, state.overflow_count > 0, "should have overflow with 6 tabs in 500px")
+	testing.expect(t, state.display_start > 0, "display_start should be shifted forward for last tab")
+	initial_vis := state.visible_tab_count
+	initial_start := state.display_start
+	initial_overflow := state.overflow_count
+
+	// Close the last tab; remaining count is 5, active tab is 4.
+	_ = tabs.tabs_layout(&state, 500, 5, rects[:], 4, titles[:5])
+
+	// display_start must shift backwards, backfilling previous tab into visible strip.
+	testing.expect(
+		t,
+		state.display_start < initial_start,
+		"display_start must shift backwards after closing tab when display_start > 0",
+	)
+	testing.expect_value(t, state.visible_tab_count, initial_vis)
+	testing.expect_value(t, state.overflow_count, initial_overflow - 1)
+
+	// The backfilled tab at state.display_start must have a non-zero rect.
+	testing.expect(t, rects[state.display_start].w > 0, "backfilled tab must have positive width")
+	// The closed tab at index 5 must have zeroed rect.
+	testing.expect_value(t, rects[5].w, f32(0))
+}
+
+@(test)
+test_tabs_overflow_backfill_at_start :: proc(t: ^testing.T) {
+	state: tabs.Tab_Bar_State
+	tabs.tabs_init(&state)
+
+	rects: [10]tabs.Rect_f32
+	titles := []string{"Tab 1", "Tab 2", "Tab 3", "Tab 4", "Tab 5", "Tab 6"}
+	_ = tabs.tabs_layout(&state, 500, 6, rects[:], 0, titles[:6])
+
+	testing.expect_value(t, state.display_start, 0)
+	testing.expect(t, state.overflow_count > 0, "should have overflow with 6 tabs")
+	initial_vis := state.visible_tab_count
+	initial_overflow := state.overflow_count
+
+	// Close tab 0; remaining tabs are 5, active tab is 0.
+	_ = tabs.tabs_layout(&state, 500, 5, rects[:], 0, titles[1:6])
+
+	testing.expect_value(t, state.display_start, 0)
+	testing.expect_value(t, state.visible_tab_count, initial_vis)
+	testing.expect_value(t, state.overflow_count, initial_overflow - 1)
+	// Right-overflowed tab is now pulled into the visible strip.
+	testing.expect(t, rects[initial_vis - 1].w > 0, "right-overflowed tab should now be visible")
+	testing.expect_value(t, rects[5].w, f32(0))
+}
+
+@(test)
+test_tabs_overflow_cleared_when_all_fit :: proc(t: ^testing.T) {
+	state: tabs.Tab_Bar_State
+	tabs.tabs_init(&state)
+
+	rects: [10]tabs.Rect_f32
+	titles := []string{"Tab 1", "Tab 2", "Tab 3", "Tab 4", "Tab 5", "Tab 6"}
+	_ = tabs.tabs_layout(&state, 500, 6, rects[:], 0, titles[:6])
+
+	testing.expect(t, state.overflow_count > 0)
+	testing.expect(t, state.overflow_indicator_rect.w > 0)
+
+	// Close tabs until only 1 tab remains.
+	_ = tabs.tabs_layout(&state, 500, 1, rects[:], 0, titles[:1])
+
+	testing.expect_value(t, state.overflow_count, 0)
+	testing.expect_value(t, state.overflow_indicator_rect.w, f32(0))
+	testing.expect_value(t, state.overflow_indicator_rect.h, f32(0))
+	testing.expect_value(t, state.visible_tab_count, 1)
+}

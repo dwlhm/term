@@ -339,10 +339,21 @@ tabs_layout :: proc(
 		}
 	}
 
-	vis_count := fit_tabs(tab_widths[:count], state.display_start, count, avail_w)
-	max_display_start := max(0, count - vis_count)
+	max_display_start := 0
+	if count > 0 && avail_w > 0 {
+		used: f32 = 0
+		max_display_start = count - 1
+		for i := count - 1; i >= 0; i -= 1 {
+			w := tab_widths[i]
+			if used + w > avail_w && used > 0 {
+				break
+			}
+			used += w
+			max_display_start = i
+		}
+	}
 	state.display_start = clamp(state.display_start, 0, max_display_start)
-	vis_count = fit_tabs(tab_widths[:count], state.display_start, count, avail_w)
+	vis_count := fit_tabs(tab_widths[:count], state.display_start, count, avail_w)
 
 	state.visible_tab_count = vis_count
 	overflow_cnt := count - vis_count
@@ -397,6 +408,9 @@ tabs_layout :: proc(
 	state.left_offset = left_offset
 
 	state.scroll_max = max(0, content_w - avail_w)
+	if state.tab_w > 0 {
+		state.scroll_offset = min(state.scroll_offset, f32(state.display_start) * state.tab_w)
+	}
 	state.scroll_offset = clamp(state.scroll_offset, 0, state.scroll_max)
 
 	return count

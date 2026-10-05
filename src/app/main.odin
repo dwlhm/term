@@ -1981,7 +1981,7 @@ _app_layout_ui :: proc(a: ^App) {
 	for i in 0 ..< tab_count {
 		titles[i] = session_title_display(&a.session_mgr.tabs[i])
 	}
-	_ = platform_tabs.tabs_layout(&a.tab_bar, window_w, tab_count, a.tab_rects[:tab_count], a.session_mgr.active_idx, titles[:tab_count])
+	_ = platform_tabs.tabs_layout(&a.tab_bar, window_w, tab_count, a.tab_rects[:], a.session_mgr.active_idx, titles[:tab_count])
 	if a.tab_overflow.visible {
 		tabs_tmp: [MAX_TABS]platform_tabs.Tab_Info
 		n := _app_build_ui_tabs(a, tabs_tmp[:])
