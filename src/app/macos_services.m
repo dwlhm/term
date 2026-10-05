@@ -1,4 +1,4 @@
-#import <AppKit/AppKit.h>
+#import <Cocoa/Cocoa.h>
 #import <SDL3/SDL.h>
 
 #include <stdlib.h>
