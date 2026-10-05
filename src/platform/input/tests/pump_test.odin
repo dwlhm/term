@@ -781,10 +781,13 @@ test_pump_full_frame_headless :: proc(t: ^testing.T) {
 	}
 	defer win.window_destroy(&w)
 
-	// Idle drain: startup events (shown/exposed/...) are not input.
+	// Idle drain: startup events (shown/exposed/...) are not keyboard or text input.
+	// Display servers (e.g. X11/Wayland) may deliver an initial pointer motion upon window mapping.
 	out: [8]input.Input_Event
 	n := input.window_poll_input(&w, out[:], 8)
-	testing.expect(t, n == 0, "idle headless poll must yield no input")
+	for i in 0 ..< n {
+		testing.expect(t, out[i].event_type == .Pointer, "idle headless poll must yield no keystrokes or text")
+	}
 	testing.expect(t, w.is_open, "idle headless poll must stay open")
 
 	// Full pump frame against a live pty + terminal.
