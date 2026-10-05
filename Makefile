@@ -6,6 +6,7 @@ PREFIX ?= /usr/local
 UNAME_S := $(shell uname -s)
 
 ifeq ($(UNAME_S),Darwin)
+HOMEBREW_PREFIX ?= $(shell brew --prefix 2>/dev/null || echo /opt/homebrew)
 MIN_OS_VERSION ?= 14.0
 LINK_FLAGS ?= -L/opt/homebrew/lib -L/usr/local/lib -framework Metal -framework MetalKit -framework QuartzCore -framework Cocoa
 COMMON_FLAGS ?= -minimum-os-version:$(MIN_OS_VERSION) -strict-style -extra-linker-flags:"$(LINK_FLAGS)"
@@ -33,7 +34,7 @@ version-info:
 ifeq ($(UNAME_S),Darwin)
 $(OUT_DIR)/macos_services.o: src/app/macos_services.m
 	@mkdir -p $(OUT_DIR)
-	clang -fobjc-arc -mmacosx-version-min=$(MIN_OS_VERSION) -c $< -o $@ -isysroot $(shell xcrun --show-sdk-path) -I/opt/homebrew/include -I/usr/local/include
+	clang -fobjc-arc -mmacosx-version-min=$(MIN_OS_VERSION) -c $< -o $@ -isysroot $(shell xcrun --show-sdk-path) -isystem $(HOMEBREW_PREFIX)/include
 
 build: version-info $(OUT_DIR)/macos_services.o
 	@mkdir -p $(OUT_DIR)
