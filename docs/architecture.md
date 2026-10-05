@@ -455,9 +455,9 @@ Input Event (app/main.odin) -> drop_fx_handle (app/drop_fx.odin)
 
 ---
 
-## 7. macOS Native Window Integration
+## 7. Window & Input Management & macOS Platform Integration
 
-Term integrates directly with macOS AppKit and Cocoa APIs (`src/platform/window/macos.odin`) via Objective-C runtime bridging.
+Window and Input management is built on **SDL3** (`src/platform/window/window.odin`), providing cross-platform window lifecycle management, event polling, DPI scaling, and hardware cursor integration. On macOS, Term integrates native Cocoa/AppKit capabilities via Darwin platform bridging in `src/platform/window/macos.odin` through the Objective-C runtime.
 
 ```
 macOS Window Composition Hierarchy:
@@ -499,7 +499,7 @@ macOS Window Composition Hierarchy:
 | **Memory** | Damage Accounting | Hierarchical Cell $\to$ Span $\to$ Row | Transmits only dirty spans (288 B typing edit vs 184 KB) |
 | **Typography** | Glyph Atlas & Fallback | 128 KiB R8 texture + Async worker thread | Cold-miss misses resolved in 0.692 ms off-thread |
 | **Renderer** | Adaptive Metal GPU | 3-Strategy compiler evaluated in 35.9 ns | Triple-buffered GPU command encoding at 60/120 FPS |
-| **Platform** | macOS Cocoa Bridge | Objective-C runtime `NSVisualEffectView` | Zero-cost compositing bypass when opaque |
+| **Platform** | SDL3 & macOS Cocoa Bridge | Window & Input management built on **SDL3** (`src/platform/window/window.odin`) with Darwin Cocoa/AppKit bridge (`src/platform/window/macos.odin`) | Native Cocoa/AppKit integration with zero-cost compositing bypass when opaque |
 
 ## Pane integration contract
 

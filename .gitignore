@@ -30,13 +30,20 @@ __pycache__/
 debug.log
 
 # Scratch & patch leftovers
-*.rej
-*.orig
 *.diff
 *.patch
 scratch_test.odin
 run_lldb.sh
 scratch/
+
+# Recovery & patch debris
+*.orig
+*.rej
+*.recovered
+
+# Root build leaks
+ui-*.o
+/app/
 
 # OS & Editor artifacts
 .DS_Store
