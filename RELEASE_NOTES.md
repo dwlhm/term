@@ -1,3 +1,52 @@
+# Release Notes - Term v0.4.0
+
+Term v0.4.0 is a major milestone release introducing Split Panes, Session Registry mobility, Cross-Platform Linux POSIX & WGPU support, native macOS Finder Services, and dynamic Git-derived build versioning.
+
+---
+
+## 🌟 Highlights & Major Features
+
+### 1. Split Panes & Pane Management (`src/app`, `src/session_core`)
+- **Arbitrary Pane Splitting**: Split any active terminal horizontally or vertically with isolated PTY execution, dynamic split ratio adjustment, and focused pane navigation.
+- **CWD Inheritance**: Child split panes automatically discover and inherit the working directory of the currently focused sibling pane.
+- **Context-Aware Pane Lifecycle**: Clean pane closure with tree collapsing and automatic focus handover to adjacent panes.
+
+### 2. Session Registry & Workspace Mobility (`src/app/session.odin`)
+- **Detached Session Migration**: Seamlessly detach long-running terminal sessions to the background registry and restore them into new or existing tabs.
+- **Enhanced Switcher Affordances**: Interactive session switcher with pane hierarchy indicators, per-row close actions, and context menu controls.
+
+### 3. Cross-Platform Linux & WGPU Rendering Architecture (`src/platform`, `src/render`)
+- **POSIX Platform Decoupling**: Abstracted platform event loops, timers, and PTY lifecycles into clean platform adapters, separating Darwin-specific Cocoa logic from POSIX/Linux subsystems.
+- **Multi-Backend Shader Dispatch**: Introduced shader language abstraction supporting both native Metal Shading Language (MSL) and WebGPU Shading Language (WGSL).
+- **Linux Packaging**: Added standard Linux FHS installation targets (`make install`, `assets/term.desktop`) and standalone tarball packaging (`scripts/package_linux.sh`).
+
+### 4. Native macOS Finder Services (`src/app/macos_services.m`)
+- **System Services Integration**: Added native macOS Finder Services (`Open in Term`, `New Workspace Here`) accessible via system menus and context clicks in macOS Finder.
+- **Service Request Queueing**: Thread-safe Cocoa service event queue dispatching folder paths directly to the terminal workspace manager.
+
+### 5. Git-Derived Dynamic Versioning (`scripts/resolve_version.py`)
+- **Compile-Time Git Metadata**: Automated version calculation resolving semantic version tags, commit distance, commit hashes, and dirty worktree flags into `src/build_info/version.odin` and `bin/Info.plist`.
+- **Deterministic Release Stamping**: Strict tag validation ensuring release tags match repository HEAD.
+
+---
+
+## 🐛 Bug Fixes & Refinements
+
+### 1. Tab Bar Layout & Backfilling (`src/platform/tabs`)
+- **Overflow Strip Backfilling**: Closing tabs or resizing viewports now automatically backfills previously scrolled tabs into the visible strip instead of leaving blank tab slots.
+- **Deterministic Rect Cleanup**: Full tab rect slices are passed during layout passes to ensure closed tab slots are zeroed out and do not intercept click hit tests.
+
+### 2. Bell Notification Lifecycle (`src/app/session.odin`)
+- **Active Tab Suppression**: Bell notification indicators are suppressed on the currently active tab where output is immediately visible.
+- **Pane Focus Clearance**: Switching tabs or focusing pane trees immediately resets bell notification badges across all split pane leaves.
+
+### 3. Protocol & Emulation Compatibility
+- **Ghostty & Modern Protocol Alignment**: Support for `XTVERSION`, `DECRQM`, and Kitty graphics query sequences.
+- **Cursor State Preservation**: Implemented CSI s / CSI u cursor save and restore sequences and cursor movement commands (CSI E / CSI F).
+- **Text Selection & Clipboard**: Fixed multi-line selection preservation and clipboard copying behavior.
+
+---
+
 # Release Notes - Term v0.3.2
 
 Term v0.3.2 introduces true standalone macOS application bundling with dynamic library relocation and comprehensive third-party open-source license compliance.
