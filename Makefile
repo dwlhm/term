@@ -6,7 +6,7 @@ PREFIX ?= /usr/local
 UNAME_S := $(shell uname -s)
 
 ifeq ($(UNAME_S),Darwin)
-MIN_OS_VERSION ?= 26.0
+MIN_OS_VERSION ?= 14.0
 LINK_FLAGS ?= -L/opt/homebrew/lib -L/usr/local/lib -framework Metal -framework MetalKit -framework QuartzCore -framework Cocoa
 COMMON_FLAGS ?= -minimum-os-version:$(MIN_OS_VERSION) -strict-style -extra-linker-flags:"$(LINK_FLAGS)"
 APP_FLAGS ?= -minimum-os-version:$(MIN_OS_VERSION) -strict-style -extra-linker-flags:"$(LINK_FLAGS) $(OUT_DIR)/macos_services.o"
