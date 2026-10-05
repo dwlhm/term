@@ -1,3 +1,4 @@
+#+build darwin
 package metal_backend
 
 import "base:intrinsics"
