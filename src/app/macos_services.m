@@ -3,8 +3,9 @@
 #include <objc/objc.h>
 #include <objc/NSObjCRuntime.h>
 #import <CoreFoundation/CoreFoundation.h>
-#import <CoreGraphics/CoreGraphics.h>
+#import <CoreFoundation/CFAttributedString.h>
 #import <Foundation/Foundation.h>
+#import <Foundation/NSExtensionContext.h>
 #import <AppKit/AppKit.h>
 #import <Cocoa/Cocoa.h>
 #import <SDL3/SDL.h>
