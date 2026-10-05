@@ -308,7 +308,7 @@ read_shared_memory :: proc(name: []u8, offset, size: u32, allocator: runtime.All
 	when ODIN_OS == .Darwin {
 		fd = posix.shm_open(shm_name, {})
 	} else {
-		fd = posix.shm_open(shm_name, {}, 0)
+		fd = posix.shm_open(shm_name, {}, posix.mode_t{})
 	}
 	if fd < 0 {
 		return nil, .Invalid

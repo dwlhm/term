@@ -11,7 +11,6 @@ import "core:path/filepath"
 import "core:strings"
 
 import "vendor:sdl3"
-import CA "vendor:darwin/QuartzCore"
 
 import termgrid "../terminal"
 import render "../render"
@@ -252,7 +251,7 @@ frontend_init :: proc(
 			fmt.eprintf("frontend_init: Metal_CreateView failed\n")
 			return 0, 0, 0, 0, false
 		}
-		layer := (^CA.MetalLayer)(sdl3.Metal_GetLayer(metal_view))
+		layer := sdl3.Metal_GetLayer(metal_view)
 		f.surface = gpu.Gpu_Surface(metal_backend.create_surface(layer))
 		if rawptr(f.surface) == nil {
 			sdl3.Metal_DestroyView(metal_view)

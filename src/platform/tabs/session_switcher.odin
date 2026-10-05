@@ -9,9 +9,6 @@ import "core:unicode/utf8"
 import input "../input"
 import session_core "../../session_core"
 
-import "core:sys/darwin"
-import posix "core:sys/posix"
-
 SESSION_SWITCHER_MAX_QUERY :: 64
 SESSION_SWITCHER_MAX_ITEMS :: 256
 SESSION_SWITCHER_MAX_VISIBLE_ROWS :: 8
@@ -176,20 +173,6 @@ session_switcher_menu_item_shortcut :: proc(entry: Session_Switcher_Menu_Item) -
 	case .Close:           return "⌘X"
 	}
 	return ""
-}
-
-// session_query_taskinfo inspects resident memory and CPU usage for a given process PID.
-session_query_taskinfo :: proc(pid: int) -> (rss_mb: int, cpu_pct: f32) {
-	if pid <= 1 do return 0, 0.0
-	when ODIN_OS == .Darwin {
-		tinfo: darwin.proc_taskinfo
-		ret := darwin.proc_pidinfo(posix.pid_t(pid), .TASKINFO, 0, &tinfo, size_of(tinfo))
-		if ret > 0 {
-			rss_mb = int(tinfo.pti_resident_size / (1024 * 1024))
-			return rss_mb, 0.0
-		}
-	}
-	return 0, 0.0
 }
 
 // session_switcher_fuzzy_match performs case-insensitive subsequence matching with bonus scoring.

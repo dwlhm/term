@@ -181,7 +181,8 @@ metal_backend_vtable :: proc() -> ^gpu.Gpu_Backend_VTable {
 	return &_metal_vtable
 }
 
-create_surface :: proc(layer: ^CA.MetalLayer) -> ^Metal_Surface {
+create_surface :: proc(layer_ptr: rawptr) -> ^Metal_Surface {
+	layer := (^CA.MetalLayer)(layer_ptr)
 	surf := new(Metal_Surface)
 	surf.layer = layer
 	surf.window_opacity = METAL_VIBRANCY_MAX

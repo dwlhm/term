@@ -17,6 +17,13 @@ when ODIN_OS == .Darwin {
 		proc_name :: proc(pid: c.int, buffer: rawptr, buffersize: u32) -> c.int ---
 		proc_listchildpids :: proc(ppid: c.int, buffer: rawptr, buffersize: c.int) -> c.int ---
 	}
+} else when ODIN_OS == .Linux {
+	foreign import libc "system:c"
+	@(default_calling_convention="c")
+	foreign libc {
+		ioctl :: proc(fd: c.int, request: c.ulong, #c_vararg args: ..any) -> c.int ---
+		tcgetpgrp :: proc(fd: c.int) -> posix.pid_t ---
+	}
 }
 
 // PTY spawn (Langkah 1): posix_openpt + fork + setsid + slave setup.
@@ -40,8 +47,13 @@ _winsize_pixel :: proc(value: int) -> c.ushort {
 }
 
 // TIOCSWINSZ sets the window size of a terminal device.
-// BSD/macOS value, verified against the system headers on this machine.
-TIOCSWINSZ :: 0x80087467
+when ODIN_OS == .Darwin {
+	TIOCSWINSZ :: 0x80087467
+} else when ODIN_OS == .Linux {
+	TIOCSWINSZ :: 0x5414
+} else {
+	TIOCSWINSZ :: 0x5414
+}
 
 // PTY_CHILD_FAIL_EXIT is the exit status the child uses when slave setup
 // or exec fails after fork. The parent learns of the failure through the
@@ -695,6 +707,22 @@ pty_has_running_processes :: proc(p: ^Pty) -> bool {
 
 		// Ada proses foreground aktif pengguna (misal: vim, python, ssh, node, make, nano, git, dll.)
 		return true
+	} else when ODIN_OS == .Linux {
+		fg_pgrp := int(tcgetpgrp(c.int(p.master)))
+		if fg_pgrp <= 0 do return false
+		comm_path := fmt.tprintf("/proc/%d/comm", fg_pgrp)
+		if data, err := os.read_entire_file(comm_path, context.temp_allocator); err == nil {
+			pname := strings.trim_space(string(data))
+			switch pname {
+			case "", "zsh", "bash", "sh", "fish", "csh", "tcsh", "ksh", "login":
+				return false
+			}
+			if strings.has_prefix(pname, "gitstatusd") || strings.has_prefix(pname, "zsh-") {
+				return false
+			}
+			return true
+		}
+		return fg_pgrp != p.pid
 	} else {
 		return false
 	}
@@ -730,6 +758,14 @@ pty_foreground_name :: proc(p: ^Pty, dst: []u8) -> int {
 		if fg <= 1 || int(fg) == p.pid do return 0
 		if proc_name(c.int(fg), raw_data(dst), u32(len(dst))) <= 0 do return 0
 		for b, i in dst { if b == 0 do return i }
+	} else when ODIN_OS == .Linux {
+		fg := tcgetpgrp(c.int(p.master))
+		if fg <= 1 || int(fg) == p.pid do return 0
+		comm_path := fmt.tprintf("/proc/%d/comm", fg)
+		if data, err := os.read_entire_file(comm_path, context.temp_allocator); err == nil {
+			str := strings.trim_space(string(data))
+			return copy(dst, str)
+		}
 	}
 	return 0
 }
@@ -741,6 +777,14 @@ pty_working_directory :: proc(p: ^Pty, dst: []u8) -> int {
 		if proc_pidinfo(c.int(p.pid), PROC_PIDVNODEPATHINFO, 0, &info, size_of(info)) != size_of(info) do return 0
 		for b, i in info.cdir.path {
 			if b == 0 do return copy(dst, info.cdir.path[:i])
+		}
+	} else when ODIN_OS == .Linux {
+		cwd_link := fmt.tprintf("/proc/%d/cwd", p.pid)
+		cwd_buf: [1024]u8
+		c_path := strings.clone_to_cstring(cwd_link, context.temp_allocator)
+		n := posix.readlink(c_path, raw_data(cwd_buf[:]), len(cwd_buf))
+		if n > 0 {
+			return copy(dst, cwd_buf[:n])
 		}
 	}
 	return 0
