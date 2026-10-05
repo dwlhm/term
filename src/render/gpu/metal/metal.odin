@@ -120,6 +120,7 @@ _metal_vtable: gpu.Gpu_Backend_VTable = gpu.Gpu_Backend_VTable{
 	write_texture           = _metal_write_texture,
 
 	// Shaders
+	shader_language         = .MSL,
 	create_shader_module    = _metal_create_shader_module,
 	destroy_shader_module   = _metal_destroy_shader_module,
 
@@ -483,11 +484,11 @@ _metal_write_texture :: proc(queue: gpu.Gpu_Queue, texture: gpu.Gpu_Texture, dat
 
 // --- Shaders (20-21) ---
 
-_metal_create_shader_module :: proc(device: gpu.Gpu_Device, wgsl_source: string) -> gpu.Gpu_ShaderModule {
+_metal_create_shader_module :: proc(device: gpu.Gpu_Device, source: string) -> gpu.Gpu_ShaderModule {
 	dev := (^Metal_Device)(rawptr(device))
-	if dev == nil || dev.handle == nil || len(wgsl_source) == 0 do return gpu.Gpu_ShaderModule(nil)
+	if dev == nil || dev.handle == nil || len(source) == 0 do return gpu.Gpu_ShaderModule(nil)
 
-	ns_source := _create_ns_string(wgsl_source)
+	ns_source := _create_ns_string(source)
 	if ns_source == nil do return gpu.Gpu_ShaderModule(nil)
 	defer ns_source->release()
 

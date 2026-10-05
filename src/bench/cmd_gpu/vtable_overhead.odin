@@ -93,6 +93,7 @@ _null_vtable: gpu.Gpu_Backend_VTable = gpu.Gpu_Backend_VTable{
 	create_texture_view          = _null_create_texture_view,
 	destroy_texture_view         = _null_destroy_texture_view,
 	write_texture                = _null_write_texture,
+	shader_language              = .MSL,
 	create_shader_module         = _null_create_shader_module,
 	destroy_shader_module        = _null_destroy_shader_module,
 	create_render_pipeline       = _null_create_render_pipeline,
@@ -206,7 +207,7 @@ _null_write_texture :: proc(queue: gpu.Gpu_Queue, texture: gpu.Gpu_Texture, data
 	_null_sink += 1
 }
 
-_null_create_shader_module :: proc(device: gpu.Gpu_Device, wgsl_source: string) -> gpu.Gpu_ShaderModule {
+_null_create_shader_module :: proc(device: gpu.Gpu_Device, source: string) -> gpu.Gpu_ShaderModule {
 	_null_sink += 1
 	return gpu.Gpu_ShaderModule(nil)
 }

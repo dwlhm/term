@@ -490,6 +490,11 @@ renderer_init :: proc(
 	r.style_lut.count = 0
 
 	// Initialize instance renderer with atlas GPU resources
+	bg_shader := string(BG_MSL) if backend.shader_language == .MSL else string(BG_WGSL)
+	glyph_shader := string(GLYPH_MSL) if backend.shader_language == .MSL else string(GLYPH_WGSL)
+	image_shader := string(IMAGE_MSL) if backend.shader_language == .MSL else string(IMAGE_WGSL)
+	emoji_shader := string(EMOJI_MSL) if backend.shader_language == .MSL else string(EMOJI_WGSL)
+
 	ok := instance.instance_renderer_init(
 		&r.instances,
 		backend,
@@ -499,8 +504,8 @@ renderer_init :: proc(
 		r.atlas.gpu_texture,
 		r.atlas.gpu_view,
 		format,
-		string(BG_MSL),
-		string(GLYPH_MSL),
+		bg_shader,
+		glyph_shader,
 		screen_w,
 		screen_h,
 		allocator,
@@ -519,7 +524,7 @@ renderer_init :: proc(
 	image_layouts := []gpu.Gpu_Vertex_Layout{
 		{array_stride = instance.INSTANCE_STRIDE, step_mode = .Instance, attributes = image_attrs},
 	}
-	image_module := backend.create_shader_module(device, string(IMAGE_MSL))
+	image_module := backend.create_shader_module(device, image_shader)
 	r.image_pipeline = backend.create_render_pipeline(
 		device, image_module, "vs_main", image_module, "fs_main",
 		image_layouts, format, .Alpha_Blend, .Triangle_List,
@@ -541,7 +546,7 @@ renderer_init :: proc(
 			&r.instances,
 			r.emoji_atlas.gpu_texture,
 			r.emoji_atlas.gpu_view,
-			string(EMOJI_MSL),
+			emoji_shader,
 			format,
 			allocator,
 		)

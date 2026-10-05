@@ -133,6 +133,12 @@ Gpu_Blend_Mode :: enum int {
 // "no timing available" rather than as an error.
 Gpu_Frame_Complete_Proc :: proc(gpu_ns: u64, valid: bool)
 
+// Gpu_Shader_Language identifies the shading language expected by the GPU backend.
+Gpu_Shader_Language :: enum {
+	MSL,
+	WGSL,
+}
+
 // Gpu_Backend_VTable is the virtual function table for a GPU backend.
 // Each backend (WGPU, etc.) provides an implementation of these functions.
 Gpu_Backend_VTable :: struct {
@@ -165,7 +171,8 @@ Gpu_Backend_VTable :: struct {
 	write_texture:      proc(queue: Gpu_Queue, texture: Gpu_Texture, data: []u8, width, height: u32),
 
 	// Shaders
-	create_shader_module: proc(device: Gpu_Device, wgsl_source: string) -> Gpu_ShaderModule,
+	shader_language:      Gpu_Shader_Language,
+	create_shader_module: proc(device: Gpu_Device, source: string) -> Gpu_ShaderModule,
 	destroy_shader_module: proc(module: Gpu_ShaderModule),
 
 	// Pipelines

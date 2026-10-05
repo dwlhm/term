@@ -48,14 +48,21 @@ _devtools_panel_snap_valid: bool
 
 // Font paths to try (in order).
 FONT_PATHS :: []string{
+	// 1. Bundled local assets (primary)
 	"assets/fonts/MapleMono-NF-Regular.ttf",
 	"assets/fonts/MapleMono-Regular.ttf",
 	"../assets/fonts/MapleMono-NF-Regular.ttf",
 	"../assets/fonts/MapleMono-Regular.ttf",
+	// 2. User & system font paths (macOS & Linux)
+	"~/.local/share/fonts/MapleMono-NF-Regular.ttf",
 	"~/Library/Fonts/MapleMono-NF-Regular.ttf",
 	"~/Library/Fonts/MapleMono-Regular.ttf",
 	"~/Library/Fonts/MesloLGS NF Regular.ttf",
 	"~/Library/Fonts/JetBrainsMonoNerdFont-Regular.ttf",
+	"/usr/local/share/fonts/MapleMono-NF-Regular.ttf",
+	"/usr/share/fonts/truetype/maple/MapleMono-NF-Regular.ttf",
+	"/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Regular.ttf",
+	"/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
 	"/Library/Fonts/MesloLGS NF Regular.ttf",
 	"/Applications/Raycast.app/Contents/Resources/JetBrainsMono-Regular.ttf",
 	"/System/Applications/Utilities/Terminal.app/Contents/Resources/Fonts/SFMono-Terminal.ttf",
@@ -67,9 +74,14 @@ FONT_PATHS :: []string{
 
 // Fallback font paths (in order).
 FALLBACK_FONT_PATHS :: []string{
+	// 1. Bundled local assets (primary symbol fallback)
 	"assets/fonts/SymbolsNerdFontMono-Regular.ttf",
 	"../assets/fonts/SymbolsNerdFontMono-Regular.ttf",
+	// 2. User & system fallback font paths (macOS & Linux)
+	"~/.local/share/fonts/SymbolsNerdFontMono-Regular.ttf",
 	"~/Library/Fonts/SymbolsNerdFontMono-Regular.ttf",
+	"/usr/share/fonts/truetype/nerd-fonts/SymbolsNerdFontMono-Regular.ttf",
+	"/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
 	"/Library/Fonts/SymbolsNerdFontMono-Regular.ttf",
 	"~/Library/Fonts/MesloLGS NF Regular.ttf",
 	"/Library/Fonts/MesloLGS NF Regular.ttf",
