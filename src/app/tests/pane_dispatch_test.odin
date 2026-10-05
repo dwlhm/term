@@ -14,14 +14,19 @@ import instance "../../render/instance"
 import gpu "../../render/gpu"
 import platform "../../platform"
 
-foreign import pane_libc "system:System.framework"
+when ODIN_OS == .Darwin {
+	foreign import pane_libc "system:System.framework"
+	PANE_TEST_GET_WINSIZE :: 0x40087468
+} else {
+	foreign import pane_libc "system:c"
+	PANE_TEST_GET_WINSIZE :: 0x5413
+}
 @(default_calling_convention="c")
 foreign pane_libc {
 	@(link_name="ioctl")
 	pane_ioctl :: proc(fd: c.int, request: c.ulong, #c_vararg args: ..any) -> c.int ---
 }
 Pane_Test_Winsize :: struct {rows, cols, xpixel, ypixel: c.ushort}
-PANE_TEST_GET_WINSIZE :: 0x40087468
 
 _pane_integration_init :: proc(a: ^app.App, t: ^testing.T) -> bool {
 	app.session_manager_init(&a.session_mgr, 4)
