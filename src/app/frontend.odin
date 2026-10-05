@@ -168,6 +168,17 @@ frontend_font_paths :: proc(executable_path: string, candidates: []string, alloc
 				append(&res, p)
 			}
 		}
+
+		// 3. share/term/assets/fonts & share/term/fonts (Linux FHS prefix, e.g. /usr/local or ~/.local)
+		for c in candidates {
+			if strings.has_prefix(c, "assets/fonts/") {
+				filename := c[len("assets/fonts/"):]
+				p1, _ := filepath.join({parent, "share/term/assets/fonts", filename}, allocator)
+				append(&res, p1)
+				p2, _ := filepath.join({parent, "share/term/fonts", filename}, allocator)
+				append(&res, p2)
+			}
+		}
 	}
 
 	for c in candidates {

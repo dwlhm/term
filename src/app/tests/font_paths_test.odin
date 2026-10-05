@@ -16,6 +16,10 @@ test_frontend_font_paths_order :: proc(t: ^testing.T) {
 		"/relocated app/Term.app/Contents/Resources/fonts/secondary.ttf",
 		"/relocated app/Term.app/Contents/assets/fonts/primary.ttf",
 		"/relocated app/Term.app/Contents/assets/fonts/secondary.ttf",
+		"/relocated app/Term.app/Contents/share/term/assets/fonts/primary.ttf",
+		"/relocated app/Term.app/Contents/share/term/fonts/primary.ttf",
+		"/relocated app/Term.app/Contents/share/term/assets/fonts/secondary.ttf",
+		"/relocated app/Term.app/Contents/share/term/fonts/secondary.ttf",
 	}
 	testing.expect_value(t, len(paths), len(expected) + len(candidates))
 	for path, i in expected do testing.expect_value(t, paths[i], path)
@@ -135,3 +139,31 @@ test_find_font_with_relocated_executable :: proc(t: ^testing.T) {
 	testing.expect(t, len(fallback_paths) > 0)
 	testing.expect_value(t, fallback_paths[0], symbols_file)
 }
+
+@(test)
+test_frontend_linux_share_font_paths :: proc(t: ^testing.T) {
+	root, root_err := os.make_directory_temp("", "term linux font *", context.allocator)
+	if !testing.expect(t, root_err == nil) do return
+	defer delete(root)
+	defer os.remove_all(root)
+
+	executable_path, _ := filepath.join({root, "usr/local/bin/term"}, context.allocator)
+	defer delete(executable_path)
+
+	font_dir, _ := filepath.join({root, "usr/local/share/term/assets/fonts"}, context.allocator)
+	defer delete(font_dir)
+	if !testing.expect(t, os.mkdir_all(font_dir) == nil) do return
+
+	font_file, _ := filepath.join({font_dir, "MapleMono-NF-Regular.ttf"}, context.allocator)
+	defer delete(font_file)
+
+	primary_data :: #load("../../../assets/fonts/MapleMono-NF-Regular.ttf")
+	if !testing.expect(t, os.write_entire_file(font_file, transmute([]u8)primary_data) == nil) do return
+
+	found_path, ok := app.find_font(executable_path)
+	if !testing.expect(t, ok, "find_font should locate font in share/term/assets/fonts") do return
+	defer delete(found_path)
+
+	testing.expect_value(t, found_path, font_file)
+}
+

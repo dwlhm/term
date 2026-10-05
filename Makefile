@@ -2,6 +2,7 @@ ODIN ?= odin
 OUT_DIR ?= bin
 MAIN_SRC ?= src/app
 TARGET ?= $(OUT_DIR)/term
+PREFIX ?= /usr/local
 UNAME_S := $(shell uname -s)
 
 ifeq ($(UNAME_S),Darwin)
@@ -22,7 +23,7 @@ TEST_FLAGS ?= -define:ODIN_TEST_THREADS=1
 DEBUG_FLAGS ?= -debug
 RELEASE_FLAGS ?= -o:speed -no-bounds-check
 
-.PHONY: all build release build-mcp release-mcp test-mcp test-version bench-mcp bundle install dmg run check check-linux test test-terminal test-parser test-pty test-input test-tabs test-ui test-interaction test-render test-app test-bench test-mcp test-diag test-probe test-session-core bench bench-run bench-video bench-vte clean help version-info
+.PHONY: all build release build-mcp release-mcp test-mcp test-version bench-mcp bundle install uninstall dist-linux dmg run check check-linux test test-terminal test-parser test-pty test-input test-tabs test-ui test-interaction test-render test-app test-bench test-mcp test-diag test-probe test-session-core bench bench-run bench-video bench-vte clean help version-info
 
 all: build
 
@@ -59,6 +60,7 @@ release-mcp:
 	@mkdir -p $(OUT_DIR)
 	$(ODIN) build src/cmd/term_mcp -out:$(OUT_DIR)/term-mcp $(RELEASE_FLAGS) -strict-style
 
+ifeq ($(UNAME_S),Darwin)
 bundle: release
 	@mkdir -p $(OUT_DIR)/Term.app/Contents/MacOS
 	@mkdir -p $(OUT_DIR)/Term.app/Contents/Resources
@@ -89,6 +91,43 @@ dmg: bundle
 		}; \
 	done
 	rm -rf $(OUT_DIR)/dmg_staging
+else
+install: release
+	@echo "Installing Term to $(PREFIX)..."
+	install -d $(DESTDIR)$(PREFIX)/bin
+	install -m 755 $(TARGET) $(DESTDIR)$(PREFIX)/bin/term
+	install -d $(DESTDIR)$(PREFIX)/share/applications
+	install -m 644 assets/term.desktop $(DESTDIR)$(PREFIX)/share/applications/term.desktop
+	install -d $(DESTDIR)$(PREFIX)/share/icons/hicolor/512x512/apps
+	install -m 644 assets/term.png $(DESTDIR)$(PREFIX)/share/icons/hicolor/512x512/apps/term.png
+	install -d $(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps
+	install -m 644 logo.svg $(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/term.svg
+	install -d $(DESTDIR)$(PREFIX)/share/term/assets/fonts
+	cp -R assets/fonts/* $(DESTDIR)$(PREFIX)/share/term/assets/fonts/
+	@chmod 644 $(DESTDIR)$(PREFIX)/share/term/assets/fonts/*
+	@if [ -z "$(DESTDIR)" ]; then \
+		command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database $(DESTDIR)$(PREFIX)/share/applications 2>/dev/null || true; \
+		command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q -t -f $(DESTDIR)$(PREFIX)/share/icons/hicolor 2>/dev/null || true; \
+	fi
+	@echo "Term installed successfully to $(PREFIX)/bin/term"
+
+uninstall:
+	@echo "Uninstalling Term from $(PREFIX)..."
+	rm -f $(DESTDIR)$(PREFIX)/bin/term
+	rm -f $(DESTDIR)$(PREFIX)/share/applications/term.desktop
+	rm -f $(DESTDIR)$(PREFIX)/share/icons/hicolor/512x512/apps/term.png
+	rm -f $(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/term.svg
+	rm -rf $(DESTDIR)$(PREFIX)/share/term
+	@if [ -z "$(DESTDIR)" ]; then \
+		command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database $(DESTDIR)$(PREFIX)/share/applications 2>/dev/null || true; \
+		command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q -t -f $(DESTDIR)$(PREFIX)/share/icons/hicolor 2>/dev/null || true; \
+	fi
+	@echo "Term uninstalled."
+endif
+
+dist-linux: release
+	@chmod +x scripts/package_linux.sh
+	scripts/package_linux.sh --target $(TARGET)
 
 run: build
 	./$(TARGET)
@@ -219,7 +258,9 @@ help:
 	@echo "  build-mcp       Build standalone headless MCP server to $(OUT_DIR)/term-mcp"
 	@echo "  release-mcp     Build release standalone headless MCP server to $(OUT_DIR)/term-mcp"
 	@echo "  bundle          Create macOS application bundle (Term.app)"
-	@echo "  install         Install Term.app to /Applications"
+	@echo "  install         Install Term.app to /Applications (macOS) or prefix (Linux)"
+	@echo "  uninstall       Uninstall Term from prefix (Linux)"
+	@echo "  dist-linux      Build release and package Linux tarball"
 	@echo "  dmg             Create macOS disk image (Term.dmg)"
 	@echo "  run             Build and run executable"
 	@echo "  check           Type check all source modules"
