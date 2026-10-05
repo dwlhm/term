@@ -1,3 +1,4 @@
+#+build !darwin
 package wgpu_backend
 
 import "core:fmt"

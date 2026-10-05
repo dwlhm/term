@@ -258,57 +258,48 @@ frontend_init :: proc(
 		return 0, 0, 0, 0, false
 	}
 
-	use_metal := false
 	when ODIN_OS == .Darwin {
-		use_metal = true
-		if val, ok := os.lookup_env("TERM_BACKEND", context.temp_allocator); ok && val == "wgpu" {
-			use_metal = false
+		f.gpu_backend = metal_backend.create_metal_backend()
+		f.instance = f.gpu_backend.create_instance()
+		if f.instance == nil {
+			win.window_destroy(&f.window)
+			fmt.eprintf("frontend_init: create_instance failed\n")
+			return 0, 0, 0, 0, false
 		}
-	}
 
-	if use_metal {
-		when ODIN_OS == .Darwin {
-			f.gpu_backend = metal_backend.create_metal_backend()
-			f.instance = f.gpu_backend.create_instance()
-			if f.instance == nil {
-				win.window_destroy(&f.window)
-				fmt.eprintf("frontend_init: create_instance failed\n")
-				return 0, 0, 0, 0, false
-			}
-
-			metal_view := sdl3.Metal_CreateView(f.window.handle)
-			if metal_view == nil {
-				f.gpu_backend.destroy_instance(f.instance)
-				f.instance = nil
-				win.window_destroy(&f.window)
-				fmt.eprintf("frontend_init: Metal_CreateView failed\n")
-				return 0, 0, 0, 0, false
-			}
-			layer := sdl3.Metal_GetLayer(metal_view)
-			f.surface = gpu.Gpu_Surface(metal_backend.create_surface(layer))
-			if rawptr(f.surface) == nil {
-				sdl3.Metal_DestroyView(metal_view)
-				f.gpu_backend.destroy_instance(f.instance)
-				f.instance = nil
-				win.window_destroy(&f.window)
-				fmt.eprintf("frontend_init: create_surface failed\n")
-				return 0, 0, 0, 0, false
-			}
-
-			f.device, f.queue = f.gpu_backend.request_device(f.instance, rawptr(f.surface))
-			if rawptr(f.device) == nil || rawptr(f.queue) == nil {
-				f.device = gpu.Gpu_Device(nil)
-				f.queue = gpu.Gpu_Queue(nil)
-				metal_backend.destroy_surface((^metal_backend.Metal_Surface)(rawptr(f.surface)))
-				f.surface = gpu.Gpu_Surface(nil)
-				sdl3.Metal_DestroyView(metal_view)
-				f.gpu_backend.destroy_instance(f.instance)
-				f.instance = nil
-				win.window_destroy(&f.window)
-				fmt.eprintf("frontend_init: request_device failed\n")
-				return 0, 0, 0, 0, false
-			}
+		metal_view := sdl3.Metal_CreateView(f.window.handle)
+		if metal_view == nil {
+			f.gpu_backend.destroy_instance(f.instance)
+			f.instance = nil
+			win.window_destroy(&f.window)
+			fmt.eprintf("frontend_init: Metal_CreateView failed\n")
+			return 0, 0, 0, 0, false
 		}
+		layer := sdl3.Metal_GetLayer(metal_view)
+		f.surface = gpu.Gpu_Surface(metal_backend.create_surface(layer))
+		if rawptr(f.surface) == nil {
+			sdl3.Metal_DestroyView(metal_view)
+			f.gpu_backend.destroy_instance(f.instance)
+			f.instance = nil
+			win.window_destroy(&f.window)
+			fmt.eprintf("frontend_init: create_surface failed\n")
+			return 0, 0, 0, 0, false
+		}
+
+		f.device, f.queue = f.gpu_backend.request_device(f.instance, rawptr(f.surface))
+		if rawptr(f.device) == nil || rawptr(f.queue) == nil {
+			f.device = gpu.Gpu_Device(nil)
+			f.queue = gpu.Gpu_Queue(nil)
+			metal_backend.destroy_surface((^metal_backend.Metal_Surface)(rawptr(f.surface)))
+			f.surface = gpu.Gpu_Surface(nil)
+			sdl3.Metal_DestroyView(metal_view)
+			f.gpu_backend.destroy_instance(f.instance)
+			f.instance = nil
+			win.window_destroy(&f.window)
+			fmt.eprintf("frontend_init: request_device failed\n")
+			return 0, 0, 0, 0, false
+		}
+
 	} else {
 		f.gpu_backend = wgpu_backend.create_wgpu_backend()
 		f.instance = f.gpu_backend.create_instance()
@@ -484,14 +475,11 @@ frontend_destroy :: proc(f: ^Frontend) {
 	// this is the one place it is freed.
 	render.devtools_panel_release()
 	render.renderer_destroy(&f.renderer)
-	if rawptr(f.surface) != nil {
-		if f.gpu_backend != nil && f.gpu_backend.shader_language == .WGSL {
-			wgpu_backend.destroy_surface((^wgpu_backend.Wgpu_Surface)(rawptr(f.surface)))
-		}
+	if f.surface != nil {
 		when ODIN_OS == .Darwin {
-			if f.gpu_backend != nil && f.gpu_backend.shader_language == .MSL {
-				metal_backend.destroy_surface((^metal_backend.Metal_Surface)(rawptr(f.surface)))
-			}
+			metal_backend.destroy_surface((^metal_backend.Metal_Surface)(rawptr(f.surface)))
+		} else {
+			wgpu_backend.destroy_surface((^wgpu_backend.Wgpu_Surface)(rawptr(f.surface)))
 		}
 		f.surface = gpu.Gpu_Surface(nil)
 	}
