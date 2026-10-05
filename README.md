@@ -6,7 +6,7 @@
   [![CI](https://github.com/dwlhm/term/actions/workflows/ci.yml/badge.svg)](https://github.com/dwlhm/term/actions/workflows/ci.yml)
   [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
   [![Odin Version](https://img.shields.io/badge/Odin-dev--2026--08%2B-blue.svg)](https://odin-lang.org)
-  [![Platform](https://img.shields.io/badge/Platform-macOS-brightgreen.svg)]()
+  [![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux-brightgreen.svg)]()
 </div>
 
 ---
@@ -119,13 +119,56 @@ All architectural decisions are documented with empirical benchmarks in [LAPORAN
 
 ## Getting Started
 
-### Prerequisites
-- **macOS**: macOS 11.0 (Big Sur) or newer (Apple Silicon M1/M2/M3/M4 or Intel).
-- **Odin Compiler**: `dev-2026-08` or newer installed in your `PATH`.
-- **SDL3**: Required for windowing and event loop. Install via Homebrew: `brew install sdl3`.
-- **Make**: Standard POSIX `make` tool.
+### Installation
 
-### Building & Running
+#### macOS
+Download the latest prebuilt release from [GitHub Releases](https://github.com/dwlhm/term/releases):
+- **Disk Image (`.dmg`)**: Download `Term.dmg`, open it, and drag `Term.app` into `/Applications`.
+- **Archive (`.tar.gz` / `.zip`)**: Download `term-macos-arm64.tar.gz` or `term-macos-arm64.zip`, extract, and move `Term.app` to `/Applications`.
+- **Headless MCP Server**: Download `term-mcp-macos-arm64.tar.gz` and extract `term-mcp` into your `$PATH`.
+
+#### Linux
+Download the latest Linux tarball from [GitHub Releases](https://github.com/dwlhm/term/releases):
+```bash
+# Download the latest Linux tarball from GitHub Releases:
+tar -xzf term-v0.4.1-linux-x86_64.tar.gz
+cd term-v0.4.1-linux-x86_64
+sudo ./install.sh
+# (Or install to user directory: ./install.sh --prefix ~/.local)
+```
+- **Headless MCP Server**: Download `term-mcp-linux-x86_64.tar.gz` and extract `term-mcp` into your `$PATH`.
+
+### Building from Source
+
+#### Prerequisites
+- **Odin Compiler**: `dev-2026-08` or newer installed in your `PATH`.
+- **Make**: Standard POSIX `make` tool.
+- **macOS Dependencies**:
+  - macOS 11.0 (Big Sur) or newer (Apple Silicon or Intel).
+  - Install dependencies via Homebrew:
+    ```bash
+    brew install sdl3 freetype harfbuzz
+    ```
+- **Linux Dependencies**:
+  - **Ubuntu / Debian**:
+    ```bash
+    sudo apt-get update
+    sudo apt-get install -y ninja-build libasound2-dev libpulse-dev libx11-dev libxext-dev \
+      libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev libxss-dev libxkbcommon-dev \
+      libdrm-dev libgbm-dev libgl1-mesa-dev libegl1-mesa-dev libwayland-dev libdecor-0-dev \
+      libfreetype-dev libharfbuzz-dev libvulkan-dev
+    ```
+  - **Arch Linux**:
+    ```bash
+    sudo pacman -S sdl3 freetype2 harfbuzz vulkan-devel
+    ```
+  - **Fedora**:
+    ```bash
+    sudo dnf install SDL3-devel freetype-devel harfbuzz-devel vulkan-loader-devel
+    ```
+  - *Note*: If SDL3 is not packaged in your Linux distribution repository, build and install SDL 3.2.8+ from source.
+
+#### Building Commands
 
 ```bash
 # 1. Clone the repository
@@ -138,19 +181,22 @@ make build
 # 3. Build optimized release binary
 make release
 
-# 4. Build macOS application bundle (bin/Term.app)
-make bundle
-
-# 5. Build debug MCP server (bin/term-mcp)
-make build-mcp
-
-# 6. Build optimized release MCP server
-make release-mcp
-
-# 7. Launch Term
+# 4. Launch Term
 make run
-# or launch the native bundle:
-open bin/Term.app
+
+# 5. Install system-wide (macOS: /Applications/Term.app; Linux: /usr/local/bin & /usr/local/share)
+sudo make install
+
+# 6. Package standalone Linux distribution tarball (Linux)
+make dist-linux
+
+# 7. Build macOS application bundle & DMG (macOS)
+make bundle
+make dmg
+
+# 8. Build standalone headless MCP server
+make build-mcp
+make release-mcp
 ```
 
 > [!NOTE]

@@ -5,13 +5,13 @@ on:
     tags:
       - 'v*'
 
+env:
+  TERM_RELEASE_TAG: ${{ github.ref_name }}
+
 jobs:
-  build-and-release:
+  build-macos:
     runs-on: macos-14
-    permissions:
-      contents: write
     env:
-      TERM_RELEASE_TAG: ${{ github.ref_name }}
       HOMEBREW_NO_AUTO_UPDATE: 1
       HOMEBREW_NO_INSTALL_CLEANUP: 1
     steps:
@@ -49,16 +49,95 @@ jobs:
           tar -czf term-mcp-macos-arm64.tar.gz -C bin term-mcp
           cd bin && zip -ry ../term-macos-arm64.zip Term.app && cd ..
           cp bin/Term.dmg .
-          shasum -a 256 Term.dmg term-macos-arm64.tar.gz term-macos-arm64.zip term-mcp-macos-arm64.tar.gz > SHA256SUMS.txt
 
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
         with:
-          files: |
+          name: macos-artifacts
+          path: |
             Term.dmg
             term-macos-arm64.tar.gz
             term-macos-arm64.zip
             term-mcp-macos-arm64.tar.gz
-            SHA256SUMS.txt
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Odin
+        uses: laytan/setup-odin@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libasound2-dev libpulse-dev libx11-dev libxext-dev \
+            libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev libxss-dev libxkbcommon-dev \
+            libdrm-dev libgbm-dev libgl1-mesa-dev libegl1-mesa-dev libwayland-dev libdecor-0-dev \
+            libfreetype-dev libharfbuzz-dev libvulkan-dev xvfb
+
+      - name: Install SDL3
+        run: |
+          git clone --depth 1 https://github.com/libsdl-org/SDL.git -b release-3.2.8 /tmp/sdl3
+          cmake -B /tmp/sdl3/build -S /tmp/sdl3 -G Ninja -DCMAKE_BUILD_TYPE=Release -DSDL_STATIC=OFF -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF
+          sudo cmake --build /tmp/sdl3/build --target install
+          sudo ldconfig
+
+      - name: Set up Odin Vendor Libraries (WGPU & STB)
+        run: |
+          ODIN_DIR=$(dirname $(which odin))
+          if [ -f "$ODIN_DIR/vendor/stb/src/build_stb.sh" ]; then
+            bash "$ODIN_DIR/vendor/stb/src/build_stb.sh"
+          fi
+          WGPU_DIR="$ODIN_DIR/vendor/wgpu/lib/wgpu-linux-x86_64-release"
+          mkdir -p "$WGPU_DIR"
+          curl -sSL "https://github.com/gfx-rs/wgpu-native/releases/download/v29.0.1.1/wgpu-linux-x86_64-release.zip" -o /tmp/wgpu.zip
+          unzip -q -o /tmp/wgpu.zip -d "$WGPU_DIR"
+
+      - name: Build release binary
+        run: make release
+
+      - name: Build MCP server binary
+        run: make release-mcp
+
+      - name: Build Linux distribution package
+        run: make dist-linux
+
+      - name: Package MCP server archive
+        run: tar -czf bin/term-mcp-linux-x86_64.tar.gz -C bin term-mcp
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-artifacts
+          path: |
+            bin/term-*-linux-*.tar.gz
+            bin/term-mcp-linux-x86_64.tar.gz
+
+  publish-release:
+    needs: [build-macos, build-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release_staging
+          merge-multiple: true
+
+      - name: Generate SHA256 checksums
+        run: |
+          cd release_staging && sha256sum * > SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release_staging/*
           draft: false
           prerelease: false

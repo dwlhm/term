@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-and-test:
+  build-macos:
     runs-on: macos-14
     env:
       HOMEBREW_NO_AUTO_UPDATE: 1
@@ -50,3 +50,57 @@ jobs:
           make dmg
           test -f bin/Term.app/Contents/Resources/fonts/MapleMono-NF-Regular.ttf
           test -f bin/Term.app/Contents/Resources/fonts/SymbolsNerdFontMono-Regular.ttf
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Odin
+        uses: laytan/setup-odin@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libasound2-dev libpulse-dev libx11-dev libxext-dev \
+            libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev libxss-dev libxkbcommon-dev \
+            libdrm-dev libgbm-dev libgl1-mesa-dev libegl1-mesa-dev libwayland-dev libdecor-0-dev \
+            libfreetype-dev libharfbuzz-dev libvulkan-dev xvfb
+
+      - name: Install SDL3
+        run: |
+          git clone --depth 1 https://github.com/libsdl-org/SDL.git -b release-3.2.8 /tmp/sdl3
+          cmake -B /tmp/sdl3/build -S /tmp/sdl3 -G Ninja -DCMAKE_BUILD_TYPE=Release -DSDL_STATIC=OFF -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF
+          sudo cmake --build /tmp/sdl3/build --target install
+          sudo ldconfig
+
+      - name: Set up Odin Vendor Libraries (WGPU & STB)
+        run: |
+          ODIN_DIR=$(dirname $(which odin))
+          if [ -f "$ODIN_DIR/vendor/stb/src/build_stb.sh" ]; then
+            bash "$ODIN_DIR/vendor/stb/src/build_stb.sh"
+          fi
+          WGPU_DIR="$ODIN_DIR/vendor/wgpu/lib/wgpu-linux-x86_64-release"
+          mkdir -p "$WGPU_DIR"
+          curl -sSL "https://github.com/gfx-rs/wgpu-native/releases/download/v29.0.1.1/wgpu-linux-x86_64-release.zip" -o /tmp/wgpu.zip
+          unzip -q -o /tmp/wgpu.zip -d "$WGPU_DIR"
+
+      - name: Check code
+        run: make check
+
+      - name: Run test suites
+        run: xvfb-run --auto-servernum make test
+
+      - name: Build release binary
+        run: make release
+
+      - name: Build MCP server binary
+        run: make release-mcp
+
+      - name: Build Linux distribution package
+        run: make dist-linux

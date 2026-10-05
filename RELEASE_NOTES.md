@@ -1,3 +1,27 @@
+# Release Notes - Term v0.4.1
+
+Term v0.4.1 introduces automated multi-platform CI/CD for Linux and macOS, attaches standalone Linux distribution tarballs with an FHS-compliant installer to GitHub Releases, and documents installation and source builds across major Linux distributions.
+
+---
+
+## 🌟 Highlights & Major Features
+
+### 1. Automated Linux CI & Release Matrix in GitHub Actions (`.github/workflows/`)
+- **Continuous Integration Matrix (`ci.yml`)**: Added the `build-linux` workflow alongside `build-macos` on `ubuntu-latest`. Automated pipeline executes Odin type checks (`make check`), headless test suites under virtual framebuffer (`xvfb-run --auto-servernum make test`), optimized release compilation (`make release`), MCP server builds (`make release-mcp`), and packaging verification (`make dist-linux`).
+- **Concurrent Multi-Platform Release Builds (`release.yml`)**: Split release workflows into concurrent `build-macos` and `build-linux` runner jobs that compile, package, and upload platform-specific distribution archives.
+- **Unified Release Publishing**: Added `publish-release` coordination job that aggregates macOS and Linux artifacts into a unified staging area, generates `SHA256SUMS.txt`, and publishes all release assets in a single GitHub release.
+
+### 2. Standalone Linux Distribution Tarballs with FHS Installer
+- **Prebuilt Linux Distribution Archive**: Releases now provide `term-v0.4.1-linux-x86_64.tar.gz` containing the optimized `term` executable, bundled Nerd Fonts, FreeDesktop desktop entry (`term.desktop`), high-resolution application icons, and an FHS-compliant `install.sh`.
+- **Flexible Installation Script**: Standalone `install.sh` enables zero-effort global installation (`sudo ./install.sh` to `/usr/local`) or unprivileged user installations (`./install.sh --prefix ~/.local`).
+- **Linux Headless MCP Server**: Releases publish standalone `term-mcp-linux-x86_64.tar.gz` for headless terminal automation with AI coding agents on Linux systems.
+
+### 3. Expanded Setup & Distribution Documentation (`README.md`)
+- **Prebuilt Installation Instructions**: Documented installation workflows for macOS (DMG / tarball) and Linux (standalone release archive).
+- **Comprehensive Linux Prerequisites**: Added exact dependency installation commands for Ubuntu/Debian (`apt`), Arch Linux (`pacman`), and Fedora (`dnf`), as well as build and install commands (`make build`, `make release`, `make run`, `sudo make install`, `make dist-linux`).
+
+---
+
 # Release Notes - Term v0.4.0
 
 Term v0.4.0 is a major milestone release introducing Split Panes, Session Registry mobility, Cross-Platform Linux POSIX & WGPU support, native macOS Finder Services, and dynamic Git-derived build versioning.
