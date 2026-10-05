@@ -12,14 +12,16 @@ import pty "../"
 
 when ODIN_OS == .Darwin {
 	foreign import libc "system:System.framework"
-	@(default_calling_convention="c")
-	foreign libc {
-		ioctl :: proc(fd: c.int, request: c.ulong, #c_vararg args: ..any) -> c.int ---
-	}
+	TIOCGWINSZ :: 0x40087468
+} else {
+	foreign import libc "system:c"
+	TIOCGWINSZ :: 0x5413
 }
 
-// TIOCGWINSZ reads the window size back (test-only; the setter is Langkah 4).
-TIOCGWINSZ :: 0x40087468
+@(default_calling_convention="c")
+foreign libc {
+	ioctl :: proc(fd: c.int, request: c.ulong, #c_vararg args: ..any) -> c.int ---
+}
 
 _Winsize :: struct {
 	ws_row:    c.ushort,
