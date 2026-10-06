@@ -463,6 +463,15 @@ test_mcp_list_commands_and_get_output :: proc(t: ^testing.T) {
 	run_content := run_obj["content"].(json.Array)
 	testing.expect_value(t, run_content[0].(json.Object)["text"].(json.String), "[exit: 0]\n" + expected_output)
 
+	session_id := string(run_obj["session_id"].(json.String))
+	session, found_session := mcp.session_manager_get(&sm, session_id)
+	if !testing.expect(t, found_session && session != nil, "run session must exist") do return
+	if !testing.expect(t, len(session.command_history) == 1, "run must record one command") do return
+	recorded_lines := session.command_history[0].output_lines[:]
+	expected_raw_output := strings.join(recorded_lines, "\n")
+	defer delete(expected_raw_output)
+	testing.expect_value(t, strings.trim_space(expected_raw_output), expected_output)
+
 	// List commands
 	list_res, list_err, _ := mcp.tools_dispatch_call(&sm, "terminal_list_commands", nil)
 	defer delete(list_res)
@@ -481,9 +490,11 @@ test_mcp_list_commands_and_get_output :: proc(t: ^testing.T) {
 	parsed_get, _ := json.parse_string(get_res, parse_integers = true)
 	defer json.destroy_value(parsed_get)
 	get_obj := parsed_get.(json.Object)
-	testing.expect_value(t, get_obj["output"].(json.String), expected_output)
+	testing.expect_value(t, get_obj["output"].(json.String), expected_raw_output)
 	get_content := get_obj["content"].(json.Array)
-	testing.expect_value(t, get_content[0].(json.Object)["text"].(json.String), expected_output)
+	testing.expect_value(t, get_content[0].(json.Object)["text"].(json.String), expected_raw_output)
+	testing.expect_value(t, get_obj["total_lines"].(json.Integer), json.Integer(len(recorded_lines)))
+	testing.expect_value(t, get_obj["total_matched"].(json.Integer), json.Integer(len(recorded_lines)))
 
 	// Get output with grep
 	grep_json := `{"grep":"needle"}`
@@ -525,6 +536,47 @@ test_mcp_list_commands_and_get_output :: proc(t: ^testing.T) {
 		content := obj["content"].(json.Array)
 		testing.expect_value(t, content[0].(json.Object)["text"].(json.String), query.output)
 	}
+}
+
+@test
+test_mcp_get_output_preserves_raw_lines :: proc(t: ^testing.T) {
+	sm: mcp.Session_Manager
+	mcp.session_manager_init(&sm)
+	defer mcp.session_manager_destroy_all(&sm)
+
+	session_id, session, created := mcp.session_manager_create(&sm, 24, 80, mode = .Fast_Headless)
+	if !testing.expect(t, created && session != nil, "fixture session must be created") do return
+	fixture_lines := []string{"", "raw repeated", "raw repeated", "raw repeated", "  ", "tail", ""}
+	record := session_core.Command_Record{
+		id = 1,
+		command = strings.clone("raw output fixture"),
+		completed = true,
+		total_lines = len(fixture_lines),
+		output_lines = make([dynamic]string),
+	}
+	for line in fixture_lines {
+		append(&record.output_lines, strings.clone(line))
+	}
+	// Session destruction owns the record and each cloned string.
+	append(&session.command_history, record)
+	expected_raw_output := strings.join(fixture_lines, "\n")
+	defer delete(expected_raw_output)
+
+	args, args_err := json.parse_string(fmt.tprintf(`{{"session_id":"%s","command_id":%d}}`, session_id, record.id), parse_integers = true)
+	if !testing.expect(t, args_err == .None) do return
+	defer json.destroy_value(args)
+	res, err, _ := mcp.tools_dispatch_call(&sm, "terminal_get_output", args)
+	defer delete(res)
+	if !testing.expect(t, !err, res) do return
+	parsed, parse_err := json.parse_string(res, parse_integers = true)
+	if !testing.expect(t, parse_err == .None) do return
+	defer json.destroy_value(parsed)
+	obj := parsed.(json.Object)
+	testing.expect_value(t, obj["output"].(json.String), expected_raw_output)
+	content := obj["content"].(json.Array)
+	testing.expect_value(t, content[0].(json.Object)["text"].(json.String), expected_raw_output)
+	testing.expect_value(t, obj["total_lines"].(json.Integer), json.Integer(len(fixture_lines)))
+	testing.expect_value(t, obj["total_matched"].(json.Integer), json.Integer(len(fixture_lines)))
 }
 
 @test
