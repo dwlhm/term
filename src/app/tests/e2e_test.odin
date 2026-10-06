@@ -15,6 +15,7 @@ import posix "core:sys/posix"
 
 import app "../"
 import termgrid "../../terminal"
+import parser "../../parser"
 import input "../../platform/input"
 import pty "../../platform/pty"
 
@@ -171,7 +172,7 @@ _e2e_pred_abc :: proc(a: ^app.App) -> bool {
 
 _e2e_pred_styled_red :: proc(a: ^app.App) -> bool {
 	// SGR colors are live: the proof is a styled R,E,D triple
-	// (shell output at col 0). Echo rows carry literal "RED" text
+	// at any column, including after a prompt. Echo rows carry "RED"
 	// with style 0 and never match.
 	_, _, found := _e2e_styled_red_at(&a.terminal)
 	return found
@@ -197,6 +198,31 @@ _e2e_pred_exit42 :: proc(a: ^app.App) -> bool {
 
 _e2e_pred_nonblank :: proc(a: ^app.App) -> bool {
 	return _e2e_grid_nonblank(&a.terminal)
+}
+
+// Parser-backed fixture separates unstyled shell echo from prompt-prefixed
+// ANSI output without depending on shell startup timing or prompt placement.
+@(test)
+test_e2e_styled_red_coordinates :: proc(t: ^testing.T) {
+	a := new(app.App)
+	defer free(a)
+	_bare_app(a)
+	defer _bare_destroy(a)
+
+	_, _, found_empty := _e2e_styled_red_at(&a.terminal)
+	testing.expect(t, !found_empty, "blank grid must not contain styled output")
+
+	echo := "printf RED\r\n"
+	parser.parse_chunk(&a.parser, &a.terminal, transmute([]u8)echo)
+	_, _, found_echo := _e2e_styled_red_at(&a.terminal)
+	testing.expect(t, !found_echo, "unstyled echo must not count as styled output")
+
+	prefix :: "$ "
+	output := prefix + "\x1b[31mRED\x1b[0m\r\n"
+	parser.parse_chunk(&a.parser, &a.terminal, transmute([]u8)output)
+	r, cc, found_output := _e2e_styled_red_at(&a.terminal)
+	testing.expect(t, found_output, "prompt-prefixed ANSI output must be found")
+	testing.expect(t, r == 1 && cc == len(prefix), "coordinates must identify output after the prompt")
 }
 
 @(test)
@@ -267,39 +293,26 @@ test_e2e_colored_output :: proc(t: ^testing.T) {
 		testing.expect(t, false, "grid must hold RED with SGR consumed after SGR printf")
 		return
 	}
-	// Output row starts with RED (execution, not echo); that row must
-	// not carry the SGR params (consumed, not printed).
-	found_out := false
-	for r in 0..<a.terminal.grid.row_count {
-		if _row_matches(&a.terminal, r, "RED") {
-			found_out = true
-			// Same row must not contain the literal param text.
-			row_has_param := false
-			// Scan this row only for "[31m".
-			for cc in 0..=(a.terminal.grid.col_count - 4) {
-				if u32(termgrid.terminal_get_cell(&a.terminal, r, cc).content) != u32('[') { continue }
-				if u32(termgrid.terminal_get_cell(&a.terminal, r, cc + 1).content) != u32('3') { continue }
-				if u32(termgrid.terminal_get_cell(&a.terminal, r, cc + 2).content) != u32('1') { continue }
-				if u32(termgrid.terminal_get_cell(&a.terminal, r, cc + 3).content) != u32('m') { continue }
-				row_has_param = true
-				break
-			}
-			if row_has_param {
-				_e2e_dump_grid(&a.terminal)
-				testing.expect(t, false, "output RED row must not leak SGR params")
-			}
-			break
-		}
-	}
-	if !found_out {
-		_e2e_dump_grid(&a.terminal)
-		testing.expect(t, false, "no RED output row found")
-	}
+	// Find styled execution output even when the shell prompt prefixes it.
 	r, cc, red_found := _e2e_styled_red_at(&a.terminal)
 	if !red_found {
 		_e2e_dump_grid(&a.terminal)
 		testing.expect(t, false, "RED triple must carry non-default style")
 		return
+	}
+	// The same output row must not contain literal SGR params.
+	row_has_param := false
+	for col in 0..=(a.terminal.grid.col_count - 4) {
+		if u32(termgrid.terminal_get_cell(&a.terminal, r, col).content) != u32('[') { continue }
+		if u32(termgrid.terminal_get_cell(&a.terminal, r, col + 1).content) != u32('3') { continue }
+		if u32(termgrid.terminal_get_cell(&a.terminal, r, col + 2).content) != u32('1') { continue }
+		if u32(termgrid.terminal_get_cell(&a.terminal, r, col + 3).content) != u32('m') { continue }
+		row_has_param = true
+		break
+	}
+	if row_has_param {
+		_e2e_dump_grid(&a.terminal)
+		testing.expect(t, false, "output RED row must not leak SGR params")
 	}
 	// R,E,D cells must carry the active theme's ANSI red style.
 	for k in 0..<3 {
