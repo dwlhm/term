@@ -1,3 +1,4 @@
+#+build darwin
 package render_tests
 
 // Phase 12 async raster tests: miss immediacy, pop-in correctness,

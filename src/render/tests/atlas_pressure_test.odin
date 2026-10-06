@@ -1,3 +1,4 @@
+#+build darwin
 package render_tests
 
 // Phase 18 Step 0 tests: pressure wrap/hit-miss/reraster accounting,

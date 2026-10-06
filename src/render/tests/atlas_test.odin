@@ -14,16 +14,18 @@ TEST_FONT_COURIER :: "/System/Library/Fonts/Supplemental/Courier New.ttf"
 
 // find_test_font tries to find a usable test font.
 find_test_font :: proc() -> (path: string, ok: bool) {
-	// Try Menlo first
+	if os.is_file("assets/fonts/MapleMono-NF-Regular.ttf") {
+		return "assets/fonts/MapleMono-NF-Regular.ttf", true
+	}
+	if os.is_file("../assets/fonts/MapleMono-NF-Regular.ttf") {
+		return "../assets/fonts/MapleMono-NF-Regular.ttf", true
+	}
 	if _, err := os.read_entire_file_from_path(TEST_FONT_MENLO, context.allocator); err == nil {
 		return TEST_FONT_MENLO, true
 	}
-
-	// Fallback to Courier New
 	if _, err := os.read_entire_file_from_path(TEST_FONT_COURIER, context.allocator); err == nil {
 		return TEST_FONT_COURIER, true
 	}
-
 	return "", false
 }
 

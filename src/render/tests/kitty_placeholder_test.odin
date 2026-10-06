@@ -1,3 +1,4 @@
+#+build darwin
 package render_tests
 
 import "core:testing"

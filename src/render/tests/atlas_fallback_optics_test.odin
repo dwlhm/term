@@ -1,3 +1,4 @@
+#+build darwin
 package render_tests
 
 // Regression test for fallback-sourced UI glyph optical alignment.

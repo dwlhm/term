@@ -1,3 +1,4 @@
+#+build darwin
 package render_tests
 
 // Phase 11 tests: fallback resolver, shape cache identity, Arabic joining,

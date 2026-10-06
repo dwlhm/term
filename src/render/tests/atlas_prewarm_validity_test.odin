@@ -1,3 +1,4 @@
+#+build darwin
 package render_tests
 
 // Regression tests for atlas prewarm validity semantics.
