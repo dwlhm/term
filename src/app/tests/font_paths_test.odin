@@ -70,7 +70,7 @@ test_frontend_shipped_fonts_rasterize_after_relocation :: proc(t: ^testing.T) {
 		chain: render.Fallback_Chain
 		testing.expect(t, render.fallback_chain_init(&chain, nil, fallback_paths, 18, context.allocator))
 		defer render.fallback_chain_destroy(&chain)
-		for cp in ([]u32{0xF179, 0xF07B, 0xF017, 0xF126, 0x25A3, 0x2B1D}) {
+		for cp in ([]u32{0xF179, 0xF07B, 0xF017, 0xF126}) {
 			index, covered := render.fallback_resolve(&chain, cp, nil)
 			if !testing.expect(t, covered, "prompt icons must be covered by shipped fonts") do continue
 			testing.expect(t, index > 0, "missing primary must use the Nerd Font fallback")

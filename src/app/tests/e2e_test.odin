@@ -257,7 +257,7 @@ test_e2e_colored_output :: proc(t: ^testing.T) {
 	}
 	defer _e2e_teardown(&a.pty)
 
-	if !pty.pty_write(&a.pty, transmute([]u8)string("printf '\\x1b[31mRED\\x1b[0m'\n")) {
+	if !pty.pty_write(&a.pty, transmute([]u8)string("printf '\\033[31mRED\\033[0m'\n")) {
 		_e2e_dump_grid(&a.terminal)
 		testing.expect(t, false, "pty_write(colored printf) must succeed")
 		return
@@ -331,7 +331,7 @@ test_e2e_clear_screen :: proc(t: ^testing.T) {
 		testing.expect(t, false, "setup must fill grid with fillmarker before clear")
 		return
 	}
-	if !pty.pty_write(&a.pty, transmute([]u8)string("printf '\\x1b[2J'\n")) {
+	if !pty.pty_write(&a.pty, transmute([]u8)string("printf '\\033[2J'\n")) {
 		_e2e_dump_grid(&a.terminal)
 		testing.expect(t, false, "pty_write(ED clear) must succeed")
 		return
