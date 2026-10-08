@@ -31,9 +31,9 @@ test_drop_payload_uses_active_paste_protocol :: proc(t: ^testing.T) {
 			return
 		}
 		defer posix.close(pipefd[0])
-		a.pty.master = int(pipefd[1])
-		a.pty.state = .Exited if c.exited else .Running
-		a.terminal.bracketed_paste = c.bracketed
+		a.backend.pty.master = int(pipefd[1])
+		a.backend.pty.state = .Exited if c.exited else .Running
+		a.backend.terminal.bracketed_paste = c.bracketed
 		event := input.Input_Event{
 			event_type = .Drop,
 			drop = {kind = c.kind, text = strings.clone(c.payload)},

@@ -11,6 +11,7 @@ import i18n "../i18n"
 import termgrid "../terminal"
 import pty "../platform/pty"
 import session_core "../session_core"
+import ipc "../session_ipc"
 import ui "../ui"
 
 MAX_TABS: int : 32
@@ -43,6 +44,9 @@ Tab_Session :: struct {
 	exit_signal:           i32,
 	has_bell:              bool,
 	terminate_t0:          time.Time,
+	is_host_backed:        bool,
+	host_ws_id:            u64,
+	host_pane_id:          u64,
 	tree:                  Pane_Tree,
 	backend:               Backend,
 }
@@ -232,6 +236,22 @@ _tab_rebase_tree :: proc(tab: ^Tab_Session, old_nodes_base: rawptr, old_backend:
 	if tab == nil || old_nodes_base == nil do return
 	new_nodes_base := rawptr(&tab.tree.nodes[0])
 	if old_nodes_base == new_nodes_base && old_backend == &tab.backend do return
+	// Parser sinks follow the moved embedded backend, not its former slot.
+	if old_backend != nil && tab.backend.parser.response_user_data == rawptr(old_backend) {
+		tab.backend.parser.response_user_data = &tab.backend
+	}
+	if old_backend != nil && tab.backend.parser.clipboard_user_data == rawptr(old_backend) {
+		tab.backend.parser.clipboard_user_data = &tab.backend
+	}
+	if old_backend != nil && tab.backend.parser.graphics_user_data == rawptr(old_backend) {
+		tab.backend.parser.graphics_user_data = &tab.backend
+	}
+	if old_backend != nil && tab.backend.parser.clipboard_read_user_data == rawptr(old_backend) {
+		tab.backend.parser.clipboard_read_user_data = &tab.backend
+	}
+	if old_backend != nil && tab.backend.observer.user_data == rawptr(old_backend) {
+		tab.backend.observer.user_data = &tab.backend
+	}
 
 	delta := int(uintptr(new_nodes_base)) - int(uintptr(old_nodes_base))
 
@@ -357,6 +377,61 @@ session_spawn :: proc(
 	return new_idx, true
 }
 
+session_spawn_host_backed :: proc(
+	sm: ^Session_Manager,
+	hc: ^App_Host_Client,
+	ws_id, pane_id: u64,
+	rows, cols: int,
+	cfg: ^config.Config,
+	theme: termgrid.Theme,
+	pixel_w: int = 0,
+	pixel_h: int = 0,
+) -> (idx: int, ok: bool) {
+	if sm == nil do return -1, false
+	if len(sm.tabs) >= sm.max_tabs do return -1, false
+
+	sm.default_rows = rows
+	sm.default_cols = cols
+	sm.default_pixel_w = pixel_w
+	sm.default_pixel_h = pixel_h
+	sm.default_config = cfg
+	sm.default_theme = theme
+
+	resize(&sm.tabs, len(sm.tabs) + 1)
+	new_idx := len(sm.tabs) - 1
+	tab := &sm.tabs[new_idx]
+	tab.id = sm.next_id
+	sm.next_id += 1
+	tab.status = .Running
+	tab.is_host_backed = true
+	tab.host_ws_id = ws_id
+	tab.host_pane_id = pane_id
+	tab.title_len = session_sanitize_title(tab.title_buf[:], i18n.i18n_get().tab_untitled)
+
+	if !backend_init_host_backed(&tab.backend, rows, cols, hc, ws_id, pane_id, cfg, theme) {
+		tab.status = .Error_Spawn
+		ordered_remove(&sm.tabs, new_idx)
+		return -1, false
+	}
+	if sm.notify_data_ready_cb != nil {
+		backend_set_notify_data_ready(&tab.backend, sm.notify_user_data, sm.notify_data_ready_cb)
+	}
+	if sm.clipboard_read_cb != nil || sm.clipboard_write_cb != nil {
+		backend_set_clipboard_callbacks(&tab.backend, sm.clipboard_user_data, sm.clipboard_write_cb, sm.clipboard_read_cb)
+	}
+
+	_ = pane_tree_init(&tab.tree, &tab.backend)
+	if tab.tree.root != nil {
+		tab.tree.root.rows = rows
+		tab.tree.root.cols = cols
+	}
+
+	if sm.active_idx < 0 {
+		sm.active_idx = new_idx
+	}
+	return new_idx, true
+}
+
 // session_close_tab begins the escalation ladder to terminate the tab child process, or cleans up if exited.
 session_close_tab :: proc(sm: ^Session_Manager, idx: int) -> bool {
 	if sm == nil || idx < 0 || idx >= len(sm.tabs) do return false
@@ -430,15 +505,10 @@ session_close_tab :: proc(sm: ^Session_Manager, idx: int) -> bool {
 
 // session_detach_tab detaches the tab at idx without killing child process or sending SIGHUP.
 // Grid and child process state are preserved in a Core_Session registered into Session_Registry.
-// If all tabs become detached, a fresh default shell tab is spawned so the window stays usable.
+// When all tabs become detached, sm.tabs becomes empty without spawning a replacement shell.
 session_detach_tab :: proc(sm: ^Session_Manager, idx: int) -> bool {
 	if sm == nil || idx < 0 || idx >= len(sm.tabs) do return false
 	s := &sm.tabs[idx]
-
-	if s.tree.node_count != 1 || tab_active_backend(s) != &s.backend {
-		fmt.eprintln("detach rejected: only an embedded singleton terminal can detach")
-		return false
-	}
 
 	// 1. Pause other threaded backends safely before mutating sm.tabs array
 	threaded_ids: [MAX_TABS]u32
@@ -453,7 +523,15 @@ session_detach_tab :: proc(sm: ^Session_Manager, idx: int) -> bool {
 		}
 	}
 
-	// 2. Stop thread on tab to be detached and clean up leaf panes
+	// 2. Stop thread on tab to be detached and all its leaf panes
+	leaves: [MAX_PANE_NODES]^Pane_Node
+	count := tab_leaf_panes(s, leaves[:])
+	for i in 0 ..< count {
+		leaf := leaves[i]
+		if leaf.backend != nil && backend_is_threaded(leaf.backend) {
+			backend_stop_thread(leaf.backend)
+		}
+	}
 	if backend_is_threaded(&s.backend) {
 		backend_stop_thread(&s.backend)
 	}
@@ -463,6 +541,8 @@ session_detach_tab :: proc(sm: ^Session_Manager, idx: int) -> bool {
 	cs.id = fmt.aprintf("session_%d", s.id)
 	cs.gui_tab_id = s.id
 	cs.is_detached = true
+	cs.is_host_backed = s.is_host_backed
+	cs.host_ws_id = s.host_ws_id
 	if !session_core.session_registry_register(reg, cs) {
 		delete(cs.id)
 		free(cs)
@@ -478,7 +558,25 @@ session_detach_tab :: proc(sm: ^Session_Manager, idx: int) -> bool {
 	if s.title_override_active do cs.title_override_len = copy(cs.title_override_buf[:], s.title_override_buf[:s.title_override_len])
 	cwd := string(s.last_cwd_buf[:s.last_cwd_len]) if s.last_cwd_len > 0 else s.backend.cwd
 	cs.cwd = strings.clone(cwd)
-	backend_restore_core_session(&s.backend, cs)
+	act_b := tab_active_backend(s)
+	if act_b == nil do act_b = &s.backend
+	backend_restore_core_session(act_b, cs)
+	if act_b != &s.backend {
+		free(act_b)
+	}
+	for i in 0 ..< count {
+		leaf := leaves[i]
+		if leaf.backend != nil && leaf.backend != act_b {
+			backend_destroy(leaf.backend)
+			if leaf.backend != &s.backend {
+				free(leaf.backend)
+			}
+			leaf.backend = nil
+		}
+	}
+	if act_b != &s.backend && s.backend.pty.master >= 0 {
+		backend_destroy(&s.backend)
+	}
 	if !session_core.session_start_drain_loop(cs) {
 		_ = session_core.session_registry_unregister(reg, cs.id)
 		_ = backend_init_from_core_session(&s.backend, cs, sm.default_config, sm.default_theme)
@@ -527,25 +625,6 @@ session_detach_tab :: proc(sm: ^Session_Manager, idx: int) -> bool {
 		sm.active_idx -= 1
 	} else if idx == sm.active_idx {
 		sm.active_idx = min(idx, len(sm.tabs) - 1)
-	}
-
-	// 7. If sm.tabs is empty, spawn fresh default shell tab so window stays usable
-	if len(sm.tabs) == 0 {
-		shell, _ := _resolve_shell()
-		shell_argv := _resolve_shell_argv(shell)
-		rows := sm.default_rows > 0 ? sm.default_rows : 24
-		cols := sm.default_cols > 0 ? sm.default_cols : 80
-		new_idx, spawn_ok := session_spawn(sm, shell, shell_argv, rows, cols, sm.default_config, sm.default_theme, sm.default_pixel_w, sm.default_pixel_h)
-		if spawn_ok {
-			sm.active_idx = new_idx
-			new_b := tab_active_backend(&sm.tabs[new_idx])
-			if sm.notify_data_ready_cb != nil {
-				backend_set_notify_data_ready(new_b, sm.notify_user_data, sm.notify_data_ready_cb)
-			}
-			if sm.clipboard_read_cb != nil || sm.clipboard_write_cb != nil {
-				backend_set_clipboard_callbacks(new_b, sm.clipboard_user_data, sm.clipboard_write_cb, sm.clipboard_read_cb)
-			}
-		}
 	}
 
 	// 8. Mark damage on active tab
@@ -603,6 +682,8 @@ session_attach_tab :: proc(sm: ^Session_Manager, persistent_session: ^session_co
 	tab.title_override_len = copy(tab.title_override_buf[:], persistent_session.title_override_buf[:persistent_session.title_override_len])
 	tab.title_override_active = tab.title_override_len > 0
 	tab.last_cwd_len = copy(tab.last_cwd_buf[:], persistent_session.cwd)
+	tab.is_host_backed = persistent_session.is_host_backed
+	tab.host_ws_id = persistent_session.host_ws_id
 
 	// 4. Initialize backend transferring ownership from persistent_session
 	b := &tab.backend
@@ -813,6 +894,18 @@ session_poll_all :: proc(sm: ^Session_Manager, max_chunk_budget: int = 65536) ->
 	idx := 0
 	for idx < len(sm.tabs) {
 		s := &sm.tabs[idx]
+		if s.is_host_backed && s.backend.host_client != nil && idx == sm.active_idx {
+			buf := s.backend.drain_buf
+			if buf == nil || len(buf) < ipc.MAX_PAYLOAD_BYTES {
+				buf = make([]u8, ipc.MAX_PAYLOAD_BYTES, context.temp_allocator)
+			}
+			updated, n := host_client_poll_snapshot(s.backend.host_client, &s.backend.terminal, buf, s.host_ws_id)
+			if updated && n > 0 {
+				any_damaged = true
+				termgrid.damage_mark_all(&s.backend.terminal.damage, nil)
+				termgrid.terminal_copy(&s.backend.front_terminal, &s.backend.terminal)
+			}
+		}
 		switch s.status {
 		case .Running, .Terminating:
 			if idx == sm.active_idx {

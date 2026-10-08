@@ -12,6 +12,8 @@ import odin_ast "core:odin/ast"
 import odin_parser "core:odin/parser"
 import odin_tok "core:odin/tokenizer"
 
+import config "../config"
+
 DEFAULT_LAYOUT_NAME :: "default"
 
 // Persisted_Pane_Leaf defines configuration for an individual terminal pane.
@@ -453,11 +455,24 @@ parse_layout_odin :: proc(source: string, file_path: string = "") -> (layout: Pe
 	defer delete(arena_buf)
 	mem.arena_init(&arena, arena_buf)
 
-	wrapped := strings.concatenate({
-		"package persistence\n_term_layout :: proc() {\n",
-		source,
-		"\n}\n",
-	}, context.temp_allocator)
+	pkg_name, transformed, has_pkg := config.extract_package_declaration(source, context.temp_allocator)
+
+	wrapped: string
+	if has_pkg {
+		wrapped = strings.concatenate({
+			"package ",
+			pkg_name,
+			"\n_term_layout :: proc() {\n",
+			transformed,
+			"\n}\n",
+		}, context.temp_allocator)
+	} else {
+		wrapped = strings.concatenate({
+			"package persistence\n_term_layout :: proc() {\n",
+			source,
+			"\n}\n",
+		}, context.temp_allocator)
+	}
 
 	file := odin_ast.File{
 		src      = wrapped,
@@ -951,6 +966,12 @@ persistence_restore_tab :: proc(a: ^App, layout: Persisted_Layout, context_dir: 
 	if !spawn_ok do return -1, false
 
 	tab := &a.session_mgr.tabs[new_idx]
+	if tab.backend.notify_data_ready_cb == nil {
+		backend_set_notify_data_ready(&tab.backend, a, _app_on_backend_data_ready)
+	}
+	if tab.backend.clipboard_write_cb == nil || tab.backend.clipboard_read_cb == nil {
+		backend_set_clipboard_callbacks(&tab.backend, &a.frontend, _frontend_clipboard_write_cb, _frontend_clipboard_read_cb)
+	}
 	if len(layout.title) > 0 {
 		_ = session_set_title_override(tab, layout.title)
 	}

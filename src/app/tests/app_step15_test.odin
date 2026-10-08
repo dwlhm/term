@@ -102,17 +102,17 @@ test_s15_banner_once :: proc(t: ^testing.T) {
 	_bare_app(a)
 	defer _bare_destroy(a)
 
-	a.pty.exit_code = 3
+	a.backend.pty.exit_code = 3
 	app.app_show_banner(a)
-	testing.expect(t, a.banner_shown, "banner must latch banner_shown")
-	last := a.terminal.grid.row_count - 1
-	testing.expect(t, _s15_row_has_prefix(&a.terminal, last, "[ process exited (3)"), "bottom row must carry the exit banner")
+	testing.expect(t, a.backend.banner_shown, "banner must latch banner_shown")
+	last := a.backend.terminal.grid.row_count - 1
+	testing.expect(t, _s15_row_has_prefix(&a.backend.terminal, last, "[ process exited (3)"), "bottom row must carry the exit banner")
 
 	// Second call rewrites the same text (transition gate in frame keeps
 	// it to one write per Exited episode).
 	app.app_show_banner(a)
-	testing.expect(t, a.banner_shown, "banner flag must stay latched")
-	testing.expect(t, _s15_row_has_prefix(&a.terminal, last, "[ process exited (3)"), "banner text must survive the rewrite")
+	testing.expect(t, a.backend.banner_shown, "banner flag must stay latched")
+	testing.expect(t, _s15_row_has_prefix(&a.backend.terminal, last, "[ process exited (3)"), "banner text must survive the rewrite")
 }
 
 @(test)
@@ -122,37 +122,37 @@ test_s15_relaunch_cycle :: proc(t: ^testing.T) {
 	_bare_app(a)
 	defer _bare_destroy(a)
 
-	a.prog = "/bin/cat"
-	a.argv = nil
-	if !pty.pty_spawn(&a.pty, APP_TEST_ROWS, APP_TEST_COLS, a.prog, a.argv) {
+	a.backend.prog = "/bin/cat"
+	a.backend.argv = nil
+	if !pty.pty_spawn(&a.backend.pty, APP_TEST_ROWS, APP_TEST_COLS, a.backend.prog, a.backend.argv) {
 		testing.expect(t, false, "pty_spawn(/bin/cat) must succeed")
 		return
 	}
-	old_pid := a.pty.pid
+	old_pid := a.backend.pty.pid
 
-	termgrid.terminal_put_string(&a.terminal, "stale")
-	_s15_kill(&a.pty)
-	if !_s15_poll_until(&a.pty) {
+	termgrid.terminal_put_string(&a.backend.terminal, "stale")
+	_s15_kill(&a.backend.pty)
+	if !_s15_poll_until(&a.backend.pty) {
 		testing.expect(t, false, "poll must reap the killed child")
-		pty.pty_close(&a.pty)
+		pty.pty_close(&a.backend.pty)
 		return
 	}
-	testing.expect(t, a.pty.state == .Exited, "killed child must poll Exited")
+	testing.expect(t, a.backend.pty.state == .Exited, "killed child must poll Exited")
 
 	app.app_show_banner(a)
-	testing.expect(t, a.banner_shown, "exited episode must latch the banner")
+	testing.expect(t, a.backend.banner_shown, "exited episode must latch the banner")
 
 	testing.expect(t, app.app_relaunch(a), "relaunch must succeed")
-	testing.expect(t, a.pty.state == .Running, "relaunched child must be Running")
-	testing.expect(t, a.pty.pid != old_pid, "relaunch must spawn a new pid")
-	testing.expect(t, !a.banner_shown, "relaunch must clear the banner latch")
-	cur := termgrid.terminal_get_cursor(&a.terminal)
+	testing.expect(t, a.backend.pty.state == .Running, "relaunched child must be Running")
+	testing.expect(t, a.backend.pty.pid != old_pid, "relaunch must spawn a new pid")
+	testing.expect(t, !a.backend.banner_shown, "relaunch must clear the banner latch")
+	cur := termgrid.terminal_get_cursor(&a.backend.terminal)
 	testing.expect(t, cur.row == 0 && cur.col == 0, "cursor must be home after relaunch")
-	testing.expect(t, !_s15_row_has_prefix(&a.terminal, 0, "stale"), "grid must be cleared by relaunch")
+	testing.expect(t, !_s15_row_has_prefix(&a.backend.terminal, 0, "stale"), "grid must be cleared by relaunch")
 
-	_s15_kill(&a.pty)
-	_s15_poll_until(&a.pty)
-	pty.pty_close(&a.pty)
+	_s15_kill(&a.backend.pty)
+	_s15_poll_until(&a.backend.pty)
+	pty.pty_close(&a.backend.pty)
 }
 
 @(test)
@@ -162,14 +162,14 @@ test_s15_relaunch_fail :: proc(t: ^testing.T) {
 	_bare_app(a)
 	defer _bare_destroy(a)
 
-	a.prog = "/nonexistent/term-step15-bad-prog"
-	a.argv = nil
-	a.pty.state = .Exited
+	a.backend.prog = "/nonexistent/term-step15-bad-prog"
+	a.backend.argv = nil
+	a.backend.pty.state = .Exited
 	testing.expect(t, !app.app_relaunch(a), "bad prog must fail relaunch")
-	testing.expect(t, a.pty.state == .Exited, "failed relaunch must keep Exited")
-	testing.expect(t, a.banner_shown, "failed relaunch must show the FAIL banner")
-	last := a.terminal.grid.row_count - 1
-	testing.expect(t, _s15_row_has_prefix(&a.terminal, last, "[ relaunch failed"), "bottom row must carry the FAIL banner")
+	testing.expect(t, a.backend.pty.state == .Exited, "failed relaunch must keep Exited")
+	testing.expect(t, a.backend.banner_shown, "failed relaunch must show the FAIL banner")
+	last := a.backend.terminal.grid.row_count - 1
+	testing.expect(t, _s15_row_has_prefix(&a.backend.terminal, last, "[ relaunch failed"), "bottom row must carry the FAIL banner")
 }
 
 @(test)
@@ -187,7 +187,7 @@ test_s15_resize_noop :: proc(t: ^testing.T) {
 	testing.expect(t, !app.app_on_resize(a, px_w, px_h), "same dims+px must be a no-op false")
 	testing.expect(t, !app.app_on_resize(a, 0, px_h), "degenerate px_w must be false untouched")
 	testing.expect(t, !app.app_on_resize(a, px_w, -1), "degenerate px_h must be false untouched")
-	testing.expect(t, a.terminal.grid.row_count == APP_TEST_ROWS && a.terminal.grid.col_count == APP_TEST_COLS, "no-op resizes must leave dims")
+	testing.expect(t, a.backend.terminal.grid.row_count == APP_TEST_ROWS && a.backend.terminal.grid.col_count == APP_TEST_COLS, "no-op resizes must leave dims")
 }
 
 @(test)
@@ -198,14 +198,14 @@ test_s15_resize_chain :: proc(t: ^testing.T) {
 	defer _bare_destroy(a)
 	defer _s15_renderer_teardown(a)
 
-	termgrid.terminal_put_string(&a.terminal, "hi")
+	termgrid.terminal_put_string(&a.backend.terminal, "hi")
 	px_w := i32(100 * app.APP_CELL_W)
 	px_h := i32(30 * app.APP_CELL_H)
 	testing.expect(t, app.app_on_resize(a, px_w, px_h), "bigger dims must resize true")
-	testing.expect(t, a.terminal.grid.row_count == 30 && a.terminal.grid.col_count == 100, "terminal dims must follow the resize")
+	testing.expect(t, a.backend.terminal.grid.row_count == 30 && a.backend.terminal.grid.col_count == 100, "terminal dims must follow the resize")
 	testing.expect(t, a.renderer.rows == 30 && a.renderer.cols == 100, "renderer grid dims must follow the resize")
 	testing.expect(t, a.last_px_w == px_w && a.last_px_h == px_h, "last_px must store the applied size")
-	testing.expect(t, _row_matches(&a.terminal, 0, "hi"), "terminal content must survive the resize")
+	testing.expect(t, _row_matches(&a.backend.terminal, 0, "hi"), "terminal content must survive the resize")
 }
 
 @(test)

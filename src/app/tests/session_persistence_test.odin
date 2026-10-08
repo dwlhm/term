@@ -13,9 +13,9 @@ import "core:sync"
 
 @(test)
 test_ui_shortcuts_detach_attach_labels :: proc(t: ^testing.T) {
-	testing.expect_value(t, ui.ui_shortcut_label(.Detach_Tab), "\u2325\u2318B")
+	testing.expect_value(t, ui.ui_shortcut_label(.Detach_Tab), "\u2318D")
 	testing.expect_value(t, ui.ui_shortcut_label(.Attach_Session), "\u2318O")
-	testing.expect_value(t, ui.ui_shortcut_label(.Close_Tab), "\u2318D")
+	testing.expect_value(t, ui.ui_shortcut_label(.Close_Tab), "\u21E7\u2318W")
 }
 
 @(test)
@@ -85,7 +85,7 @@ test_session_detach_all_spawns_default_shell :: proc(t: ^testing.T) {
 	testing.expect(t, ok, "spawn must succeed")
 	testing.expect_value(t, len(sm.tabs), 1)
 
-	// Detaching the sole tab must spawn a fresh shell tab so window stays usable
+	// Detaching the sole tab must not spawn a replacement shell (window closes in GUI)
 	detach_ok := app.session_detach_tab(&sm, 0)
 	testing.expect(t, detach_ok, "detach tab must succeed")
 
@@ -94,9 +94,9 @@ test_session_detach_all_spawns_default_shell :: proc(t: ^testing.T) {
 	count := session_core.session_registry_list_detached(&custom_reg, out[:])
 	testing.expect_value(t, count, 1)
 
-	// sm.tabs must still have 1 tab (the fresh default shell tab spawned)
-	testing.expect_value(t, len(sm.tabs), 1)
-	testing.expect_value(t, sm.active_idx, 0)
+	// sm.tabs must now be empty
+	testing.expect_value(t, len(sm.tabs), 0)
+	testing.expect_value(t, sm.active_idx, -1)
 
 	// Clean up detached session
 	popped := session_core.session_registry_pop_latest_detached(&custom_reg)

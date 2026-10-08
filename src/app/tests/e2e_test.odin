@@ -163,41 +163,41 @@ _e2e_teardown :: proc(p: ^pty.Pty) {
 
 // Predicates for _e2e_run_until (no captures; one per condition).
 _e2e_pred_hello :: proc(a: ^app.App) -> bool {
-	return _e2e_grid_contains(&a.terminal, "hello") && _e2e_cursor_advanced(&a.terminal)
+	return _e2e_grid_contains(&a.backend.terminal, "hello") && _e2e_cursor_advanced(&a.backend.terminal)
 }
 
 _e2e_pred_abc :: proc(a: ^app.App) -> bool {
-	return _e2e_grid_contains(&a.terminal, "ABC")
+	return _e2e_grid_contains(&a.backend.terminal, "ABC")
 }
 
 _e2e_pred_styled_red :: proc(a: ^app.App) -> bool {
 	// SGR colors are live: the proof is a styled R,E,D triple
 	// at any column, including after a prompt. Echo rows carry "RED"
 	// with style 0 and never match.
-	_, _, found := _e2e_styled_red_at(&a.terminal)
+	_, _, found := _e2e_styled_red_at(&a.backend.terminal)
 	return found
 }
 
 _e2e_pred_blank :: proc(a: ^app.App) -> bool {
 	// Interactive sh reprints its prompt after ED, so "all blank" never
 	// holds; the ED proof is the fill content gone.
-	return !_e2e_grid_contains(&a.terminal, "fillmarker")
+	return !_e2e_grid_contains(&a.backend.terminal, "fillmarker")
 }
 
 _e2e_pred_fillmarker :: proc(a: ^app.App) -> bool {
-	return _e2e_grid_contains(&a.terminal, "fillmarker")
+	return _e2e_grid_contains(&a.backend.terminal, "fillmarker")
 }
 
 _e2e_pred_x :: proc(a: ^app.App) -> bool {
-	return _e2e_grid_contains(&a.terminal, "x")
+	return _e2e_grid_contains(&a.backend.terminal, "x")
 }
 
 _e2e_pred_exit42 :: proc(a: ^app.App) -> bool {
-	return a.pty.state == .Exited && _e2e_exit_banner_present(&a.terminal, "process exited (42")
+	return a.backend.pty.state == .Exited && _e2e_exit_banner_present(&a.backend.terminal, "process exited (42")
 }
 
 _e2e_pred_nonblank :: proc(a: ^app.App) -> bool {
-	return _e2e_grid_nonblank(&a.terminal)
+	return _e2e_grid_nonblank(&a.backend.terminal)
 }
 
 // Parser-backed fixture separates unstyled shell echo from prompt-prefixed
@@ -209,18 +209,18 @@ test_e2e_styled_red_coordinates :: proc(t: ^testing.T) {
 	_bare_app(a)
 	defer _bare_destroy(a)
 
-	_, _, found_empty := _e2e_styled_red_at(&a.terminal)
+	_, _, found_empty := _e2e_styled_red_at(&a.backend.terminal)
 	testing.expect(t, !found_empty, "blank grid must not contain styled output")
 
 	echo := "printf RED\r\n"
-	parser.parse_chunk(&a.parser, &a.terminal, transmute([]u8)echo)
-	_, _, found_echo := _e2e_styled_red_at(&a.terminal)
+	parser.parse_chunk(&a.backend.parser, &a.backend.terminal, transmute([]u8)echo)
+	_, _, found_echo := _e2e_styled_red_at(&a.backend.terminal)
 	testing.expect(t, !found_echo, "unstyled echo must not count as styled output")
 
 	prefix :: "$ "
 	output := prefix + "\x1b[31mRED\x1b[0m\r\n"
-	parser.parse_chunk(&a.parser, &a.terminal, transmute([]u8)output)
-	r, cc, found_output := _e2e_styled_red_at(&a.terminal)
+	parser.parse_chunk(&a.backend.parser, &a.backend.terminal, transmute([]u8)output)
+	r, cc, found_output := _e2e_styled_red_at(&a.backend.terminal)
 	testing.expect(t, found_output, "prompt-prefixed ANSI output must be found")
 	testing.expect(t, r == 1 && cc == len(prefix), "coordinates must identify output after the prompt")
 }
@@ -231,19 +231,19 @@ test_e2e_echo_hello_session :: proc(t: ^testing.T) {
 	defer free(a)
 	_bare_app(a)
 	defer _bare_destroy(a)
-	if !pty.pty_spawn(&a.pty, APP_TEST_ROWS, APP_TEST_COLS, "/bin/sh", {}) {
+	if !pty.pty_spawn(&a.backend.pty, APP_TEST_ROWS, APP_TEST_COLS, "/bin/sh", {}) {
 		testing.expect(t, false, "pty_spawn(/bin/sh) must succeed")
 		return
 	}
-	defer _e2e_teardown(&a.pty)
+	defer _e2e_teardown(&a.backend.pty)
 
-	if !pty.pty_write(&a.pty, transmute([]u8)string("echo hello\n")) {
-		_e2e_dump_grid(&a.terminal)
+	if !pty.pty_write(&a.backend.pty, transmute([]u8)string("echo hello\n")) {
+		_e2e_dump_grid(&a.backend.terminal)
 		testing.expect(t, false, "pty_write(echo hello) must succeed")
 		return
 	}
 	if !_e2e_run_until(a, _e2e_pred_hello, 200) {
-		_e2e_dump_grid(&a.terminal)
+		_e2e_dump_grid(&a.backend.terminal)
 		testing.expect(t, false, "grid must spell hello with cursor advanced after echo hello")
 	}
 }
@@ -254,19 +254,19 @@ test_e2e_prompt_roundtrip :: proc(t: ^testing.T) {
 	defer free(a)
 	_bare_app(a)
 	defer _bare_destroy(a)
-	if !pty.pty_spawn(&a.pty, APP_TEST_ROWS, APP_TEST_COLS, "/bin/sh", {}) {
+	if !pty.pty_spawn(&a.backend.pty, APP_TEST_ROWS, APP_TEST_COLS, "/bin/sh", {}) {
 		testing.expect(t, false, "pty_spawn(/bin/sh) must succeed")
 		return
 	}
-	defer _e2e_teardown(&a.pty)
+	defer _e2e_teardown(&a.backend.pty)
 
-	if !pty.pty_write(&a.pty, transmute([]u8)string("printf 'ABC'\n")) {
-		_e2e_dump_grid(&a.terminal)
+	if !pty.pty_write(&a.backend.pty, transmute([]u8)string("printf 'ABC'\n")) {
+		_e2e_dump_grid(&a.backend.terminal)
 		testing.expect(t, false, "pty_write(printf ABC) must succeed")
 		return
 	}
 	if !_e2e_run_until(a, _e2e_pred_abc, 200) {
-		_e2e_dump_grid(&a.terminal)
+		_e2e_dump_grid(&a.backend.terminal)
 		testing.expect(t, false, "grid must contain ABC after printf ABC")
 	}
 }
@@ -277,47 +277,47 @@ test_e2e_colored_output :: proc(t: ^testing.T) {
 	defer free(a)
 	_bare_app(a)
 	defer _bare_destroy(a)
-	if !pty.pty_spawn(&a.pty, APP_TEST_ROWS, APP_TEST_COLS, "/bin/sh", {}) {
+	if !pty.pty_spawn(&a.backend.pty, APP_TEST_ROWS, APP_TEST_COLS, "/bin/sh", {}) {
 		testing.expect(t, false, "pty_spawn(/bin/sh) must succeed")
 		return
 	}
-	defer _e2e_teardown(&a.pty)
+	defer _e2e_teardown(&a.backend.pty)
 
-	if !pty.pty_write(&a.pty, transmute([]u8)string("printf '\\033[31mRED\\033[0m\\n'\n")) {
-		_e2e_dump_grid(&a.terminal)
+	if !pty.pty_write(&a.backend.pty, transmute([]u8)string("printf '\\033[31mRED\\033[0m\\n'\n")) {
+		_e2e_dump_grid(&a.backend.terminal)
 		testing.expect(t, false, "pty_write(colored printf) must succeed")
 		return
 	}
 	if !_e2e_run_until(a, _e2e_pred_styled_red, 200) {
-		_e2e_dump_grid(&a.terminal)
+		_e2e_dump_grid(&a.backend.terminal)
 		testing.expect(t, false, "grid must hold RED with SGR consumed after SGR printf")
 		return
 	}
 	// Find styled execution output even when the shell prompt prefixes it.
-	r, cc, red_found := _e2e_styled_red_at(&a.terminal)
+	r, cc, red_found := _e2e_styled_red_at(&a.backend.terminal)
 	if !red_found {
-		_e2e_dump_grid(&a.terminal)
+		_e2e_dump_grid(&a.backend.terminal)
 		testing.expect(t, false, "RED triple must carry non-default style")
 		return
 	}
 	// The same output row must not contain literal SGR params.
 	row_has_param := false
-	for col in 0..=(a.terminal.grid.col_count - 4) {
-		if u32(termgrid.terminal_get_cell(&a.terminal, r, col).content) != u32('[') { continue }
-		if u32(termgrid.terminal_get_cell(&a.terminal, r, col + 1).content) != u32('3') { continue }
-		if u32(termgrid.terminal_get_cell(&a.terminal, r, col + 2).content) != u32('1') { continue }
-		if u32(termgrid.terminal_get_cell(&a.terminal, r, col + 3).content) != u32('m') { continue }
+	for col in 0..=(a.backend.terminal.grid.col_count - 4) {
+		if u32(termgrid.terminal_get_cell(&a.backend.terminal, r, col).content) != u32('[') { continue }
+		if u32(termgrid.terminal_get_cell(&a.backend.terminal, r, col + 1).content) != u32('3') { continue }
+		if u32(termgrid.terminal_get_cell(&a.backend.terminal, r, col + 2).content) != u32('1') { continue }
+		if u32(termgrid.terminal_get_cell(&a.backend.terminal, r, col + 3).content) != u32('m') { continue }
 		row_has_param = true
 		break
 	}
 	if row_has_param {
-		_e2e_dump_grid(&a.terminal)
+		_e2e_dump_grid(&a.backend.terminal)
 		testing.expect(t, false, "output RED row must not leak SGR params")
 	}
 	// R,E,D cells must carry the active theme's ANSI red style.
 	for k in 0..<3 {
-		cell := termgrid.terminal_get_cell(&a.terminal, r, cc + k)
-		st := termgrid.style_table_get(&a.terminal.grid.style_table, cell.style)
+		cell := termgrid.terminal_get_cell(&a.backend.terminal, r, cc + k)
+		st := termgrid.style_table_get(&a.backend.terminal.grid.style_table, cell.style)
 		testing.expect(t, st.fg == termgrid.THEME_CATPPUCCIN_MOCHA.ansi16[1], "RED cell fg must be theme red")
 	}
 }
@@ -328,29 +328,29 @@ test_e2e_clear_screen :: proc(t: ^testing.T) {
 	defer free(a)
 	_bare_app(a)
 	defer _bare_destroy(a)
-	if !pty.pty_spawn(&a.pty, APP_TEST_ROWS, APP_TEST_COLS, "/bin/sh", {}) {
+	if !pty.pty_spawn(&a.backend.pty, APP_TEST_ROWS, APP_TEST_COLS, "/bin/sh", {}) {
 		testing.expect(t, false, "pty_spawn(/bin/sh) must succeed")
 		return
 	}
-	defer _e2e_teardown(&a.pty)
+	defer _e2e_teardown(&a.backend.pty)
 
-	if !pty.pty_write(&a.pty, transmute([]u8)string("echo fillmarker\n")) {
-		_e2e_dump_grid(&a.terminal)
+	if !pty.pty_write(&a.backend.pty, transmute([]u8)string("echo fillmarker\n")) {
+		_e2e_dump_grid(&a.backend.terminal)
 		testing.expect(t, false, "pty_write(fill) must succeed")
 		return
 	}
 	if !_e2e_run_until(a, _e2e_pred_fillmarker, 200) {
-		_e2e_dump_grid(&a.terminal)
+		_e2e_dump_grid(&a.backend.terminal)
 		testing.expect(t, false, "setup must fill grid with fillmarker before clear")
 		return
 	}
-	if !pty.pty_write(&a.pty, transmute([]u8)string("printf '\\033[2J'\n")) {
-		_e2e_dump_grid(&a.terminal)
+	if !pty.pty_write(&a.backend.pty, transmute([]u8)string("printf '\\033[2J'\n")) {
+		_e2e_dump_grid(&a.backend.terminal)
 		testing.expect(t, false, "pty_write(ED clear) must succeed")
 		return
 	}
 	if !_e2e_run_until(a, _e2e_pred_blank, 200) {
-		_e2e_dump_grid(&a.terminal)
+		_e2e_dump_grid(&a.backend.terminal)
 		testing.expect(t, false, "fillmarker must be gone after ED Entire through the real path")
 	}
 }
@@ -361,11 +361,11 @@ test_e2e_typing_roundtrip :: proc(t: ^testing.T) {
 	defer free(a)
 	_bare_app(a)
 	defer _bare_destroy(a)
-	if !pty.pty_spawn(&a.pty, APP_TEST_ROWS, APP_TEST_COLS, "/bin/cat", {}) {
+	if !pty.pty_spawn(&a.backend.pty, APP_TEST_ROWS, APP_TEST_COLS, "/bin/cat", {}) {
 		testing.expect(t, false, "pty_spawn(/bin/cat) must succeed")
 		return
 	}
-	defer _e2e_teardown(&a.pty)
+	defer _e2e_teardown(&a.backend.pty)
 
 	buf: [input.INPUT_ENCODE_MAX]u8
 	n := input.input_encode(input.Input_Event{kind = .Printable, rune = 'x'}, buf[:])
@@ -373,13 +373,13 @@ test_e2e_typing_roundtrip :: proc(t: ^testing.T) {
 		testing.expect(t, false, "input_encode('x') must emit bytes")
 		return
 	}
-	if !pty.pty_write(&a.pty, buf[:n]) {
-		_e2e_dump_grid(&a.terminal)
+	if !pty.pty_write(&a.backend.pty, buf[:n]) {
+		_e2e_dump_grid(&a.backend.terminal)
 		testing.expect(t, false, "pty_write(encoded x) must succeed")
 		return
 	}
 	if !_e2e_run_until(a, _e2e_pred_x, 200) {
-		_e2e_dump_grid(&a.terminal)
+		_e2e_dump_grid(&a.backend.terminal)
 		testing.expect(t, false, "grid must contain x after encoded input roundtrip through cat")
 	}
 }
@@ -390,20 +390,20 @@ test_e2e_shell_exit_banner :: proc(t: ^testing.T) {
 	defer free(a)
 	_bare_app(a)
 	defer _bare_destroy(a)
-	if !pty.pty_spawn(&a.pty, APP_TEST_ROWS, APP_TEST_COLS, "/bin/sh", {"-c", "exit 42"}) {
+	if !pty.pty_spawn(&a.backend.pty, APP_TEST_ROWS, APP_TEST_COLS, "/bin/sh", {"-c", "exit 42"}) {
 		testing.expect(t, false, "pty_spawn(exit 42) must succeed")
 		return
 	}
-	defer _e2e_teardown(&a.pty)
+	defer _e2e_teardown(&a.backend.pty)
 
 	if !_e2e_run_until(a, _e2e_pred_exit42, 200) {
-		_e2e_dump_grid(&a.terminal)
+		_e2e_dump_grid(&a.backend.terminal)
 		testing.expect(t, false, "pty must reach Exited with exit banner for code 42")
 		return
 	}
-	testing.expect(t, a.pty.state == .Exited, "pty state must be Exited after quick exit")
-	if !_e2e_exit_banner_present(&a.terminal, "process exited (42") {
-		_e2e_dump_grid(&a.terminal)
+	testing.expect(t, a.backend.pty.state == .Exited, "pty state must be Exited after quick exit")
+	if !_e2e_exit_banner_present(&a.backend.terminal, "process exited (42") {
+		_e2e_dump_grid(&a.backend.terminal)
 		testing.expect(t, false, "banner row must be present for exit 42")
 	}
 }
@@ -424,20 +424,20 @@ test_e2e_login_shell_smoke :: proc(t: ^testing.T) {
 	defer free(a)
 	_bare_app(a)
 	defer _bare_destroy(a)
-	if !pty.pty_spawn(&a.pty, APP_TEST_ROWS, APP_TEST_COLS, shell_val, {}) {
-		_e2e_dump_grid(&a.terminal)
+	if !pty.pty_spawn(&a.backend.pty, APP_TEST_ROWS, APP_TEST_COLS, shell_val, {}) {
+		_e2e_dump_grid(&a.backend.terminal)
 		testing.expect(t, false, "$SHELL spawn must succeed")
 		return
 	}
-	defer _e2e_teardown(&a.pty)
+	defer _e2e_teardown(&a.backend.pty)
 
-	if !pty.pty_write(&a.pty, transmute([]u8)string("echo $0\n")) {
-		_e2e_dump_grid(&a.terminal)
+	if !pty.pty_write(&a.backend.pty, transmute([]u8)string("echo $0\n")) {
+		_e2e_dump_grid(&a.backend.terminal)
 		testing.expect(t, false, "pty_write(echo $0) must succeed")
 		return
 	}
 	if !_e2e_run_until(a, _e2e_pred_nonblank, 200) {
-		_e2e_dump_grid(&a.terminal)
+		_e2e_dump_grid(&a.backend.terminal)
 		testing.expect(t, false, "grid must be non-blank after echo $0 on login shell")
 	}
 }

@@ -165,18 +165,18 @@ test_profile_scenario_ls_then_resize_ladder :: proc(t: ^testing.T) {
 			_ = posix.open("/dev/null", {.RDWR})
 		}
 	}
-	if !pty.pty_spawn(&a.pty, APP_TEST_ROWS, APP_TEST_COLS, "/bin/sh", {}) {
+	if !pty.pty_spawn(&a.backend.pty, APP_TEST_ROWS, APP_TEST_COLS, "/bin/sh", {}) {
 		testing.expect(t, false, "profile ladder test shell starts")
 		return
 	}
-	defer _e2e_teardown(&a.pty)
+	defer _e2e_teardown(&a.backend.pty)
 
 	echo_off := "stty -echo\n"
-	testing.expect(t, pty.pty_write(&a.pty, transmute([]u8)echo_off), "shell disables PTY echo before marker command")
+	testing.expect(t, pty.pty_write(&a.backend.pty, transmute([]u8)echo_off), "shell disables PTY echo before marker command")
 	time.sleep(20 * time.Millisecond)
-	base_count := _grid_nonblank_count(&a.terminal)
+	base_count := _grid_nonblank_count(&a.backend.terminal)
 	command := "ls; printf 'PROFILE_DONE_41\\n'\n"
-	testing.expect(t, pty.pty_write(&a.pty, transmute([]u8)command), "shell lists directory and emits completion marker through PTY")
+	testing.expect(t, pty.pty_write(&a.backend.pty, transmute([]u8)command), "shell lists directory and emits completion marker through PTY")
 
 	scenario := app.Profile_Scenario{}
 	testing.expect(t, app.profile_scenario_init(&scenario, 41, 1), "scenario initializes for marker scan")
@@ -187,16 +187,16 @@ test_profile_scenario_ls_then_resize_ladder :: proc(t: ^testing.T) {
 	done_seen := false
 	for _ in 0..<200 {
 		_ = app.app_frame(a)
-		if !listing_seen && _grid_nonblank_count(&a.terminal) > base_count {
+		if !listing_seen && _grid_nonblank_count(&a.backend.terminal) > base_count {
 			listing_seen = true
 		}
-		if app.profile_scenario_observe_terminal(&scenario, &a.terminal, 2) == .Advance && scenario.phase == .Complete {
+		if app.profile_scenario_observe_terminal(&scenario, &a.backend.terminal, 2) == .Advance && scenario.phase == .Complete {
 			done_seen = true
 			break
 		}
 		time.sleep(5 * time.Millisecond)
 	}
-	if !listing_seen || !done_seen { _e2e_dump_grid(&a.terminal) }
+	if !listing_seen || !done_seen { _e2e_dump_grid(&a.backend.terminal) }
 	testing.expect(t, listing_seen, "ls listing enters the grid before any resize")
 	testing.expect(t, done_seen, "done marker completes the scenario with advance")
 
@@ -218,11 +218,11 @@ test_profile_scenario_ls_then_resize_ladder :: proc(t: ^testing.T) {
 		}
 		testing.expect(t, app.profile_scenario_step_done(&scenario), "ladder step advances")
 		if step == 5 {
-			testing.expect(t, a.terminal.grid.col_count == APP_TEST_COLS && a.terminal.grid.row_count == APP_TEST_ROWS, "width ladder returns to the full-width grid")
+			testing.expect(t, a.backend.terminal.grid.col_count == APP_TEST_COLS && a.backend.terminal.grid.row_count == APP_TEST_ROWS, "width ladder returns to the full-width grid")
 		}
 	}
-	testing.expect(t, a.terminal.grid.col_count == APP_TEST_COLS && a.terminal.grid.row_count == APP_TEST_ROWS, "height ladder returns to the initial grid")
-	testing.expect(t, _grid_nonblank_count(&a.terminal) > 0, "ls listing survives every reflow")
+	testing.expect(t, a.backend.terminal.grid.col_count == APP_TEST_COLS && a.backend.terminal.grid.row_count == APP_TEST_ROWS, "height ladder returns to the initial grid")
+	testing.expect(t, _grid_nonblank_count(&a.backend.terminal) > 0, "ls listing survives every reflow")
 	testing.expect(t, app.profile_scenario_next(&scenario, 6) == .Stop, "scenario stops after the ladder completes")
 	testing.expect(t, scenario.resize_step == 12, "scenario counted all ladder steps")
 }

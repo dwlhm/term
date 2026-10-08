@@ -1,5 +1,7 @@
 package main
 
+import "core:fmt"
+import "core:strings"
 import platform_dialogs "../platform/dialogs"
 import platform_tabs "../platform/tabs"
 import session_core "../session_core"
@@ -19,6 +21,29 @@ _app_open_session_switcher :: proc(a: ^App, background: bool = false) {
 	if a.search_bar.visible {
 		a.search_bar.visible = false
 		_app_search_action(a, .Close)
+	}
+	if a.host_client.connected {
+		entries, ok := host_client_list_metadata(&a.host_client)
+		if ok {
+			for entry in entries {
+				if !entry.has_active_viewer {
+					id_str := fmt.tprintf("host_ws_%d", entry.id)
+					existing := session_core.session_registry_lookup(a.session_mgr.registry, id_str)
+					if existing == nil {
+						cs := new(session_core.Core_Session)
+						cs.id = strings.clone(id_str)
+						cs.is_detached = true
+						cs.is_host_backed = true
+						cs.host_ws_id = u64(entry.id)
+						t_len := min(len(entry.title), len(cs.title_buf))
+						if t_len > 0 do copy(cs.title_buf[:], entry.title[:t_len])
+						cs.title_len = t_len
+						termgrid.terminal_init(&cs.term, 24, 80)
+						_ = session_core.session_registry_register(a.session_mgr.registry, cs)
+					}
+				}
+			}
+		}
 	}
 	platform_tabs.session_switcher_show(&a.session_switcher, a.session_mgr.tabs[:], a.session_mgr.active_idx, a.session_mgr.registry)
 	a.session_switcher.message_len = 0
@@ -49,6 +74,29 @@ _app_refresh_session_switcher :: proc(a: ^App) {
 	if state.match_count > 0 {
 		selected_len = copy(selected_id[:], state.items[state.matches[state.selected_match_idx]].id)
 	}
+	if a.host_client.connected {
+		entries, ok := host_client_list_metadata(&a.host_client)
+		if ok {
+			for entry in entries {
+				if !entry.has_active_viewer {
+					id_str := fmt.tprintf("host_ws_%d", entry.id)
+					existing := session_core.session_registry_lookup(a.session_mgr.registry, id_str)
+					if existing == nil {
+						cs := new(session_core.Core_Session)
+						cs.id = strings.clone(id_str)
+						cs.is_detached = true
+						cs.is_host_backed = true
+						cs.host_ws_id = u64(entry.id)
+						t_len := min(len(entry.title), len(cs.title_buf))
+						if t_len > 0 do copy(cs.title_buf[:], entry.title[:t_len])
+						cs.title_len = t_len
+						termgrid.terminal_init(&cs.term, 24, 80)
+						_ = session_core.session_registry_register(a.session_mgr.registry, cs)
+					}
+				}
+			}
+		}
+	}
 	platform_tabs.session_switcher_show(state, a.session_mgr.tabs[:], a.session_mgr.active_idx, a.session_mgr.registry)
 	state.query = query
 	state.query_len = query_len
@@ -64,8 +112,11 @@ _app_detach_tab :: proc(a: ^App, idx: int) {
 	if !session_detach_tab(&a.session_mgr, idx) {
 		if !a.session_switcher.visible do _app_open_session_switcher(a)
 		message := "Cannot detach this session. The terminal remains available; try again."
-		if a.session_mgr.tabs[idx].tree.node_count != 1 do message = "Cannot detach: use a single terminal without split panes."
 		_app_session_message(a, message)
+		return
+	}
+	if len(a.session_mgr.tabs) == 0 {
+		a.should_quit = true
 		return
 	}
 	_app_resync_tab_modals(a)
@@ -87,6 +138,29 @@ _app_execute_session_action :: proc(a: ^App, action: platform_tabs.Session_Switc
 		}
 	case .Attach:
 		cs := session_core.session_registry_lookup(a.session_mgr.registry, item.id)
+		if cs != nil && cs.is_host_backed {
+			attach_ok := host_client_attach_workspace(&a.host_client, cs.host_ws_id)
+			if !attach_ok {
+				_app_session_message(a, "Failed to attach host workspace.")
+				return
+			}
+			rows := a.renderer.rows > 0 ? int(a.renderer.rows) : APP_DEFAULT_ROWS
+			cols := a.renderer.cols > 0 ? int(a.renderer.cols) : APP_DEFAULT_COLS
+			new_idx, spawn_ok := session_spawn_host_backed(&a.session_mgr, &a.host_client, cs.host_ws_id, 1, rows, cols, &a.config, a.renderer.theme)
+			if !spawn_ok {
+				_app_session_message(a, "Cannot attach: maximum tabs reached.")
+				return
+			}
+			_ = session_core.session_registry_unregister(a.session_mgr.registry, cs.id)
+			session_core.session_destroy(cs)
+			free(cs)
+			_ = session_switch_tab(&a.session_mgr, new_idx)
+			_app_close_session_switcher(a)
+			_app_resync_tab_modals(a)
+			_app_layout_panes(a)
+			a.renderer.full_redraw_pending = true
+			return
+		}
 		idx, attached := session_attach_tab(&a.session_mgr, cs)
 		if !attached {
 			message := "Cannot attach this session. It remains in the background; try again."

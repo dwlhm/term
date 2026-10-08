@@ -3,6 +3,7 @@ package main
 import "core:fmt"
 import "core:math"
 import "core:strings"
+import posix "core:sys/posix"
 import "vendor:sdl3"
 import win "../platform/window"
 import "../platform/input"
@@ -137,6 +138,24 @@ _app_split_pane :: proc(a: ^App, direction: Split_Direction) -> bool {
 		return false
 	}
 	previous := leaf.backend
+	if tab.is_host_backed && a.host_client.connected {
+		host_pane_id, ok := host_client_split_pane(&a.host_client, tab.host_ws_id, leaf.rows, leaf.cols)
+		if ok {
+			b := new(Backend)
+			backend_init_host_backed(b, leaf.rows, leaf.cols, &a.host_client, tab.host_ws_id, host_pane_id, &a.config, a.renderer.theme)
+			backend_set_clipboard_callbacks(b, &a.frontend, _frontend_clipboard_write_cb, _frontend_clipboard_read_cb)
+			backend_set_notify_data_ready(b, a, _app_on_backend_data_ready)
+			_, split_ok := pane_tree_split(&tab.tree, leaf.id, direction, b)
+			if split_ok {
+				tab.tree.zoomed_pane_id = 0
+				_app_pane_focus_changed(a, previous)
+				_ = _app_layout_panes(a)
+				return true
+			}
+			backend_destroy(b)
+			free(b)
+		}
+	}
 	cwd := leaf.backend.cwd
 	live_cwd: [4096]u8
 	if cwd_len := pty.pty_working_directory(&leaf.backend.pty, live_cwd[:]); cwd_len > 0 {
@@ -203,6 +222,17 @@ _app_dispatch_pane_shortcut :: proc(a: ^App, ev: input.Input_Event) -> bool {
 		_ = pane_tree_resize_active(&tab.tree, .Horizontal, -PANE_RESIZE_STEP)
 	} else if ui.ui_shortcut_matches(.Pane_Resize_Down, ev) {
 		_ = pane_tree_resize_active(&tab.tree, .Horizontal, PANE_RESIZE_STEP)
+	} else if ui.ui_shortcut_matches(.Pane_Focus_Left, ev) {
+		_ = pane_tree_navigate_spatially(&tab.tree, .Vertical, false)
+	} else if ui.ui_shortcut_matches(.Pane_Focus_Right, ev) {
+		_ = pane_tree_navigate_spatially(&tab.tree, .Vertical, true)
+	} else if ui.ui_shortcut_matches(.Pane_Focus_Up, ev) {
+		_ = pane_tree_navigate_spatially(&tab.tree, .Horizontal, false)
+	} else if ui.ui_shortcut_matches(.Pane_Focus_Down, ev) {
+		_ = pane_tree_navigate_spatially(&tab.tree, .Horizontal, true)
+	} else if ui.ui_shortcut_matches(.Close_Pane, ev) {
+		_app_close_pane(a, tab.tree.focused_pane_id)
+		return true
 	} else {
 		handled = false
 	}
@@ -215,6 +245,56 @@ _app_dispatch_pane_shortcut :: proc(a: ^App, ev: input.Input_Event) -> bool {
 		a.renderer.full_redraw_pending = true
 	}
 	return handled
+}
+
+_app_close_pane :: proc(a: ^App, target_id: Pane_Id) {
+	if a == nil || target_id == 0 do return
+	tab := _app_active_tab(a)
+	if tab == nil do return
+	leaf := pane_tree_find_pane(&tab.tree, target_id)
+	if leaf == nil || leaf.kind != .Leaf do return
+
+	if leaf == tab.tree.root {
+		_app_request_close_tab(a, a.session_mgr.active_idx)
+		return
+	}
+
+	if leaf.backend != nil {
+		if leaf.backend.pty.pid > 1 && leaf.backend.pty.state == .Running {
+			posix.kill(posix.pid_t(-leaf.backend.pty.pid), .SIGHUP)
+		}
+		backend_destroy(leaf.backend)
+		if leaf.backend != &tab.backend {
+			free(leaf.backend)
+		}
+		leaf.backend = nil
+	}
+
+	closed_last := pane_tree_close(&tab.tree, target_id)
+	if closed_last {
+		_app_request_close_tab(a, a.session_mgr.active_idx)
+		return
+	}
+
+	leaves_rem: [MAX_PANE_NODES]^Pane_Node
+	rem_count := tab_leaf_panes(tab, leaves_rem[:])
+	for k in 0 ..< rem_count {
+		if leaves_rem[k] != nil {
+			leaves_rem[k].dispatched_rows = 0
+			leaves_rem[k].dispatched_cols = 0
+		}
+	}
+	active_b := tab_active_backend(tab)
+	if active_b != nil {
+		if backend_is_threaded(active_b) do backend_lock_render(active_b)
+		current := &active_b.front_terminal if backend_is_threaded(active_b) else &active_b.terminal
+		termgrid.damage_mark_all(&current.damage, nil)
+		if backend_is_threaded(active_b) do backend_unlock_render(active_b)
+	}
+
+	_ = _app_layout_panes(a)
+	_app_pane_focus_changed(a, nil)
+	a.renderer.full_redraw_pending = true
 }
 
 _app_route_pane_pointer :: proc(a: ^App, p: input.Input_Pointer_Event) -> bool {

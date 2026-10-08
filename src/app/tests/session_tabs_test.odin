@@ -1,8 +1,11 @@
 package app_test
 
+import "core:sync"
 import "core:testing"
+import "core:time"
 
 import app "../"
+import termgrid "../../terminal"
 
 // _seeded_manager builds a session manager with count parked tabs whose ids are
 // base+1 .. base+count, avoiding process/GPU dependencies.
@@ -184,5 +187,123 @@ test_session_switch_tab_clears_bell :: proc(t: ^testing.T) {
 	testing.expect(t, !sm.tabs[2].has_bell, "split tab has_bell must be cleared on switch")
 	testing.expect(t, !leaf_a.has_bell, "split leaf A has_bell must be cleared on switch")
 	testing.expect(t, !leaf_b.has_bell, "split leaf B has_bell must be cleared on switch")
+}
+
+@(private="file")
+_dummy_notify_proc :: proc(user_data: rawptr) {
+	if user_data != nil {
+		counter := (^int)(user_data)
+		counter^ += 1
+	}
+}
+
+@(private="file")
+_dummy_clip_write :: proc(user_data: rawptr, text: string) {}
+
+@(private="file")
+_dummy_clip_read :: proc(user_data: rawptr, out: []u8) -> int { return 0 }
+
+@(test)
+test_tab_rebase_updates_observer_user_data :: proc(t: ^testing.T) {
+	tab := new(app.Tab_Session)
+	defer free(tab)
+	_ = app.pane_tree_init(&tab.tree, &tab.backend)
+
+	old_backend_ptr := (^app.Backend)(uintptr(0xDEADBEEF))
+	tab.backend.observer.user_data = rawptr(old_backend_ptr)
+	tab.backend.parser.clipboard_read_user_data = rawptr(old_backend_ptr)
+
+	old_nodes_base := rawptr(uintptr(rawptr(&tab.tree.nodes[0])) - 128)
+	app._tab_rebase_tree(tab, old_nodes_base, old_backend_ptr)
+
+	testing.expect(t, tab.backend.observer.user_data == rawptr(&tab.backend), "observer.user_data must be rebased to new backend")
+	testing.expect(t, tab.backend.parser.clipboard_read_user_data == rawptr(&tab.backend), "clipboard_read_user_data must be rebased to new backend")
+}
+
+@(test)
+test_session_manager_callbacks_propagated_to_host_backed :: proc(t: ^testing.T) {
+	sm: app.Session_Manager
+	app.session_manager_init(&sm, 4)
+	defer app.session_manager_destroy(&sm)
+
+	notify_val := 0
+	sm.notify_data_ready_cb = _dummy_notify_proc
+	sm.notify_user_data = &notify_val
+	sm.clipboard_write_cb = _dummy_clip_write
+	sm.clipboard_read_cb = _dummy_clip_read
+	sm.clipboard_user_data = rawptr(uintptr(0x5678))
+
+	ws_id: u64 = 42
+	pane_id: u64 = 99
+	idx, ok := app.session_spawn_host_backed(&sm, nil, ws_id, pane_id, 24, 80, nil, termgrid.Theme{})
+	testing.expect(t, ok, "session_spawn_host_backed must succeed")
+	testing.expect_value(t, idx, 0)
+
+	tab := &sm.tabs[0]
+	testing.expect(t, tab.backend.notify_data_ready_cb == _dummy_notify_proc, "notify_data_ready_cb must be propagated")
+	testing.expect(t, tab.backend.notify_user_data == &notify_val, "notify_user_data must be propagated")
+	testing.expect(t, tab.backend.clipboard_write_cb == _dummy_clip_write, "clipboard_write must be propagated")
+	testing.expect(t, tab.backend.clipboard_read_cb == _dummy_clip_read, "clipboard_read must be propagated")
+	testing.expect(t, tab.backend.clipboard_user_data == rawptr(uintptr(0x5678)), "clipboard_user_data must be propagated")
+	testing.expect_value(t, tab.backend.host_ws_id, ws_id)
+	testing.expect_value(t, tab.backend.host_pane_id, pane_id)
+}
+
+@(test)
+test_concurrent_tabs_loop_output_no_starvation :: proc(t: ^testing.T) {
+	sm: app.Session_Manager
+	app.session_manager_init(&sm, 4)
+	defer app.session_manager_destroy(&sm)
+
+	notify_counter := 0
+	sm.notify_data_ready_cb = _dummy_notify_proc
+	sm.notify_user_data = &notify_counter
+
+	// Spawn Tab 0 (background) and Tab 1 (foreground) running 2-iteration loops with sleep
+	idx0, ok0 := app.session_spawn(&sm, "/bin/sh", {"-c", "printf 'Tab0_Line1\\n'; sleep 0.05; printf 'Tab0_Line2\\n'"}, 24, 80, nil, termgrid.Theme{})
+	testing.expect(t, ok0, "tab 0 spawn must succeed")
+
+	idx1, ok1 := app.session_spawn(&sm, "/bin/sh", {"-c", "printf 'Tab1_Line1\\n'; sleep 0.05; printf 'Tab1_Line2\\n'"}, 24, 80, nil, termgrid.Theme{})
+	testing.expect(t, ok1, "tab 1 spawn must succeed")
+
+	app.session_switch_tab(&sm, idx1)
+
+	// Wait up to 3 seconds for both background and foreground tabs to reach Line 2
+	b0 := app.tab_active_backend(&sm.tabs[idx0])
+	b1 := app.tab_active_backend(&sm.tabs[idx1])
+
+	t0_seen_line2 := false
+	t1_seen_line2 := false
+
+	for attempt in 0 ..< 150 {
+		if !t0_seen_line2 {
+			app.backend_lock_render(b0)
+			for r in 0 ..< b0.front_terminal.grid.row_count {
+				if _row_matches(&b0.front_terminal, r, "Tab0_Line2") {
+					t0_seen_line2 = true
+					break
+				}
+			}
+			app.backend_unlock_render(b0)
+		}
+
+		if !t1_seen_line2 {
+			app.backend_lock_render(b1)
+			for r in 0 ..< b1.front_terminal.grid.row_count {
+				if _row_matches(&b1.front_terminal, r, "Tab1_Line2") {
+					t1_seen_line2 = true
+					break
+				}
+			}
+			app.backend_unlock_render(b1)
+		}
+
+		if t0_seen_line2 && t1_seen_line2 do break
+		time.sleep(20 * time.Millisecond)
+	}
+
+	testing.expect(t, t0_seen_line2, "background tab must receive and publish output past line 1 without starvation")
+	testing.expect(t, t1_seen_line2, "foreground tab must receive and publish output past line 1 without starvation")
+	testing.expect(t, notify_counter > 2, "notify_data_ready_cb must be called for subsequent output events")
 }
 

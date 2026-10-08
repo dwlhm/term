@@ -362,7 +362,9 @@ import instance "../render/instance"
 // App composes Multi-Session Manager, UI Chrome, and Frontend subsystems.
 App :: struct {
 	session_mgr:         Session_Manager,
-	using backend:       Backend, // Active tab backend fallback for tests/headless
+	config:              config.Config,
+	should_quit:         bool,
+	backend:             Backend, // Active tab backend fallback for tests/headless
 	using frontend:      Frontend,
 	tab_bar:             platform_tabs.Tab_Bar_State,
 	tab_rects:           [MAX_TABS]platform_tabs.Rect_f32,
@@ -399,6 +401,7 @@ App :: struct {
 	// counter itself lives on the Backend (it is written on the worker
 	// thread); this is only the frame loop's baseline for the delta.
 	devtools_pty_last:        u64,
+	host_client:              App_Host_Client,
 }
 
 _app_on_backend_data_ready :: proc(user_data: rawptr) {
@@ -623,12 +626,25 @@ _app_open_tab_overflow :: proc(a: ^App) {
 	a.renderer.full_redraw_pending = true
 }
 
+// _app_switch_tab transitions active focus to the designated tab index and notifies term-host daemon if host-backed.
+_app_switch_tab :: proc(a: ^App, idx: int) -> bool {
+	if a == nil do return false
+	if !session_switch_tab(&a.session_mgr, idx) do return false
+	if a.session_mgr.active_idx >= 0 && a.session_mgr.active_idx < len(a.session_mgr.tabs) {
+		tab := &a.session_mgr.tabs[a.session_mgr.active_idx]
+		if tab.is_host_backed && a.host_client.connected {
+			_ = host_client_attach_workspace(&a.host_client, tab.host_ws_id)
+		}
+	}
+	return true
+}
+
 // _app_activate_overflow_selection switches to the dropdown's selected tab and closes it.
 _app_activate_overflow_selection :: proc(a: ^App) {
 	if a == nil do return
 	idx := _app_tab_index_by_id(a, a.tab_overflow.selected_tab_id)
 	if idx >= 0 {
-		_ = session_switch_tab(&a.session_mgr, idx)
+		_ = _app_switch_tab(a, idx)
 		_ = platform_tabs.tab_bar_scroll_to_tab(&a.tab_bar, idx)
 	}
 	platform_tabs.tab_overflow_close(&a.tab_overflow)
@@ -649,17 +665,31 @@ _app_execute_tab_menu :: proc(a: ^App, item: platform_tabs.Tab_Menu_Item, target
 	case .Close_To_Right:
 		_ = session_close_to_right(&a.session_mgr, target_idx)
 	case .New_Tab:
-		shell, _ := _resolve_shell()
-		shell_argv := _resolve_shell_argv(shell)
 		rows := a.renderer.rows > 0 ? int(a.renderer.rows) : APP_DEFAULT_ROWS
 		cols := a.renderer.cols > 0 ? int(a.renderer.cols) : APP_DEFAULT_COLS
 		pixel_w, pixel_h := grid_pixel_extent_for_cells(rows, cols, a.renderer.cell_width, a.renderer.cell_height)
-		new_idx, spawn_ok := session_spawn(&a.session_mgr, shell, shell_argv, rows, cols, &a.config, a.renderer.theme, pixel_w, pixel_h)
-		if spawn_ok {
-			new_b := &a.session_mgr.tabs[new_idx].backend
-			backend_set_clipboard_callbacks(new_b, &a.frontend, _frontend_clipboard_write_cb, _frontend_clipboard_read_cb)
-			backend_set_notify_data_ready(new_b, a, _app_on_backend_data_ready)
-			session_switch_tab(&a.session_mgr, new_idx)
+		spawned := false
+		if a.host_client.connected {
+			shell, _ := _resolve_shell()
+			ws_id, pane_id, ok := host_client_create_workspace(&a.host_client, rows, cols, shell)
+			if ok {
+				new_idx, spawn_ok := session_spawn_host_backed(&a.session_mgr, &a.host_client, ws_id, pane_id, rows, cols, &a.config, a.renderer.theme, pixel_w, pixel_h)
+				if spawn_ok {
+					_app_switch_tab(a, new_idx)
+					spawned = true
+				}
+			}
+		}
+		if !spawned {
+			shell, _ := _resolve_shell()
+			shell_argv := _resolve_shell_argv(shell)
+			new_idx, spawn_ok := session_spawn(&a.session_mgr, shell, shell_argv, rows, cols, &a.config, a.renderer.theme, pixel_w, pixel_h)
+			if spawn_ok {
+				new_b := &a.session_mgr.tabs[new_idx].backend
+				backend_set_clipboard_callbacks(new_b, &a.frontend, _frontend_clipboard_write_cb, _frontend_clipboard_read_cb)
+				backend_set_notify_data_ready(new_b, a, _app_on_backend_data_ready)
+				_app_switch_tab(a, new_idx)
+			}
 		}
 	case .Rename:
 		_app_begin_tab_rename(a, target_idx)
@@ -673,13 +703,77 @@ _app_execute_tab_menu :: proc(a: ^App, item: platform_tabs.Tab_Menu_Item, target
 	a.renderer.full_redraw_pending = true
 }
 
+// _app_spawn_default_tab creates a new tab with default shell and activates it.
+_app_spawn_default_tab :: proc(a: ^App) -> bool {
+	if a == nil do return false
+	rows := a.renderer.rows > 0 ? int(a.renderer.rows) : APP_DEFAULT_ROWS
+	cols := a.renderer.cols > 0 ? int(a.renderer.cols) : APP_DEFAULT_COLS
+	pixel_w, pixel_h := grid_pixel_extent_for_cells(rows, cols, a.renderer.cell_width, a.renderer.cell_height)
+
+	if a.host_client.connected {
+		shell, _ := _resolve_shell()
+		ws_id, pane_id, ok := host_client_create_workspace(&a.host_client, rows, cols, shell)
+		if ok {
+			new_idx, spawn_ok := session_spawn_host_backed(&a.session_mgr, &a.host_client, ws_id, pane_id, rows, cols, &a.config, a.renderer.theme, pixel_w, pixel_h)
+			if spawn_ok {
+				_app_switch_tab(a, new_idx)
+				_app_resync_tab_modals(a)
+				_ = _app_layout_panes(a)
+				platform_tabs.tab_bar_anim_activate(&a.tab_bar)
+				a.renderer.full_redraw_pending = true
+				return true
+			}
+		}
+	}
+
+	shell, _ := _resolve_shell()
+	shell_argv := _resolve_shell_argv(shell)
+	new_idx, spawn_ok := session_spawn(&a.session_mgr, shell, shell_argv, rows, cols, &a.config, a.renderer.theme, pixel_w, pixel_h)
+	if !spawn_ok do return false
+	new_b := &a.session_mgr.tabs[new_idx].backend
+	backend_set_clipboard_callbacks(new_b, &a.frontend, _frontend_clipboard_write_cb, _frontend_clipboard_read_cb)
+	backend_set_notify_data_ready(new_b, a, _app_on_backend_data_ready)
+	_app_switch_tab(a, new_idx)
+	_app_resync_tab_modals(a)
+	_ = _app_layout_panes(a)
+	platform_tabs.tab_bar_anim_activate(&a.tab_bar)
+	a.renderer.full_redraw_pending = true
+	return true
+}
+
+// _app_detach_current_tab detaches the active tab. When the last visible tab
+// is detached, the window closes while detached sessions persist (D11).
+_app_detach_current_tab :: proc(a: ^App) {
+	if a == nil || a.session_mgr.active_idx < 0 || a.session_mgr.active_idx >= len(a.session_mgr.tabs) do return
+	if a.session_mgr.active_idx >= 0 && a.session_mgr.active_idx < len(a.session_mgr.tabs) {
+		tab := &a.session_mgr.tabs[a.session_mgr.active_idx]
+		if tab.is_host_backed && a.host_client.connected {
+			_ = host_client_detach_workspace(&a.host_client, tab.host_ws_id)
+		}
+	}
+	if !session_detach_tab(&a.session_mgr, a.session_mgr.active_idx) do return
+	if len(a.session_mgr.tabs) == 0 {
+		a.should_quit = true
+		return
+	}
+	_app_switch_tab(a, a.session_mgr.active_idx)
+	_app_resync_tab_modals(a)
+	if a.session_switcher.visible do _app_refresh_session_switcher(a)
+	a.renderer.full_redraw_pending = true
+}
+
 // _app_close_tab_confirmed closes the tab at idx and rebinds the chrome modals
-// that pointed at it. Closing the final tab requests application quit.
+// that pointed at it. Closing the final tab opens the session switcher (D17).
 _app_close_tab_confirmed :: proc(a: ^App, idx: int) {
 	if a == nil do return
 	if idx < 0 || idx >= len(a.session_mgr.tabs) do return
 	_ = session_close_tab(&a.session_mgr, idx)
-	if len(a.session_mgr.tabs) == 0 do a.should_quit = true
+	if len(a.session_mgr.tabs) == 0 {
+		_app_open_session_switcher(a, false)
+		a.renderer.full_redraw_pending = true
+		return
+	}
+	_app_switch_tab(a, a.session_mgr.active_idx)
 	a.renderer.full_redraw_pending = true
 	_app_resync_tab_modals(a)
 }
@@ -755,8 +849,8 @@ app_init :: proc(a: ^App, rows, cols: int, prog: string, argv: []string, spawn_i
 	if a == nil {
 		return false
 	}
-	a.pty.master = -1
-	a.pty.pid = -1
+	a.backend.pty.master = -1
+	a.backend.pty.pid = -1
 	if len(prog) == 0 {
 		return false
 	}
@@ -808,6 +902,11 @@ app_init :: proc(a: ^App, rows, cols: int, prog: string, argv: []string, spawn_i
 
 	// (2) Session Manager & UI Chrome initialization
 	session_manager_init(&a.session_mgr, MAX_TABS)
+	a.session_mgr.notify_data_ready_cb = _app_on_backend_data_ready
+	a.session_mgr.notify_user_data = a
+	a.session_mgr.clipboard_write_cb = _frontend_clipboard_write_cb
+	a.session_mgr.clipboard_read_cb = _frontend_clipboard_read_cb
+	a.session_mgr.clipboard_user_data = &a.frontend
 	platform_tabs.tabs_init(&a.tab_bar)
 	platform_chrome.search_bar_init(&a.search_bar)
 	platform_tabs.tab_drag_reset(&a.tab_drag)
@@ -935,6 +1034,7 @@ app_destroy :: proc(a: ^App) {
 	if a == nil {
 		return
 	}
+	host_client_close(&a.host_client)
 	sdl3.RemoveEventWatch(_app_event_watch, a)
 	if a.session_mgr.registry == session_core.session_registry_default() do session_core.session_registry_clear(a.session_mgr.registry)
 	session_manager_destroy(&a.session_mgr)
@@ -1371,10 +1471,10 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 					if len(a.session_mgr.tabs) > 0 {
 						if ev.shift {
 							prev_idx := (a.session_mgr.active_idx - 1 + len(a.session_mgr.tabs)) % len(a.session_mgr.tabs)
-							session_switch_tab(&a.session_mgr, prev_idx)
+							_app_switch_tab(a, prev_idx)
 						} else {
 							next_idx := (a.session_mgr.active_idx + 1) % len(a.session_mgr.tabs)
-							session_switch_tab(&a.session_mgr, next_idx)
+							_app_switch_tab(a, next_idx)
 						}
 						_app_resync_tab_modals(a)
 						platform_tabs.tab_bar_anim_activate(&a.tab_bar)
@@ -1423,32 +1523,61 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 					continue
 				}
 				if ev.rune == 't' || ev.rune == 'T' {
-					shell, _ := _resolve_shell()
-					shell_argv := _resolve_shell_argv(shell)
 					rows := a.renderer.rows > 0 ? int(a.renderer.rows) : APP_DEFAULT_ROWS
 					cols := a.renderer.cols > 0 ? int(a.renderer.cols) : APP_DEFAULT_COLS
 					pixel_w, pixel_h := grid_pixel_extent_for_cells(rows, cols, a.renderer.cell_width, a.renderer.cell_height)
-					new_idx, spawn_ok := session_spawn(&a.session_mgr, shell, shell_argv, rows, cols, &a.config, a.renderer.theme, pixel_w, pixel_h)
-					if spawn_ok {
-						new_b := &a.session_mgr.tabs[new_idx].backend
-						backend_set_clipboard_callbacks(new_b, &a.frontend, _frontend_clipboard_write_cb, _frontend_clipboard_read_cb)
-						backend_set_notify_data_ready(new_b, a, _app_on_backend_data_ready)
-						session_switch_tab(&a.session_mgr, new_idx)
-						_app_resync_tab_modals(a)
-						ui.tab_bar_anim_activate(&a.tab_bar)
+					spawned := false
+					if a.host_client.connected {
+						shell, _ := _resolve_shell()
+						ws_id, pane_id, ok := host_client_create_workspace(&a.host_client, rows, cols, shell)
+						if ok {
+							new_idx, spawn_ok := session_spawn_host_backed(&a.session_mgr, &a.host_client, ws_id, pane_id, rows, cols, &a.config, a.renderer.theme, pixel_w, pixel_h)
+							if spawn_ok {
+								_app_switch_tab(a, new_idx)
+								_app_resync_tab_modals(a)
+								ui.tab_bar_anim_activate(&a.tab_bar)
+								spawned = true
+							}
+						}
+					}
+					if !spawned {
+						shell, _ := _resolve_shell()
+						shell_argv := _resolve_shell_argv(shell)
+						new_idx, spawn_ok := session_spawn(&a.session_mgr, shell, shell_argv, rows, cols, &a.config, a.renderer.theme, pixel_w, pixel_h)
+						if spawn_ok {
+							new_b := &a.session_mgr.tabs[new_idx].backend
+							backend_set_clipboard_callbacks(new_b, &a.frontend, _frontend_clipboard_write_cb, _frontend_clipboard_read_cb)
+							backend_set_notify_data_ready(new_b, a, _app_on_backend_data_ready)
+							_app_switch_tab(a, new_idx)
+							_app_resync_tab_modals(a)
+							ui.tab_bar_anim_activate(&a.tab_bar)
+						}
 					}
 					a.renderer.full_redraw_pending = true
 					continue
-				} else if ev.rune == 'd' || ev.rune == 'D' {
+				}
+				if ui.ui_shortcut_matches(.Detach_Tab, ev) {
+					_app_detach_current_tab(a)
+					continue
+				}
+				if ui.ui_shortcut_matches(.Close_Tab, ev) {
 					_app_request_close_tab(a, a.session_mgr.active_idx)
 					continue
-				} else if ev.rune == 'f' || ev.rune == 'F' {
+				}
+				if ui.ui_shortcut_matches(.Close_Pane, ev) {
+					tab := _app_active_tab(a)
+					if tab != nil {
+						_app_close_pane(a, tab.tree.focused_pane_id)
+					}
+					continue
+				}
+				if ev.rune == 'f' || ev.rune == 'F' {
 					a.search_bar.visible = !a.search_bar.visible
 					_app_search_action(a, .Query_Changed if a.search_bar.visible else .Close)
 					continue
 				} else if ev.rune == '9' {
 					if len(a.session_mgr.tabs) > 0 {
-						session_switch_tab(&a.session_mgr, len(a.session_mgr.tabs) - 1)
+						_app_switch_tab(a, len(a.session_mgr.tabs) - 1)
 						_app_resync_tab_modals(a)
 						ui.tab_bar_anim_activate(&a.tab_bar)
 						a.renderer.full_redraw_pending = true
@@ -1457,7 +1586,7 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 				} else if ev.rune >= '1' && ev.rune <= '8' {
 					idx := int(ev.rune - '1')
 					if idx < len(a.session_mgr.tabs) {
-						session_switch_tab(&a.session_mgr, idx)
+						_app_switch_tab(a, idx)
 						_app_resync_tab_modals(a)
 						ui.tab_bar_anim_activate(&a.tab_bar)
 						a.renderer.full_redraw_pending = true
@@ -1490,7 +1619,7 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 			#partial switch ev.action {
 			case .Detach_Tab:
 				if a.tab_rename.active || a.search_bar.visible || a.tab_menu.visible || a.tab_overflow.visible do continue
-				_app_detach_tab(a, a.session_mgr.active_idx)
+				_app_detach_current_tab(a)
 			case .Attach_Session:
 				if a.tab_rename.active || a.search_bar.visible || a.tab_menu.visible || a.tab_overflow.visible do continue
 				_app_open_session_switcher(a)
@@ -1669,7 +1798,7 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 						if is_down && ev.pointer.clicks == 2 {
 							_app_begin_tab_rename(a, target_idx)
 						} else {
-							if session_switch_tab(&a.session_mgr, target_idx) {
+							if _app_switch_tab(a, target_idx) {
 								_ = platform_tabs.tab_bar_scroll_to_tab(&a.tab_bar, target_idx)
 							}
 							if is_down {
@@ -1683,17 +1812,31 @@ app_dispatch_input_events :: proc(a: ^App, evs: []input.Input_Event) -> (quit: b
 						_app_request_close_tab(a, target_idx)
 						continue
 					case .New_Tab:
-						shell, _ := _resolve_shell()
-						shell_argv := _resolve_shell_argv(shell)
 						rows := a.renderer.rows > 0 ? int(a.renderer.rows) : APP_DEFAULT_ROWS
 						cols := a.renderer.cols > 0 ? int(a.renderer.cols) : APP_DEFAULT_COLS
 						pixel_w, pixel_h := grid_pixel_extent_for_cells(rows, cols, a.renderer.cell_width, a.renderer.cell_height)
-						new_idx, spawn_ok := session_spawn(&a.session_mgr, shell, shell_argv, rows, cols, &a.config, a.renderer.theme, pixel_w, pixel_h)
-						if spawn_ok {
-							new_b := &a.session_mgr.tabs[new_idx].backend
-							backend_set_clipboard_callbacks(new_b, &a.frontend, _frontend_clipboard_write_cb, _frontend_clipboard_read_cb)
-							backend_set_notify_data_ready(new_b, a, _app_on_backend_data_ready)
-							session_switch_tab(&a.session_mgr, new_idx)
+						spawned := false
+						if a.host_client.connected {
+							shell, _ := _resolve_shell()
+							ws_id, pane_id, ok := host_client_create_workspace(&a.host_client, rows, cols, shell)
+							if ok {
+								new_idx, spawn_ok := session_spawn_host_backed(&a.session_mgr, &a.host_client, ws_id, pane_id, rows, cols, &a.config, a.renderer.theme, pixel_w, pixel_h)
+								if spawn_ok {
+									_app_switch_tab(a, new_idx)
+									spawned = true
+								}
+							}
+						}
+						if !spawned {
+							shell, _ := _resolve_shell()
+							shell_argv := _resolve_shell_argv(shell)
+							new_idx, spawn_ok := session_spawn(&a.session_mgr, shell, shell_argv, rows, cols, &a.config, a.renderer.theme, pixel_w, pixel_h)
+							if spawn_ok {
+								new_b := &a.session_mgr.tabs[new_idx].backend
+								backend_set_clipboard_callbacks(new_b, &a.frontend, _frontend_clipboard_write_cb, _frontend_clipboard_read_cb)
+								backend_set_notify_data_ready(new_b, a, _app_on_backend_data_ready)
+								_app_switch_tab(a, new_idx)
+							}
 						}
 						_app_resync_tab_modals(a)
 						platform_tabs.tab_bar_anim_activate(&a.tab_bar)
@@ -2395,7 +2538,7 @@ _app_dispatch_macos_service_requests :: proc(a: ^App) {
 			}
 			if loaded {
 				restored_idx, restored := persistence_restore_tab(a, layout, context_dir)
-				if restored && session_switch_tab(&a.session_mgr, restored_idx) {
+				if restored && _app_switch_tab(a, restored_idx) {
 					tab := &a.session_mgr.tabs[restored_idx]
 					backend_set_clipboard_callbacks(&tab.backend, &a.frontend, _frontend_clipboard_write_cb, _frontend_clipboard_read_cb)
 					backend_set_notify_data_ready(&tab.backend, a, _app_on_backend_data_ready)
@@ -2494,9 +2637,29 @@ main :: proc() {
 		free(app, runtime.heap_allocator())
 	}
 
+	when ODIN_OS == .Darwin {
+		if app.config.spawn_host {
+			host_client_ensure_connected(&app.host_client)
+			if app.host_client.connected && !restore_layout_ok {
+				entries, m_ok := host_client_list_metadata(&app.host_client)
+				if m_ok {
+					for entry in entries {
+						if !entry.has_active_viewer {
+							_app_open_session_switcher(app, true)
+							break
+						}
+					}
+				}
+			}
+		}
+		if app.config.spawn_monitor {
+			monitor_client_ensure_spawned()
+		}
+	}
+
 	if restore_layout_ok {
 		restored_idx, restore_ok := persistence_restore_tab(app, restore_layout, restore_context)
-		if restore_ok && session_switch_tab(&app.session_mgr, restored_idx) {
+		if restore_ok && _app_switch_tab(app, restored_idx) {
 			tab := &app.session_mgr.tabs[restored_idx]
 			active_b := &tab.backend
 			backend_set_clipboard_callbacks(active_b, &app.frontend, _frontend_clipboard_write_cb, _frontend_clipboard_read_cb)
@@ -2546,6 +2709,10 @@ main :: proc() {
 		has_ev := false
 		if anim_active || profile_scenario_enabled() || has_pending_damage || app.has_deferred_render || app.renderer.full_redraw_pending {
 			if sdl3.WaitEventTimeout(&ev, 1) {
+				has_ev = true
+			}
+		} else if app.host_client.connected {
+			if sdl3.WaitEventTimeout(&ev, 4) {
 				has_ev = true
 			}
 		} else {

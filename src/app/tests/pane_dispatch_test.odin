@@ -13,6 +13,7 @@ import render "../../render"
 import instance "../../render/instance"
 import gpu "../../render/gpu"
 import platform "../../platform"
+import session_core "../../session_core"
 
 when ODIN_OS == .Darwin {
 	foreign import pane_libc "system:System.framework"
@@ -106,7 +107,11 @@ test_pane_production_split_resize_focus_and_zoom :: proc(t: ^testing.T) {
 	_, _ = app.app_dispatch_input_events(a, {{event_type = .Key, kind = .Printable, rune = '\\', gui = true}})
 	testing.expect_value(t, tab.tree.zoomed_pane_id, app.Pane_Id(0))
 	testing.expect_value(t, tab.tree.node_count, 5)
-	testing.expect(t, !app.session_detach_tab(&a.session_mgr, 0), "unsupported detach preserves live panes")
+	reg: session_core.Session_Registry
+	session_core.session_registry_init(&reg)
+	a.session_mgr.registry = &reg
+	defer session_core.session_registry_destroy(&reg)
+	testing.expect(t, app.session_detach_tab(&a.session_mgr, 0), "detach multi-pane tab succeeds")
 }
 
 @(test)
@@ -151,19 +156,19 @@ test_pane_search_async_query_and_focus_noop :: proc(t: ^testing.T) {
 	defer free(a)
 	_bare_app(a)
 	defer _bare_destroy(a)
-	a.front_interaction.search_len = 1
-	a.front_interaction.search_query[0] = 'a'
+	a.backend.front_interaction.search_len = 1
+	a.backend.front_interaction.search_query[0] = 'a'
 	a.search_bar.query_len = 2
 	a.search_bar.query[0] = 'a'
 	a.search_bar.query[1] = 'b'
 	// Pretend worker exists only while borrowing an initialized front snapshot.
-	a.thread = cast(type_of(a.thread))(uintptr(1))
+	a.backend.thread = cast(type_of(a.backend.thread))(uintptr(1))
 	app.app_sync_search_bar(a)
-	a.thread = nil
+	a.backend.thread = nil
 	testing.expect_value(t, string(a.search_bar.query[:a.search_bar.query_len]), "ab")
-	a.focus_requested = true
+	a.backend.focus_requested = true
 	testing.expect(t, app.app_dispatch_backend(&a.backend, app.UI_Event{type = .Focus, focused = true}))
-	testing.expect_value(t, a.event_queue.count, 0)
+	testing.expect_value(t, a.backend.event_queue.count, 0)
 }
 
 @(test)

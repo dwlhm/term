@@ -165,6 +165,11 @@ Backend :: struct {
 	session_mode:         session_core.Session_Mode,
 	session_cfg:          session_core.Session_Config,
 
+	// Host-backed session client & pane
+	host_client:          ^App_Host_Client,
+	host_ws_id:           u64,
+	host_pane_id:         u64,
+
 	// Scrollback cell-sync generation tracking.
 	// Tracks whether front_terminal.scrollback.cells was copied from the back
 	// buffer at least once for the current total_pushed / clear_generation pair.
@@ -174,10 +179,6 @@ Backend :: struct {
 	front_scrollback_synced_pushed:    u64,
 	front_scrollback_synced_clear_gen: u64,
 }
-
-// backend_global holds the active Backend pointer for C-style callbacks
-// required by the parser.
-backend_global: ^Backend
 
 _backend_observer_on_damage :: proc(user_data: rawptr, min_row, min_col, max_row, max_col: int) {
 	b := (^Backend)(user_data)
@@ -210,17 +211,17 @@ _backend_observer_on_exit :: proc(user_data: rawptr, exit_code: int) {
 	b.pty.exit_code = exit_code
 }
 
-_backend_response_cb :: proc(data: []u8) {
-	b := backend_global
-	if b != nil && b.pty.master >= 0 && b.pty.state == .Running {
-		pty.pty_write(&b.pty, data)
+_backend_response_cb :: proc(user_data: rawptr, data: []u8) {
+	b := (^Backend)(user_data)
+	if b != nil {
+		backend_write_pty(b, data)
 	}
 }
 
 _backend_graphics_write :: proc(user_data: rawptr, data: []u8) {
 	b := (^Backend)(user_data)
-	if b == nil || b.pty.master < 0 || b.pty.state != .Running do return
-	_ = pty.pty_write(&b.pty, data)
+	if b == nil do return
+	_ = backend_write_pty(b, data)
 }
 
 _backend_graphics_cb :: proc(user_data: rawptr, t: ^termgrid.Terminal, control, payload: []u8) {
@@ -233,8 +234,8 @@ _backend_graphics_cb :: proc(user_data: rawptr, t: ^termgrid.Terminal, control, 
 	_ = termgrid.terminal_graphics_feed(t, control, payload, sink)
 }
 
-_backend_clipboard_cb :: proc(data: []u8) {
-	b := backend_global
+_backend_clipboard_cb :: proc(user_data: rawptr, data: []u8) {
+	b := (^Backend)(user_data)
 	if b != nil {
 		backend_set_pending_clipboard(b, data)
 	}
@@ -376,19 +377,24 @@ backend_init :: proc(
 		b.wake_pipe_w = pipe_fds[1]
 		_ = posix.fcntl(b.wake_pipe_r, .SETFL, int(posix.O_NONBLOCK))
 		_ = posix.fcntl(b.wake_pipe_w, .SETFL, int(posix.O_NONBLOCK))
+		_ = posix.fcntl(b.wake_pipe_r, .SETFD, int(posix.FD_CLOEXEC))
+		_ = posix.fcntl(b.wake_pipe_w, .SETFD, int(posix.FD_CLOEXEC))
 	} else {
 		b.wake_pipe_r = -1
 		b.wake_pipe_w = -1
 	}
 
 	parser.parser_init(&b.parser)
-	b.parser.response_cb = _backend_response_cb
+	b.parser.response_cb = nil
+	b.parser.response_context_cb = _backend_response_cb
+	b.parser.response_user_data = b
 	b.parser.graphics_cb = _backend_graphics_cb
 	b.parser.graphics_user_data = b
-	b.parser.clipboard_cb = _backend_clipboard_cb
+	b.parser.clipboard_cb = nil
+	b.parser.clipboard_context_cb = _backend_clipboard_cb
+	b.parser.clipboard_user_data = b
 	b.parser.clipboard_read_cb = _backend_clipboard_read_cb
 	b.parser.clipboard_read_user_data = b
-	backend_global = b
 
 	spawn_prog := b.prog
 	spawn_argv := b.argv
@@ -501,13 +507,16 @@ backend_init_from_core_session :: proc(
 		b.wake_pipe_w = -1
 	}
 
-	b.parser.response_cb = _backend_response_cb
+	b.parser.response_cb = nil
+	b.parser.response_context_cb = _backend_response_cb
+	b.parser.response_user_data = b
 	b.parser.graphics_cb = _backend_graphics_cb
 	b.parser.graphics_user_data = b
-	b.parser.clipboard_cb = _backend_clipboard_cb
+	b.parser.clipboard_cb = nil
+	b.parser.clipboard_context_cb = _backend_clipboard_cb
+	b.parser.clipboard_user_data = b
 	b.parser.clipboard_read_cb = _backend_clipboard_read_cb
 	b.parser.clipboard_read_user_data = b
-	backend_global = b
 
 	b.cwd = strings.clone(cs.cwd)
 
@@ -546,6 +555,7 @@ backend_restore_core_session :: proc(b: ^Backend, cs: ^session_core.Core_Session
 	cs.pty_handle = b.pty
 	cs.term = b.terminal
 	cs.vt_parser = b.parser
+	session_core.session_bind_parser_callbacks(cs)
 	cs.vt_parser.graphics_cb = nil
 	cs.vt_parser.graphics_user_data = nil
 	cs.mode = b.session_mode
@@ -598,9 +608,6 @@ backend_destroy :: proc(b: ^Backend) {
 	b.cwd = ""
 	b.observer = {}
 	b.session_cfg = {}
-	if backend_global == b {
-		backend_global = nil
-	}
 }
 
 // backend_set_clipboard_callbacks registers the handlers for OSC 52 clipboard ops.
@@ -640,7 +647,9 @@ backend_drain_pty :: proc(b: ^Backend) -> int {
 	n, _ := pty.pty_drain(&b.pty, buf, len(buf))
 	if n > 0 {
 		sync.atomic_add(&b.pty_bytes_total, u64(n))
-		backend_global = b
+		// Embedded backends may move with tab storage; refresh their origin.
+		b.parser.response_user_data = b
+		b.parser.clipboard_user_data = b
 		parser.parse_chunk(&b.parser, &b.terminal, buf[:n])
 		if b.observer.on_damage != nil {
 			min_r := -1
@@ -824,9 +833,9 @@ backend_set_focused :: proc(b: ^Backend, new_focused: bool) {
 		b.focused = new_focused
 		if b.terminal.focus_reporting && b.pty.state == .Running {
 			if new_focused {
-				pty.pty_write(&b.pty, []u8{0x1B, '[', 'I'})
+				backend_write_pty(b, []u8{0x1B, '[', 'I'})
 			} else {
-				pty.pty_write(&b.pty, []u8{0x1B, '[', 'O'})
+				backend_write_pty(b, []u8{0x1B, '[', 'O'})
 			}
 		}
 	}
@@ -838,6 +847,9 @@ backend_on_resize :: proc(b: ^Backend, rows, cols: int, pixel_w: int = 0, pixel_
 		return false
 	}
 	pty.pty_set_winsize(&b.pty, rows, cols, pixel_w, pixel_h)
+	if b.host_client != nil && b.host_pane_id != 0 {
+		_ = host_client_send_resize(b.host_client, b.host_ws_id, b.host_pane_id, rows, cols)
+	}
 	if rows == b.terminal.grid.row_count && cols == b.terminal.grid.col_count {
 		return true
 	}
@@ -895,6 +907,59 @@ backend_show_banner_fail :: proc(b: ^Backend) {
 	_backend_write_banner_text(b, APP_BANNER_FAIL)
 }
 
+backend_init_host_backed :: proc(
+	b: ^Backend,
+	init_rows, init_cols: int,
+	hc: ^App_Host_Client,
+	ws_id, pane_id: u64,
+	cfg: ^config.Config,
+	theme: termgrid.Theme,
+) -> bool {
+	if b == nil do return false
+
+	b.pty.master = -1
+	b.pty.pid = -1
+	b.pty.state = .Running
+	b.focused = true
+	b.should_quit = false
+	b.view = termgrid.Terminal_View{}
+	inter.interaction_init(&b.interaction)
+	inter.interaction_init(&b.front_interaction)
+	b.view_generation = 0
+	b.pty_bytes_total = 0
+	b.prog = "host"
+	b.host_client = hc
+	b.host_ws_id = ws_id
+	b.host_pane_id = pane_id
+
+	termgrid.terminal_init(&b.terminal, init_rows, init_cols, theme = theme)
+	termgrid.terminal_init(&b.front_terminal, init_rows, init_cols, theme = theme)
+	b.front_view = termgrid.Terminal_View{}
+	b.front_cursor = render.Cursor_Overlay{}
+	b.front_focused = true
+	b.focus_requested = true
+	b.drain_buf = make([]u8, APP_DRAIN_CAP, runtime.heap_allocator())
+	b.thread = nil
+	b.thread_running = false
+	b.wake_pipe_r = -1
+	b.wake_pipe_w = -1
+
+	parser.parser_init(&b.parser)
+	b.cwd = strings.clone(cfg.working_directory if (cfg != nil && len(cfg.working_directory) > 0) else "~")
+
+	render.style_lut_rebuild(&b.lut, &b.terminal.grid.style_table)
+	return true
+}
+
+// backend_write_pty writes data to the host client if host-backed, or to the local PTY master.
+backend_write_pty :: proc(b: ^Backend, data: []u8) -> bool {
+	if b == nil || len(data) == 0 do return false
+	if b.host_client != nil && b.host_pane_id != 0 {
+		return host_client_send_input(b.host_client, b.host_pane_id, data)
+	}
+	return pty.pty_write(&b.pty, data)
+}
+
 // backend_relaunch closes the dead PTY and spawns a fresh child.
 backend_relaunch :: proc(b: ^Backend) -> bool {
 	if b == nil {
@@ -910,10 +975,14 @@ backend_relaunch :: proc(b: ^Backend) -> bool {
 	termgrid.terminal_erase_display(&b.terminal, .Entire)
 	termgrid.terminal_move_cursor(&b.terminal, 0, 0)
 	parser.parser_init(&b.parser)
-	b.parser.response_cb = _backend_response_cb
+	b.parser.response_cb = nil
+	b.parser.response_context_cb = _backend_response_cb
+	b.parser.response_user_data = b
 	b.parser.graphics_cb = _backend_graphics_cb
 	b.parser.graphics_user_data = b
-	b.parser.clipboard_cb = _backend_clipboard_cb
+	b.parser.clipboard_cb = nil
+	b.parser.clipboard_context_cb = _backend_clipboard_cb
+	b.parser.clipboard_user_data = b
 	b.parser.clipboard_read_cb = _backend_clipboard_read_cb
 	b.parser.clipboard_read_user_data = b
 	b.banner_shown = false
@@ -951,12 +1020,12 @@ backend_paste :: proc(b: ^Backend, text: string) -> bool {
 		if strings.contains(text, "\x1b[201~") {
 			sanitized, _ = strings.replace_all(text, "\x1b[201~", "", context.allocator)
 		}
-		pty.pty_write(&b.pty, []u8{0x1B, '[', '2', '0', '0', '~'})
-		ok := pty.pty_write(&b.pty, transmute([]u8)sanitized)
-		pty.pty_write(&b.pty, []u8{0x1B, '[', '2', '0', '1', '~'})
+		backend_write_pty(b, []u8{0x1B, '[', '2', '0', '0', '~'})
+		ok := backend_write_pty(b, transmute([]u8)sanitized)
+		backend_write_pty(b, []u8{0x1B, '[', '2', '0', '1', '~'})
 		return ok
 	}
-	return pty.pty_write(&b.pty, transmute([]u8)text)
+	return backend_write_pty(b, transmute([]u8)text)
 }
 
 // backend_accumulate_wheel accumulates fractional wheel delta and extracts whole line steps.
@@ -1419,7 +1488,7 @@ backend_handle_ui_event :: proc(b: ^Backend, ev: UI_Event) {
 						text = inter.interaction_extract_selection_text(&b.terminal, &state_before)
 					}
 					if len(text) > 0 {
-						_backend_clipboard_cb(transmute([]u8)text)
+						_backend_clipboard_cb(b, transmute([]u8)text)
 						delete(text)
 					}
 					termgrid.terminal_view_set_offset(&b.view, &b.terminal, 0)
@@ -1468,8 +1537,16 @@ backend_handle_ui_event :: proc(b: ^Backend, ev: UI_Event) {
 					b.view_generation += 1
 				}
 				kitty_flags := termgrid.terminal_kitty_active(&b.terminal).flags
-				key_evs := [1]input.Input_Event{ev.input}
-				_ = input.input_pump_events(&b.pty, key_evs[:], kitty_flags, b.terminal.app_cursor_keys)
+				if b.host_client != nil && b.host_pane_id != 0 {
+					buf: [input.INPUT_ENCODE_MAX]u8
+					m := input.input_encode(ev.input, buf[:], kitty_flags, b.terminal.app_cursor_keys)
+					if m > 0 {
+						_ = backend_write_pty(b, buf[:m])
+					}
+				} else {
+					key_evs := [1]input.Input_Event{ev.input}
+					_ = input.input_pump_events(&b.pty, key_evs[:], kitty_flags, b.terminal.app_cursor_keys)
+				}
 			}
 		case .Pointer:
 			p := ev.input.pointer
@@ -1492,7 +1569,7 @@ backend_handle_ui_event :: proc(b: ^Backend, ev: UI_Event) {
 				buf: [32]u8
 				n := input.mouse_encode_sgr(p, col, row, p.shift, buf[:])
 				if n > 0 {
-					_ = pty.pty_write(&b.pty, buf[:n])
+					_ = backend_write_pty(b, buf[:n])
 				}
 				b.last_mouse_col = col
 				b.last_mouse_row = row
@@ -1534,7 +1611,7 @@ backend_handle_ui_event :: proc(b: ^Backend, ev: UI_Event) {
 				case .Copy:
 					text := inter.interaction_extract_selection_text(&b.terminal, &b.interaction)
 					if len(text) > 0 {
-						_backend_clipboard_cb(transmute([]u8)text)
+						_backend_clipboard_cb(b, transmute([]u8)text)
 						delete(text)
 					}
 					termgrid.terminal_view_set_offset(&b.view, &b.terminal, 0)
@@ -1579,7 +1656,7 @@ backend_handle_ui_event :: proc(b: ^Backend, ev: UI_Event) {
 						seq = {0x1B, '[', code}
 					}
 					for _ in 0 ..< steps {
-						_ = pty.pty_write(&b.pty, seq[:])
+						_ = backend_write_pty(b, seq[:])
 					}
 					return
 				}

@@ -66,20 +66,20 @@ _dummy_window :: proc(t: ^testing.T, w: ^win.Window, title: string, width, heigh
 // _bare_app builds an App with terminal + parser live, pty parked
 // (master/pid -1, drain-safe), window + renderer zero. No SDL calls.
 _bare_app :: proc(a: ^app.App) {
-	a.pty.master = -1
-	a.pty.pid = -1
-	a.focused = true
+	a.backend.pty.master = -1
+	a.backend.pty.pid = -1
+	a.backend.focused = true
 	a.config = config.config_default()
-	termgrid.terminal_init(&a.terminal, APP_TEST_ROWS, APP_TEST_COLS)
-	parser.parser_init(&a.parser)
-	a.drain_buf = make([]u8, app.APP_DRAIN_CAP, context.allocator)
+	termgrid.terminal_init(&a.backend.terminal, APP_TEST_ROWS, APP_TEST_COLS)
+	parser.parser_init(&a.backend.parser)
+	a.backend.drain_buf = make([]u8, app.APP_DRAIN_CAP, context.allocator)
 }
 
 _bare_destroy :: proc(a: ^app.App) {
 	config.config_destroy(&a.config)
-	termgrid.terminal_destroy(&a.terminal)
-	parser.parser_destroy(&a.parser)
-	delete(a.drain_buf, context.allocator)
+	termgrid.terminal_destroy(&a.backend.terminal)
+	parser.parser_destroy(&a.backend.parser)
+	delete(a.backend.drain_buf, context.allocator)
 }
 
 _app_test_clipboard_read_cb :: proc(user_data: rawptr, out: []u8) -> int {
@@ -192,7 +192,7 @@ test_app_init_rejects_nil_and_empty :: proc(t: ^testing.T) {
 	a := new(app.App)
 	defer free(a)
 	testing.expect(t, !app.app_init(a, 24, 80, "", nil), "empty prog must fail without side effects")
-	testing.expect_value(t, a.pty.master, -1)
+	testing.expect_value(t, a.backend.pty.master, -1)
 }
 
 @(test)
@@ -212,7 +212,7 @@ test_app_frame_headless_skip :: proc(t: ^testing.T) {
 	for i in 0..<3 {
 		testing.expect(t, app.app_frame(a), "headless frame must stay alive")
 	}
-	testing.expect(t, a.cursor.blink_on, "first tick must arm blink_on (visible+focused)")
+	testing.expect(t, a.backend.cursor.blink_on, "first tick must arm blink_on (visible+focused)")
 	testing.expect(t, !a.should_quit, "no quit without SDL events")
 }
 
@@ -225,11 +225,11 @@ test_app_frame_damage_consumed_and_cursor_staged :: proc(t: ^testing.T) {
 	_cpu_renderer(a)
 	defer _cpu_renderer_destroy(a)
 
-	termgrid.terminal_put_string(&a.terminal, "hi")
-	testing.expect(t, _damage_cells(&a.terminal) > 0, "setup must produce damage")
+	termgrid.terminal_put_string(&a.backend.terminal, "hi")
+	testing.expect(t, _damage_cells(&a.backend.terminal) > 0, "setup must produce damage")
 
 	testing.expect(t, app.app_frame(a), "damage frame must stay alive")
-	testing.expect(t, _damage_cells(&a.terminal) > 0, "nil-backend publication failure must keep damage queued")
+	testing.expect(t, _damage_cells(&a.backend.terminal) > 0, "nil-backend publication failure must keep damage queued")
 
 	// The damage present found no backend (headless), but the cursor quad
 	// for the same frame must be staged at the reserved slot: cursor at
@@ -239,7 +239,7 @@ test_app_frame_damage_consumed_and_cursor_staged :: proc(t: ^testing.T) {
 	testing.expect(t, got != instance.Instance_Data{}, "cursor quad must be staged")
 	testing.expect_value(t, got.x, f32(2 * app.APP_CELL_W))
 	testing.expect_value(t, got.y, 0.0)
-	testing.expect(t, _row_matches(&a.terminal, 0, "hi"), "parsed output must reach the grid")
+	testing.expect(t, _row_matches(&a.backend.terminal, 0, "hi"), "parsed output must reach the grid")
 }
 
 @(test)
@@ -254,16 +254,16 @@ test_app_cursor_blink_change_renders_without_overlay_present :: proc(t: ^testing
 	// The first visible tick arms the cursor and marks a renderable cell even
 	// though the terminal scene starts clean.
 	testing.expect(t, app.app_frame(a), "headless frame must stay alive")
-	testing.expect(t, a.cursor.blink_on && a.cursor.visible, "cursor must start visible")
-	testing.expect(t, _damage_cells(&a.terminal) > 0, "nil-backend publication failure must keep cursor damage queued")
+	testing.expect(t, a.backend.cursor.blink_on && a.backend.cursor.visible, "cursor must start visible")
+	testing.expect(t, _damage_cells(&a.backend.terminal) > 0, "nil-backend publication failure must keep cursor damage queued")
 
 	// Force the next tick into the opposite blink phase. The app must consume
 	// the cursor-only damage through the normal renderer path; no overlay-only
 	// present is available or required.
-	a.cursor.next_toggle = 1
+	a.backend.cursor.next_toggle = 1
 	testing.expect(t, app.app_frame(a), "blink-change frame must stay alive")
-	testing.expect(t, !a.cursor.blink_on, "blink change must hide the cursor")
-	testing.expect(t, _damage_cells(&a.terminal) > 0, "nil-backend publication failure must keep blink damage queued")
+	testing.expect(t, !a.backend.cursor.blink_on, "blink change must hide the cursor")
+	testing.expect(t, _damage_cells(&a.backend.terminal) > 0, "nil-backend publication failure must keep blink damage queued")
 }
 
 @(test)
@@ -303,18 +303,18 @@ test_app_frame_drain_parse_exit :: proc(t: ^testing.T) {
 
 	// Scripted child: prints once, exits. Drain -> parse -> grid runs
 	// through app_frame with a nil-backend renderer (no present).
-	if !pty.pty_spawn(&a.pty, APP_TEST_ROWS, APP_TEST_COLS, "/bin/echo", {"hello"}) {
+	if !pty.pty_spawn(&a.backend.pty, APP_TEST_ROWS, APP_TEST_COLS, "/bin/echo", {"hello"}) {
 		testing.expect(t, false, "pty_spawn(/bin/echo) must succeed")
 		return
 	}
-	defer pty.pty_close(&a.pty)
+	defer pty.pty_close(&a.backend.pty)
 
 	found := false
 	for i in 0..<200 {
 		if !app.app_frame(a) {
 			break
 		}
-		if _row_matches(&a.terminal, 0, "hello") {
+		if _row_matches(&a.backend.terminal, 0, "hello") {
 			found = true
 			break
 		}
@@ -325,7 +325,7 @@ test_app_frame_drain_parse_exit :: proc(t: ^testing.T) {
 	exited := false
 	for i in 0..<200 {
 		_ = app.app_frame(a)
-		if a.pty.state == .Exited {
+		if a.backend.pty.state == .Exited {
 			exited = true
 			break
 		}
@@ -351,7 +351,7 @@ test_grid_pixel_extent_uses_cell_geometry :: proc(t: ^testing.T) {
 test_app_zoom_request_bounds_and_coalescing :: proc(t: ^testing.T) {
 	a := new(app.App)
 	defer free(a)
-	a.pty.state = .Running
+	a.backend.pty.state = .Running
 	a.logical_font_size = app.APP_FONT_SIZE
 
 	// Multiple local actions update one target; the renderer rebuild is
@@ -374,7 +374,7 @@ test_app_zoom_request_bounds_and_coalescing :: proc(t: ^testing.T) {
 	testing.expect(t, !app._app_request_zoom(a, 1), "maximum zoom must clamp")
 	testing.expect_value(t, a.zoom_target_logical_size, app.APP_FONT_ZOOM_MAX)
 
-	a.pty.state = .Exited
+	a.backend.pty.state = .Exited
 	a.zoom_target_logical_size = 0
 	testing.expect(t, !app._app_request_zoom(a, 1), "exited child must ignore zoom")
 	testing.expect_value(t, a.zoom_target_logical_size, 0.0)
@@ -416,8 +416,8 @@ test_app_init_failure_unwind :: proc(t: ^testing.T) {
 	a := new(app.App)
 	defer free(a)
 	testing.expect(t, !app.app_init(a, APP_TEST_ROWS, APP_TEST_COLS, "", nil), "empty prog must fail init")
-	testing.expect_value(t, a.pty.master, -1)
-	testing.expect_value(t, a.pty.pid, -1)
+	testing.expect_value(t, a.backend.pty.master, -1)
+	testing.expect_value(t, a.backend.pty.pid, -1)
 	// HEADLESS LIMIT (honest): stages past window creation (surface,
 	// device, renderer, pty_spawn) cannot run under SDL dummy video:
 	// wgpu's GetSurface aborts (Rust panic, non-unwinding) on dummy
@@ -444,13 +444,13 @@ test_app_wheel_alt_screen_arrow_keys :: proc(t: ^testing.T) {
 		posix.close(pipefd[1])
 	}
 
-	a.pty.master = int(pipefd[1])
-	a.pty.state = .Running
-	a.terminal.is_alt_screen = true
+	a.backend.pty.master = int(pipefd[1])
+	a.backend.pty.state = .Running
+	a.backend.terminal.is_alt_screen = true
 
 	// 1. Normal cursor keys (app_cursor_keys = false), Wheel Up (+1)
 	// Must emit 3x ESC [ A -> 9 bytes: "\x1b[A\x1b[A\x1b[A"
-	a.terminal.app_cursor_keys = false
+	a.backend.terminal.app_cursor_keys = false
 	ev_up := input.Input_Pointer_Event{
 		kind = .Wheel,
 		wheel_integer_y = 1,
@@ -476,7 +476,7 @@ test_app_wheel_alt_screen_arrow_keys :: proc(t: ^testing.T) {
 
 	// 3. App cursor keys (app_cursor_keys = true), Wheel Up (+1)
 	// Must emit 3x ESC O A -> 9 bytes: "\x1bOA\x1bOA\x1bOA"
-	a.terminal.app_cursor_keys = true
+	a.backend.terminal.app_cursor_keys = true
 	testing.expect(t, app._app_route_pointer(a, ev_up), "route pointer wheel up in app mode must return true")
 
 	n = posix.read(pipefd[0], raw_data(buf[:]), len(buf))
@@ -508,42 +508,42 @@ test_app_synchronized_output_deferral_and_timeout :: proc(t: ^testing.T) {
 	_cpu_renderer(a)
 	defer _cpu_renderer_destroy(a)
 
-	termgrid.terminal_put_string(&a.terminal, "sync")
-	damage_before := _damage_cells(&a.terminal)
+	termgrid.terminal_put_string(&a.backend.terminal, "sync")
+	damage_before := _damage_cells(&a.backend.terminal)
 	testing.expect(t, damage_before > 0, "putting string must create damage")
 
 	// 1. Enable synchronized output (Mode 2026)
-	termgrid.terminal_set_sync_output(&a.terminal, true)
-	testing.expect(t, a.terminal.synchronized_output, "synchronized output should be enabled")
-	testing.expect_value(t, a.sync_output_start_ns, u64(0))
+	termgrid.terminal_set_sync_output(&a.backend.terminal, true)
+	testing.expect(t, a.backend.terminal.synchronized_output, "synchronized output should be enabled")
+	testing.expect_value(t, a.backend.sync_output_start_ns, u64(0))
 
 	// 2. Frame 1: Synchronized output active and within timeout -> renderer_frame must be skipped.
 	// Frame count stays 0 and sync_output_start_ns is recorded.
 	ok := app.app_frame(a)
 	testing.expect(t, ok, "app_frame must succeed")
-	testing.expect(t, a.sync_output_start_ns > 0, "sync_output_start_ns must record timestamp on first sync frame")
+	testing.expect(t, a.backend.sync_output_start_ns > 0, "sync_output_start_ns must record timestamp on first sync frame")
 	testing.expect_value(t, a.renderer.frame_count, u64(0))
-	testing.expect(t, _damage_cells(&a.terminal) > 0, "damage must remain queued while presentation is deferred")
+	testing.expect(t, _damage_cells(&a.backend.terminal) > 0, "damage must remain queued while presentation is deferred")
 
 	// 3. Frame 2: Still within 100ms -> presentation remains deferred.
 	ok = app.app_frame(a)
 	testing.expect(t, ok, "app_frame must succeed on deferred frame")
 	testing.expect_value(t, a.renderer.frame_count, u64(0))
-	testing.expect(t, _damage_cells(&a.terminal) > 0, "damage must remain queued while presentation is deferred")
+	testing.expect(t, _damage_cells(&a.backend.terminal) > 0, "damage must remain queued while presentation is deferred")
 
 	// 4. Timeout reached: set sync_output_start_ns to 1 (in the past relative to now >= 100ms).
 	// Safety timeout triggers -> renderer_frame proceeds, incrementing frame_count.
-	a.sync_output_start_ns = 1
+	a.backend.sync_output_start_ns = 1
 	ok = app.app_frame(a)
 	testing.expect(t, ok, "app_frame must succeed on safety timeout")
 	testing.expect_value(t, a.renderer.frame_count, u64(1))
 
 	// 5. Disable synchronized output: resets sync_output_start_ns to 0 and renders normally.
-	termgrid.terminal_set_sync_output(&a.terminal, false)
-	termgrid.terminal_put_string(&a.terminal, "more")
+	termgrid.terminal_set_sync_output(&a.backend.terminal, false)
+	termgrid.terminal_put_string(&a.backend.terminal, "more")
 	ok = app.app_frame(a)
 	testing.expect(t, ok, "app_frame must succeed when sync output is disabled")
-	testing.expect_value(t, a.sync_output_start_ns, u64(0))
+	testing.expect_value(t, a.backend.sync_output_start_ns, u64(0))
 	testing.expect_value(t, a.renderer.frame_count, u64(2))
 }
 
@@ -554,7 +554,7 @@ test_app_reload_config :: proc(t: ^testing.T) {
 	_bare_app(a)
 	defer _bare_destroy(a)
 
-	render.style_lut_rebuild(&a.lut, &a.terminal.grid.style_table)
+	render.style_lut_rebuild(&a.backend.lut, &a.backend.terminal.grid.style_table)
 
 	// Verify initial config
 	testing.expect_value(t, a.config.theme_name, "Catppuccin Mocha")
@@ -583,7 +583,7 @@ blur = 0.625
 	testing.expect_value(t, a.config.window_blur, APP_TEST_BLUR)
 	testing.expect_value(t, a.renderer.background_opacity, APP_TEST_OPACITY)
 	testing.expect(t, a.renderer.full_redraw_pending, "opacity reload must request a full redraw")
-	testing.expect_value(t, a.terminal.grid.style_table.theme.background, u32(0xFF000000))
+	testing.expect_value(t, a.backend.terminal.grid.style_table.theme.background, u32(0xFF000000))
 
 	// Now test reloading with syntax error in config
 	a.renderer.full_redraw_pending = false
@@ -600,7 +600,7 @@ background = = 1234
 	testing.expect_value(t, a.config.window_blur, APP_TEST_BLUR)
 	testing.expect_value(t, a.renderer.background_opacity, APP_TEST_OPACITY)
 	testing.expect(t, !a.renderer.full_redraw_pending, "invalid reload must preserve redraw state")
-	testing.expect_value(t, a.terminal.grid.style_table.theme.background, u32(0xFF000000))
+	testing.expect_value(t, a.backend.terminal.grid.style_table.theme.background, u32(0xFF000000))
 }
 
 @(test)
@@ -1156,9 +1156,9 @@ test_app_paste_shadow_search_dispatch :: proc(t: ^testing.T) {
 		return
 	}
 	defer posix.close(pipefd[0])
-	a.pty.master = int(pipefd[1])
-	a.pty.state = .Running
-	defer if a.pty.master >= 0 {posix.close(posix.FD(a.pty.master))}
+	a.backend.pty.master = int(pipefd[1])
+	a.backend.pty.state = .Running
+	defer if a.backend.pty.master >= 0 {posix.close(posix.FD(a.backend.pty.master))}
 
 	local_paste := input.Input_Event{event_type = .Local, action = .Paste}
 	marked := [?]input.Input_Event{
@@ -1175,7 +1175,7 @@ test_app_paste_shadow_search_dispatch :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(a.search_bar.query[:a.search_bar.query_len]), clipboard)
 
 	posix.close(pipefd[1])
-	a.pty.master = -1
+	a.backend.pty.master = -1
 	buf: [32]u8
 	n := posix.read(pipefd[0], raw_data(buf[:]), len(buf))
 	testing.expect_value(t, n, len(clipboard))
@@ -1208,8 +1208,8 @@ test_app_paste_shadow_raw_events_write_once :: proc(t: ^testing.T) {
 			free(a)
 			return
 		}
-		a.pty.master = int(pipefd[1])
-		a.pty.state = .Running
+		a.backend.pty.master = int(pipefd[1])
+		a.backend.pty.state = .Running
 		app.backend_set_clipboard_callbacks(&a.backend, &clipboard, nil, _app_test_clipboard_read_cb)
 
 		key_down: sdl3.Event
@@ -1248,7 +1248,7 @@ test_app_paste_shadow_raw_events_write_once :: proc(t: ^testing.T) {
 			testing.expect_value(t, len(pending), 0)
 		}
 		posix.close(pipefd[1])
-		a.pty.master = -1
+		a.backend.pty.master = -1
 		buf: [32]u8
 		n := posix.read(pipefd[0], raw_data(buf[:]), len(buf))
 		expected_len := len(clipboard)
@@ -1335,9 +1335,9 @@ test_app_paste_stays_in_tab_menus :: proc(t: ^testing.T) {
 		return
 	}
 	defer posix.close(pipefd[0])
-	a.pty.master = int(pipefd[1])
-	a.pty.state = .Running
-	defer if a.pty.master >= 0 {posix.close(posix.FD(a.pty.master))}
+	a.backend.pty.master = int(pipefd[1])
+	a.backend.pty.state = .Running
+	defer if a.backend.pty.master >= 0 {posix.close(posix.FD(a.backend.pty.master))}
 
 	local_paste := input.Input_Event{event_type = .Local, action = .Paste}
 	a.tab_menu.visible = true
@@ -1349,7 +1349,7 @@ test_app_paste_stays_in_tab_menus :: proc(t: ^testing.T) {
 	testing.expect(t, ok && a.tab_overflow.visible, "overflow menu must retain paste without PTY routing")
 
 	posix.close(pipefd[1])
-	a.pty.master = -1
+	a.backend.pty.master = -1
 	buf: [32]u8
 	n := posix.read(pipefd[0], raw_data(buf[:]), len(buf))
 	testing.expect_value(t, n, 0)

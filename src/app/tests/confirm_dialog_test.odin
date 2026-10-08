@@ -67,8 +67,8 @@ test_confirm_dialog_modal_swallows_input :: proc(t: ^testing.T) {
 test_request_close_tab_exited_closes_immediately :: proc(t: ^testing.T) {
 	a := new(app.App)
 	defer free(a)
-	a.pty.master = -1
-	a.pty.pid = -1
+	a.backend.pty.master = -1
+	a.backend.pty.pid = -1
 	app.session_manager_init(&a.session_mgr, 4)
 	defer app.session_manager_destroy(&a.session_mgr)
 
@@ -86,15 +86,15 @@ test_request_close_tab_exited_closes_immediately :: proc(t: ^testing.T) {
 	app._app_request_close_tab(a, idx)
 	testing.expect(t, !a.confirm_dialog.visible, "exited tab must close without a dialog")
 	testing.expect_value(t, len(a.session_mgr.tabs), 0)
-	testing.expect(t, a.should_quit, "closing the last tab must request quit")
+	testing.expect(t, a.session_switcher.visible, "closing the last tab must open session switcher per D17")
 }
 
 @(test)
 test_request_close_tab_running_shows_dialog :: proc(t: ^testing.T) {
 	a := new(app.App)
 	defer free(a)
-	a.pty.master = -1
-	a.pty.pid = -1
+	a.backend.pty.master = -1
+	a.backend.pty.pid = -1
 	app.session_manager_init(&a.session_mgr, 4)
 	defer app.session_manager_destroy(&a.session_mgr)
 
