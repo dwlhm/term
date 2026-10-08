@@ -1,5 +1,7 @@
 package parser
 
+import "core:sync"
+
 // Parser_State is the VT parser state.
 Parser_State :: enum u8 {
 	Ground,
@@ -62,7 +64,15 @@ Byte_Class :: enum u8 {
 // 256 entries, one per byte value.
 BYTE_CLASS: [256]Byte_Class
 
+@(private="file")
+_tables_once: sync.Once
+
 init :: proc() {
+	sync.once_do(&_tables_once, _init_tables)
+}
+
+@(private="file")
+_init_tables :: proc() {
 	BYTE_CLASS = init_byte_class_table()
 	TRANSITION_TABLE = init_transition_table()
 }

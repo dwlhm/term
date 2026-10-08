@@ -7,6 +7,9 @@ import termgrid "../terminal"
 // back through the PTY (e.g., Device Attributes, cursor position report).
 Parser_Response_Cb :: proc(data: []u8)
 
+// Context sinks bind replies and clipboard writes to their originating owner.
+Parser_Context_Callback :: proc(user_data: rawptr, data: []u8)
+
 // Parser_Clipboard_Cb is called when an OSC 52 clipboard write arrives.
 // The callee owns delivery to the system clipboard.
 Parser_Clipboard_Cb :: proc(data: []u8)
@@ -71,6 +74,11 @@ Parser :: struct {
 	// Graphics callback for APC (Kitty Graphics Protocol) sequences
 	graphics_cb:       Parser_Graphics_Cb,
 	graphics_user_data: rawptr,
+
+	response_context_cb:  Parser_Context_Callback,
+	clipboard_context_cb: Parser_Context_Callback,
+	response_user_data:   rawptr,
+	clipboard_user_data:  rawptr,
 }
 
 // parser_init initializes a parser.
@@ -110,6 +118,37 @@ parser_init :: proc(p: ^Parser) {
 	p.clipboard_read_user_data = nil
 	p.graphics_cb = nil
 	p.graphics_user_data = nil
+	p.response_context_cb = nil
+	p.clipboard_context_cb = nil
+	p.response_user_data = nil
+	p.clipboard_user_data = nil
+}
+
+// Contextual callbacks take precedence; legacy sinks remain usable by tools.
+parser_has_response_sink :: proc(p: ^Parser) -> bool {
+	return p != nil && (p.response_context_cb != nil || p.response_cb != nil)
+}
+
+parser_has_clipboard_sink :: proc(p: ^Parser) -> bool {
+	return p != nil && (p.clipboard_context_cb != nil || p.clipboard_cb != nil)
+}
+
+parser_emit_response :: proc(p: ^Parser, data: []u8) {
+	if p == nil do return
+	if p.response_context_cb != nil {
+		p.response_context_cb(p.response_user_data, data)
+	} else if p.response_cb != nil {
+		p.response_cb(data)
+	}
+}
+
+parser_emit_clipboard :: proc(p: ^Parser, data: []u8) {
+	if p == nil do return
+	if p.clipboard_context_cb != nil {
+		p.clipboard_context_cb(p.clipboard_user_data, data)
+	} else if p.clipboard_cb != nil {
+		p.clipboard_cb(data)
+	}
 }
 
 // parser_destroy frees parser state (currently no-op, but future-proof).
@@ -648,7 +687,7 @@ osc_dispatch :: proc(p: ^Parser, t: ^termgrid.Terminal, payload: []u8) {
 	case 4:
 		// Palette color query ("4;<idx>;?"): respond rgb:rrrr/gggg/bbbb
 		// with 16-bit channels scaled from the theme palette.
-		if p.response_cb == nil { return }
+		if !parser_has_response_sink(p) { return }
 		idx_val := 0
 		i := 0
 		for i < len(body) && body[i] >= '0' && body[i] <= '9' {
@@ -684,7 +723,7 @@ osc_dispatch :: proc(p: ^Parser, t: ^termgrid.Terminal, payload: []u8) {
 			_osc_write_hex4(resp[:], n, b16); n += 4
 			resp[n] = 0x1B; n += 1
 			resp[n] = '\\'; n += 1
-			p.response_cb(resp[:n])
+			parser_emit_response(p, resp[:n])
 		}
 	case 7:
 		termgrid.terminal_osc_set_cwd(t, body)
@@ -712,7 +751,7 @@ osc_dispatch :: proc(p: ^Parser, t: ^termgrid.Terminal, payload: []u8) {
 	case 10:
 		// Foreground color query ("10;?"): respond rgb:RRRR/GGGG/BBBB
 		// with 16-bit channels scaled from the theme foreground.
-		if len(body) == 1 && body[0] == '?' && p.response_cb != nil {
+		if len(body) == 1 && body[0] == '?' && parser_has_response_sink(p) {
 			fg := t.grid.style_table.theme.foreground
 			r16 := u32(((fg >> 16) & 0xFF) * 257)
 			g16 := u32(((fg >> 8) & 0xFF) * 257)
@@ -735,12 +774,12 @@ osc_dispatch :: proc(p: ^Parser, t: ^termgrid.Terminal, payload: []u8) {
 			_osc_write_hex4(resp[:], n, b16); n += 4
 			resp[n] = 0x1B; n += 1
 			resp[n] = '\\'; n += 1
-			p.response_cb(resp[:n])
+			parser_emit_response(p, resp[:n])
 		}
 	case 11:
 		// Background color query ("11;?"): respond rgb:RRRR/GGGG/BBBB
 		// with 16-bit channels scaled from the theme background.
-		if len(body) == 1 && body[0] == '?' && p.response_cb != nil {
+		if len(body) == 1 && body[0] == '?' && parser_has_response_sink(p) {
 			bg := t.grid.style_table.theme.background
 			r16 := u32(((bg >> 16) & 0xFF) * 257)
 			g16 := u32(((bg >> 8) & 0xFF) * 257)
@@ -763,12 +802,12 @@ osc_dispatch :: proc(p: ^Parser, t: ^termgrid.Terminal, payload: []u8) {
 			_osc_write_hex4(resp[:], n, b16); n += 4
 			resp[n] = 0x1B; n += 1
 			resp[n] = '\\'; n += 1
-			p.response_cb(resp[:n])
+			parser_emit_response(p, resp[:n])
 		}
 	case 52:
 		// Clipboard query ("52;c;?") and write ("52;c;<base64>").
 		if p.allow_clipboard_read && len(body) >= 3 && body[0] == 'c' && body[1] == ';' && body[2] == '?' {
-			if p.clipboard_read_cb != nil && p.response_cb != nil {
+			if p.clipboard_read_cb != nil && parser_has_response_sink(p) {
 				raw_buf: [512]u8
 				raw_len := p.clipboard_read_cb(p.clipboard_read_user_data, raw_buf[:])
 				if raw_len >= 0 && raw_len <= len(raw_buf) {
@@ -790,7 +829,7 @@ osc_dispatch :: proc(p: ^Parser, t: ^termgrid.Terminal, payload: []u8) {
 						}
 						resp[n] = 0x1B; n += 1
 						resp[n] = '\\'; n += 1
-						p.response_cb(resp[:n])
+						parser_emit_response(p, resp[:n])
 					}
 				}
 			}
@@ -800,11 +839,11 @@ osc_dispatch :: proc(p: ^Parser, t: ^termgrid.Terminal, payload: []u8) {
 		// selection) form is honored. Truncated payloads are skipped:
 		// a partial base64 quantum would otherwise set a corrupt clipboard.
 		if len(body) < 2 || body[0] != 'c' || body[1] != ';' { return }
-		if p.osc_truncated || p.clipboard_cb == nil { return }
+		if p.osc_truncated || !parser_has_clipboard_sink(p) { return }
 		decoded: [1024]u8
 		n, ok := _osc_base64_decode(body[2:], decoded[:])
 		if ok && n > 0 {
-			p.clipboard_cb(decoded[:n])
+			parser_emit_clipboard(p, decoded[:n])
 		}
 	case 133:
 		if len(body) < 1 { return }
@@ -855,7 +894,7 @@ DCS_XTGETTCAP_OS :: "71756572792d6f732d6e616d65"
 // with the platform name. Unknown DCS payloads are ignored per ECMA-48.
 dcs_dispatch :: proc(p: ^Parser, t: ^termgrid.Terminal, payload: []u8) {
 	_ = t
-	if p == nil || p.response_cb == nil { return }
+	if p == nil || !parser_has_response_sink(p) { return }
 	if len(payload) < 3 || payload[0] != '+' || payload[1] != 'q' { return }
 	param := payload[2:]
 
@@ -877,7 +916,7 @@ dcs_dispatch :: proc(p: ^Parser, t: ^termgrid.Terminal, payload: []u8) {
 		}
 		resp[n] = 0x1B; n += 1
 		resp[n] = '\\'; n += 1
-		p.response_cb(resp[:n])
+		parser_emit_response(p, resp[:n])
 		return
 	}
 
@@ -906,7 +945,7 @@ dcs_dispatch :: proc(p: ^Parser, t: ^termgrid.Terminal, payload: []u8) {
 		}
 		resp[n] = 0x1B; n += 1
 		resp[n] = '\\'; n += 1
-		p.response_cb(resp[:n])
+		parser_emit_response(p, resp[:n])
 		return
 	}
 }

@@ -502,7 +502,7 @@ test_parser_memory_layout :: proc(t: ^testing.T) {
 	testing.expect(t, offset_of(p.Parser, apc_truncated) == 9368, "offset apc_truncated == 9368")
 	testing.expect(t, offset_of(p.Parser, graphics_cb) == 9376, "offset graphics_cb == 9376")
 	testing.expect(t, offset_of(p.Parser, graphics_user_data) == 9384, "offset graphics_user_data == 9384")
-	testing.expect(t, size_of(p.Parser) == 9392, "size_of(Parser) == 9392")
+	testing.expect(t, size_of(p.Parser) == 9392 + 4 * size_of(rawptr), "context callbacks append four pointer slots without changing the prefix")
 }
 
 @(test)

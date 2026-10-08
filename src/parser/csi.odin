@@ -574,18 +574,18 @@ _csi_execute_dch :: proc(t: ^termgrid.Terminal, params: CSI_Params) {
 _csi_execute_xtversion :: proc(t: ^termgrid.Terminal, params: CSI_Params, p: ^Parser) {
 	_ = t
 	_ = params
-	if p.response_cb == nil {
+	if !parser_has_response_sink(p) {
 		return
 	}
 	// Preserve the DCS > | name(version) ST framing while identifying Term.
 	response := fmt.tprintf("\x1bP>|Term(%s)\x1b\\", build_info.VERSION)
-	p.response_cb(transmute([]u8)response)
+	parser_emit_response(p, transmute([]u8)response)
 }
 
 // _csi_execute_decrqm handles Request Mode (DECRQM: CSI ? Ps $ p or CSI Ps $ p).
 // Responds with DECRPM (CSI ? Ps ; Pm $ y or CSI Ps ; Pm $ y).
 _csi_execute_decrqm :: proc(t: ^termgrid.Terminal, params: CSI_Params, p: ^Parser) {
-	if p.response_cb == nil || params.count == 0 {
+	if !parser_has_response_sink(p) || params.count == 0 {
 		return
 	}
 	is_private := p.leader == '?' || p.intermediate == '?'
@@ -639,7 +639,7 @@ _csi_execute_decrqm :: proc(t: ^termgrid.Terminal, params: CSI_Params, p: ^Parse
 	buf[n] = '0' + status; n += 1
 	buf[n] = '$'; n += 1
 	buf[n] = 'y'; n += 1
-	p.response_cb(buf[:n])
+	parser_emit_response(p, buf[:n])
 }
 
 // _csi_execute_kitty_keyboard handles the kitty keyboard protocol's CSI u
@@ -669,7 +669,7 @@ _csi_execute_kitty_keyboard :: proc(t: ^termgrid.Terminal, params: CSI_Params, p
 	case '?':
 		if count <= 1 && flags == 0 {
 			// Query: respond CSI ? flags u with the active screen's flags.
-			if p.response_cb == nil {
+			if !parser_has_response_sink(p) {
 				return
 			}
 			active := termgrid.terminal_kitty_active(t)
@@ -690,7 +690,7 @@ _csi_execute_kitty_keyboard :: proc(t: ^termgrid.Terminal, params: CSI_Params, p
 			resp[n] = '0' + active.flags % 10
 			n += 1
 			resp[n] = 'u'; n += 1
-			p.response_cb(resp[:n])
+			parser_emit_response(p, resp[:n])
 		} else {
 			// Enable form with parameters: apply like '='.
 			termgrid.terminal_kitty_set(t, flags, mode)
@@ -709,17 +709,17 @@ _csi_execute_kitty_keyboard :: proc(t: ^termgrid.Terminal, params: CSI_Params, p
 _csi_execute_da :: proc(t: ^termgrid.Terminal, params: CSI_Params, p: ^Parser) {
 	_ = t
 	_ = params
-	if p.response_cb == nil {
+	if !parser_has_response_sink(p) {
 		return
 	}
 	if p.intermediate == '>' {
 		response := [10]u8{0x1B, '[', '>', '0', ';', '1', '0', ';', '0', 'c'}
-		p.response_cb(response[:])
+		parser_emit_response(p, response[:])
 	} else {
 		// VT220 Primary DA response: ESC [ ? 6 2 c (no trailing separator).
 		// 62 = VT220, which is the standard xterm-compatible response.
 		response := [6]u8{0x1B, '[', '?', '6', '2', 'c'}
-		p.response_cb(response[:])
+		parser_emit_response(p, response[:])
 	}
 }
 
@@ -728,12 +728,12 @@ _csi_execute_da :: proc(t: ^termgrid.Terminal, params: CSI_Params, p: ^Parser) {
 // Parameter 6: Cursor Position Report (CPR) -> responds \x1b[<row>;<col>R (1-indexed).
 // Used by fish shell and modern CLIs for terminal queries and layout negotiation.
 _csi_execute_dsr :: proc(t: ^termgrid.Terminal, params: CSI_Params, p: ^Parser) {
-	if p.response_cb == nil || params.count == 0 {
+	if !parser_has_response_sink(p) || params.count == 0 {
 		return
 	}
 	if params.values[0] == 5 {
 		response := [4]u8{0x1B, '[', '0', 'n'}
-		p.response_cb(response[:])
+		parser_emit_response(p, response[:])
 	} else if params.values[0] == 6 {
 		// Format row and col as decimal strings (1-indexed)
 		row_1 := t.cursor.row + 1
@@ -757,7 +757,7 @@ _csi_execute_dsr :: proc(t: ^termgrid.Terminal, params: CSI_Params, p: ^Parser) 
 		if col_1 >= 10 { buf[n] = '0' + u8((col_1 / 10) % 10); n += 1 }
 		buf[n] = '0' + u8(col_1 % 10); n += 1
 		buf[n] = 'R'; n += 1
-		p.response_cb(buf[:n])
+		parser_emit_response(p, buf[:n])
 	}
 }
 
