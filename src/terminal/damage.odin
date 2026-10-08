@@ -69,7 +69,7 @@ damage_init :: proc(d: ^Damage, rows, cols: int, allocator: runtime.Allocator = 
 damage_destroy :: proc(d: ^Damage, allocator: runtime.Allocator = context.allocator) {
 	d.journal_active = false
 	if d.dirty_rows != nil {
-		delete(d.dirty_rows)
+		delete(d.dirty_rows, allocator)
 		d.dirty_rows = nil
 	}
 	if d.scroll_ops != nil {
@@ -77,7 +77,7 @@ damage_destroy :: proc(d: ^Damage, allocator: runtime.Allocator = context.alloca
 		d.scroll_ops = nil
 	}
 	if d.journal_rows != nil {
-		delete(d.journal_rows)
+		delete(d.journal_rows, allocator)
 		d.journal_rows = nil
 	}
 	if d.journal_ops != nil {

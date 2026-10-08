@@ -521,29 +521,31 @@ terminal_resize :: proc(t: ^Terminal, new_rows: int, new_cols: int, allocator :=
 		return
 	}
 
+	alloc := t.state_allocator if t.state_allocator_set else allocator
+
 	if t.is_alt_screen {
 		// Delta-only: Only resize active alt screen grid directly.
 		// Bypasses primary grid reflow & scrollback coalescence during alt-screen mode.
-		_grid_resize_alt(&t.grid, new_rows, new_cols, &t.grapheme_store, allocator)
+		_grid_resize_alt(&t.grid, new_rows, new_cols, &t.grapheme_store, alloc)
 		t.cursor.row = clamp(t.cursor.row, 0, new_rows - 1)
 		t.cursor.col = clamp(t.cursor.col, 0, new_cols - 1)
 		t.cursor.pending_wrap = false
 		t.scroll_top = 0
 		t.scroll_bottom = new_rows - 1
 
-		damage_destroy(&t.damage, allocator)
-		damage_init(&t.damage, new_rows, new_cols, allocator)
-		gens := make([]u32, new_rows, allocator)
+		damage_destroy(&t.damage, alloc)
+		damage_init(&t.damage, new_rows, new_cols, alloc)
+		gens := make([]u32, new_rows, alloc)
 		for i in 0..<new_rows {
 			gens[i] = t.grid.rows[i].generation
 		}
 		damage_mark_all(&t.damage, gens)
-		delete(gens, allocator)
+		delete(gens, alloc)
 		t.render_epoch += 1
 		return
 	}
-	_terminal_resize_primary(t, new_rows, new_cols, allocator)
-	_grid_resize_clean(t, new_rows, new_cols, allocator)
+	_terminal_resize_primary(t, new_rows, new_cols, alloc)
+	_grid_resize_clean(t, new_rows, new_cols, alloc)
 }
 
 _grid_resize_alt :: proc(g: ^Grid, new_rows, new_cols: int, store: ^Grapheme_Store, allocator: runtime.Allocator = context.allocator) {
@@ -604,13 +606,13 @@ _grid_resize_alt :: proc(g: ^Grid, new_rows, new_cols: int, store: ^Grapheme_Sto
 	}
 
 	if old_ext_colors_slice != nil {
-		delete(old_ext_colors_slice)
+		delete(old_ext_colors_slice, allocator)
 	}
 	if old_cells_slice != nil {
-		delete(old_cells_slice)
+		delete(old_cells_slice, allocator)
 	}
 	if old_rows_slice != nil {
-		delete(old_rows_slice)
+		delete(old_rows_slice, allocator)
 	}
 
 	g.rows = new_rows_slice
@@ -633,13 +635,13 @@ _grid_resize_clean :: proc(t: ^Terminal, new_rows, new_cols: int, allocator: run
 		}
 	}
 	if g.ext_colors != nil {
-		delete(g.ext_colors)
+		delete(g.ext_colors, allocator)
 	}
 	if g.cells != nil {
-		delete(g.cells)
+		delete(g.cells, allocator)
 	}
 	if g.rows != nil {
-		delete(g.rows)
+		delete(g.rows, allocator)
 	}
 	new_cap := _next_pow2(new_rows)
 	g.row_count = new_rows

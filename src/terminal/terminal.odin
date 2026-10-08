@@ -362,6 +362,29 @@ terminal_graphics_active :: proc(t: ^Terminal) -> ^graphics_pkg.Store {
 	return t.graphics
 }
 
+// terminal_copy synchronizes grid dimensions, cells, and marks damage from src to dst.
+terminal_copy :: proc(dst, src: ^Terminal) {
+	if dst == nil || src == nil || dst == src do return
+	if dst.grid.row_count != src.grid.row_count || dst.grid.col_count != src.grid.col_count {
+		terminal_resize(dst, src.grid.row_count, src.grid.col_count)
+	}
+	dst.grid.origin = src.grid.origin
+	dst.grid.mask = src.grid.mask
+	dst.grid.style_table = src.grid.style_table
+	if dst.grid.cells != nil && src.grid.cells != nil {
+		copy(dst.grid.cells, src.grid.cells)
+		if dst.grid.ext_colors != nil && src.grid.ext_colors != nil {
+			copy(dst.grid.ext_colors, src.grid.ext_colors)
+		}
+		for i in 0..<src.grid.capacity {
+			if i < len(dst.grid.rows) && i < len(src.grid.rows) {
+				dst.grid.rows[i] = src.grid.rows[i]
+			}
+		}
+	}
+	damage_mark_all(&dst.damage, nil)
+}
+
 terminal_graphics_sync :: proc(dst, src: ^Terminal, allocator: runtime.Allocator) {
 	if dst == nil || src == nil || dst == src do return
 	graphics_pkg.store_sync(dst.graphics, src.graphics, allocator)
