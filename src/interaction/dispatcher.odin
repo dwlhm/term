@@ -1,7 +1,7 @@
 package interaction
 
 import "core:unicode/utf8"
-import input "../platform/input"
+import input "../input_core"
 import termgrid "../terminal"
 
 // interaction_dispatch_key routes keyboard input through the modal FSM.
