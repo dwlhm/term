@@ -24,7 +24,7 @@ TEST_FLAGS ?= -define:ODIN_TEST_THREADS=1
 DEBUG_FLAGS ?= -debug
 RELEASE_FLAGS ?= -o:speed -no-bounds-check
 
-.PHONY: all build release build-mcp release-mcp test-mcp test-version bench-mcp bundle install uninstall dist-linux dmg run check check-linux test test-terminal test-parser test-pty test-input test-tabs test-ui test-interaction test-render test-app test-bench test-mcp test-diag test-probe test-session-core bench bench-run bench-video bench-vte clean help version-info
+.PHONY: all build release build-host build-monitor build-mcp release-mcp test-host test-session-host test-mcp test-version bench-mcp bundle install uninstall dist-linux dmg run check check-linux test test-terminal test-parser test-pty test-input test-tabs test-ui test-interaction test-render test-app test-bench test-mcp test-diag test-probe test-session-core test-session-runtime test-session-ipc bench bench-run bench-session-runtime bench-transport build-bench-transport bench-video bench-vte clean help version-info
 
 all: build
 
@@ -53,6 +53,10 @@ release: version-info
 	$(ODIN) build $(MAIN_SRC) -out:$(TARGET) $(RELEASE_FLAGS) $(APP_FLAGS)
 endif
 
+build-host:
+	@mkdir -p $(OUT_DIR)
+	$(ODIN) build src/cmd/term_host -out:bin/term-host $(COMMON_FLAGS)
+
 build-mcp:
 	@mkdir -p $(OUT_DIR)
 	$(ODIN) build src/cmd/term_mcp -out:$(OUT_DIR)/term-mcp $(DEBUG_FLAGS) -strict-style
@@ -62,10 +66,21 @@ release-mcp:
 	$(ODIN) build src/cmd/term_mcp -out:$(OUT_DIR)/term-mcp $(RELEASE_FLAGS) -strict-style
 
 ifeq ($(UNAME_S),Darwin)
-bundle: release
+$(OUT_DIR)/monitor_bridge.o: src/cmd/term_monitor/monitor_bridge.m
+	@mkdir -p $(OUT_DIR)
+	clang -fobjc-arc -mmacosx-version-min=$(MIN_OS_VERSION) -c $< -o $@ -isysroot $(shell xcrun --show-sdk-path)
+
+build-monitor: version-info $(OUT_DIR)/monitor_bridge.o
+	@mkdir -p $(OUT_DIR)
+	$(ODIN) build src/cmd/term_monitor -out:$(OUT_DIR)/term-monitor -minimum-os-version:$(MIN_OS_VERSION) -strict-style -extra-linker-flags:"-framework AppKit -framework Cocoa $(OUT_DIR)/monitor_bridge.o"
+
+bundle: release build-host build-monitor
 	@mkdir -p $(OUT_DIR)/Term.app/Contents/MacOS
+	@mkdir -p $(OUT_DIR)/Term.app/Contents/Helpers
 	@mkdir -p $(OUT_DIR)/Term.app/Contents/Resources
 	cp $(TARGET) $(OUT_DIR)/Term.app/Contents/MacOS/
+	cp $(OUT_DIR)/term-host $(OUT_DIR)/Term.app/Contents/Helpers/
+	cp $(OUT_DIR)/term-monitor $(OUT_DIR)/Term.app/Contents/Helpers/
 	cp $(OUT_DIR)/Info.plist $(OUT_DIR)/Term.app/Contents/Info.plist
 	cp assets/term.icns $(OUT_DIR)/Term.app/Contents/Resources/
 	rm -rf $(OUT_DIR)/Term.app/Contents/Resources/fonts
@@ -135,7 +150,12 @@ run: build
 
 check: version-info
 	$(ODIN) check src/app $(CHECK_FLAGS)
+	$(ODIN) check src/session_host $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/cmd/term_host $(CHECK_FLAGS)
+	$(ODIN) check src/cmd/term_monitor $(CHECK_FLAGS)
+	$(ODIN) check src/session_ipc $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/session_core $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/session_runtime $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/cmd/term_mcp $(CHECK_FLAGS)
 	$(ODIN) check src/terminal $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/parser $(CHECK_FLAGS) -no-entry-point
@@ -146,9 +166,12 @@ check: version-info
 	$(ODIN) check src/interaction $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/diag $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/bench/probe $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/bench/cmd_transport_comparative $(CHECK_FLAGS)
 
 check-linux: version-info
+	$(ODIN) check src/session_ipc $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
 	$(ODIN) check src/session_core $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
+	$(ODIN) check src/session_runtime $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
 	$(ODIN) check src/cmd/term_mcp $(CHECK_FLAGS) -target:linux_arm64
 	$(ODIN) check src/terminal $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
 	$(ODIN) check src/parser $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
@@ -159,7 +182,7 @@ check-linux: version-info
 	$(ODIN) check src/diag $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
 	$(ODIN) check src/bench/probe $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
 
-test: version-info test-version test-config test-terminal test-parser test-pty test-input test-tabs test-ui test-interaction test-render test-app test-bench test-mcp test-diag test-probe test-session-core
+test: version-info test-version test-config test-terminal test-parser test-pty test-input test-tabs test-ui test-interaction test-render test-app test-bench test-mcp test-diag test-probe test-session-core test-session-runtime test-session-ipc test-session-host
 
 test-version:
 	python3 -m unittest discover -s scripts/tests -v
@@ -214,6 +237,15 @@ test-probe:
 test-session-core:
 	$(ODIN) test src/session_core/tests $(COMMON_FLAGS) $(TEST_FLAGS)
 
+test-session-runtime:
+	$(ODIN) test src/session_runtime/tests $(COMMON_FLAGS) $(TEST_FLAGS)
+
+test-session-ipc:
+	$(ODIN) test src/session_ipc/tests $(COMMON_FLAGS) $(TEST_FLAGS)
+
+test-session-host:
+	$(ODIN) test src/session_host/tests $(COMMON_FLAGS) $(TEST_FLAGS)
+
 bench-mcp: release-mcp
 	python3 scripts/bench_mcp_comprehensive.py
 
@@ -223,6 +255,7 @@ bench:
 	$(ODIN) build src/bench/cmd_terminal -out:$(OUT_DIR)/bench_terminal -o:speed
 	$(ODIN) build src/bench/cmd_pty -out:$(OUT_DIR)/bench_pty -o:speed
 	$(ODIN) build src/bench/cmd_input_photon -out:$(OUT_DIR)/bench_input_photon -o:speed
+	$(ODIN) build src/bench/cmd_session_runtime -out:$(OUT_DIR)/bench_session_runtime -o:speed
 
 bench-run: bench
 	@echo "=== Running Parser Benchmarks ==="
@@ -233,6 +266,20 @@ bench-run: bench
 	@./$(OUT_DIR)/bench_pty
 	@echo "\n=== Running Input Photon Latency Benchmarks ==="
 	@./$(OUT_DIR)/bench_input_photon
+	@echo "\n=== Running Session Runtime Benchmarks ==="
+	@./$(OUT_DIR)/bench_session_runtime
+
+bench-session-runtime:
+	@mkdir -p $(OUT_DIR)
+	$(ODIN) build src/bench/cmd_session_runtime -out:$(OUT_DIR)/bench_session_runtime -o:speed
+	@./$(OUT_DIR)/bench_session_runtime
+
+build-bench-transport:
+	@mkdir -p $(OUT_DIR)
+	$(ODIN) build src/bench/cmd_transport_comparative -out:$(OUT_DIR)/bench_transport_comparative -o:speed $(COMMON_FLAGS)
+
+bench-transport: build-bench-transport
+	@./$(OUT_DIR)/bench_transport_comparative
 
 $(OUT_DIR)/term_video_player: scripts/term_video_player.swift
 	@mkdir -p $(OUT_DIR)
