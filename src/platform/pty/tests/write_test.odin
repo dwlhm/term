@@ -1,5 +1,7 @@
 package pty_test
 
+import "core:c"
+import posix "core:sys/posix"
 import "core:sync"
 import "core:testing"
 import "core:thread"
@@ -164,4 +166,73 @@ test_write_rejects_bad_pty :: proc(t: ^testing.T) {
 	defer _teardown(&exited)
 	exited.state = .Exited
 	testing.expect(t, !pty.pty_write(&exited, payload), "Exited state must fail without a syscall")
+}
+
+// A payload larger than pipe capacity forces a positive prefix followed by
+// EAGAIN without a consuming thread or timing assumptions.
+@(test)
+test_write_counted_resumes_exact_suffix :: proc(t: ^testing.T) {
+	fds: [2]posix.FD
+	if !testing.expect(t, posix.pipe(&fds) == .OK) do return
+	defer posix.close(fds[0])
+	defer posix.close(fds[1])
+	if !testing.expect(t, posix.fcntl(fds[1], .SETFL, c.int(posix.O_NONBLOCK)) != -1) do return
+	if !testing.expect(t, posix.fcntl(fds[0], .SETFL, c.int(posix.O_NONBLOCK)) != -1) do return
+	payload := make([]u8, WRITE_LINE_COUNT * WRITE_LINE_COUNT)
+	defer delete(payload)
+	for i in 0..<len(payload) do payload[i] = u8(i % 251)
+	p := pty.Pty{master = int(fds[1]), state = .Running}
+	first := pty.pty_write_counted(&p, payload)
+	testing.expect(t, first.status == .WouldBlock && first.errno == .EAGAIN)
+	testing.expect(t, first.bytes_written > 0 && first.bytes_written < len(payload))
+	blocked := pty.pty_write_counted(&p, payload[first.bytes_written:])
+	testing.expect(t, blocked.status == .WouldBlock && blocked.bytes_written == 0)
+	got := make([dynamic]u8)
+	defer delete(got)
+	buf: [WRITE_LINE_COUNT]u8
+	offset := first.bytes_written
+	for rounds := 0; rounds < len(payload) && len(got) < len(payload); rounds += 1 {
+		for {
+			n := posix.read(fds[0], raw_data(buf[:]), c.size_t(len(buf)))
+			if n < 0 {
+				testing.expect(t, posix.errno() == .EAGAIN)
+				break
+			}
+			if n == 0 do break
+			append(&got, ..buf[:int(n)])
+		}
+		if offset < len(payload) {
+			result := pty.pty_write_counted(&p, payload[offset:])
+			offset += result.bytes_written
+			testing.expect(t, result.status == .WouldBlock || result.status == .Complete)
+			testing.expect(t, (result.status == .Complete) == (offset == len(payload)))
+		}
+	}
+	testing.expect(t, offset == len(payload) && len(got) == len(payload))
+	testing.expect(t, string(got[:]) == string(payload), "resuming must neither replay nor omit bytes")
+	testing.expect(t, pty.pty_write_counted(&p, {}).status == .Complete)
+	testing.expect(t, pty.pty_write_counted(&p, {}).bytes_written == 0)
+}
+
+@(test)
+test_write_counted_rejects_closed :: proc(t: ^testing.T) {
+	data := transmute([]u8)string("counted")
+	testing.expect(t, pty.pty_write_counted(nil, data).status == .Closed)
+	testing.expect(t, pty.pty_write_counted(nil, {}).status == .Closed)
+	bad := pty.Pty{master = -1, state = .Running}
+	testing.expect(t, pty.pty_write_counted(&bad, data).errno == .EBADF)
+	exited := pty.Pty{master = 0, state = .Exited}
+	result := pty.pty_write_counted(&exited, data)
+	testing.expect(t, result.status == .Closed && result.bytes_written == 0)
+}
+
+@(test)
+test_write_counted_invalid_descriptor_errno :: proc(t: ^testing.T) {
+	fds: [2]posix.FD
+	if !testing.expect(t, posix.pipe(&fds) == .OK) do return
+	defer posix.close(fds[0])
+	posix.close(fds[1])
+	p := pty.Pty{master = int(fds[1]), state = .Running}
+	result := pty.pty_write_counted(&p, transmute([]u8)string("closed fd"))
+	testing.expect(t, result.status == .Closed && result.errno == .EBADF && result.bytes_written == 0)
 }

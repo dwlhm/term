@@ -5,6 +5,7 @@ import "core:fmt"
 import "core:os"
 import "core:strings"
 import "core:testing"
+import "core:thread"
 import "core:time"
 import build_info "../../../build_info"
 import posix "core:sys/posix"
@@ -305,5 +306,98 @@ test_spawn_env_shell_integration :: proc(t: ^testing.T) {
 	}
 	output := string(buf[:total])
 	testing.expect_value(t, output, "|||")
+}
+
+@(test)
+test_spawn_master_cloexec :: proc(t: ^testing.T) {
+	p: pty.Pty
+	ok := pty.pty_spawn(&p, 24, 80, "/bin/sh", {"-c", "exit 0"})
+	testing.expect(t, ok, "spawn must succeed")
+	if !ok { return }
+	defer _teardown(&p)
+
+	fd_flags := posix.fcntl(posix.FD(p.master), .GETFD)
+	testing.expect(t, fd_flags >= 0, "fcntl GETFD must succeed")
+	testing.expect(t, (int(fd_flags) & int(posix.FD_CLOEXEC)) != 0, "master fd must have FD_CLOEXEC set")
+}
+
+@(test)
+test_spawn_env_without_slash :: proc(t: ^testing.T) {
+	test_env_key :: "TEST_SPAWN_VAR"
+	test_env_val :: "hello_pty"
+	os.set_env(test_env_key, test_env_val)
+	defer os.unset_env(test_env_key)
+
+	p: pty.Pty
+	ok := pty.pty_spawn(&p, 24, 80, "sh", {"-c", "printf '%s' \"$TEST_SPAWN_VAR\""})
+	testing.expect(t, ok, "spawn without slash must succeed")
+	if !ok { return }
+	defer _teardown(&p)
+
+	buf: [256]u8
+	total := 0
+	for _ in 0..<200 {
+		n, eof := pty.pty_drain(&p, buf[total:], len(buf) - total)
+		total += n
+		if eof || total >= len(buf) { break }
+		time.sleep(1 * time.Millisecond)
+	}
+	output := string(buf[:total])
+	testing.expect_value(t, output, test_env_val)
+}
+
+_Concurrent_Spawn_Worker :: struct {
+	p:  pty.Pty,
+	ok: bool,
+}
+
+_concurrent_spawn_proc :: proc(t: ^thread.Thread) {
+	worker := (^_Concurrent_Spawn_Worker)(t.data)
+	worker.ok = pty.pty_spawn(&worker.p, 24, 80, "/bin/sh", {"-c", "sleep 0.2"})
+}
+
+@(test)
+test_spawn_concurrent :: proc(t: ^testing.T) {
+	workers: [8]_Concurrent_Spawn_Worker
+	threads: [8]^thread.Thread
+
+	for i in 0 ..< 8 {
+		threads[i] = thread.create(_concurrent_spawn_proc)
+		threads[i].data = &workers[i]
+		thread.start(threads[i])
+	}
+
+	for i in 0 ..< 8 {
+		thread.join(threads[i])
+		thread.destroy(threads[i])
+	}
+
+	masters: [8]int
+	pids: [8]int
+	for i in 0 ..< 8 {
+		w := &workers[i]
+		testing.expect(t, w.ok, "concurrent pty_spawn must succeed")
+		if w.ok {
+			testing.expect(t, w.p.master >= 0, "master fd must be valid")
+			testing.expect(t, w.p.pid > 0, "pid must be valid")
+			masters[i] = w.p.master
+			pids[i] = w.p.pid
+		}
+	}
+
+	for i in 0 ..< 8 {
+		for j in (i + 1) ..< 8 {
+			if workers[i].ok && workers[j].ok {
+				testing.expect(t, masters[i] != masters[j], "each thread must have a distinct master fd")
+				testing.expect(t, pids[i] != pids[j], "each thread must have a distinct pid")
+			}
+		}
+	}
+
+	for i in 0 ..< 8 {
+		if workers[i].ok {
+			_teardown(&workers[i].p)
+		}
+	}
 }
 

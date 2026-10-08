@@ -4,6 +4,7 @@ import "core:c"
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import "core:sync"
 import posix "core:sys/posix"
 import build_info "../../build_info"
 
@@ -25,6 +26,9 @@ when ODIN_OS == .Darwin {
 		tcgetpgrp :: proc(fd: c.int) -> posix.pid_t ---
 	}
 }
+
+// _spawn_mutex serializes ptsname/grantpt/unlockpt critical sections to prevent races.
+_spawn_mutex: sync.Mutex
 
 // PTY spawn (Langkah 1): posix_openpt + fork + setsid + slave setup.
 // Later steps add drain/write/winsize/exit here as separate procs —
@@ -177,21 +181,31 @@ pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string, c
 	// Master-side setup happens fully before fork, so a fork failure only
 	// has the master fd to clean up. Open with NONBLOCK atomically so master
 	// never blocks the event loop without requiring post-open fcntl.
+	sync.lock(&_spawn_mutex)
 	master := posix.posix_openpt({.RDWR, .NOCTTY, .NONBLOCK})
 	if int(master) < 0 {
+		sync.unlock(&_spawn_mutex)
 		fmt.eprintfln("[pty_spawn error] posix_openpt failed, errno: %d (%v)", int(posix.errno()), posix.errno())
+		return false
+	}
+	if posix.fcntl(master, .SETFD, c.int(posix.FD_CLOEXEC)) == -1 {
+		sync.unlock(&_spawn_mutex)
+		fmt.eprintfln("[pty_spawn error] fcntl SETFD FD_CLOEXEC on master failed, errno: %d (%v)", int(posix.errno()), posix.errno())
+		posix.close(master)
 		return false
 	}
 	// On modern macOS devfs manages slave permissions automatically;
 	// grantpt may fail or be unnecessary, so proceed if unlockpt and ptsname succeed.
 	_ = posix.grantpt(master)
 	if posix.unlockpt(master) != .OK {
+		sync.unlock(&_spawn_mutex)
 		fmt.eprintfln("[pty_spawn error] unlockpt failed, errno: %d (%v)", int(posix.errno()), posix.errno())
 		posix.close(master)
 		return false
 	}
 	slave_name := posix.ptsname(master)
 	if slave_name == nil {
+		sync.unlock(&_spawn_mutex)
 		fmt.eprintfln("[pty_spawn error] ptsname failed, errno: %d (%v)", int(posix.errno()), posix.errno())
 		posix.close(master)
 		return false
@@ -202,6 +216,7 @@ pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string, c
 	slave_buf: [128]u8
 	name := string(slave_name)
 	if len(name) <= 0 || len(name) >= len(slave_buf) {
+		sync.unlock(&_spawn_mutex)
 		fmt.eprintfln("[pty_spawn error] invalid slave name length: %d", len(name))
 		posix.close(master)
 		return false
@@ -209,6 +224,7 @@ pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string, c
 	copy(slave_buf[:], name)
 	slave_buf[len(name)] = 0
 	slave_path := cstring(&slave_buf[0])
+	sync.unlock(&_spawn_mutex)
 
 	// Initial size is applied to the slave in the child after fork: on
 	// Darwin TIOCSWINSZ is only valid on the slave side, and the size
@@ -225,7 +241,8 @@ pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string, c
 		posix.close(master)
 		return false
 	}
-	if posix.fcntl(errfd[1], .SETFD, c.int(posix.FD_CLOEXEC)) == -1 {
+	if posix.fcntl(errfd[0], .SETFD, c.int(posix.FD_CLOEXEC)) == -1 ||
+	   posix.fcntl(errfd[1], .SETFD, c.int(posix.FD_CLOEXEC)) == -1 {
 		fmt.eprintfln("[pty_spawn error] fcntl SETFD FD_CLOEXEC failed, errno: %d (%v)", int(posix.errno()), posix.errno())
 		posix.close(errfd[0])
 		posix.close(errfd[1])
@@ -356,6 +373,18 @@ pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string, c
 	if pid == 0 {
 		// --- child: never returns, never touches parent allocators ---
 		posix.close(errfd[0])
+
+		empty_set: posix.sigset_t
+		posix.sigemptyset(&empty_set)
+		posix.sigprocmask(.SETMASK, &empty_set, nil)
+
+		posix.signal(.SIGPIPE, auto_cast posix.SIG_DFL)
+		posix.signal(.SIGINT, auto_cast posix.SIG_DFL)
+		posix.signal(.SIGQUIT, auto_cast posix.SIG_DFL)
+		posix.signal(.SIGTERM, auto_cast posix.SIG_DFL)
+		posix.signal(.SIGCHLD, auto_cast posix.SIG_DFL)
+		posix.signal(.SIGHUP, auto_cast posix.SIG_DFL)
+
 		if posix.setsid() == posix.pid_t(-1) {
 			_child_fail(errfd[1], 1)
 		}
@@ -382,6 +411,7 @@ pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string, c
 				_ = posix.chdir("/")
 			}
 		}
+		posix.environ = raw_data(c_env)
 		if has_slash {
 			posix.execve(c_argv[0], raw_data(c_argv), raw_data(c_env[:]))
 		} else {
@@ -400,7 +430,22 @@ pty_spawn :: proc(p: ^Pty, rows: int, cols: int, prog: string, argv: []string, c
 	// --- parent: exec outcome arrives over the error pipe ---
 	posix.close(errfd[1])
 	mark: [2]byte
-	n := posix.read(errfd[0], raw_data(mark[:]), 2)
+	n: c.ssize_t = 0
+	for n < 2 {
+		r := posix.read(errfd[0], raw_data(mark[n:]), c.size_t(2 - n))
+		if r > 0 {
+			n += r
+			continue
+		}
+		if r == 0 {
+			break
+		}
+		if posix.errno() == .EINTR {
+			continue
+		}
+		n = -1
+		break
+	}
 	posix.close(errfd[0])
 	if n != 0 {
 		status: c.int
@@ -514,53 +559,68 @@ PTY_WRITE_POLL_MS :: 1
 // write/poll cycles even when everything flows.
 PTY_WRITE_EAGAIN_RETRIES :: 5000
 
-// pty_write sends child stdin through the pty master without blocking.
-//
-// All of data is written, looping over short writes. EINTR retries
-// internally with no backoff. EAGAIN (buffer full on the nonblocking
-// master) polls briefly for writability and retries, up to
-// PTY_WRITE_EAGAIN_RETRIES waits; when still blocked the result is false.
-// Any other error fails immediately with false.
-//
-// Empty data is a no-op true. A nil pty, a negative master, or Exited
-// state returns false without issuing a syscall. No byte counters are
-// kept here: on incomplete writes the caller counts what was lost.
-pty_write :: proc(p: ^Pty, data: []u8) -> bool {
-	if p == nil {
-		return false
+// Counted writes never wait for capacity. The caller retains the unwritten suffix.
+PTY_WRITE_EINTR_RETRIES :: 16
+
+Pty_Write_Status :: enum u8 {
+	Complete,
+	WouldBlock,
+	Closed,
+	Error,
+}
+
+Pty_Write_Result :: struct {
+	bytes_written: int,
+	status:        Pty_Write_Status,
+	errno:         posix.Errno,
+}
+
+pty_write_counted :: proc(p: ^Pty, data: []u8) -> Pty_Write_Result {
+	if p == nil || p.master < 0 {
+		return Pty_Write_Result{status = .Closed, errno = .EBADF}
 	}
-	if p.master < 0 {
-		return false
-	}
-	if p.state == .Exited {
-		return false
-	}
-	if len(data) == 0 {
-		return true
-	}
-	written := 0
-	waits := 0
+	if p.state == .Exited do return Pty_Write_Result{status = .Closed}
+	written, interrupted := 0, 0
 	for written < len(data) {
 		r := posix.write(posix.FD(p.master), raw_data(data[written:]), c.size_t(len(data[written:])))
 		if r > 0 {
 			written += int(r)
 			continue
 		}
-		#partial switch posix.errno() {
+		if r == 0 do return Pty_Write_Result{written, .Closed, {}}
+		err := posix.errno()
+		#partial switch err {
 		case .EINTR:
-			continue
+			if interrupted >= PTY_WRITE_EINTR_RETRIES do return Pty_Write_Result{written, .Error, err}
+			interrupted += 1
 		case .EAGAIN:
-			if waits >= PTY_WRITE_EAGAIN_RETRIES {
-				return false
-			}
+			return Pty_Write_Result{written, .WouldBlock, err}
+		case .EBADF, .EIO, .EPIPE:
+			return Pty_Write_Result{written, .Closed, err}
+		case:
+			return Pty_Write_Result{written, .Error, err}
+		}
+	}
+	return Pty_Write_Result{written, .Complete, {}}
+}
+
+// Compatibility API: bounded polling preserves the previous all-or-failure
+// contract. New resumable callers use pty_write_counted and retain their offset.
+pty_write :: proc(p: ^Pty, data: []u8) -> bool {
+	written, waits := 0, 0
+	for {
+		result := pty_write_counted(p, data[written:])
+		written += result.bytes_written
+		switch result.status {
+		case .Complete: return true
+		case .Closed, .Error: return false
+		case .WouldBlock:
+			if waits >= PTY_WRITE_EAGAIN_RETRIES do return false
 			waits += 1
 			pfd := posix.pollfd{fd = posix.FD(p.master), events = {.OUT}}
 			posix.poll(&pfd, 1, PTY_WRITE_POLL_MS)
-		case:
-			return false
 		}
 	}
-	return true
 }
 
 // pty_set_winsize resizes the live pty via TIOCSWINSZ on the master fd.
@@ -732,7 +792,18 @@ pty_has_running_processes :: proc(p: ^Pty) -> bool {
 // and exits. It must not run any parent cleanup or return.
 _child_fail :: proc(w: posix.FD, stage: u8) -> ! {
 	mark: [2]u8 = {stage, byte(posix.errno())}
-	posix.write(w, raw_data(mark[:]), 2)
+	written: c.ssize_t = 0
+	for written < 2 {
+		res := posix.write(w, raw_data(mark[written:]), c.size_t(2 - written))
+		if res > 0 {
+			written += res
+			continue
+		}
+		if res < 0 && posix.errno() == .EINTR {
+			continue
+		}
+		break
+	}
 	posix._exit(PTY_CHILD_FAIL_EXIT)
 }
 
