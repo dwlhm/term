@@ -126,6 +126,11 @@ Pane_Actor :: struct {
 	reply_queue:  Input_Queue,
 	liveness:     Work_Liveness,
 	allocator:    runtime.Allocator,
+	last_cursor_row:      int,
+	last_cursor_col:      int,
+	last_cursor_visible:  bool,
+	last_cursor_style:    u8,
+	last_app_cursor_keys: bool,
 }
 
 _actor_response_cb :: proc(user_data: rawptr, data: []u8) {
@@ -155,6 +160,11 @@ actor_init :: proc(
 	a.parser.response_context_cb = _actor_response_cb
 	a.parser.response_user_data = a
 	a.liveness = .VerifiedLive
+	a.last_cursor_row = -1
+	a.last_cursor_col = -1
+	a.last_cursor_visible = true
+	a.last_cursor_style = 0
+	a.last_app_cursor_keys = false
 }
 
 actor_spawn :: proc(

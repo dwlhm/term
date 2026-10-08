@@ -882,6 +882,15 @@ _host_handle_client_disconnect :: proc(h: ^Session_Host, slot: int) {
 @(private="file")
 _actor_has_pending_damage :: proc(a: ^rt.Pane_Actor) -> bool {
 	if a == nil do return false
+	// Cursor movement, visibility toggle, style change, or keypad mode changes
+	// must be reported even if no grid cells were dirtied (e.g. arrow keys, backspace).
+	if a.terminal.cursor.row != a.last_cursor_row ||
+	   a.terminal.cursor.col != a.last_cursor_col ||
+	   a.terminal.cursor.visible != a.last_cursor_visible ||
+	   a.terminal.cursor.style != a.last_cursor_style ||
+	   a.terminal.app_cursor_keys != a.last_app_cursor_keys {
+		return true
+	}
 	for r in 0 ..< a.terminal.damage.row_count {
 		if r < len(a.terminal.damage.dirty_rows) {
 			dr := a.terminal.damage.dirty_rows[r]
@@ -986,7 +995,14 @@ host_step :: proc(h: ^Session_Host, timeout_ms: int = 10) -> bool {
 						h.snap_buf[:written],
 					)
 					if send_err == .None {
+						sub.needs_full_snapshot = false
+						sub.last_snapshot_rev = ws.snapshot_rev
 						termgrid.terminal_clear_damage(&var_actor.terminal)
+						var_actor.last_cursor_row = var_actor.terminal.cursor.row
+						var_actor.last_cursor_col = var_actor.terminal.cursor.col
+						var_actor.last_cursor_visible = var_actor.terminal.cursor.visible
+						var_actor.last_cursor_style = var_actor.terminal.cursor.style
+						var_actor.last_app_cursor_keys = var_actor.terminal.app_cursor_keys
 					}
 				}
 			}

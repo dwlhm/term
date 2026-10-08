@@ -302,8 +302,14 @@ input_encode :: proc(ev: Input_Event, out: []u8, kitty_flags: u8 = 0, app_cursor
 	case .Arrow_Down:
 		return _encode_arrow('B', ev, out, app_cursor)
 	case .Arrow_Right:
+		if ev.gui && !ev.alt && !ev.ctrl && !ev.shift {
+			return _encode_csi3('F', out)
+		}
 		return _encode_arrow('C', ev, out, app_cursor)
 	case .Arrow_Left:
+		if ev.gui && !ev.alt && !ev.ctrl && !ev.shift {
+			return _encode_csi3('H', out)
+		}
 		return _encode_arrow('D', ev, out, app_cursor)
 	case .Home:
 		return _encode_csi3('H', out)

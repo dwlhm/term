@@ -13,6 +13,7 @@ import termgrid "../terminal"
 import pty "../platform/pty"
 import session_core "../session_core"
 import ipc "../session_ipc"
+import render "../render"
 import ui "../ui"
 
 MAX_TABS: int : 32
@@ -923,6 +924,8 @@ _session_poll_host_snapshots :: proc(s: ^Tab_Session) -> (damaged: bool) {
 			damaged = true
 			termgrid.damage_mark_all(&target_b.terminal.damage, nil)
 			termgrid.terminal_copy(&target_b.front_terminal, &target_b.terminal)
+			cur := termgrid.terminal_get_cursor(&target_b.terminal)
+			render.cursor_overlay_sync(&target_b.cursor, cur.row, cur.col, cur.style)
 		}
 	}
 	return damaged

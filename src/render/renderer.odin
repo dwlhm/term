@@ -1429,7 +1429,7 @@ _renderer_has_pending_work :: proc(
 		return false
 	}
 	if r.first_frame_pending || r.full_redraw_pending || r.atlas.gpu_dirty || r.fallback_pending ||
-		_renderer_view_changed(r, view) || _renderer_graphics_changed(r, terminal) || r.ui_staged || r.interaction_staged {
+		_renderer_view_changed(r, view) || _renderer_graphics_changed(r, terminal) || r.ui_staged || r.interaction_staged || r.cursor_staged {
 		return true
 	}
 	for row in terminal.damage.dirty_rows {
@@ -2118,7 +2118,7 @@ _renderer_frame_v2_journal :: proc(
 	view: ^termgrid.Terminal_View = nil,
 	view_changed: bool = false,
 ) -> bool {
-	has_damage := _renderer_journal_has_damage(journal)
+	has_damage := _renderer_journal_has_damage(journal) || r.cursor_staged
 	force_full := r.full_redraw_pending || view_changed || _renderer_graphics_changed(r, terminal) ||
 		(view != nil && (view.scrollback_offset != 0 || view.selection.active)) || len(journal.scroll_ops) > 0
 	alt_screen_changed := r.last_is_alt_screen != terminal.is_alt_screen
@@ -2424,7 +2424,7 @@ renderer_frame_auto :: proc(r: ^Renderer, terminal: ^termgrid.Terminal, lut: ^St
 	renderer_prepare_frame(r, terminal)
 	_renderer_force_pending_redraw(r, terminal)
 	inp := strategy_estimate_inputs(&terminal.damage, r.rows, r.cols)
-	if inp.dirty_cells <= 0 && !inp.scroll {
+	if inp.dirty_cells <= 0 && !inp.scroll && !r.cursor_staged {
 		r.frame_prepared = false
 		return false
 	}

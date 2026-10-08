@@ -2386,6 +2386,7 @@ app_frame :: proc(a: ^App) -> bool {
 			_app_mark_cursor_dirty(a, old_row, old_col)
 			cur := termgrid.terminal_get_cursor(active_term)
 			_app_mark_cursor_dirty(a, cur.row, cur.col)
+			any_damaged = true
 		}
 	}
 

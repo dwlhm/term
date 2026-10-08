@@ -534,3 +534,122 @@ test_host_split_workspace_roundtrip :: proc(t: ^testing.T) {
 	}
 }
 
+@(test)
+test_host_cursor_movement_produces_snapshot :: proc(t: ^testing.T) {
+	pid := posix.getpid()
+	now := time.to_unix_nanoseconds(time.now())
+	sock_path := fmt.tprintf("/tmp/term_host_test_cursor_%d_%d.sock", pid, now)
+
+	host: sh.Session_Host
+	init_ok := sh.host_init(&host, sock_path)
+	testing.expect(t, init_ok, "host_init must succeed")
+	defer sh.host_destroy(&host)
+
+	client_adapter: ipc.Hybrid_Client_Adapter
+	client_port := ipc.hybrid_client_make_port(&client_adapter)
+	c_err := client_port.connect_endpoint(client_port.user_data, sock_path)
+	testing.expect_value(t, c_err, ipc.Transport_Error.None)
+	defer client_port.close_endpoint(client_port.user_data)
+
+	// Step host to accept connection
+	_ = sh.host_step(&host, 5)
+
+	// Send Create frame with /bin/sleep 30 so no shell prompt interferes with cursor state
+	create_frame := ipc.Frame{
+		header = {
+			major      = ipc.PROTOCOL_MAJOR,
+			minor      = ipc.PROTOCOL_MINOR,
+			kind       = .Create,
+			request_id = 301,
+		},
+		payload = transmute([]u8)string("\x18\x00\x50\x00/bin/sleep 30"),
+	}
+	_, s_err := client_port.send_frame(client_port.user_data, create_frame)
+	testing.expect_value(t, s_err, ipc.Transport_Error.None)
+
+	_ = sh.host_step(&host, 5)
+
+	ack_frame, _, a_stat := client_port.recv_frame(client_port.user_data)
+	testing.expect_value(t, a_stat, ipc.Codec_Status.Ok)
+	testing.expect_value(t, ack_frame.header.kind, ipc.Message_Kind.Ack)
+	testing.expect(t, len(ack_frame.payload) >= 16)
+
+	ws_id := rt.Workspace_ID(endian.unchecked_get_u64le(ack_frame.payload[0:8]))
+	pane_id := rt.Pane_ID(endian.unchecked_get_u64le(ack_frame.payload[8:16]))
+
+	// Read initial full snapshot
+	snap_buf := make([]u8, ipc.MAX_PAYLOAD_BYTES, context.temp_allocator)
+	snap_n := 0
+	read_ok := false
+	for _ in 0..<50 {
+		snap_n, _, read_ok = client_port.read_snapshot(client_port.user_data, snap_buf)
+		if read_ok do break
+		_ = sh.host_step(&host, 5)
+		time.sleep(10 * time.Millisecond)
+	}
+	testing.expect(t, read_ok, "read initial snapshot must succeed")
+
+	client_term := new(termgrid.Terminal)
+	termgrid.terminal_init(client_term, sh.DEFAULT_ROWS, sh.DEFAULT_COLS)
+	defer {
+		termgrid.terminal_destroy(client_term)
+		free(client_term)
+	}
+
+	_, app_init_err := ipc.apply_terminal_snapshot(client_term, snap_buf[:snap_n])
+	testing.expect_value(t, app_init_err, ipc.Snapshot_Error.None)
+
+	// Locate actor on host
+	target_actor: ^rt.Pane_Actor = nil
+	for &ws in host.workspaces {
+		if ws.used && ws.id == ws_id {
+			for a in ws.panes {
+				if a != nil && a.pane_id == pane_id {
+					target_actor = a
+					break
+				}
+			}
+			break
+		}
+	}
+	testing.expect(t, target_actor != nil, "target actor must exist")
+
+	defer {
+		if target_actor != nil && target_actor.pty.pid > 1 {
+			posix.kill(posix.pid_t(target_actor.pty.pid), .SIGKILL)
+			posix.waitpid(posix.pid_t(target_actor.pty.pid), nil, {})
+		}
+	}
+
+	// Drain any remaining snapshot frames
+	for {
+		_, _, ok := client_port.read_snapshot(client_port.user_data, snap_buf)
+		if !ok do break
+	}
+
+	// Ensure actor damage is cleared and cursor is at default
+	termgrid.terminal_clear_damage(&target_actor.terminal)
+
+	// Move cursor purely without cell damage
+	target_actor.terminal.cursor.col = 42
+
+	// Step host - damage check must recognize cursor move and produce a delta snapshot
+	_ = sh.host_step(&host, 5)
+
+	snap_n = 0
+	read_ok = false
+	for _ in 0..<50 {
+		snap_n, _, read_ok = client_port.read_snapshot(client_port.user_data, snap_buf)
+		if read_ok do break
+		_ = sh.host_step(&host, 5)
+		time.sleep(10 * time.Millisecond)
+	}
+	testing.expect(t, read_ok, "pure cursor movement must produce a published snapshot")
+	testing.expect(t, snap_n > 0)
+
+	_, app_err := ipc.apply_terminal_snapshot(client_term, snap_buf[:snap_n])
+	testing.expect_value(t, app_err, ipc.Snapshot_Error.None)
+	testing.expect_value(t, client_term.cursor.col, 42)
+}
+
+

@@ -726,9 +726,9 @@ backend_sync_cursor :: proc(
 	if b == nil {
 		return false, false, false, 0, 0
 	}
-	t := &b.front_terminal if b.thread != nil else &b.terminal
-	view_ptr := &b.front_view if b.thread != nil else &b.view
-	inter_ptr := &b.front_interaction if b.thread != nil else &b.interaction
+	t := &b.terminal
+	view_ptr := &b.view
+	inter_ptr := &b.interaction
 
 	cur_row: int
 	cur_col: int
@@ -799,6 +799,12 @@ backend_get_render_state :: proc(b: ^Backend) -> Render_State {
 	cursor_ptr := &b.front_cursor if b.thread != nil else &b.cursor
 	interaction_ptr := &b.front_interaction if b.thread != nil else &b.interaction
 	focused := b.front_focused if b.thread != nil else b.focused
+
+	if b.thread == nil {
+		cur := termgrid.terminal_get_cursor(term_ptr)
+		render.cursor_overlay_sync(cursor_ptr, cur.row, cur.col, cur.style)
+		_ = render.cursor_overlay_tick(cursor_ptr, now, focused, cur.visible)
+	}
 
 	if term_ptr.synchronized_output {
 		if b.sync_output_start_ns == 0 {
