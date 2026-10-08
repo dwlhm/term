@@ -17,9 +17,9 @@ Term is a keyboard-first, native macOS terminal emulator engineered from first p
    - [Confirmation Dialog on Close](#confirmation-dialog-on-close)
 2. [Session Detachment & Persistence](#session-detachment--persistence)
    - [The Persistence Architecture](#the-persistence-architecture)
-   - [Detaching Tabs (`Alt+Cmd+B`)](#detaching-tabs-altcmdb)
+   - [Detaching Tabs (`Cmd+D` / `Alt+Cmd+B`)](#detaching-tabs-cmdd--altcmdb)
    - [Headless Virtual Grid Drain Loop](#headless-virtual-grid-drain-loop)
-   - [Window Usability Preservation](#window-usability-preservation)
+   - [Last-Tab Detach Window Closure & Background Monitoring (D11)](#last-tab-detach-window-closure--background-monitoring-d11)
 3. [Session Switcher & Quick Palette (`Cmd+O`)](#session-switcher--quick-palette-cmdo)
    - [Invoking the Quick Palette](#invoking-the-quick-palette)
    - [Fuzzy Subsequence Matching](#fuzzy-subsequence-matching)
@@ -117,7 +117,7 @@ Term features an integrated modal confirmation dialog (`Confirm_Dialog_State`) r
 - **Mouse Handling**: Click the **Close** or **Cancel** button directly.
 
 > [!TIP]
-> If you wish to close a tab window while keeping a long-running process (e.g., a local server, compiler, or background watcher) alive without interruption, use **Session Detachment** (`⌥⌘B`) instead of closing the tab!
+> If you wish to dismiss a tab while keeping a long-running process (e.g., a local server, compiler, or background watcher) alive without interruption, use **Session Detachment** (`⌘D` / `⌥⌘B`) instead of closing the tab!
 
 ---
 
@@ -139,7 +139,7 @@ In Term, sessions can transition seamlessly between two operational states:
                     │   (Metal GPU Rendering)   │
                     └─────────────┬─────────────┘
                                   │
-                       ⌥⌘B (Detach)  ⌘O (Attach)
+                 ⌘D / ⌥⌘B (Detach)  ⌘O (Attach)
                                   │
                                   ▼
                     ┌───────────────────────────┐
@@ -148,9 +148,9 @@ In Term, sessions can transition seamlessly between two operational states:
                     └───────────────────────────┘
 ```
 
-### Detaching Tabs (`Alt+Cmd+B`)
+### Detaching Tabs (`Cmd+D` / `Alt+Cmd+B`)
 
-Pressing **`⌥⌘B` (`Alt+Cmd+B`)** performs an instantaneous atomic detachment of the current active tab:
+Pressing **`⌘D` (`Cmd+D`)** (canonical shortcut) or **`⌥⌘B` (`Alt+Cmd+B`)** (safe alias) performs an instantaneous atomic detachment of the current active tab:
 - **No SIGHUP**: The PTY master file descriptor, child process PID, virtual grid, scrollback ring, and escape state machine remain fully alive.
 - **Thread Safety**: Any background PTY reader threads are safely coordinated, preserving byte streams without race conditions.
 - **Preserved State**: Full scrollback history, cursor positions, DEC private modes, and active terminal styles are preserved verbatim in memory.
@@ -162,9 +162,13 @@ When a session is detached, Term starts an autonomous background drain loop (`se
 - **Headless Terminal Updates**: Bytes are parsed by the VT state machine, updating the virtual cell grid and scrollback ring in-memory.
 - **Backpressure Prevention**: Because the background loop drains the PTY continuously, child processes producing heavy output never block or stall on an unread PTY pipe buffer.
 
-### Window Usability Preservation
+### Last-Tab Detach Window Closure & Background Monitoring (D11)
 
-If you detach the **last remaining tab** in the window, Term does not close the window. Instead, it detects that `len(tabs) == 0` and automatically spawns a fresh default shell tab in place. This guarantees that your terminal window remains active, focused, and immediately available for new tasks.
+When the **last remaining tab** in the window is detached:
+- **Window Closure (D11)**: Term immediately sets `should_quit = true` and closes the GUI window without creating an unwanted replacement shell tab.
+- **Host Daemon Survival**: The headless `term-host` daemon process and all detached sessions survive independently in the background.
+- **Menu Bar Indicator (`term-monitor`)**: The companion menu bar monitor displays an active dot indicator at the bottom-right corner of its icon whenever detached background sessions are running.
+- **Re-attachment (`Cmd+O`)**: You can re-attach to any detached session at any time by pressing **`⌘O` (`Cmd+O`)** to open the Session Switcher (or by re-launching Term / selecting a session in `term-monitor`).
 
 ---
 
@@ -193,7 +197,7 @@ As you type into the search bar, Term filters open tabs and detached sessions in
 | **`Up` (`↑`)** | Navigate Up | Moves the selection highlight to the preceding result. |
 | **`Down` (`↓`)** | Navigate Down | Moves the selection highlight to the next result. |
 | **`Enter` (`⏎`)** | Activate / Attach | If selecting an **active tab**, switches focus to it. If selecting a **detached session**, re-attaches it into the GUI tab bar. |
-| **`⌥⌘B` (`Alt+Cmd+B`)** | Detach Session | Immediately detaches the highlighted active tab into the background registry. |
+| **`⌘D` / `⌥⌘B`** | Detach Session | Immediately detaches the highlighted active tab into the background registry (`⌘D` canonical, `⌥⌘B` alias). |
 | **`⌘X` / `^X`** | Terminate Session | Opens confirmation before closing the highlighted tab or terminating a background session. |
 | **`Backspace`** | Delete Character | Deletes the trailing character from the active search query. |
 | **`Escape` (`esc`)** | Close Palette | Dismisses the quick palette and returns keyboard focus to the active terminal. |
@@ -354,13 +358,13 @@ The following table provides the exhaustive mapping of all keyboard shortcuts de
 | Action Enum | macOS Key Combo | Keystroke String | Description |
 |---|---|---|---|
 | `New_Tab` | `⌘T` | `Cmd+T` | Spawns a new shell tab in the current window. |
-| `Close_Tab` | `⌘D` | `Cmd+D` | Closes active tab (prompts if process running). |
+| `Close_Tab` | `⇧⌘W` | `Shift+Cmd+W` | Closes active tab (prompts if process running). |
 | `Close_Others` | `⌥⌘D` | `Option+Cmd+D` | Closes all tabs except the active tab. |
 | `Close_To_Right` | `⌥⇧⌘D` | `Option+Shift+Cmd+D` | Closes all tabs located to the right of active tab. |
 | `Rename_Tab` | `⌘R` | `Cmd+R` | Begins inline tab title editing. |
 | `Next_Tab` | `^⇥` | `Ctrl+Tab` | Cycles focus to the next tab. |
 | `Prev_Tab` | `^⇧⇥` | `Ctrl+Shift+Tab` | Cycles focus to the previous tab. |
-| `Detach_Tab` | `⌥⌘B` | `Alt+Cmd+B` | Detaches active tab into persistent background session. |
+| `Detach_Tab` | `⌘D` | `Cmd+D` | Detaches active tab into persistent background session (alias: `⌥⌘B` / `Alt+Cmd+B`). |
 | `Attach_Session` | `⌘O` | `Cmd+O` | Opens the Quick Palette / Session Switcher. |
 | `Search` | `⌘F` | `Cmd+F` | Opens the in-terminal search overlay. |
 | `Search_Next` | `⏎` | `Enter` | Focuses next search match. |
@@ -400,11 +404,13 @@ These bindings require the exact modifiers and backslash key; pipe is not a spli
 
 ### Background session interaction
 
-Detach (`Option+Command+B`, or tab menu **Run in background**) transfers a single
+Detach (`Cmd+D`, alias `Option+Command+B`, or tab menu **Run in background**) transfers a single
 terminal's PTY, parser, screen, scrollback, displayed title, rename override, and
 working directory to the in-app session registry. Split tabs cannot detach; the
-switcher explains the rejection. Detaching the last tab opens a replacement shell.
-Processes continue and output is parsed while the application remains running.
+switcher explains the rejection. Detaching the last tab closes the GUI window (D11) while
+persistent sessions and the `term-host` daemon remain running. The `term-monitor` menu bar
+icon displays a dot indicator at its bottom-right corner while background sessions are active.
+Processes continue and output is parsed in the background.
 Background sessions stop when the application exits; this is not restart persistence.
 
 `Command+O`, the tab menu **Sessions**, or the background count badge opens the

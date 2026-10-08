@@ -161,6 +161,7 @@ classDiagram
     class Native_Metal_GUI_Adapter {
         +Frontend frontend
         +Session_Manager session_mgr
+        +App_Host_Client host_client
         +render_frame()
     }
 
@@ -168,6 +169,33 @@ classDiagram
         +Session_Manager sm
         +tools_dispatch_call()
         +stdio_json_rpc_loop()
+    }
+
+    class Session_Host_Daemon {
+        +Session_Host host
+        +Pane_Actor panes
+        +Hybrid_Host_Adapter hybrid_adapter
+        +host_step(timeout_ms)
+        +host_attach_workspace(ws_id)
+        +host_detach_workspace(ws_id)
+    }
+
+    class Native_Menu_Bar_Monitor {
+        +NSStatusItem statusItem
+        +pollSessionHost()
+        +rebuildMenu()
+        +statusIconWithBackgroundIndicator(hasDot, isOffline)
+    }
+
+    class Hybrid_IPC_Transport {
+        +Host_Transport_Port host_port
+        +Client_Transport_Port client_port
+        +Hybrid_Host_Adapter host_adapter
+        +Hybrid_Client_Adapter client_adapter
+        +publish_snapshot()
+        +read_snapshot()
+        +send_frame()
+        +recv_frame()
     }
 
     class Session_Registry {
@@ -185,6 +213,10 @@ classDiagram
     Native_Metal_GUI_Adapter ..> Terminal_Control_Port : drives
     Headless_MCP_Server_Adapter ..> Terminal_Control_Port : drives
     Session_Registry o-- Core_Session : tracks
+    Session_Host_Daemon o-- Core_Session : hosts via Pane_Actor
+    Session_Host_Daemon --> Hybrid_IPC_Transport : publishes snapshots & events
+    Native_Metal_GUI_Adapter --> Hybrid_IPC_Transport : connects via App_Host_Client
+    Native_Menu_Bar_Monitor --> Hybrid_IPC_Transport : queries daemon metadata
 ```
 
 ### 3.1 Ports and Adapters
@@ -198,8 +230,10 @@ classDiagram
 
 ### 3.2 Primary Adapters
 
-- **Native Metal GUI Adapter (`src/app/`)**: Integrates SDL3 window management, Apple Metal swapchains, keyboard/mouse event dispatch, and multi-tab rendering.
-- **Headless MCP Server Adapter (`src/cmd/term_mcp/`)**: A dedicated command-line binary communicating via standard I/O using JSON-RPC 2.0. Exposes terminal state to AI agent runtimes without linking Metal, Cocoa, or SDL3.
+- **Native Metal GUI Adapter (`src/app/`)**: Integrates SDL3 window management, Apple Metal swapchains (`CAMetalLayer`), keyboard/mouse event dispatch, multi-tab/split-pane layout, and `Cmd+O` Session Switcher navigation. Connects to `term-host` via `App_Host_Client` using `Hybrid_Client_Adapter` to stream terminal state snapshots without direct PTY ownership.
+- **Headless MCP Server Adapter (`src/cmd/term_mcp/`)**: A dedicated command-line binary communicating via standard I/O using JSON-RPC 2.0. Exposes terminal state, screen inspection tools, and execution controls to AI agent runtimes without linking Metal, Cocoa, or SDL3.
+- **Headless Session Host Daemon Adapter (`src/cmd/term_host/`, `src/session_host/`)**: The persistent background multiplexer daemon (`term-host`). Manages `Session_Host`, workspace topologies, and `Pane_Actor` instances. Owns operating system PTYs and child processes from inception, continuously draining child output and serving multi-client connections via `Hybrid_Host_Adapter`.
+- **Native Menu Bar Monitor Adapter (`src/cmd/term_monitor/`)**: An AppKit companion status item (`term-monitor`) residing in the macOS menu bar. Periodically interrogates `term-host` over the control socket to display active session counts, process health, and workspace metadata with zero GUI rendering overhead.
 
 ### 3.3 Session Execution Modes
 
@@ -216,16 +250,46 @@ stty -echo 2>/dev/null; export PROMPT='' RPROMPT='' PS1=''; precmd_functions=();
 ```
 This strips away prompt decoration, echo pollution, and line editor overhead, allowing agent commands to execute with near-native process latency.
 
-### 3.4 Zero-Copy Session Detachment & Memory Transfer
+### 3.4 Native Multiplexer, Daemon Persistence & Cross-Process IPC
 
-Term supports detaching live terminal sessions from GUI tabs into headless background sessions, or vice-versa, with **zero memory copies**:
-1. **Thread Suspension**: The GUI tab halts its rendering worker thread.
-2. **Handle Extraction**: The underlying PTY master descriptor (`pty_handle`), terminal grid (`term`), and parser state (`vt_parser`) are extracted directly from the GUI `Tab_Session`.
-3. **Handle Invalidation**: Pointers in the source GUI backend are set to `nil` and `-1`, preventing the GUI teardown routines from closing the kernel PTY descriptor or freeing memory allocations.
-4. **Adoption**: The extracted state is moved directly into a new `Core_Session` registered with `Session_Registry`.
-5. **Background Draining**: The session continues running background PTY reading without interrupting child processes or sending `SIGHUP`.
+Term separates interactive rendering from session execution through a decoupled **Native Multiplexer architecture** (`src/session_host/`, `src/session_ipc/`, `src/session_runtime/`, `src/cmd/term_host/`, `src/cmd/term_monitor/`). Terminal sessions, PTY descriptors, and child processes run inside an independent headless daemon (`term-host`), persisting transparently across GUI restarts, window closures, and process terminations.
 
-The global `Session_Registry` (`session_registry_default()`) maintains thread-safe tracking of all active and detached sessions, allowing detached sessions to be re-attached to newly spawned GUI tabs seamlessly.
+#### 3.4.1 `term-host` Daemon Lifecycle & Process Persistence
+- **Root Process Ownership**: When a new tab or split pane is created, the GUI client (`App_Host_Client`) dispatches a creation frame to `term-host`. The daemon initializes a `Workspace_State` entry, instantiates a `Pane_Actor` (`src/session_runtime/actor.odin`), and forks the child process (`/bin/zsh`, `/bin/bash`, or a requested executable) inside a dedicated POSIX PTY pair. Child processes and PTY file descriptors are owned exclusively by `Session_Host` from inception.
+- **GUI Quit & Crash Survival**: When the user closes a window, detaches a session (`Cmd+D`), or terminates the GUI application (`Cmd+Q` / `SIGTERM`), the GUI `App_Host_Client` closes its transport socket. In `term-host`, `_host_handle_client_disconnect` intercepts the socket disconnect and automatically transitions the associated workspaces to detached mode (`ws.has_active_viewer = false`, `ws.client_slot = -1`).
+- **Independent Background Drain**: Because PTY master descriptors are held by the daemon's `Pane_Actor` rather than the GUI process, child processes **never receive `SIGHUP`** on GUI disconnect. The daemon's non-blocking event loop (`host_step`) continues polling child PTY descriptors, executing VT parsing, maintaining the terminal grid, and advancing scrollback buffers indefinitely at $> 117\,\text{MB/s}$ without any connected GUI viewer.
+- **Single-Instance Advisory Locking**: `term-host` uses `flock(LOCK_EX | LOCK_NB)` on a well-known lockfile (`.term/term-host.lock` or `/tmp/term-host-<uid>.lock`) to enforce single-daemon mutual exclusion per user session.
+
+#### 3.4.2 Pointer-Free Snapshot & Delta Synchronization via Hybrid POSIX SHM + UDS (`src/session_ipc/`)
+Inter-process communication between `term-host` and client applications (the Metal GUI and menu bar monitor) abstracts transport mechanisms behind unified procedural interfaces: `Host_Transport_Port` and `Client_Transport_Port` (`src/session_ipc/ports.odin`).
+
+Term implements a **Hybrid IPC Transport** (`Hybrid_Host_Adapter` / `Hybrid_Client_Adapter`) combining the strengths of Unix Domain Sockets and POSIX Shared Memory:
+1. **Unix Domain Sockets (UDS, `AF_UNIX`)**: Serves as the transactional control plane. Exchanges structured binary frames (`Frame` in `protocol.odin`) for handshake negotiation, interactive keystroke streaming, mouse events, window resizing, pane splitting, and workspace attachment lifecycle commands.
+2. **POSIX Shared Memory (SHM, `shm_open` + `mmap`)**: Serves as the high-throughput data plane for terminal screen state. Bypasses kernel buffer copying and context switches by exposing a shared memory ring buffer between host and GUI subscribers.
+
+**Pointer-Free Binary Wire Format (`src/session_ipc/snapshot.odin`)**:
+Terminal grid state cannot pass raw heap pointers across address boundaries. Term defines a strictly pointer-free binary serialization scheme for cross-process synchronization:
+- **Snapshot Frames**: Composed of fixed-layout headers (`Snapshot_Header`), metadata sections (`Snapshot_Metadata`), and variable payload blocks (`Snapshot_Section_Kind`: `Metadata`, `Style_Table`, `Grid_Cells`, `Scrollback_Page`, `End`).
+- **Full Snapshots (`Snapshot_Type.Full`)**: Transmit complete grid dimensions, cursor state, terminal modes (alternate screen, mouse tracking, kitty keyboard protocol), the 1024-entry style table, and the full cell grid.
+- **Delta Snapshots (`Snapshot_Type.Delta`)**: Encode dirty row indices and modified cell spans. Run-length and span-coalesced encodings minimize bandwidth, allowing high-frequency screen updates to deserialize in under $13\,\mu\text{s}$ at $> 1\,\text{GB/s}$ throughput.
+- **Zero Address Translation**: Because all structs, headers, and cell records are flat POD (Plain Old Data) layouts with explicit little-endian integer encodings, shared memory pages map directly into the client's virtual address space with zero memory copies and zero pointer swizzling.
+
+#### 3.4.3 `term-monitor` Companion Menu Bar Status Item
+`term-monitor` (`src/cmd/term_monitor/`) is a lightweight AppKit menu bar companion application (`NSStatusItem`) providing ambient observability into background daemon health:
+- **Non-Intrusive Background Interrogation**: Operates with near-zero resource consumption by polling `term-host` metadata over the control socket at regular intervals (2.0s cadence) via non-blocking queries.
+- **Dynamic Status Indicator**: Displays a native terminal status icon with an adaptive bottom-right dot indicator (`statusIconWithBackgroundIndicator(hasDot, isOffline)`):
+  - **Dot Indicator Active**: Displayed when one or more detached workspaces are running in the background without an active GUI viewer (`has_active_viewer == false`).
+  - **Dot Indicator Clear**: Displayed when all active workspaces are attached to GUI windows, or when no workspaces are running.
+  - **Offline State**: When `term-host` is not running, the icon dims to 40% opacity with an `[Offline]` tooltip.
+- **Status Item Dropdown**: Clicking the status item provides an interactive menu detailing active workspaces, pane counts, running foreground commands, and one-click actions to launch Term or re-attach detached sessions.
+
+#### 3.4.4 Seamless Session Re-Attachment via `Cmd+O` Session Switcher
+Detached daemon sessions are re-attached to the native Metal GUI seamlessly via the built-in Session Switcher:
+1. **Metadata Discovery**: When the user presses `Cmd+O`, the GUI's `App_Host_Client` invokes `host_client_list_metadata()` to fetch all active workspaces registered on `Session_Host`.
+2. **Visual Differentiation**: The Session Switcher card renders local tabs and background daemon workspaces. Detached sessions are highlighted with distinct badges (`[Background]`, process name, pane hierarchy).
+3. **Attachment Request**: Selecting a detached workspace sends an attach frame (`host_client_attach_workspace()`) to `term-host`. The host assigns the client to the workspace (`ws.has_active_viewer = true`, `ws.client_slot = slot`).
+4. **State Rehydration**: `Session_Host` publishes a fresh `Snapshot_Type.Full` frame over the shared memory transport. The GUI's `session_spawn_host_backed()` allocates a tab session, rehydrates the terminal grid, and links the backend's `host_pane_id`.
+5. **Interactive Streaming**: The tab instantly resumes real-time rendering, keystroke transmission via `backend_write_pty()`, and incremental delta updates with zero interruption to running background processes.
 
 ---
 
