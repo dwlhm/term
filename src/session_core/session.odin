@@ -59,6 +59,8 @@ Core_Session :: struct {
 	thread:                  ^thread.Thread,
 	is_running:              bool,
 	is_detached:             bool,
+	is_host_backed:          bool,
+	host_ws_id:              u64,
 	lock:                    sync.Mutex,
 	last_exit_code:          int,
 	command_finished_signal: sync.Cond,
@@ -128,6 +130,7 @@ session_create :: proc(id: string, cfg: Session_Config) -> (^Core_Session, bool)
 
 	termgrid.terminal_init(&s.term, r, c_cols)
 	parser.parser_init(&s.vt_parser)
+	session_bind_parser_callbacks(s)
 	s.vt_parser.graphics_cb = _session_graphics_cb
 	s.vt_parser.graphics_user_data = s
 
@@ -194,12 +197,9 @@ _session_bootstrap_headless :: proc(s: ^Core_Session, prog: string) -> bool {
 	}
 }
 
-@(private="file", thread_local)
-_session_response_owner: ^Core_Session
-
 @(private="file")
-_session_response_cb :: proc(data: []u8) {
-	s := _session_response_owner
+_session_response_cb :: proc(user_data: rawptr, data: []u8) {
+	s := (^Core_Session)(user_data)
 	if s != nil && s.pty_handle.master >= 0 && s.pty_handle.state == .Running {
 		_ = pty.pty_write(&s.pty_handle, data)
 	}
@@ -223,19 +223,27 @@ _session_graphics_cb :: proc(user_data: rawptr, t: ^termgrid.Terminal, control, 
 	_ = termgrid.terminal_graphics_feed(t, control, payload, sink)
 }
 
+// Rebind immediately on ownership transfer, before any former owner is freed.
+session_bind_parser_callbacks :: proc(s: ^Core_Session) {
+	if s == nil do return
+	s.vt_parser.response_cb = nil
+	s.vt_parser.response_context_cb = _session_response_cb
+	s.vt_parser.response_user_data = s
+	s.vt_parser.graphics_cb = _session_graphics_cb
+	s.vt_parser.graphics_user_data = s
+	// Background owners have no system clipboard delivery surface.
+	s.vt_parser.clipboard_cb = nil
+	s.vt_parser.clipboard_context_cb = nil
+	s.vt_parser.clipboard_user_data = nil
+	s.vt_parser.clipboard_read_cb = nil
+	s.vt_parser.clipboard_read_user_data = nil
+}
+
 // session_start_drain_loop launches the background thread reading PTY output.
 session_start_drain_loop :: proc(s: ^Core_Session) -> bool {
 	if s == nil do return false
 	if s.thread != nil do return sync.atomic_load(&s.is_running)
-	s.vt_parser.response_cb = _session_response_cb
-	s.vt_parser.graphics_cb = _session_graphics_cb
-	s.vt_parser.graphics_user_data = s
-	if s.is_detached {
-		// A transferred parser must never call the former GUI backend or clipboard.
-		s.vt_parser.clipboard_cb = nil
-		s.vt_parser.clipboard_read_cb = nil
-		s.vt_parser.clipboard_read_user_data = nil
-	}
+	session_bind_parser_callbacks(s)
 	s.thread = thread.create(session_drain_worker)
 	if s.thread == nil {
 		sync.atomic_store(&s.is_running, false)
@@ -253,8 +261,6 @@ session_drain_worker :: proc(t: ^thread.Thread) {
 	if s == nil {
 		return
 	}
-	_session_response_owner = s
-	defer _session_response_owner = nil
 
 	drain_buf: [64 * 1024]u8
 
@@ -453,7 +459,7 @@ session_stop :: proc(s: ^Core_Session) {
 	}
 
 	// Final reap child if still alive
-	if s.pty_handle.pid > 1 {
+	if !s.is_host_backed && s.pty_handle.pid > 1 {
 		posix.kill(posix.pid_t(-s.pty_handle.pid), .SIGKILL)
 		status: c.int
 		posix.waitpid(posix.pid_t(s.pty_handle.pid), &status, posix.Wait_Flags{})
