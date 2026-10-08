@@ -57,7 +57,7 @@ test_devtools_toggle_does_not_shadow_other_shortcuts :: proc(t: ^testing.T) {
 	match := ui.ui_shortcut_matches
 
 	testing.expect(t, !match(.Close_Tab, devtools_shortcut_ev('d', true, false, false, false)))
-	testing.expect(t, !match(.New_Tab, devtools_shortcut_ev('t', true, false, false, false)))
+	testing.expect(t, match(.New_Tab, devtools_shortcut_ev('t', true, false, false, false)))
 	testing.expect(t, !match(.Rename_Tab, devtools_shortcut_ev('r', true, false, false, false)))
 
 	testing.expect(t, match(.Pane_Equalize, devtools_shortcut_ev('=', true, true, false, false)))

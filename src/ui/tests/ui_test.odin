@@ -736,10 +736,10 @@ test_tab_overflow_dropdown_pointer_and_autoclose :: proc(t: ^testing.T) {
 @test
 test_shortcut_registry_labels :: proc(t: ^testing.T) {
 	testing.expect_value(t, ui.ui_shortcut_label(.New_Tab), "\u2318T")
-	testing.expect_value(t, ui.ui_shortcut_label(.Close_Tab), "\u2318D")
+	testing.expect_value(t, ui.ui_shortcut_label(.Close_Tab), "\u21E7\u2318W")
 	testing.expect_value(t, ui.ui_shortcut_label(.Close_Others), "\u2325\u2318D")
 	testing.expect_value(t, ui.ui_shortcut_label(.Close_To_Right), "\u2325\u21E7\u2318D")
-	testing.expect_value(t, ui.ui_shortcut_label(.Detach_Tab), "\u2325\u2318B")
+	testing.expect_value(t, ui.ui_shortcut_label(.Detach_Tab), "\u2318D")
 	testing.expect_value(t, ui.ui_shortcut_label(.Overflow), "\u21E7\u2318\\")
 	testing.expect_value(t, ui.ui_shortcut_label(.Window_Zoom), "\u2303\u2318Z")
 	testing.expect_value(t, ui.ui_shortcut_label(.Cancel), "esc")

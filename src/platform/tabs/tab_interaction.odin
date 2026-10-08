@@ -354,12 +354,12 @@ tab_menu_item_label :: proc(copy: ^i18n.Strings, item: Tab_Menu_Item) -> string 
 // tab_menu_item_shortcut returns the keybinding hint for an item.
 tab_menu_item_shortcut :: proc(item: Tab_Menu_Item) -> string {
 	switch item {
-	case .Close:          return "\u2318D"
+	case .Close:          return "\u21E7\u2318W"
 	case .New_Tab:        return "\u2318T"
 	case .Close_Others:   return "\u2325\u2318D"
 	case .Close_To_Right: return "\u2325\u21E7\u2318D"
 	case .Rename:         return "\u2318R"
-	case .Detach:         return "\u2325\u2318B"
+	case .Detach:         return "\u2318D"
 	case .Sessions:       return "\u2318O"
 	}
 	return ""

@@ -8,6 +8,7 @@ import "../platform/input"
 Shortcut_Action :: enum u8 {
 	New_Tab,
 	Close_Tab,
+	Close_Pane,
 	Close_Others,
 	Close_To_Right,
 	Rename_Tab,
@@ -28,6 +29,10 @@ Shortcut_Action :: enum u8 {
 	Attach_Session,
 	Split_Vertical,
 	Split_Horizontal,
+	Pane_Focus_Left,
+	Pane_Focus_Right,
+	Pane_Focus_Up,
+	Pane_Focus_Down,
 	Pane_Resize_Left,
 	Pane_Resize_Right,
 	Pane_Resize_Up,
@@ -44,7 +49,8 @@ Shortcut_Action :: enum u8 {
 ui_shortcut_label :: proc(a: Shortcut_Action) -> string {
 	switch a {
 	case .New_Tab:           return "\u2318T"
-	case .Close_Tab:         return "\u2318D"
+	case .Close_Tab:         return "\u21E7\u2318W"
+	case .Close_Pane:        return "\u2318W"
 	case .Close_Others:      return "\u2325\u2318D"
 	case .Close_To_Right:    return "\u2325\u21E7\u2318D"
 	case .Rename_Tab:        return "\u2318R"
@@ -61,10 +67,14 @@ ui_shortcut_label :: proc(a: Shortcut_Action) -> string {
 	case .Search_Prev:       return "\u21E7\u21B5"
 	case .Search_Next:       return "\u21B5"
 	case .Search_Close:      return "esc"
-	case .Detach_Tab:        return "\u2325\u2318B"
+	case .Detach_Tab:        return "\u2318D"
 	case .Attach_Session:    return "\u2318O"
 	case .Split_Vertical:    return "\u2318\\"
 	case .Split_Horizontal:  return "\u2325\u2318\\"
+	case .Pane_Focus_Left:   return "\u2325\u2318\u2190"
+	case .Pane_Focus_Right:  return "\u2325\u2318\u2192"
+	case .Pane_Focus_Up:     return "\u2325\u2318\u2191"
+	case .Pane_Focus_Down:   return "\u2325\u2318\u2193"
 	case .Pane_Resize_Left:  return "\u2325\u21E7\u2318\u2190"
 	case .Pane_Resize_Right: return "\u2325\u21E7\u2318\u2192"
 	case .Pane_Resize_Up:    return "\u2325\u21E7\u2318\u2191"
@@ -133,6 +143,19 @@ ui_shortcut_matches :: proc(action: Shortcut_Action, ev: input.Input_Event) -> b
 		shift = true
 	case .Toggle_Devtools: key = ev.rune == 'i'
 		alt = true
+	case .Detach_Tab: key = ev.rune == 'd' || ev.rune == 'D'
+	case .Close_Pane: key = ev.rune == 'w' || ev.rune == 'W'
+	case .Close_Tab: key = ev.rune == 'w' || ev.rune == 'W'
+		shift = true
+	case .Pane_Focus_Left: key = ev.kind == .Arrow_Left
+		alt = true
+	case .Pane_Focus_Right: key = ev.kind == .Arrow_Right
+		alt = true
+	case .Pane_Focus_Up: key = ev.kind == .Arrow_Up
+		alt = true
+	case .Pane_Focus_Down: key = ev.kind == .Arrow_Down
+		alt = true
+	case .New_Tab: key = ev.rune == 't' || ev.rune == 'T'
 	case: return false
 	}
 	return key && ev.gui == gui && ev.alt == alt && ev.shift == shift && ev.ctrl == ctrl
