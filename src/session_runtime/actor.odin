@@ -177,12 +177,26 @@ actor_spawn :: proc(
 	return ok
 }
 
+// actor_start initializes a Pane_Actor and spawns the target shell or command.
+//
+// Parameters:
+// - `a`: Pointer to the Pane_Actor to initialize and start.
+// - `rows`, `cols`: Grid dimensions for the terminal and pseudo-terminal window size.
+// - `prog`: Path to the shell binary or command string (may include space-separated arguments).
+// - `argv`: Explicit argument slice. If empty, arguments are resolved automatically via `pty.shell_resolve_argv`.
+// - `cwd`: Initial working directory for the spawned process.
+// - `mode`: Launch mode controlling default shell argument resolution:
+//   - `.Interactive`: Default for user terminal sessions. Passes login shell flags (`-l`, `--login`)
+//     and Unicode flags (e.g. `-o COMBINING_CHARS` for zsh) so user profiles and full `$PATH` are loaded.
+//   - `.Headless`: For background commands, benchmarking, or automated tests. Passes flags that suppress
+//     user config files (`--no-rcs`, `--norc`, `--no-config`) to ensure clean, deterministic execution.
 actor_start :: proc(
 	a: ^Pane_Actor,
 	rows, cols: int,
 	prog: string,
 	argv: []string = nil,
 	cwd: string = "",
+	mode: pty.Shell_Launch_Mode = .Interactive,
 ) -> bool {
 	if a == nil do return false
 	allocator := a.allocator if a.allocator.procedure != nil else context.allocator
@@ -208,11 +222,7 @@ actor_start :: proc(
 		}
 	}
 	if len(effective_argv) == 0 {
-		if strings.contains(effective_prog, "zsh") {
-			effective_argv = []string{"--no-rcs"}
-		} else if strings.contains(effective_prog, "bash") {
-			effective_argv = []string{"--norc", "--noprofile"}
-		}
+		effective_argv = pty.shell_resolve_argv(effective_prog, mode)
 	}
 	return actor_spawn(a, effective_prog, effective_argv, cwd)
 }

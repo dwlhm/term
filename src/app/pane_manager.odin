@@ -181,10 +181,16 @@ _app_split_pane :: proc(a: ^App, direction: Split_Direction) -> bool {
 
 _app_pane_focus_changed :: proc(a: ^App, previous: ^Backend) {
 	if previous != nil do _ = _app_dispatch_backend(previous, UI_Event{type = .Focus, focused = false})
+	active_b := app_active_backend(a)
 	if a.window.handle != nil {
 		_app_sync_focus(a)
 	} else {
-		_ = _app_dispatch_backend(app_active_backend(a), UI_Event{type = .Focus, focused = true})
+		_ = _app_dispatch_backend(active_b, UI_Event{type = .Focus, focused = true})
+	}
+	if active_b != nil && active_b.host_client != nil && active_b.host_pane_id != 0 {
+		if active_b.terminal.focus_reporting {
+			_ = host_client_send_input(active_b.host_client, active_b.host_pane_id, []u8{0x1B, '[', 'I'})
+		}
 	}
 	_app_resync_tab_modals(a)
 	_app_sync_search_bar(a, true)

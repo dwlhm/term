@@ -263,11 +263,9 @@ host_split_pane :: proc(
 		} else {
 			effective_prog = "/bin/sh"
 		}
-		if strings.contains(effective_prog, "zsh") {
-			argv = []string{"--no-rcs"}
-		} else if strings.contains(effective_prog, "bash") {
-			argv = []string{"--norc", "--noprofile"}
-		}
+	}
+	if len(argv) == 0 {
+		argv = pty.shell_resolve_argv(effective_prog, .Interactive)
 	}
 
 	if !rt.actor_spawn(actor, effective_prog, argv, ws.cwd) {
@@ -329,7 +327,7 @@ host_split_workspace :: proc(
 	actor.liveness = .VerifiedLive
 
 	effective_cwd := cwd if len(cwd) > 0 else h.workspaces[ws_idx].cwd
-	spawn_ok := rt.actor_start(actor, rows, cols, shell_prog, nil, effective_cwd)
+	spawn_ok := rt.actor_start(actor, rows, cols, shell_prog, nil, effective_cwd, .Interactive)
 	if !spawn_ok {
 		rt.actor_destroy(actor)
 		free(actor, h.allocator)
@@ -881,6 +879,18 @@ _host_handle_client_disconnect :: proc(h: ^Session_Host, slot: int) {
 	}
 }
 
+@(private="file")
+_actor_has_pending_damage :: proc(a: ^rt.Pane_Actor) -> bool {
+	if a == nil do return false
+	for r in 0 ..< a.terminal.damage.row_count {
+		if r < len(a.terminal.damage.dirty_rows) {
+			dr := a.terminal.damage.dirty_rows[r]
+			if dr.full || dr.span_count > 0 do return true
+		}
+	}
+	return len(a.terminal.damage.scroll_ops) > 0
+}
+
 host_step :: proc(h: ^Session_Host, timeout_ms: int = 10) -> bool {
 	if h == nil || !h.running do return false
 
@@ -953,69 +963,35 @@ host_step :: proc(h: ^Session_Host, timeout_ms: int = 10) -> bool {
 			ws := &h.workspaces[ws_idx]
 			if !ws.has_active_viewer || ws.client_slot != slot do continue
 
-			target_pane := sub.pane_id
-			if target_pane == 0 do target_pane = ws.topology.focused
-
-			var_actor: ^rt.Pane_Actor = nil
-			for a in ws.panes {
-				if a != nil && a.pane_id == target_pane {
-					var_actor = a
-					break
+			for var_actor in ws.panes {
+				if var_actor == nil do continue
+				has_damage := _actor_has_pending_damage(var_actor)
+				if !sub.needs_full_snapshot && !has_damage do continue
+				snap_type: ipc.Snapshot_Type = .Full if sub.needs_full_snapshot else .Delta
+				ws.snapshot_rev += 1
+				hdr := ipc.Snapshot_Header{
+					workspace_id = u64(ws.id),
+					pane_id      = u64(var_actor.pane_id),
+					snapshot_rev = ws.snapshot_rev,
+					topology_rev = u64(ws.topology.revision),
+					kind         = snap_type,
 				}
-			}
-			if var_actor == nil {
-				for a in ws.panes {
-					if a != nil {
-						var_actor = a
-						break
+				written, enc_err := ipc.encode_terminal_snapshot(h.snap_buf, &var_actor.terminal, hdr)
+				if enc_err == .None && written > 0 {
+					_, send_err := h.transport.publish_snapshot(
+						h.transport.user_data,
+						slot,
+						u64(var_actor.pane_id),
+						ws.snapshot_rev,
+						h.snap_buf[:written],
+					)
+					if send_err == .None {
+						termgrid.terminal_clear_damage(&var_actor.terminal)
 					}
 				}
 			}
-			if var_actor == nil do continue
-
-			has_damage := false
-			for r in 0..<var_actor.terminal.grid.row_count {
-				if r < len(var_actor.terminal.damage.dirty_rows) {
-					dr := var_actor.terminal.damage.dirty_rows[r]
-					if dr.full || dr.span_count > 0 {
-						has_damage = true
-						break
-					}
-				}
-			}
-			if len(var_actor.terminal.damage.scroll_ops) > 0 {
-				has_damage = true
-			}
-
-			if !sub.needs_full_snapshot && !has_damage do continue
-
-			snap_type: ipc.Snapshot_Type = .Full if sub.needs_full_snapshot else .Delta
-			ws.snapshot_rev += 1
-			hdr := ipc.Snapshot_Header{
-				workspace_id = u64(ws.id),
-				pane_id      = u64(var_actor.pane_id),
-				snapshot_rev = ws.snapshot_rev,
-				topology_rev = u64(ws.topology.revision),
-				kind         = snap_type,
-			}
-
-			written, enc_err := ipc.encode_terminal_snapshot(h.snap_buf, &var_actor.terminal, hdr)
-			if enc_err == .None && written > 0 {
-				_, send_err := h.transport.publish_snapshot(
-					h.transport.user_data,
-					slot,
-					u64(var_actor.pane_id),
-					ws.snapshot_rev,
-					h.snap_buf[:written],
-				)
-				if send_err == .None {
-					sub.needs_full_snapshot = false
-					sub.last_snapshot_rev = ws.snapshot_rev
-					termgrid.terminal_clear_damage(&var_actor.terminal)
-				}
-			} else if snap_type == .Delta {
-				sub.needs_full_snapshot = true
-			}
+			sub.needs_full_snapshot = false
+			sub.last_snapshot_rev = ws.snapshot_rev
 		}
 	}
 

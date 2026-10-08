@@ -1,6 +1,7 @@
 package main
 
 import "base:runtime"
+import "core:encoding/endian"
 import "core:fmt"
 import "core:sync"
 import posix "core:sys/posix"
@@ -887,6 +888,46 @@ session_switch_tab :: proc(sm: ^Session_Manager, idx: int) -> bool {
 	return true
 }
 
+// _session_poll_host_snapshots drains pending terminal snapshots from the host IPC transport
+// for a host-backed tab session, applying them to the appropriate pane backend's terminal.
+// Returns true if any snapshot was successfully applied and caused damage.
+@(private="file")
+_session_poll_host_snapshots :: proc(s: ^Tab_Session) -> (damaged: bool) {
+	if s == nil || !s.is_host_backed || s.backend.host_client == nil || s.backend.host_client.transport.read_snapshot == nil {
+		return false
+	}
+	buf := s.backend.drain_buf
+	if buf == nil || len(buf) < ipc.MAX_PAYLOAD_BYTES {
+		buf = make([]u8, ipc.MAX_PAYLOAD_BYTES, context.temp_allocator)
+	}
+	leaves: [MAX_PANE_NODES]^Pane_Node
+	n_leaves := tab_leaf_panes(s, leaves[:])
+	for {
+		n_read, _, ok := s.backend.host_client.transport.read_snapshot(s.backend.host_client.transport.user_data, buf)
+		if !ok || n_read < ipc.SNAPSHOT_HEADER_BYTES do break
+		snap_ws_id := endian.unchecked_get_u64le(buf[0:8])
+		snap_pane_id := endian.unchecked_get_u64le(buf[8:16])
+		if snap_ws_id != s.host_ws_id do continue
+
+		target_b: ^Backend = nil
+		for leaf in leaves[:n_leaves] {
+			if leaf != nil && leaf.backend != nil && leaf.backend.host_pane_id == snap_pane_id {
+				target_b = leaf.backend
+				break
+			}
+		}
+		if target_b == nil do target_b = &s.backend
+
+		_, snap_err := ipc.apply_terminal_snapshot(&target_b.terminal, buf[:n_read])
+		if snap_err == .None {
+			damaged = true
+			termgrid.damage_mark_all(&target_b.terminal.damage, nil)
+			termgrid.terminal_copy(&target_b.front_terminal, &target_b.terminal)
+		}
+	}
+	return damaged
+}
+
 // session_poll_all performs fair-scheduled drains across tabs and reaps processes without blocking.
 session_poll_all :: proc(sm: ^Session_Manager, max_chunk_budget: int = 65536) -> (any_damaged: bool) {
 	if sm == nil || len(sm.tabs) == 0 do return false
@@ -895,15 +936,8 @@ session_poll_all :: proc(sm: ^Session_Manager, max_chunk_budget: int = 65536) ->
 	for idx < len(sm.tabs) {
 		s := &sm.tabs[idx]
 		if s.is_host_backed && s.backend.host_client != nil && idx == sm.active_idx {
-			buf := s.backend.drain_buf
-			if buf == nil || len(buf) < ipc.MAX_PAYLOAD_BYTES {
-				buf = make([]u8, ipc.MAX_PAYLOAD_BYTES, context.temp_allocator)
-			}
-			updated, n := host_client_poll_snapshot(s.backend.host_client, &s.backend.terminal, buf, s.host_ws_id)
-			if updated && n > 0 {
+			if _session_poll_host_snapshots(s) {
 				any_damaged = true
-				termgrid.damage_mark_all(&s.backend.terminal.damage, nil)
-				termgrid.terminal_copy(&s.backend.front_terminal, &s.backend.terminal)
 			}
 		}
 		switch s.status {

@@ -305,15 +305,9 @@ _resolve_shell :: proc() -> (shell: string, allocated: bool) {
 	return shell_cand, cand_alloc
 }
 
-_SHELL_ARGV_ZSH := []string{"-l", "-o", "COMBINING_CHARS"}
-_SHELL_ARGV_DEFAULT := []string{"-l"}
-
 // _resolve_shell_argv returns the startup arguments for the spawned shell.
 _resolve_shell_argv :: proc(shell: string) -> []string {
-	if strings.has_suffix(shell, "zsh") {
-		return _SHELL_ARGV_ZSH
-	}
-	return _SHELL_ARGV_DEFAULT
+	return pty.shell_resolve_argv(shell, .Interactive)
 }
 
 // backend_init initializes terminal, parser, PTY, and style LUT.
