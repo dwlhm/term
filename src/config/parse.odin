@@ -29,6 +29,114 @@ _config_parse_error_handler :: proc(pos: odin_tok.Pos, format: string, args: ..a
 	}
 }
 
+// extract_package_declaration scans the start of source (ignoring whitespace and comments)
+// for a package declaration `package <name>`. If found, returns the package name, the source
+// with the package line replaced with an empty line to preserve 1:1 line numbering, and true.
+extract_package_declaration :: proc(source: string, allocator := context.temp_allocator) -> (pkg_name: string, transformed_source: string, found: bool) {
+	n := len(source)
+	i := 0
+
+	for i < n {
+		ch := source[i]
+		if ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' {
+			i += 1
+			continue
+		}
+
+		// Line comment
+		if ch == '/' && i + 1 < n && source[i+1] == '/' {
+			i += 2
+			for i < n && source[i] != '\n' {
+				i += 1
+			}
+			continue
+		}
+
+		// Block comment (supports nested block comments)
+		if ch == '/' && i + 1 < n && source[i+1] == '*' {
+			depth := 1
+			i += 2
+			for depth > 0 && i < n {
+				if i + 1 < n && source[i] == '/' && source[i+1] == '*' {
+					depth += 1
+					i += 2
+				} else if i + 1 < n && source[i] == '*' && source[i+1] == '/' {
+					depth -= 1
+					i += 2
+				} else {
+					i += 1
+				}
+			}
+			continue
+		}
+
+		break
+	}
+
+	if i >= n || !strings.has_prefix(source[i:], "package") {
+		return "", source, false
+	}
+
+	after_pkg := i + len("package")
+	if after_pkg >= n {
+		return "", source, false
+	}
+	sep := source[after_pkg]
+	if sep != ' ' && sep != '\t' {
+		return "", source, false
+	}
+
+	pkg_start := after_pkg
+	for pkg_start < n && (source[pkg_start] == ' ' || source[pkg_start] == '\t') {
+		pkg_start += 1
+	}
+	if pkg_start >= n {
+		return "", source, false
+	}
+
+	pkg_end := pkg_start
+	for pkg_end < n {
+		c := source[pkg_end]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' {
+			pkg_end += 1
+		} else {
+			break
+		}
+	}
+
+	if pkg_end == pkg_start {
+		return "", source, false
+	}
+
+	extracted_name := source[pkg_start:pkg_end]
+
+	line_start := i
+	for line_start > 0 && source[line_start - 1] != '\n' {
+		line_start -= 1
+	}
+
+	line_end := pkg_end
+	for line_end < n && source[line_end] != '\n' {
+		line_end += 1
+	}
+
+	transformed: string
+	if line_end < n {
+		transformed = strings.concatenate({
+			source[:line_start],
+			"\n",
+			source[line_end + 1:],
+		}, allocator)
+	} else {
+		transformed = strings.concatenate({
+			source[:line_start],
+			"\n",
+		}, allocator)
+	}
+
+	return extracted_name, transformed, true
+}
+
 // parse_config parses Odin configuration syntax from source.
 // Returns the resulting Config, success boolean, and error diagnostic on failure.
 parse_config :: proc(source: string, file_path: string = "") -> (Config, bool, Config_Parse_Error) {
@@ -42,11 +150,24 @@ parse_config :: proc(source: string, file_path: string = "") -> (Config, bool, C
 	defer delete(arena_buf)
 	mem.arena_init(&arena, arena_buf)
 
-	wrapped := strings.concatenate({
-		"package config\n_term_cfg :: proc() {\n",
-		source,
-		"\n}\n",
-	}, context.temp_allocator)
+	pkg_name, transformed, has_pkg := extract_package_declaration(source, context.temp_allocator)
+
+	wrapped: string
+	if has_pkg {
+		wrapped = strings.concatenate({
+			"package ",
+			pkg_name,
+			"\n_term_cfg :: proc() {\n",
+			transformed,
+			"\n}\n",
+		}, context.temp_allocator)
+	} else {
+		wrapped = strings.concatenate({
+			"package config\n_term_cfg :: proc() {\n",
+			source,
+			"\n}\n",
+		}, context.temp_allocator)
+	}
 
 	file := odin_ast.File{
 		src      = wrapped,
@@ -428,6 +549,24 @@ _apply_key_value :: proc(cfg: ^Config, key: string, val_expr: ^odin_ast.Expr) {
 		if s, ok := _expr_to_string(val_expr); ok {
 			delete(cfg.devtools_log_path)
 			cfg.devtools_log_path = strings.clone(s)
+		}
+	case "max_workspaces":
+		if lit, ok := _expr_to_lit_text(val_expr); ok {
+			if v, vok := _parse_int(lit); vok && v > 0 {
+				cfg.max_workspaces = max(1, min(v, 256))
+			}
+		}
+	case "spawn_host", "enable_host", "host_daemon":
+		if lit, ok := _expr_to_lit_text(val_expr); ok {
+			if v, vok := _parse_bool(lit); vok {
+				cfg.spawn_host = v
+			}
+		}
+	case "spawn_monitor", "enable_monitor", "monitor_status_item", "menu_bar_monitor":
+		if lit, ok := _expr_to_lit_text(val_expr); ok {
+			if v, vok := _parse_bool(lit); vok {
+				cfg.spawn_monitor = v
+			}
 		}
 	case "ansi16":
 		if comp, ok := val_expr.derived.(^odin_ast.Comp_Lit); ok {

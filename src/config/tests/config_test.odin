@@ -35,6 +35,28 @@ test_config_default :: proc(t: ^testing.T) {
 	testing.expect_value(t, cfg.opacity, config.CONFIG_NORMALIZED_MAX)
 	testing.expect_value(t, cfg.window_blur, config.CONFIG_NORMALIZED_MIN)
 	testing.expect_value(t, cfg.allow_screensaver, true)
+	testing.expect_value(t, cfg.max_workspaces, 32)
+	testing.expect_value(t, cfg.spawn_host, true)
+	testing.expect_value(t, cfg.spawn_monitor, true)
+}
+
+@(test)
+test_parse_config_max_workspaces :: proc(t: ^testing.T) {
+	src := `
+max_workspaces = 64
+`
+	cfg, ok, _ := config.parse_config(src)
+	defer config.config_destroy(&cfg)
+	testing.expect(t, ok, "max_workspaces config must parse")
+	testing.expect_value(t, cfg.max_workspaces, 64)
+
+	src_clamp := `
+max_workspaces = 500
+`
+	cfg_clamp, ok_clamp, _ := config.parse_config(src_clamp)
+	defer config.config_destroy(&cfg_clamp)
+	testing.expect(t, ok_clamp, "clamped max_workspaces config must parse")
+	testing.expect_value(t, cfg_clamp.max_workspaces, 256)
 }
 
 @(test)
@@ -323,4 +345,85 @@ test_parse_config_screensaver :: proc(t: ^testing.T) {
 	testing.expect(t, ok_true)
 	testing.expect_value(t, cfg_true.allow_screensaver, true)
 }
+
+@(test)
+test_parse_config_package_declaration :: proc(t: ^testing.T) {
+	// 1. Config with package term at top
+	src_term := `package term
+
+cols = 100
+rows = 50
+`
+	cfg_term, ok_term, err_term := config.parse_config(src_term)
+	defer config.config_destroy(&cfg_term)
+	testing.expect(t, ok_term, "config with package term must parse")
+	testing.expect_value(t, cfg_term.cols, 100)
+	testing.expect_value(t, cfg_term.rows, 50)
+
+	// 2. Config with leading comments then package config
+	src_comments := `// Leading single line comment
+/* Leading block comment
+   span across multiple lines */
+package config
+
+cols = 120
+rows = 45
+`
+	cfg_comments, ok_comments, err_comments := config.parse_config(src_comments)
+	defer config.config_destroy(&cfg_comments)
+	testing.expect(t, ok_comments, "config with leading comments then package must parse")
+	testing.expect_value(t, cfg_comments.cols, 120)
+	testing.expect_value(t, cfg_comments.rows, 45)
+
+	// 3. Config without package declaration (backward compatibility)
+	src_none := `
+cols = 90
+rows = 30
+`
+	cfg_none, ok_none, err_none := config.parse_config(src_none)
+	defer config.config_destroy(&cfg_none)
+	testing.expect(t, ok_none, "config without package declaration must parse")
+	testing.expect_value(t, cfg_none.cols, 90)
+	testing.expect_value(t, cfg_none.rows, 30)
+
+	// 4. Exact line preservation in error reporting with package declaration
+	src_err := `package term
+cols = 80
+rows = = 24
+`
+	cfg_err, ok_err, err_info := config.parse_config(src_err)
+	defer config.config_destroy(&cfg_err)
+	defer delete(err_info.message)
+	testing.expect(t, !ok_err, "syntax error must fail parsing")
+	testing.expect_value(t, err_info.line, 3)
+}
+
+@(test)
+test_config_spawn_helpers_defaults_and_override :: proc(t: ^testing.T) {
+	cfg_def := config.config_default()
+	defer config.config_destroy(&cfg_def)
+	testing.expect_value(t, cfg_def.spawn_host, true)
+	testing.expect_value(t, cfg_def.spawn_monitor, true)
+
+	src_override := `
+spawn_host = false
+spawn_monitor = false
+`
+	cfg_over, ok_over, _ := config.parse_config(src_override)
+	defer config.config_destroy(&cfg_over)
+	testing.expect(t, ok_over, "spawn helpers override config must parse")
+	testing.expect_value(t, cfg_over.spawn_host, false)
+	testing.expect_value(t, cfg_over.spawn_monitor, false)
+
+	src_aliases := `
+enable_host = false
+enable_monitor = false
+`
+	cfg_alias, ok_alias, _ := config.parse_config(src_aliases)
+	defer config.config_destroy(&cfg_alias)
+	testing.expect(t, ok_alias, "spawn helpers aliases config must parse")
+	testing.expect_value(t, cfg_alias.spawn_host, false)
+	testing.expect_value(t, cfg_alias.spawn_monitor, false)
+}
+
 

@@ -108,6 +108,9 @@ Config :: struct {
 	devtools_anchor:          Devtools_Anchor,
 	devtools_columns:         int,
 	devtools_log_path:        string,
+	max_workspaces:           int,
+	spawn_host:               bool,
+	spawn_monitor:            bool,
 }
 
 // config_default returns a default terminal configuration struct matching standard defaults.
@@ -143,6 +146,9 @@ config_default :: proc() -> Config {
 		devtools_anchor          = .Top_Right,
 		devtools_columns         = DEVTOOLS_DEFAULT_COLUMNS,
 		devtools_log_path        = strings.clone(""),
+		max_workspaces           = 32,
+		spawn_host               = true,
+		spawn_monitor            = true,
 	}
 }
 

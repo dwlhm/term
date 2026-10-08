@@ -1,3 +1,5 @@
+package term
+
 name = "default"
 title = "Repository workspace: fastfetch and ls"
 cwd = "."

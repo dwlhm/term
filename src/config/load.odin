@@ -6,7 +6,8 @@ import "core:strings"
 
 // config_resolve_path checks config candidate locations in order:
 // 1. $TERM_CONFIG (if set and file exists)
-// 2. ~/.config/term/config.odin (if file exists)
+// 2. ~/.term/config.odin (if file exists)
+// 3. ~/.config/term/config.odin (if file exists)
 // Returns the resolved path and true, or empty string and false if not found.
 // The returned string is heap-allocated and caller-owned if ok is true.
 config_resolve_path :: proc() -> (string, bool) {
@@ -18,17 +19,22 @@ config_resolve_path :: proc() -> (string, bool) {
 		delete(val)
 	}
 
-	// (2) ~/.config/term/config.odin
 	if home, hok := os.lookup_env("HOME", context.allocator); hok {
+		defer delete(home)
 		if len(home) > 0 {
-			path := strings.concatenate({home, "/.config/term/config.odin"}, context.allocator)
-			delete(home)
-			if os.exists(path) {
-				return path, true
+			// (2) ~/.term/config.odin
+			term_path := strings.concatenate({home, "/.term/config.odin"}, context.allocator)
+			if os.exists(term_path) {
+				return term_path, true
 			}
-			delete(path)
-		} else {
-			delete(home)
+			delete(term_path)
+
+			// (3) ~/.config/term/config.odin
+			config_path := strings.concatenate({home, "/.config/term/config.odin"}, context.allocator)
+			if os.exists(config_path) {
+				return config_path, true
+			}
+			delete(config_path)
 		}
 	}
 
