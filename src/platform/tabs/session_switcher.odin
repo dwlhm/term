@@ -291,8 +291,9 @@ session_switcher_footer_hint :: proc(item: ^Session_Switcher_Item) -> string {
 // pane tree's fixed node pool through the same compile-time reflection the rest of the
 // ingestion path uses. Leaf nodes are exactly the panes: a split contributes an extra
 // node of kind Split, which must not be counted.
-session_switcher_pane_count :: proc($T: typeid, tab: ^T) -> int {
-	when intrinsics.type_has_field(T, "tree") {
+session_switcher_pane_count :: proc($T: typeid, tab: $P) -> int {
+	Tab_T :: intrinsics.type_elem_type(T) when intrinsics.type_is_pointer(T) else T
+	when intrinsics.type_has_field(Tab_T, "tree") {
 		leaves := 0
 		for i in 0 ..< len(tab.tree.node_in_use) {
 			if tab.tree.node_in_use[i] && tab.tree.nodes[i].kind == .Leaf do leaves += 1
@@ -314,6 +315,8 @@ session_switcher_init :: proc(state: ^Session_Switcher_State) {
 session_switcher_show :: proc(state: ^Session_Switcher_State, tabs: []$T, active_idx: int, reg: ^session_core.Session_Registry = nil, saved_layouts: []string = nil) {
 	if state == nil do return
 
+	Tab_T :: intrinsics.type_elem_type(T) when intrinsics.type_is_pointer(T) else T
+
 	state.item_count = 0
 	state.truncated = false
 	state.scroll_offset = 0
@@ -322,18 +325,23 @@ session_switcher_show :: proc(state: ^Session_Switcher_State, tabs: []$T, active
 	// 1. Ingest active tabs
 	for i := 0; i < len(tabs); i += 1 {
 		if state.item_count >= SESSION_SWITCHER_MAX_ITEMS do break
-		tab := &tabs[i]
+		when intrinsics.type_is_pointer(T) {
+			tab := tabs[i]
+		} else {
+			tab := &tabs[i]
+		}
+		if tab == nil do continue
 		item := &state.items[state.item_count]
 		item^ = {}
 		item.pane_count = 1
 		item.tab_idx = i
 		item.is_detached = false
 		item.is_current = i == active_idx
-		if panes := session_switcher_pane_count(T, tab); panes > 1 {
+		if panes := session_switcher_pane_count(Tab_T, tab); panes > 1 {
 			item.pane_count = panes
 		}
 
-		when intrinsics.type_has_field(T, "id") {
+		when intrinsics.type_has_field(Tab_T, "id") {
 			item.tab_id = tab.id
 			id_str := fmt.bprintf(item.id_buf[:], "%v", tab.id)
 			item.id = id_str
@@ -343,13 +351,13 @@ session_switcher_show :: proc(state: ^Session_Switcher_State, tabs: []$T, active
 		}
 
 		title_str := ""
-		when intrinsics.type_has_field(T, "title_override_active") {
+		when intrinsics.type_has_field(Tab_T, "title_override_active") {
 			if tab.title_override_active && tab.title_override_len > 0 {
 				title_str = string(tab.title_override_buf[:tab.title_override_len])
 			} else if tab.title_len > 0 {
 				title_str = string(tab.title_buf[:tab.title_len])
 			}
-		} else when intrinsics.type_has_field(T, "title") {
+		} else when intrinsics.type_has_field(Tab_T, "title") {
 			title_str = tab.title
 		}
 
@@ -362,22 +370,22 @@ session_switcher_show :: proc(state: ^Session_Switcher_State, tabs: []$T, active
 			item.title = string(item.title_buf[:copy_len])
 		}
 
-		when intrinsics.type_has_field(T, "backend") {
+		when intrinsics.type_has_field(Tab_T, "backend") {
 			item.pid = tab.backend.pty.pid
-		} else when intrinsics.type_has_field(T, "pid") {
+		} else when intrinsics.type_has_field(Tab_T, "pid") {
 			item.pid = int(tab.pid)
 		}
 
 		cwd_str := ""
-		when intrinsics.type_has_field(T, "last_cwd_len") {
+		when intrinsics.type_has_field(Tab_T, "last_cwd_len") {
 			if tab.last_cwd_len > 0 {
 				cwd_str = string(tab.last_cwd_buf[:tab.last_cwd_len])
 			} else {
-				when intrinsics.type_has_field(T, "backend") {
+				when intrinsics.type_has_field(Tab_T, "backend") {
 					cwd_str = tab.backend.cwd
 				}
 			}
-		} else when intrinsics.type_has_field(T, "cwd") {
+		} else when intrinsics.type_has_field(Tab_T, "cwd") {
 			cwd_str = tab.cwd
 		}
 
