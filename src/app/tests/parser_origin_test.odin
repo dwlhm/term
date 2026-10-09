@@ -45,7 +45,7 @@ test_parser_origins_survive_tab_reorder_and_compaction :: proc(t: ^testing.T) {
 	// Remove the first slot to force another move of every surviving backend.
 	testing.expect(t, app.session_close_tab(sm, 0))
 	for i in 0..<len(sm.tabs) {
-		tab := &sm.tabs[i]
+		tab := sm.tabs[i]
 		b := &tab.backend
 		testing.expect(t, b.parser.response_user_data == rawptr(b))
 		testing.expect(t, b.parser.clipboard_user_data == rawptr(b))

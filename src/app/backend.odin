@@ -97,14 +97,14 @@ ui_event_queue_pop_all :: proc(q: ^UI_Event_Queue, out: []UI_Event) -> int {
 Backend :: struct {
 	// Back Buffer (internal to Backend worker thread)
 	terminal:             termgrid.Terminal,
-	// Front Buffer (swapped snapshot read by Frontend renderer)
-	front_terminal:       termgrid.Terminal,
-	front_view:           termgrid.Terminal_View,
-	front_cursor:         render.Cursor_Overlay,
-	front_focused:        bool,
-	front_exited:         bool,
-	search_invalid_regex: bool,
-	front_search_invalid_regex: bool,
+	// Triple Buffering snapshots and lock-free exchange state
+	snapshots:            [SNAPSHOT_SLOT_COUNT]Front_Snapshot,
+	middle:               int, // atomic
+	write_index:          int, // owned by worker
+	reader:               Reader_State, // owned by main thread
+	missed_rows:          [SNAPSHOT_SLOT_COUNT]Row_Bitset,
+	needs_full_copy:      [SNAPSHOT_SLOT_COUNT]bool,
+	publish_seq:          u64,
 	focus_requested:      bool,
 
 	parser:               parser.Parser,
@@ -113,7 +113,7 @@ Backend :: struct {
 	cursor:               render.Cursor_Overlay,
 	view:                 termgrid.Terminal_View,
 	interaction:          inter.Interaction_State,
-	front_interaction:    inter.Interaction_State,
+	search_invalid_regex: bool,
 	config:               config.Config,
 	focused:              bool,
 	should_quit:          bool,
@@ -135,7 +135,9 @@ Backend :: struct {
 	// Multi-threaded worker thread & synchronization primitives
 	thread:               ^thread.Thread,
 	thread_running:       b32,
-	swap_mutex:           sync.Mutex,
+	is_background:        b32,
+	pending_events:       u32, // atomic bitmask of Backend_Event
+	mailbox:              Notification_Mailbox,
 	render_locked:        bool,
 	event_queue:          UI_Event_Queue,
 	drain_buf:            []u8,
@@ -148,7 +150,7 @@ Backend :: struct {
 	// with sync.atomic_add on the writer side and read with sync.atomic_load
 	// by the renderer, matching the discipline already used for
 	// resize_generation: a bare read would race with the worker thread, and
-	// the swap mutex cannot be used instead because the drain does not hold
+	// a lock cannot be used instead because the drain does not hold
 	// it. The counter is monotonic per backend, so a torn read is the only
 	// failure a relaxed load can produce and that cannot happen here; the
 	// frame loop additionally clamps a negative delta, which is what a reset
@@ -169,15 +171,6 @@ Backend :: struct {
 	host_client:          ^App_Host_Client,
 	host_ws_id:           u64,
 	host_pane_id:         u64,
-
-	// Scrollback cell-sync generation tracking.
-	// Tracks whether front_terminal.scrollback.cells was copied from the back
-	// buffer at least once for the current total_pushed / clear_generation pair.
-	// Separate from total_pushed on front_terminal because metadata and cell
-	// data are synced independently: metadata is always updated, cells only
-	// when viewing history AND a newer pushed/clear_gen is seen here.
-	front_scrollback_synced_pushed:    u64,
-	front_scrollback_synced_clear_gen: u64,
 }
 
 _backend_observer_on_damage :: proc(user_data: rawptr, min_row, min_col, max_row, max_col: int) {
@@ -189,6 +182,9 @@ _backend_observer_on_damage :: proc(user_data: rawptr, min_row, min_col, max_row
 			phys := (g.origin + r) & g.mask
 			gen := g.rows[phys].generation
 			termgrid.damage_mark_span(&b.terminal.damage, r, min_col, max_col, gen)
+			for slot in 0 ..< SNAPSHOT_SLOT_COUNT {
+				bitset_set(&b.missed_rows[slot], r)
+			}
 		}
 	}
 }
@@ -197,18 +193,21 @@ _backend_observer_on_title_change :: proc(user_data: rawptr, title: string) {
 	b := (^Backend)(user_data)
 	if b == nil do return
 	termgrid.terminal_osc_set_title(&b.terminal, transmute([]u8)title)
+	backend_post_event(b, .Title_Changed)
 }
 
 _backend_observer_on_bell :: proc(user_data: rawptr) {
 	b := (^Backend)(user_data)
 	if b == nil do return
 	b.terminal.bell_event = true
+	backend_post_event(b, .Bell)
 }
 
 _backend_observer_on_exit :: proc(user_data: rawptr, exit_code: int) {
 	b := (^Backend)(user_data)
 	if b == nil do return
 	b.pty.exit_code = exit_code
+	backend_post_event(b, .Child_Exited)
 }
 
 _backend_response_cb :: proc(user_data: rawptr, data: []u8) {
@@ -334,7 +333,6 @@ backend_init :: proc(
 	b.should_quit = false
 	b.view = termgrid.Terminal_View{}
 	inter.interaction_init(&b.interaction)
-	inter.interaction_init(&b.front_interaction)
 	b.view_generation = 0
 	b.pty_bytes_total = 0
 	b.prog = prog
@@ -351,15 +349,17 @@ backend_init :: proc(
 		theme = theme,
 	)
 
-	termgrid.terminal_init(
-		&b.front_terminal,
-		init_rows,
-		init_cols,
-		theme = theme,
-	)
-	b.front_view = termgrid.Terminal_View{}
-	b.front_cursor = render.Cursor_Overlay{}
-	b.front_focused = true
+	for i in 0 ..< SNAPSHOT_SLOT_COUNT {
+		front_snapshot_init(&b.snapshots[i], init_rows, init_cols, theme = theme)
+		b.needs_full_copy[i] = true
+		bitset_clear(&b.missed_rows[i])
+	}
+	b.middle = 1
+	b.write_index = 0
+	b.reader.read_index = 2
+	b.reader.drawn_seq = 0
+	b.reader.force_full_redraw = true
+	b.publish_seq = 0
 	b.focus_requested = true
 	b.drain_buf = make([]u8, APP_DRAIN_CAP, runtime.heap_allocator())
 	b.thread = nil
@@ -423,7 +423,9 @@ backend_init :: proc(
 
 	if !pty.pty_spawn(&b.pty, init_rows, init_cols, spawn_prog, spawn_argv, b.cwd, pixel_w, pixel_h) {
 		termgrid.terminal_destroy(&b.terminal)
-		termgrid.terminal_destroy(&b.front_terminal)
+		for i in 0 ..< SNAPSHOT_SLOT_COUNT {
+			front_snapshot_destroy(&b.snapshots[i])
+		}
 		if b.wake_pipe_r >= 0 {
 			posix.close(b.wake_pipe_r)
 			b.wake_pipe_r = -1
@@ -472,7 +474,6 @@ backend_init_from_core_session :: proc(
 	b.should_quit = false
 	b.view = termgrid.Terminal_View{}
 	inter.interaction_init(&b.interaction)
-	inter.interaction_init(&b.front_interaction)
 	b.view_generation = 0
 	b.last_mouse_col = 0
 	b.last_mouse_row = 0
@@ -481,10 +482,17 @@ backend_init_from_core_session :: proc(
 	rows := b.terminal.grid.row_count
 	cols := b.terminal.grid.col_count
 
-	termgrid.terminal_init(&b.front_terminal, rows, cols, theme = theme)
-	b.front_view = termgrid.Terminal_View{}
-	b.front_cursor = render.Cursor_Overlay{}
-	b.front_focused = true
+	for i in 0 ..< SNAPSHOT_SLOT_COUNT {
+		front_snapshot_init(&b.snapshots[i], rows, cols, theme = theme)
+		b.needs_full_copy[i] = true
+		bitset_clear(&b.missed_rows[i])
+	}
+	b.middle = 1
+	b.write_index = 0
+	b.reader.read_index = 2
+	b.reader.drawn_seq = 0
+	b.reader.force_full_redraw = true
+	b.publish_seq = 0
 	b.focus_requested = true
 	b.drain_buf = make([]u8, APP_DRAIN_CAP, runtime.heap_allocator())
 	b.thread = nil
@@ -530,12 +538,15 @@ backend_init_from_core_session :: proc(
 
 	backend_apply_theme(b, theme)
 
-	// Synchronize virtual grid to front terminal
-	_terminal_sync_to_front(b)
+	// Synchronize virtual grid to front snapshots
+	_backend_publish_snapshot(b)
 
 	// Mark all damage so renderer immediately displays the session's active screen and scrollback
 	termgrid.damage_mark_all(&b.terminal.damage, nil)
-	termgrid.damage_mark_all(&b.front_terminal.damage, nil)
+	for i in 0 ..< SNAPSHOT_SLOT_COUNT {
+		b.needs_full_copy[i] = true
+		termgrid.damage_mark_all(&b.snapshots[i].terminal.damage, nil)
+	}
 	b.view_generation += 1
 
 	return true
@@ -592,7 +603,9 @@ backend_destroy :: proc(b: ^Backend) {
 	b.parser.graphics_cb = nil
 	b.parser.graphics_user_data = nil
 	termgrid.terminal_destroy(&b.terminal)
-	termgrid.terminal_destroy(&b.front_terminal)
+	for i in 0 ..< SNAPSHOT_SLOT_COUNT {
+		front_snapshot_destroy(&b.snapshots[i])
+	}
 	parser.parser_destroy(&b.parser)
 	if b.drain_buf != nil {
 		delete(b.drain_buf, runtime.heap_allocator())
@@ -714,7 +727,7 @@ backend_take_title :: proc(b: ^Backend) -> string {
 		return ""
 	}
 	if b.thread != nil {
-		return termgrid.terminal_take_title(&b.front_terminal)
+		return termgrid.terminal_take_title(&b.snapshots[b.reader.read_index].terminal)
 	}
 	return termgrid.terminal_take_title(&b.terminal)
 }
@@ -759,6 +772,19 @@ backend_sync_cursor :: proc(
 	return cursor_changed, position_changed, style_changed, old_row, old_col
 }
 
+// backend_get_terminal returns the active front terminal if worker is threaded, or live terminal.
+backend_get_terminal :: proc(b: ^Backend) -> ^termgrid.Terminal {
+	if b == nil do return nil
+	if b.thread != nil {
+		_ = backend_refresh_snapshot(b)
+		idx := b.reader.read_index
+		if idx >= 0 && idx < SNAPSHOT_SLOT_COUNT {
+			return &b.snapshots[idx].terminal
+		}
+	}
+	return &b.terminal
+}
+
 _backend_mark_cursor_dirty_terminal :: proc(t: ^termgrid.Terminal, r, c: int) -> bool {
 		g := &t.grid
 		if g.row_count <= 0 || g.col_count <= 0 || len(g.rows) == 0 {
@@ -781,7 +807,7 @@ backend_mark_cursor_dirty :: proc(b: ^Backend, row, col: int) -> bool {
 		return false
 	}
 
-	t := &b.front_terminal if b.thread != nil else &b.terminal
+	t := backend_get_terminal(b)
 	marked := _backend_mark_cursor_dirty_terminal(t, row, col)
 	return marked
 }
@@ -794,11 +820,15 @@ backend_get_render_state :: proc(b: ^Backend) -> Render_State {
 	now := platform.platform_ticks_to_ns(platform.platform_now())
 	now_ns := u64(now)
 
-	term_ptr := &b.front_terminal if b.thread != nil else &b.terminal
-	view_ptr := &b.front_view if b.thread != nil else &b.view
-	cursor_ptr := &b.front_cursor if b.thread != nil else &b.cursor
-	interaction_ptr := &b.front_interaction if b.thread != nil else &b.interaction
-	focused := b.front_focused if b.thread != nil else b.focused
+	if b.thread != nil {
+		_ = backend_refresh_snapshot(b)
+	}
+
+	term_ptr := &b.snapshots[b.reader.read_index].terminal if b.thread != nil else &b.terminal
+	view_ptr := &b.snapshots[b.reader.read_index].view if b.thread != nil else &b.view
+	cursor_ptr := &b.snapshots[b.reader.read_index].cursor if b.thread != nil else &b.cursor
+	interaction_ptr := &b.snapshots[b.reader.read_index].interaction if b.thread != nil else &b.interaction
+	focused := b.snapshots[b.reader.read_index].focused if b.thread != nil else b.focused
 
 	if b.thread == nil {
 		cur := termgrid.terminal_get_cursor(term_ptr)
@@ -854,6 +884,9 @@ backend_on_resize :: proc(b: ^Backend, rows, cols: int, pixel_w: int = 0, pixel_
 		return true
 	}
 	termgrid.terminal_resize(&b.terminal, rows, cols)
+	for slot in 0 ..< SNAPSHOT_SLOT_COUNT {
+		b.needs_full_copy[slot] = true
+	}
 	return true
 }
 
@@ -924,7 +957,6 @@ backend_init_host_backed :: proc(
 	b.should_quit = false
 	b.view = termgrid.Terminal_View{}
 	inter.interaction_init(&b.interaction)
-	inter.interaction_init(&b.front_interaction)
 	b.view_generation = 0
 	b.pty_bytes_total = 0
 	b.prog = "host"
@@ -933,10 +965,17 @@ backend_init_host_backed :: proc(
 	b.host_pane_id = pane_id
 
 	termgrid.terminal_init(&b.terminal, init_rows, init_cols, theme = theme)
-	termgrid.terminal_init(&b.front_terminal, init_rows, init_cols, theme = theme)
-	b.front_view = termgrid.Terminal_View{}
-	b.front_cursor = render.Cursor_Overlay{}
-	b.front_focused = true
+	for i in 0 ..< SNAPSHOT_SLOT_COUNT {
+		front_snapshot_init(&b.snapshots[i], init_rows, init_cols, theme = theme)
+		b.needs_full_copy[i] = true
+		bitset_clear(&b.missed_rows[i])
+	}
+	b.middle = 1
+	b.write_index = 0
+	b.reader.read_index = 2
+	b.reader.drawn_seq = 0
+	b.reader.force_full_redraw = true
+	b.publish_seq = 0
 	b.focus_requested = true
 	b.drain_buf = make([]u8, APP_DRAIN_CAP, runtime.heap_allocator())
 	b.thread = nil
@@ -995,10 +1034,11 @@ backend_copy_selection :: proc(b: ^Backend) -> string {
 		return ""
 	}
 	if b.thread != nil {
-		if b.front_interaction.selection_active {
-			return inter.interaction_extract_selection_text(&b.front_terminal, &b.front_interaction)
+		snap := &b.snapshots[b.reader.read_index]
+		if snap.interaction.selection_active {
+			return inter.interaction_extract_selection_text(&snap.terminal, &snap.interaction)
 		}
-		return termgrid.terminal_view_copy(&b.front_terminal, &b.front_view)
+		return termgrid.terminal_view_copy(&snap.terminal, &snap.view)
 	}
 	if b.interaction.selection_active {
 		return inter.interaction_extract_selection_text(&b.terminal, &b.interaction)
@@ -1118,258 +1158,19 @@ backend_apply_theme :: proc(b: ^Backend, theme: termgrid.Theme) {
 		phys := (b.terminal.grid.origin + r) & b.terminal.grid.mask
 		gen := b.terminal.grid.rows[phys].generation
 		termgrid.damage_mark_row(&b.terminal.damage, r, gen)
+		for slot in 0 ..< SNAPSHOT_SLOT_COUNT {
+			bitset_set(&b.missed_rows[slot], r)
+		}
 	}
 	if backend_is_threaded(b) do _backend_swap_buffers(b)
 }
 
-// _terminal_sync_to_front synchronizes back buffer terminal state to front buffer terminal.
-_terminal_sync_to_front :: proc(b: ^Backend) {
-	if b == nil {
-		return
-	}
-	dst := &b.front_terminal
-	src := &b.terminal
-	view := &b.view
-	if dst == nil || src == nil {
-		return
-	}
-	// 1. Grid resize if dimensions changed
-	dims_changed := dst.grid.row_count != src.grid.row_count || dst.grid.col_count != src.grid.col_count
-	alt_screen_switched := dst.is_alt_screen != src.is_alt_screen
-	origin_changed := dst.grid.origin != src.grid.origin
-
-	if dims_changed {
-		termgrid.terminal_resize(dst, src.grid.row_count, src.grid.col_count)
-	}
-
-	// 2. Copy active grid cells (Delta-only: copy only damaged rows)
-	dst.grid.origin = src.grid.origin
-	dst.grid.mask = src.grid.mask
-	dst.grid.style_table = src.grid.style_table
-	if dst.grid.cells != nil && src.grid.cells != nil {
-		if dims_changed || alt_screen_switched || origin_changed {
-			copy(dst.grid.cells, src.grid.cells)
-			if dst.grid.ext_colors != nil && src.grid.ext_colors != nil {
-				copy(dst.grid.ext_colors, src.grid.ext_colors)
-			}
-			for i in 0..<src.grid.capacity {
-				if i < len(dst.grid.rows) && i < len(src.grid.rows) {
-					dst.grid.rows[i].generation = src.grid.rows[i].generation
-					dst.grid.rows[i].wrapped = src.grid.rows[i].wrapped
-					dst.grid.rows[i].is_prompt = src.grid.rows[i].is_prompt
-					dst.grid.rows[i].ext.channels = src.grid.rows[i].ext.channels
-				}
-			}
-			for r in 0..<dst.damage.row_count {
-				if r < len(dst.damage.dirty_rows) {
-					dst.damage.dirty_rows[r].full = true
-				}
-			}
-		} else {
-			for r in 0..<src.damage.row_count {
-				if r < len(src.damage.dirty_rows) {
-					dr := src.damage.dirty_rows[r]
-					if dr.full || dr.span_count > 0 {
-						src_phys := (src.grid.origin + r) & src.grid.mask
-						dst_phys := (dst.grid.origin + r) & dst.grid.mask
-						if src_phys < len(src.grid.rows) && dst_phys < len(dst.grid.rows) {
-							copy(dst.grid.rows[dst_phys].cells, src.grid.rows[src_phys].cells)
-							dst.grid.rows[dst_phys].generation = src.grid.rows[src_phys].generation
-							dst.grid.rows[dst_phys].wrapped = src.grid.rows[src_phys].wrapped
-							dst.grid.rows[dst_phys].is_prompt = src.grid.rows[src_phys].is_prompt
-							dst.grid.rows[dst_phys].ext.channels = src.grid.rows[src_phys].ext.channels
-							if len(dst.grid.rows[dst_phys].ext.colors) > 0 && len(src.grid.rows[src_phys].ext.colors) > 0 {
-								copy(dst.grid.rows[dst_phys].ext.colors, src.grid.rows[src_phys].ext.colors)
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// 3. Alternate grid synchronization (only if alt screen is active)
-	if src.is_alt_screen {
-		dst.alt_grid.origin = src.alt_grid.origin
-		dst.alt_grid.mask = src.alt_grid.mask
-		dst.alt_grid.style_table = src.alt_grid.style_table
-		if dst.alt_grid.cells != nil && src.alt_grid.cells != nil {
-			copy(dst.alt_grid.cells, src.alt_grid.cells)
-			if dst.alt_grid.ext_colors != nil && src.alt_grid.ext_colors != nil {
-				copy(dst.alt_grid.ext_colors, src.alt_grid.ext_colors)
-			}
-		}
-		for i in 0..<src.alt_grid.capacity {
-			if i < len(dst.alt_grid.rows) && i < len(src.alt_grid.rows) {
-				dst.alt_grid.rows[i].generation = src.alt_grid.rows[i].generation
-				dst.alt_grid.rows[i].wrapped = src.alt_grid.rows[i].wrapped
-				dst.alt_grid.rows[i].is_prompt = src.alt_grid.rows[i].is_prompt
-				dst.alt_grid.rows[i].ext.channels = src.alt_grid.rows[i].ext.channels
-			}
-		}
-	}
-
-	dst.is_alt_screen = src.is_alt_screen
-	dst.cursor = src.cursor
-	dst.saved_cursor = src.saved_cursor
-	dst.saved_cursor_valid = src.saved_cursor_valid
-	dst.current_style = src.current_style
-
-	// 4. Sync scrollback lazily (0 bytes copied when viewing active screen)
-	// Resize if scrollback dimensions changed; reset synced markers so cells
-	// are re-copied on the next viewing_history frame.
-	if dst.scrollback.max_lines != src.scrollback.max_lines || dst.scrollback.col_count != src.scrollback.col_count {
-		termgrid.scrollback_destroy(&dst.scrollback, nil)
-		termgrid.scrollback_init(&dst.scrollback, src.scrollback.col_count, src.scrollback.max_lines)
-		b.front_scrollback_synced_pushed = 0
-		b.front_scrollback_synced_clear_gen = 0
-	}
-
-	// Always update metadata so head/count are correct for index calculations.
-	dst.scrollback.head = src.scrollback.head
-	dst.scrollback.count = src.scrollback.count
-	dst.scrollback.total_pushed = src.scrollback.total_pushed
-	dst.scrollback.clear_generation = src.scrollback.clear_generation
-
-	// Copy cells only when the user is viewing history AND cells have not yet
-	// been copied for this pushed/clear_gen pair. Using dedicated synced markers
-	// (not dst.scrollback.total_pushed) avoids the race where metadata is
-	// updated every frame but cells are only needed while viewing history.
-	viewing_history := view != nil && view.scrollback_offset > 0
-	needs_cell_sync := b.front_scrollback_synced_pushed != src.scrollback.total_pushed ||
-	                   b.front_scrollback_synced_clear_gen != src.scrollback.clear_generation
-	if viewing_history && needs_cell_sync {
-		if dst.scrollback.cells != nil && src.scrollback.cells != nil {
-			copy(dst.scrollback.cells, src.scrollback.cells)
-			if dst.scrollback.ext_colors != nil && src.scrollback.ext_colors != nil {
-				copy(dst.scrollback.ext_colors, src.scrollback.ext_colors)
-			}
-		}
-		for i in 0..<src.scrollback.max_lines {
-			dst.scrollback.rows[i].wrapped = src.scrollback.rows[i].wrapped
-			dst.scrollback.rows[i].ext.channels = src.scrollback.rows[i].ext.channels
-		}
-		b.front_scrollback_synced_pushed = src.scrollback.total_pushed
-		b.front_scrollback_synced_clear_gen = src.scrollback.clear_generation
-	}
-
-	// Graphics stores are published as a separate deep snapshot. Store epochs
-	// cover image/frame changes while placement epochs cover placement changes.
-	graphics_changed := dst.graphics_namespace != src.graphics_namespace
-	if dst.graphics == nil || src.graphics == nil {
-		graphics_changed = graphics_changed || dst.graphics != src.graphics
-	} else {
-		graphics_changed = graphics_changed ||
-			dst.graphics.epoch != src.graphics.epoch ||
-			dst.graphics.placement_epoch != src.graphics.placement_epoch ||
-			dst.graphics.upload_count != src.graphics.upload_count
-	}
-	if dst.graphics_alt == nil || src.graphics_alt == nil {
-		graphics_changed = graphics_changed || dst.graphics_alt != src.graphics_alt
-	} else {
-		graphics_changed = graphics_changed ||
-			dst.graphics_alt.epoch != src.graphics_alt.epoch ||
-			dst.graphics_alt.placement_epoch != src.graphics_alt.placement_epoch ||
-			dst.graphics_alt.upload_count != src.graphics_alt.upload_count
-	}
-	graphics_allocator := dst.state_allocator if dst.state_allocator_set else runtime.heap_allocator()
-	termgrid.terminal_graphics_sync(dst, src, graphics_allocator)
-	if graphics_changed {
-		termgrid.damage_mark_all(&dst.damage, nil)
-	}
-
-	// 5. Transfer damage from src to dst: merge dirty rows and copy scroll ops
-	for r in 0..<src.damage.row_count {
-		if r < len(dst.damage.dirty_rows) && r < len(src.damage.dirty_rows) {
-			s_row := src.damage.dirty_rows[r]
-			if s_row.full {
-				dst.damage.dirty_rows[r].full = true
-				dst.damage.dirty_rows[r].generation = s_row.generation
-			} else if s_row.span_count > 0 {
-				d_row := &dst.damage.dirty_rows[r]
-				if d_row.full {
-					// already full dirty
-				} else if d_row.span_count == 0 {
-					d_row^ = s_row
-				} else {
-					d_row.full = true
-					d_row.generation = s_row.generation
-				}
-			}
-		}
-	}
-	for op in src.damage.scroll_ops {
-		append(&dst.damage.scroll_ops, op)
-	}
-	termgrid.terminal_clear_damage(src)
-
-	dst.cwd = src.cwd
-	dst.cwd_len = clamp(src.cwd_len, 0, len(dst.cwd))
-
-	// 6. Transfer title dirty state and auxiliary flags and states
-	if src.title_dirty {
-		dst.window_title = src.window_title
-		dst.window_title_len = src.window_title_len
-		dst.title_dirty = true
-		src.title_dirty = false
-	}
-
-	dst.scroll_top = src.scroll_top
-	dst.scroll_bottom = src.scroll_bottom
-	dst.grapheme_store = src.grapheme_store
-	dst.render_epoch = src.render_epoch
-	dst.in_prompt_zone = src.in_prompt_zone
-	dst.has_osc_133 = src.has_osc_133
-	dst.bracketed_paste = src.bracketed_paste
-	dst.focus_reporting = src.focus_reporting
-	dst.app_cursor_keys = src.app_cursor_keys
-	dst.mouse_tracking = src.mouse_tracking
-	dst.mouse_format = src.mouse_format
-	dst.synchronized_output = src.synchronized_output
-	dst.kitty_kb = src.kitty_kb
-	dst.kitty_kb_alt = src.kitty_kb_alt
-	if src.bell_event {
-		dst.bell_event = true
-		src.bell_event = false
-	}
-	for src.notification_count > 0 {
-		notif, ok := termgrid.terminal_pop_notification(src)
-		if ok {
-			termgrid.terminal_push_notification(dst, notif.title[:notif.title_len], notif.message[:notif.message_len])
-		}
-	}
-
-	// Only copy hyperlinks struct (526 KB) if entries count changed
-	if src.hyperlinks.count != dst.hyperlinks.count {
-		dst.hyperlinks = src.hyperlinks
-	}
-
-	dst.charset_g0 = src.charset_g0
-	dst.charset_g1 = src.charset_g1
-	dst.active_charset_is_g1 = src.active_charset_is_g1
-	dst.active_charset_is_dec = src.active_charset_is_dec
-}
-
-// _backend_perform_swap_locked only publishes state; caller MUST hold b.swap_mutex.
-// Notifications must run after unlocking because they may enter the window event system.
-_backend_perform_swap_locked :: proc(b: ^Backend) {
-	_terminal_sync_to_front(b)
-	b.front_view = b.view
-	b.front_cursor = b.cursor
-	b.front_focused = b.focused
-	b.front_exited = b.pty.state == .Exited
-	b.front_search_invalid_regex = b.search_invalid_regex
-	b.front_interaction = b.interaction
-}
-
-// _backend_swap_buffers publishes under swap_mutex, then notifies after unlocking.
+// _backend_swap_buffers publishes snapshot, then notifies after publishing.
 _backend_swap_buffers :: proc(b: ^Backend) {
 	if b == nil {
 		return
 	}
-	sync.mutex_lock(&b.swap_mutex)
-	_backend_perform_swap_locked(b)
-	sync.mutex_unlock(&b.swap_mutex)
+	_backend_publish_snapshot(b)
 	if b.notify_data_ready_cb != nil {
 		b.notify_data_ready_cb(b.notify_user_data)
 	}
@@ -1410,22 +1211,6 @@ backend_stop_thread :: proc(b: ^Backend) {
 // backend_is_threaded reports whether the worker thread is running.
 backend_is_threaded :: proc(b: ^Backend) -> bool {
 	return b != nil && b.thread != nil
-}
-
-// backend_lock_render locks the swap mutex for rendering the front buffer.
-backend_lock_render :: proc(b: ^Backend) {
-	if b != nil {
-		sync.mutex_lock(&b.swap_mutex)
-		b.render_locked = true
-	}
-}
-
-// backend_unlock_render releases the swap mutex after rendering.
-backend_unlock_render :: proc(b: ^Backend) {
-	if b != nil && b.render_locked {
-		b.render_locked = false
-		sync.mutex_unlock(&b.swap_mutex)
-	}
 }
 
 // backend_push_event enqueues a UI event to be executed by the backend thread.
@@ -1762,7 +1547,6 @@ backend_worker_proc :: proc(t: ^thread.Thread) {
 	}
 
 	events_buf: [128]UI_Event
-	pending_swap := false
 
 	for sync.atomic_load(&b.thread_running) {
 		// 1. Drain and execute pending UI events from Frontend
@@ -1775,16 +1559,40 @@ backend_worker_proc :: proc(t: ^thread.Thread) {
 			break
 		}
 
-		// 2. Drain PTY & Parse (Exhaustive Drain)
+		is_bg := sync.atomic_load(&b.is_background)
+
+		// 2. Drain PTY & Parse (Exhaustive Batch Drain)
 		bytes_read := 0
 		if b.pty.state == .Running && b.pty.master >= 0 {
-			bytes_read = backend_drain_pty(b)
+			drain_budget := 512 * 1024
+			if is_bg {
+				drain_budget = 64 * 1024
+			}
+			total_drained := 0
+			for total_drained < drain_budget {
+				n := backend_drain_pty(b)
+				if n <= 0 do break
+				total_drained += n
+				bytes_read += n
+
+				pfd := [1]posix.pollfd{{fd = posix.FD(b.pty.master), events = {.IN}}}
+				if posix.poll(&pfd[0], 1, 0) <= 0 {
+					break
+				}
+			}
+		}
+
+		if is_bg && bytes_read > 0 {
+			time.sleep(8 * time.Millisecond)
 		}
 
 		// 3. Child exit poll
 		was_exited := b.pty.state == .Exited
 		backend_poll_exit(b)
 		exit_changed := !was_exited && b.pty.state == .Exited
+		if exit_changed {
+			backend_post_event(b, .Child_Exited)
+		}
 
 		// 4. Cursor sync & damage marking
 		cursor_changed, position_changed, style_changed, old_row, old_col := backend_sync_cursor(b)
@@ -1799,31 +1607,16 @@ backend_worker_proc :: proc(t: ^thread.Thread) {
 
 		// 5. Swap back buffer to front buffer if any state changed
 		if exit_changed || bytes_read > 0 || n_events > 0 || cursor_changed || position_changed || style_changed {
-			pending_swap = true
-		}
-		
-		if pending_swap {
-			// If a new resize is queued, skip swapping stale buffers to avoid
-			// heavy deep copies while window geometry is actively changing.
-			if ui_event_queue_has_resize(&b.event_queue) {
-				free_all(context.temp_allocator)
-				continue
-			}
-			if sync.mutex_try_lock(&b.swap_mutex) {
-				_backend_perform_swap_locked(b)
-				sync.mutex_unlock(&b.swap_mutex)
-				pending_swap = false
-				if b.notify_data_ready_cb != nil do b.notify_data_ready_cb(b.notify_user_data)
+			if !ui_event_queue_has_resize(&b.event_queue) {
+				_backend_publish_snapshot(b)
+				if !is_bg && b.notify_data_ready_cb != nil {
+					b.notify_data_ready_cb(b.notify_user_data)
+				}
 			}
 		}
 
 		// 6. Wait when idle
 		if bytes_read == 0 && n_events == 0 {
-			if pending_swap {
-				_backend_swap_buffers(b)
-				pending_swap = false
-			}
-
 			pfds: [2]posix.pollfd
 			pfd_count: int = 0
 			if b.pty.state == .Running && b.pty.master >= 0 {
@@ -1855,13 +1648,10 @@ backend_worker_proc :: proc(t: ^thread.Thread) {
 	}
 }
 
-// Copy title metadata while holding the snapshot lock; no borrowed worker data
-// escapes to the session title resolver.
+// Copy title metadata; no borrowed worker data escapes to the session title resolver.
 backend_title_metadata :: proc(b: ^Backend, title, cwd: []u8) -> (title_len, cwd_len: int, fresh: bool) {
 	if b == nil do return
-	if b.thread != nil do sync.mutex_lock(&b.swap_mutex)
-	defer { if b.thread != nil do sync.mutex_unlock(&b.swap_mutex) }
-	t := &b.front_terminal if b.thread != nil else &b.terminal
+	t := &b.snapshots[b.reader.read_index].terminal if b.thread != nil else &b.terminal
 	f := t.title_dirty
 	if f {
 		title_len = copy(title, t.window_title[:clamp(t.window_title_len, 0, len(t.window_title))])
@@ -1875,9 +1665,7 @@ backend_title_metadata :: proc(b: ^Backend, title, cwd: []u8) -> (title_len, cwd
 backend_snapshot_exited :: proc(b: ^Backend) -> bool {
 	if b == nil do return false
 	if backend_is_threaded(b) {
-		backend_lock_render(b)
-		defer backend_unlock_render(b)
-		return b.front_exited
+		return b.snapshots[b.reader.read_index].exited
 	}
 	backend_poll_exit(b)
 	return b.pty.state == .Exited

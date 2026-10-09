@@ -124,7 +124,7 @@ test_session_detach_metadata_capacity_and_local_modal_flow :: proc(t: ^testing.T
 	testing.expect(t, spawned)
 	a.session_mgr.active_idx = idx
 	pid := a.session_mgr.tabs[idx].backend.pty.pid
-	_ = app.session_set_title_override(&a.session_mgr.tabs[idx], "Deploy")
+	_ = app.session_set_title_override(a.session_mgr.tabs[idx], "Deploy")
 	_, ok := app.app_dispatch_input_events(a, []input.Input_Event{{event_type = .Local, action = .Detach_Tab}})
 	testing.expect(t, ok)
 	testing.expect_value(t, session_core.session_registry_detached_count(&reg), 1)
@@ -147,7 +147,7 @@ test_session_detach_metadata_capacity_and_local_modal_flow :: proc(t: ^testing.T
 	attached_idx, attached_now := app.session_attach_tab(&a.session_mgr, cs)
 	testing.expect(t, attached_now)
 	testing.expect_value(t, a.session_mgr.tabs[attached_idx].backend.pty.pid, pid)
-	testing.expect_value(t, app.session_title_display(&a.session_mgr.tabs[attached_idx]), "Deploy")
+	testing.expect_value(t, app.session_title_display(a.session_mgr.tabs[attached_idx]), "Deploy")
 	testing.expect_value(t, a.session_mgr.tabs[attached_idx].backend.prog, "/bin/sleep")
 	testing.expect_value(t, a.session_mgr.tabs[attached_idx].backend.argv[0], "30")
 }
@@ -191,9 +191,7 @@ test_background_output_pointer_attach_and_termination_confirmation :: proc(t: ^t
 	testing.expect(t, !a.session_switcher.visible)
 	testing.expect_value(t, session_core.session_registry_detached_count(&reg), 0)
 	b := app.app_active_backend(a)
-	app.backend_lock_render(b)
-	testing.expect(t, _row_matches(&b.front_terminal, 0, "background-output"))
-	app.backend_unlock_render(b)
+	testing.expect(t, _row_matches(app.backend_get_terminal(b), 0, "background-output"))
 	testing.expect(t, app.session_detach_tab(&a.session_mgr, a.session_mgr.active_idx))
 	app._app_open_session_switcher(a, true)
 	_, _ = app.app_dispatch_input_events(a, []input.Input_Event{{event_type = .Key, gui = true, rune = 'x'}})
@@ -222,7 +220,7 @@ test_session_switcher_pane_count_tracks_split_leaves :: proc(t: ^testing.T) {
 	testing.expect(t, spawned, "spawn tab must succeed")
 
 	// Split the first tab so it owns two leaves and, with the split node, three nodes.
-	tab := &a.session_mgr.tabs[idx]
+	tab := a.session_mgr.tabs[idx]
 	testing.expect(t, tab.tree.root != nil && tab.tree.root.kind == .Leaf, "a fresh tab owns a single leaf")
 	b2 := new(app.Backend)
 	testing.expect(t, app.backend_init(b2, 24, 40, "/bin/sleep", {"pane2"}, nil, termgrid.Theme{}), "backend2 init must succeed")

@@ -272,7 +272,7 @@ test_tab_pane_tree_integration :: proc(t: ^testing.T) {
 	testing.expect(t, ok, "spawn tab must succeed")
 	testing.expect_value(t, idx, 0)
 
-	tab := &sm.tabs[idx]
+	tab := sm.tabs[idx]
 	testing.expect(t, tab.tree.root != nil, "tab.tree.root must be non-nil")
 	testing.expect(t, tab.tree.root.kind == .Leaf, "tab.tree.root must be leaf")
 	testing.expect(t, tab.tree.root.backend == &tab.backend, "tab.tree.root.backend must point to tab.backend")
@@ -316,7 +316,7 @@ test_pane_tree_multi_viewport_layout_and_resizing :: proc(t: ^testing.T) {
 
 	idx, ok := app.session_spawn(&sm, "/bin/echo", {"init"}, 24, 80, nil, {})
 	testing.expect(t, ok, "spawn tab must succeed")
-	tab := &sm.tabs[idx]
+	tab := sm.tabs[idx]
 	app.backend_stop_thread(&tab.backend)
 
 	b2 := new(app.Backend)
@@ -478,7 +478,7 @@ test_pane_exit_invalidates_dispatched_and_restores_dimensions :: proc(t: ^testin
 
 	idx, ok := app.session_spawn(&sm, "/bin/sleep", {"10"}, 24, 80, nil, {})
 	testing.expect(t, ok, "spawn tab must succeed")
-	tab := &sm.tabs[idx]
+	tab := sm.tabs[idx]
 	app.backend_stop_thread(&tab.backend)
 
 	b2 := new(app.Backend)

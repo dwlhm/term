@@ -1,6 +1,5 @@
 package app_test
 
-import "core:sync"
 import "core:testing"
 import app "../"
 
@@ -14,19 +13,22 @@ Publication_Probe :: struct {
 _publication_notify :: proc(user_data: rawptr) {
 	p := cast(^Publication_Probe)user_data
 	p.calls += 1
-	p.lock_available = sync.mutex_try_lock(&p.b.swap_mutex)
-	if p.lock_available {
-		p.snapshot_visible = p.b.front_focused == p.b.focused &&
-			p.b.front_exited == (p.b.pty.state == .Exited) &&
-			p.b.front_search_invalid_regex == p.b.search_invalid_regex
-		sync.mutex_unlock(&p.b.swap_mutex)
-	}
+	p.lock_available = true
+	app.backend_refresh_snapshot(p.b)
+	snap := app.backend_snapshot(p.b)
+	p.snapshot_visible = snap != nil &&
+		snap.focused == p.b.focused &&
+		snap.exited == (p.b.pty.state == .Exited) &&
+		snap.search_invalid_regex == p.b.search_invalid_regex
 }
 
 @(test)
 test_backend_publication_notifies_after_unlock :: proc(t: ^testing.T) {
 	b := new(app.Backend)
 	defer free(b)
+	b.middle = 1
+	b.write_index = 0
+	b.reader.read_index = 2
 	p := Publication_Probe{b = b}
 	app.backend_set_notify_data_ready(b, &p, _publication_notify)
 	for focused in ([]bool{true, false}) {
@@ -49,12 +51,14 @@ test_backend_publication_notifies_after_unlock :: proc(t: ^testing.T) {
 test_backend_locked_publication_does_not_notify :: proc(t: ^testing.T) {
 	b := new(app.Backend)
 	defer free(b)
+	b.middle = 1
+	b.write_index = 0
+	b.reader.read_index = 2
 	p := Publication_Probe{b = b}
 	app.backend_set_notify_data_ready(b, &p, _publication_notify)
 	b.focused = true
-	sync.mutex_lock(&b.swap_mutex)
-	app._backend_perform_swap_locked(b)
-	sync.mutex_unlock(&b.swap_mutex)
+	app.backend_publish_snapshot(b)
 	testing.expect_value(t, p.calls, 0)
-	testing.expect(t, b.front_focused, "locked helper must still publish the snapshot")
+	app.backend_refresh_snapshot(b)
+	testing.expect(t, app.backend_snapshot(b).focused, "publish helper must still publish the snapshot")
 }

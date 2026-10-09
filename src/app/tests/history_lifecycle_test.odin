@@ -56,8 +56,7 @@ test_closing_tabs_preserves_surviving_active_identity :: proc(t: ^testing.T) {
 		sm: app.Session_Manager
 		app.session_manager_init(&sm, 3)
 		for i in 0 ..< 3 {
-			resize(&sm.tabs, len(sm.tabs) + 1)
-			tab := &sm.tabs[len(sm.tabs) - 1]
+			tab, _ := app.session_append_tab(&sm)
 			tab.id = u32(i + 1)
 			tab.status = .Exited
 			tab.backend.pty.master = -1
@@ -80,15 +79,13 @@ test_session_close_tab_on_pty_exited_or_last :: proc(t: ^testing.T) {
 	app.session_manager_init(&sm, 3)
 	defer app.session_manager_destroy(&sm)
 
-	resize(&sm.tabs, len(sm.tabs) + 1)
-	tab0 := &sm.tabs[len(sm.tabs) - 1]
+	tab0, _ := app.session_append_tab(&sm)
 	tab0.id = 1
 	tab0.status = .Running
 	tab0.backend.pty.master = -1
 	tab0.backend.pty.state = .Exited
 
-	resize(&sm.tabs, len(sm.tabs) + 1)
-	tab1 := &sm.tabs[len(sm.tabs) - 1]
+	tab1, _ := app.session_append_tab(&sm)
 	tab1.id = 2
 	tab1.status = .Running
 	tab1.backend.pty.master = -1

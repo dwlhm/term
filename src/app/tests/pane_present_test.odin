@@ -217,19 +217,18 @@ test_app_pane_present_reaches_gpu_and_releases_borrowed_snapshots :: proc(t: ^te
 	defer free(a)
 	app.session_manager_init(&a.session_mgr, 4)
 	defer app.session_manager_destroy(&a.session_mgr)
-	resize(&a.session_mgr.tabs, 1)
+	tab, _ := app.session_append_tab(&a.session_mgr)
 	a.session_mgr.active_idx = 0
-	tab := &a.session_mgr.tabs[0]
 	b := &tab.backend
 	termgrid.terminal_init(&b.terminal, FRAME_PANE_GPU_TRACE_ROWS, FRAME_PANE_GPU_TRACE_COLS)
-	termgrid.terminal_init(&b.front_terminal, FRAME_PANE_GPU_TRACE_ROWS, FRAME_PANE_GPU_TRACE_COLS)
+	app.front_snapshot_init(&b.snapshots[b.reader.read_index], FRAME_PANE_GPU_TRACE_ROWS, FRAME_PANE_GPU_TRACE_COLS, theme = {})
 	b.pty.master = -1
 	b.pty.pid = -1
 	b.wake_pipe_r = -1
 	b.wake_pipe_w = -1
 	second := new(app.Backend)
 	termgrid.terminal_init(&second.terminal, FRAME_PANE_GPU_TRACE_ROWS, FRAME_PANE_GPU_TRACE_COLS)
-	termgrid.terminal_init(&second.front_terminal, FRAME_PANE_GPU_TRACE_ROWS, FRAME_PANE_GPU_TRACE_COLS)
+	app.front_snapshot_init(&second.snapshots[second.reader.read_index], FRAME_PANE_GPU_TRACE_ROWS, FRAME_PANE_GPU_TRACE_COLS, theme = {})
 	second.pty.master = -1
 	second.pty.pid = -1
 	second.wake_pipe_r = -1
@@ -245,8 +244,8 @@ test_app_pane_present_reaches_gpu_and_releases_borrowed_snapshots :: proc(t: ^te
 	a.renderer.instances.instance_data = make([]instance.Instance_Data, 512)
 	render.upload_ring_destroy(&a.renderer.upload_ring)
 	render.upload_ring_init(&a.renderer.upload_ring, &_pane_gpu_trace_backend, a.renderer.device, a.renderer.queue, 512*instance.INSTANCE_STRIDE)
-	_pane_gpu_trace_mark_damage(&b.front_terminal)
-	_pane_gpu_trace_mark_damage(&second.front_terminal)
+	_pane_gpu_trace_mark_damage(&b.snapshots[b.reader.read_index].terminal)
+	_pane_gpu_trace_mark_damage(&second.snapshots[second.reader.read_index].terminal)
 	// Non-running thread handles select front snapshots without racing a worker.
 	b.thread = cast(type_of(b.thread))(uintptr(1))
 	second.thread = cast(type_of(second.thread))(uintptr(2))
@@ -261,7 +260,7 @@ test_app_pane_present_reaches_gpu_and_releases_borrowed_snapshots :: proc(t: ^te
 	testing.expect(t, app.app_present(a), "production composed frame must reach fake GPU present")
 	testing.expect_value(t, _pane_gpu_trace.present_count, 2)
 	testing.expect(t, !b.render_locked && !second.render_locked)
-	b.front_terminal.synchronized_output = true
+	b.snapshots[b.reader.read_index].terminal.synchronized_output = true
 	b.sync_output_start_ns = u64(platform.platform_ticks_to_ns(platform.platform_now()))
 	testing.expect(t, !app.app_present(a), "any visible synchronized terminal postpones composed publication")
 	testing.expect_value(t, _pane_gpu_trace.present_count, 2)

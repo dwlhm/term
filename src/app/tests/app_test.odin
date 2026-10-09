@@ -670,7 +670,7 @@ test_backend_threaded_worker_and_double_buffer :: proc(t: ^testing.T) {
 	// Poll front buffer render state until the text appears in front buffer
 	found := false
 	for _ in 0..<100 {
-		app.backend_lock_render(b)
+		app.backend_refresh_snapshot(b)
 		state := app.backend_get_render_state(b)
 		if state.terminal != nil {
 			// Scan front buffer grid for THREAD_OK
@@ -695,7 +695,6 @@ test_backend_threaded_worker_and_double_buffer :: proc(t: ^testing.T) {
 				}
 			}
 		}
-		app.backend_unlock_render(b)
 		if found {
 			break
 		}
@@ -1120,8 +1119,7 @@ test_app_cmd_r_renames_active_tab :: proc(t: ^testing.T) {
 	defer free(a)
 	app.session_manager_init(&a.session_mgr, 4)
 	defer app.session_manager_destroy(&a.session_mgr)
-	resize(&a.session_mgr.tabs, len(a.session_mgr.tabs) + 1)
-	tab := &a.session_mgr.tabs[len(a.session_mgr.tabs) - 1]
+	tab, _ := app.session_append_tab(&a.session_mgr)
 	tab.id = 1
 	tab.backend.pty.master = -1
 	tab.backend.pty.pid = -1
@@ -1290,8 +1288,7 @@ test_app_paste_shadow_rename_dispatch :: proc(t: ^testing.T) {
 	defer posix.close(pipefd[0])
 	app.session_manager_init(&a.session_mgr, 4)
 	defer app.session_manager_destroy(&a.session_mgr)
-	resize(&a.session_mgr.tabs, len(a.session_mgr.tabs) + 1)
-	tab := &a.session_mgr.tabs[len(a.session_mgr.tabs) - 1]
+	tab, _ := app.session_append_tab(&a.session_mgr)
 	tab.id = 1
 	tab.backend.pty.master = int(pipefd[1])
 	tab.backend.pty.state = .Running

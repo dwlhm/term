@@ -78,7 +78,7 @@ test_pane_production_split_resize_focus_and_zoom :: proc(t: ^testing.T) {
 		testing.expect_value(t, a.session_mgr.tabs[0].tree.node_count, 1)
 	}
 	_, _ = app.app_dispatch_input_events(a, {{event_type = .Key, kind = .Printable, rune = '\\', gui = true}})
-	tab := &a.session_mgr.tabs[0]
+	tab := a.session_mgr.tabs[0]
 	testing.expect_value(t, tab.tree.node_count, 3)
 	leaves: [app.MAX_PANE_NODES]^app.Pane_Node
 	n := app.tab_leaf_panes(tab, leaves[:])
@@ -122,7 +122,7 @@ test_pane_focused_key_dispatch_and_pointer_scale :: proc(t: ^testing.T) {
 	if !_pane_integration_init(a, t) do return
 	defer _pane_integration_destroy(a)
 	_, _ = app.app_dispatch_input_events(a, {{event_type = .Key, kind = .Printable, rune = '\\', gui = true}})
-	tab := &a.session_mgr.tabs[0]
+	tab := a.session_mgr.tabs[0]
 	leaves: [app.MAX_PANE_NODES]^app.Pane_Node
 	n := app.tab_leaf_panes(tab, leaves[:])
 	for leaf in leaves[:n] { app.backend_stop_thread(leaf.backend) }
@@ -156,8 +156,9 @@ test_pane_search_async_query_and_focus_noop :: proc(t: ^testing.T) {
 	defer free(a)
 	_bare_app(a)
 	defer _bare_destroy(a)
-	a.backend.front_interaction.search_len = 1
-	a.backend.front_interaction.search_query[0] = 'a'
+	snap := app.backend_snapshot(&a.backend)
+	snap.interaction.search_len = 1
+	snap.interaction.search_query[0] = 'a'
 	a.search_bar.query_len = 2
 	a.search_bar.query[0] = 'a'
 	a.search_bar.query[1] = 'b'
@@ -177,7 +178,7 @@ test_pane_extra_modifiers_dispatch_does_not_split :: proc(t: ^testing.T) {
 	defer free(a)
 	app.session_manager_init(&a.session_mgr, 2)
 	defer app.session_manager_destroy(&a.session_mgr)
-	resize(&a.session_mgr.tabs, 1)
+	_, _ = app.session_append_tab(&a.session_mgr)
 	a.session_mgr.active_idx = 0
 	b := &a.session_mgr.tabs[0].backend
 	b.pty.master = -1

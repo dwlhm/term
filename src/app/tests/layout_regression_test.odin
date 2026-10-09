@@ -57,7 +57,7 @@ test_layout_dispatch_refreshes_logical_chrome :: proc(t: ^testing.T) {
 	defer app.session_manager_destroy(&a.session_mgr)
 	// Parked sessions avoid process or GPU dependencies.
 	for _ in 0..<2 {
-		resize(&a.session_mgr.tabs, len(a.session_mgr.tabs) + 1)
+		_, _ = app.session_append_tab(&a.session_mgr)
 	}
 	a.session_mgr.active_idx = 0
 	ui.tab_bar_init(&a.tab_bar)

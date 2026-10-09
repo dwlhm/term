@@ -99,17 +99,13 @@ _profile_resize_case :: proc(a: ^App, requested_w, requested_h: i32, expect_grid
 	threaded := backend_is_threaded(b)
 	before_rows, before_cols := b.terminal.grid.row_count, b.terminal.grid.col_count
 	if threaded {
-		backend_lock_render(b)
-		before_rows, before_cols = b.front_terminal.grid.row_count, b.front_terminal.grid.col_count
-		backend_unlock_render(b)
+		before_rows, before_cols = backend_get_terminal(b).grid.row_count, backend_get_terminal(b).grid.col_count
 	}
 	if noop {
 		_ = app_on_resize(a, requested_w, requested_h)
 		actual_rows, actual_cols := before_rows, before_cols
 		if threaded {
-			backend_lock_render(b)
-			actual_rows, actual_cols = b.front_terminal.grid.row_count, b.front_terminal.grid.col_count
-			backend_unlock_render(b)
+			actual_rows, actual_cols = backend_get_terminal(b).grid.row_count, backend_get_terminal(b).grid.col_count
 		} else {
 			actual_rows, actual_cols = b.terminal.grid.row_count, b.terminal.grid.col_count
 		}
@@ -152,9 +148,7 @@ _profile_resize_case :: proc(a: ^App, requested_w, requested_h: i32, expect_grid
 	if threaded {
 		deadline := u64(platform.platform_ticks_to_ns(platform.platform_now())) + PROFILE_WINDOW_RESIZE_TIMEOUT_NS
 		for {
-			backend_lock_render(b)
-			actual_rows, actual_cols = b.front_terminal.grid.row_count, b.front_terminal.grid.col_count
-			backend_unlock_render(b)
+			actual_rows, actual_cols = backend_get_terminal(b).grid.row_count, backend_get_terminal(b).grid.col_count
 			if actual_rows == actual_target_rows && actual_cols == actual_target_cols { break }
 			if u64(platform.platform_ticks_to_ns(platform.platform_now())) >= deadline {
 				_profile_failure_reason = .Grid_Size_Timeout
@@ -188,9 +182,7 @@ _profile_scenario_resize :: proc(a: ^App, now_ns: u64) -> bool {
 	profile_scenario_step_done(&_profile_scenario)
 	rows, cols := b.terminal.grid.row_count, b.terminal.grid.col_count
 	if backend_is_threaded(b) {
-		backend_lock_render(b)
-		rows, cols = b.front_terminal.grid.row_count, b.front_terminal.grid.col_count
-		backend_unlock_render(b)
+		rows, cols = backend_get_terminal(b).grid.row_count, backend_get_terminal(b).grid.col_count
 	}
 	profile_record(.Scenario_Phase, .Complete, a.window.pixel_w, a.window.pixel_h, i32(rows), i32(cols), 0, backend_is_threaded(b))
 	_ = now_ns
@@ -214,9 +206,7 @@ _profile_scenario_step :: proc(a: ^App) -> bool {
 		for marker_len < len(_profile_scenario.marker_done) && _profile_scenario.marker_done[marker_len] != 0 { marker_len += 1 }
 		marker_cols := b.terminal.grid.col_count
 		if backend_is_threaded(b) {
-			backend_lock_render(b)
-			marker_cols = b.front_terminal.grid.col_count
-			backend_unlock_render(b)
+			marker_cols = backend_get_terminal(b).grid.col_count
 		}
 		if marker_len > marker_cols {
 			_profile_scenario.phase = .Failed
@@ -233,12 +223,10 @@ _profile_scenario_step :: proc(a: ^App) -> bool {
 	if _profile_scenario.phase == .Running {
 		terminal := &b.terminal
 		if backend_is_threaded(b) {
-			backend_lock_render(b)
-			terminal = &b.front_terminal
+			terminal = backend_get_terminal(b)
 		}
 		action := profile_scenario_observe_terminal(&_profile_scenario, terminal, now_ns)
 		profile_phase_publish(_profile_scenario.phase)
-		if backend_is_threaded(b) { backend_unlock_render(b) }
 		if action == .Advance {
 			profile_record(.Scenario_Phase, .Complete, a.window.pixel_w, a.window.pixel_h, i32(terminal.grid.row_count), i32(terminal.grid.col_count), 0, backend_is_threaded(b))
 			return true
@@ -276,11 +264,9 @@ _profile_scenario_step :: proc(a: ^App) -> bool {
 		if !a.window.is_open do return true
 		terminal := &b.terminal
 		if backend_is_threaded(b) {
-			backend_lock_render(b)
-			terminal = &b.front_terminal
+			terminal = backend_get_terminal(b)
 		}
 		ready := profile_scenario_shell_ready(terminal)
-		if backend_is_threaded(b) { backend_unlock_render(b) }
 		if !ready do return true
 		if action == .Prepare {
 			evs: [16]input.Input_Event
@@ -434,7 +420,7 @@ _app_gpu_frame_complete :: proc(gpu_ns: u64, valid: bool) {
 app_active_backend :: proc(a: ^App) -> ^Backend {
 	if a == nil do return nil
 	if len(a.session_mgr.tabs) > 0 && a.session_mgr.active_idx >= 0 && a.session_mgr.active_idx < len(a.session_mgr.tabs) {
-		return tab_active_backend(&a.session_mgr.tabs[a.session_mgr.active_idx])
+		return tab_active_backend(a.session_mgr.tabs[a.session_mgr.active_idx])
 	}
 	return &a.backend
 }
@@ -541,7 +527,7 @@ _app_commit_tab_drop :: proc(a: ^App, from_idx, drop_gap: int) {
 _app_begin_tab_rename :: proc(a: ^App, tab_idx: int) {
 	if a == nil do return
 	if tab_idx < 0 || tab_idx >= len(a.session_mgr.tabs) do return
-	tab := &a.session_mgr.tabs[tab_idx]
+	tab := a.session_mgr.tabs[tab_idx]
 	title := session_title_display(tab)
 	_ = platform_tabs.tab_rename_begin(&a.tab_rename, tab_idx, tab.id, title)
 	a.renderer.full_redraw_pending = true
@@ -554,9 +540,9 @@ _app_commit_tab_rename :: proc(a: ^App) {
 	if tab_idx >= 0 {
 		text := platform_tabs.tab_rename_text(&a.tab_rename)
 		if len(text) == 0 {
-			_ = session_clear_title_override(&a.session_mgr.tabs[tab_idx])
+			_ = session_clear_title_override(a.session_mgr.tabs[tab_idx])
 		} else {
-			_ = session_set_title_override(&a.session_mgr.tabs[tab_idx], text)
+			_ = session_set_title_override(a.session_mgr.tabs[tab_idx], text)
 		}
 	}
 	_app_cancel_tab_rename(a)
@@ -597,7 +583,7 @@ _app_build_ui_tabs :: proc(a: ^App, out: []platform_tabs.Tab_Info) -> int {
 	if a == nil do return 0
 	n := min(len(a.session_mgr.tabs), len(out))
 	for i in 0 ..< n {
-		t := &a.session_mgr.tabs[i]
+		t := a.session_mgr.tabs[i]
 		out[i] = platform_tabs.Tab_Info{
 			id        = t.id,
 			title     = session_title_display(t),
@@ -631,7 +617,7 @@ _app_switch_tab :: proc(a: ^App, idx: int) -> bool {
 	if a == nil do return false
 	if !session_switch_tab(&a.session_mgr, idx) do return false
 	if a.session_mgr.active_idx >= 0 && a.session_mgr.active_idx < len(a.session_mgr.tabs) {
-		tab := &a.session_mgr.tabs[a.session_mgr.active_idx]
+		tab := a.session_mgr.tabs[a.session_mgr.active_idx]
 		if tab.is_host_backed && a.host_client.connected {
 			_ = host_client_attach_workspace(&a.host_client, tab.host_ws_id)
 		}
@@ -746,7 +732,7 @@ _app_spawn_default_tab :: proc(a: ^App) -> bool {
 _app_detach_current_tab :: proc(a: ^App) {
 	if a == nil || a.session_mgr.active_idx < 0 || a.session_mgr.active_idx >= len(a.session_mgr.tabs) do return
 	if a.session_mgr.active_idx >= 0 && a.session_mgr.active_idx < len(a.session_mgr.tabs) {
-		tab := &a.session_mgr.tabs[a.session_mgr.active_idx]
+		tab := a.session_mgr.tabs[a.session_mgr.active_idx]
 		if tab.is_host_backed && a.host_client.connected {
 			_ = host_client_detach_workspace(&a.host_client, tab.host_ws_id)
 		}
@@ -783,7 +769,7 @@ _app_close_tab_confirmed :: proc(a: ^App, idx: int) {
 _app_request_close_tab :: proc(a: ^App, idx: int) {
 	if a == nil do return
 	if idx < 0 || idx >= len(a.session_mgr.tabs) do return
-	tab := &a.session_mgr.tabs[idx]
+	tab := a.session_mgr.tabs[idx]
 	if _app_tab_has_running_processes(tab) {
 		a.confirm_session_len = 0
 		platform_dialogs.confirm_dialog_show(&a.confirm_dialog, idx, tab.id)
@@ -1083,9 +1069,9 @@ _app_sync_focus :: proc(a: ^App) {
 	}
 	focused := .INPUT_FOCUS in sdl3.GetWindowFlags(a.window.handle)
 	if len(a.session_mgr.tabs) > 0 {
-		for &tab, idx in a.session_mgr.tabs {
+		for tab, idx in a.session_mgr.tabs {
 			leaves: [MAX_PANE_NODES]^Pane_Node
-			n := tab_leaf_panes(&tab, leaves[:])
+			n := tab_leaf_panes(tab, leaves[:])
 			for leaf in leaves[:n] {
 				_ = _app_dispatch_backend(leaf.backend, UI_Event{type = .Focus, focused = focused && idx == a.session_mgr.active_idx && leaf.id == tab.tree.focused_pane_id})
 			}
@@ -1206,22 +1192,7 @@ _app_copy_selection :: proc(a: ^App) -> bool {
 	}
 	b := app_active_backend(a)
 	if b == nil do return false
-	if backend_is_threaded(b) do backend_lock_render(b)
-	defer if backend_is_threaded(b) { backend_unlock_render(b) }
-	copied: string
-	if backend_is_threaded(b) {
-		if b.front_interaction.selection_active {
-			copied = inter.interaction_extract_selection_text(&b.front_terminal, &b.front_interaction)
-		} else {
-			copied = termgrid.terminal_view_copy(&b.front_terminal, &b.front_view)
-		}
-	} else {
-		if b.interaction.selection_active {
-			copied = inter.interaction_extract_selection_text(&b.terminal, &b.interaction)
-		} else {
-			copied = backend_copy_selection(b)
-		}
-	}
+	copied := backend_copy_selection(b)
 	defer delete(copied)
 	if len(copied) == 0 {
 		return false
@@ -1313,9 +1284,9 @@ app_reload_config :: proc(a: ^App) -> bool {
 		new_cfg.ansi16 != a.config.ansi16
 
 	if theme_changed {
-		for &tab in a.session_mgr.tabs {
+		for tab in a.session_mgr.tabs {
 			leaves: [MAX_PANE_NODES]^Pane_Node
-			n := tab_leaf_panes(&tab, leaves[:])
+			n := tab_leaf_panes(tab, leaves[:])
 			for leaf in leaves[:n] {
 				if !_app_send_theme(leaf.backend, theme) {
 					fmt.eprintln("config reload rejected: backend theme queue full")
@@ -2061,9 +2032,8 @@ _app_sync_title :: proc(a: ^App) {
 		}
 	}
 
-	if backend_is_threaded(active_b) do backend_lock_render(active_b)
-	defer if backend_is_threaded(active_b) { backend_unlock_render(active_b) }
-	inter_ptr := &active_b.front_interaction if backend_is_threaded(active_b) else &active_b.interaction
+	snap := backend_snapshot(active_b)
+	inter_ptr := &snap.interaction if (backend_is_threaded(active_b) && snap != nil) else &active_b.interaction
 	if inter_ptr.mode != .Passthrough || inter_ptr.viewport_flow == .Paused {
 		hud_title := _app_compute_hud_title(inter_ptr)
 		if len(hud_title) > 0 {
@@ -2092,12 +2062,22 @@ _app_drain_terminal_events :: proc(a: ^App, term_ref: ^termgrid.Terminal) {
 		delete(clip_text, runtime.heap_allocator())
 	}
 
-	if backend_is_threaded(active_b) do backend_lock_render(active_b)
-	defer if backend_is_threaded(active_b) { backend_unlock_render(active_b) }
-	if term_ref.bell_event {
+	events := backend_take_events(active_b)
+	if (events & u32(Backend_Event.Bell)) != 0 || term_ref.bell_event {
 		term_ref.bell_event = false
 		when ODIN_OS == .Darwin {
 			NSBeep()
+		}
+	}
+
+	if (events & u32(Backend_Event.Notification)) != 0 {
+		notifs: [MAX_NOTIFICATIONS]Notification_Message
+		n := backend_take_notifications(active_b, notifs[:])
+		for i in 0 ..< n {
+			msg := &notifs[i]
+			title := string(msg.title[:msg.title_len])
+			message := string(msg.message[:msg.message_len])
+			_app_show_notification(title, message)
 		}
 	}
 
@@ -2122,7 +2102,7 @@ _app_layout_ui :: proc(a: ^App) {
 	a.tab_bar.max_title_len = a.config.tab_max_title_len if a.config.tab_max_title_len > 0 else 16
 	titles: [MAX_TABS]string
 	for i in 0 ..< tab_count {
-		titles[i] = session_title_display(&a.session_mgr.tabs[i])
+		titles[i] = session_title_display(a.session_mgr.tabs[i])
 	}
 	_ = platform_tabs.tabs_layout(&a.tab_bar, window_w, tab_count, a.tab_rects[:], a.session_mgr.active_idx, titles[:tab_count])
 	if a.tab_overflow.visible {
@@ -2372,11 +2352,9 @@ app_frame :: proc(a: ^App) -> bool {
 		}
 	}
 	threaded := backend_is_threaded(active_b)
-	active_term := &active_b.front_terminal if threaded else &active_b.terminal
+	active_term := backend_get_terminal(active_b)
 
-	if threaded do backend_lock_render(active_b)
-	if _damage_cells(active_term) > 0 do any_damaged = true
-	if threaded do backend_unlock_render(active_b)
+	if _app_has_pending_damage(a) do any_damaged = true
 	_app_drain_terminal_events(a, active_term)
 	_app_sync_title(a)
 	_app_sync_search_bar(a)
@@ -2540,7 +2518,7 @@ _app_dispatch_macos_service_requests :: proc(a: ^App) {
 			if loaded {
 				restored_idx, restored := persistence_restore_tab(a, layout, context_dir)
 				if restored && _app_switch_tab(a, restored_idx) {
-					tab := &a.session_mgr.tabs[restored_idx]
+					tab := a.session_mgr.tabs[restored_idx]
 					backend_set_clipboard_callbacks(&tab.backend, &a.frontend, _frontend_clipboard_write_cb, _frontend_clipboard_read_cb)
 					backend_set_notify_data_ready(&tab.backend, a, _app_on_backend_data_ready)
 					render.renderer_resize_grid(&a.renderer, &tab.backend.terminal, i32(a.renderer.rows), i32(a.renderer.cols))
@@ -2661,7 +2639,7 @@ main :: proc() {
 	if restore_layout_ok {
 		restored_idx, restore_ok := persistence_restore_tab(app, restore_layout, restore_context)
 		if restore_ok && _app_switch_tab(app, restored_idx) {
-			tab := &app.session_mgr.tabs[restored_idx]
+			tab := app.session_mgr.tabs[restored_idx]
 			active_b := &tab.backend
 			backend_set_clipboard_callbacks(active_b, &app.frontend, _frontend_clipboard_write_cb, _frontend_clipboard_read_cb)
 			backend_set_notify_data_ready(active_b, app, _app_on_backend_data_ready)

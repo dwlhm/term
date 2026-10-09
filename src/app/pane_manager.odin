@@ -23,7 +23,7 @@ PANE_EDGE_EPSILON: f32 : 0.5
 
 _app_active_tab :: proc(a: ^App) -> ^Tab_Session {
 	if a == nil || a.session_mgr.active_idx < 0 || a.session_mgr.active_idx >= len(a.session_mgr.tabs) do return nil
-	return &a.session_mgr.tabs[a.session_mgr.active_idx]
+	return a.session_mgr.tabs[a.session_mgr.active_idx]
 }
 
 // Every UI mutation crosses the same boundary
@@ -292,10 +292,8 @@ _app_close_pane :: proc(a: ^App, target_id: Pane_Id) {
 	}
 	active_b := tab_active_backend(tab)
 	if active_b != nil {
-		if backend_is_threaded(active_b) do backend_lock_render(active_b)
-		current := &active_b.front_terminal if backend_is_threaded(active_b) else &active_b.terminal
+		current := backend_get_terminal(active_b)
 		termgrid.damage_mark_all(&current.damage, nil)
-		if backend_is_threaded(active_b) do backend_unlock_render(active_b)
 	}
 
 	_ = _app_layout_panes(a)
@@ -332,6 +330,8 @@ _app_route_pane_pointer :: proc(a: ^App, p: input.Input_Pointer_Event) -> bool {
 			previous := app_active_backend(a)
 			tree.focused_pane_id = leaf.id
 			_app_pane_focus_changed(a, previous)
+			a.renderer.full_redraw_pending = true
+			return true
 		}
 	}
 	if p.kind == .Motion && tree.divider_hover != divider {
@@ -355,10 +355,7 @@ _app_image_focus_hit :: proc(a: ^App, p: input.Input_Pointer_Event) -> (hit: int
 		if px < leaf.rect.x || py < leaf.rect.y || px >= leaf.rect.x + leaf.rect.w || py >= leaf.rect.y + leaf.rect.h do continue
 		if px < leaf.rect.x + pad || py < leaf.rect.y + pad || px >= leaf.rect.x + leaf.rect.w - pad || py >= leaf.rect.y + leaf.rect.h - pad do continue
 		b := leaf.backend
-		threaded := backend_is_threaded(b)
-		if threaded do backend_lock_render(b)
-		t := &b.front_terminal if threaded else &b.terminal
-		defer if threaded { backend_unlock_render(b) }
+		t := backend_get_terminal(b)
 		// Alt-screen applications retain the existing terminal mouse policy unless
 		// Shift explicitly opts into the GUI interaction layer.
 		if t.is_alt_screen && !p.shift do return {}, 0, false
@@ -376,10 +373,7 @@ _app_image_focus_contains :: proc(a: ^App, p: input.Input_Pointer_Event) -> bool
 	if a == nil || !a.image_focus.active do return false
 	b := app_active_backend(a)
 	if b == nil do return false
-	threaded := backend_is_threaded(b)
-	if threaded do backend_lock_render(b)
-	defer if threaded { backend_unlock_render(b) }
-	t := &b.front_terminal if threaded else &b.terminal
+	t := backend_get_terminal(b)
 	if t.graphics_namespace != a.image_focus.namespace do return false
 	store := termgrid.terminal_graphics_active(t)
 	image := graphics.store_find_image(store, a.image_focus.image_id, 0)
@@ -403,13 +397,13 @@ _app_tab_has_running_processes :: proc(tab: ^Tab_Session) -> bool {
 	return false
 }
 
-// Arrays borrow locked worker snapshots only for the duration of one publication.
+// Arrays store render state for composed presentation.
 App_Pane_Frame :: struct {
-	leaves: [MAX_PANE_NODES]^Pane_Node,
-	states: [MAX_PANE_NODES]Render_State,
+	leaves:    [MAX_PANE_NODES]^Pane_Node,
+	states:    [MAX_PANE_NODES]Render_State,
 	viewports: [MAX_PANE_NODES]render.Pane_Viewport,
-	locked: [MAX_PANE_NODES]^Backend,
-	count, lock_count, active: int,
+	count:     int,
+	active:    int,
 }
 
 // _pane_divider_edges reports which of the focused leaf's four edges are
@@ -448,18 +442,13 @@ _app_present :: proc(a: ^App) -> bool {
 	render.renderer_ui_reset(&a.renderer)
 	_app_stage_ui(a) // Layout and dispatch run before borrowing worker snapshots.
 	frame: App_Pane_Frame
-	defer for b in frame.locked[:frame.lock_count] { backend_unlock_render(b) }
 	if tab := _app_active_tab(a); tab != nil {
 		n := tab_leaf_panes(tab, frame.leaves[:])
 		pad := _app_pane_padding(a)
 		for leaf in frame.leaves[:n] {
 			if leaf.backend == nil || leaf.rect.w <= 0 || leaf.rect.h <= 0 do continue
 			b := leaf.backend
-			if backend_is_threaded(b) {
-				backend_lock_render(b)
-				frame.locked[frame.lock_count] = b
-				frame.lock_count += 1
-			}
+			backend_refresh_snapshot(b)
 			i := frame.count
 			frame.states[i] = backend_get_render_state(b)
 			state := &frame.states[i]
@@ -512,11 +501,7 @@ _app_present :: proc(a: ^App) -> bool {
 	} else {
 		b := app_active_backend(a)
 		if b == nil do return false
-		if backend_is_threaded(b) {
-			backend_lock_render(b)
-			frame.locked[0] = b
-			frame.lock_count = 1
-		}
+		backend_refresh_snapshot(b)
 		frame.states[0] = backend_get_render_state(b)
 		frame.count = 1
 	}
@@ -541,12 +526,11 @@ _app_present :: proc(a: ^App) -> bool {
 _app_sync_search_bar :: proc(a: ^App, adopt_query: bool = false) {
 	b := app_active_backend(a)
 	if b == nil do return
-	if backend_is_threaded(b) do backend_lock_render(b)
-	defer if backend_is_threaded(b) { backend_unlock_render(b) }
-	s := &b.front_interaction if backend_is_threaded(b) else &b.interaction
+	snap := backend_snapshot(b)
+	s := &snap.interaction if (backend_is_threaded(b) && snap != nil) else &b.interaction
 	query := string(s.search_query[:clamp(s.search_len, 0, len(s.search_query))])
 	if !adopt_query && query != string(a.search_bar.query[:a.search_bar.query_len]) do return
-	a.search_bar.is_invalid_regex = b.front_search_invalid_regex if backend_is_threaded(b) else b.search_invalid_regex
+	a.search_bar.is_invalid_regex = snap.search_invalid_regex if (backend_is_threaded(b) && snap != nil) else b.search_invalid_regex
 	a.search_bar.match_count = s.search_match_count
 	a.search_bar.match_idx = s.search_match_idx
 	if adopt_query do a.search_bar.query_len = copy(a.search_bar.query[:], s.search_query[:clamp(s.search_len, 0, len(s.search_query))])
@@ -587,9 +571,7 @@ _app_send_theme :: proc(b: ^Backend, theme: termgrid.Theme) -> bool {
 
 _app_backend_pending_damage :: proc(b: ^Backend) -> bool {
 	if b == nil do return false
-	if backend_is_threaded(b) do backend_lock_render(b)
-	defer if backend_is_threaded(b) { backend_unlock_render(b) }
-	terminal := &b.front_terminal if backend_is_threaded(b) else &b.terminal
+	terminal := backend_get_terminal(b)
 	return _damage_cells(terminal) > 0
 }
 

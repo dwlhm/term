@@ -12,8 +12,7 @@ import termgrid "../../terminal"
 _seeded_manager :: proc(sm: ^app.Session_Manager, count: int, base: u32) {
 	app.session_manager_init(sm, 8)
 	for i in 0 ..< count {
-		resize(&sm.tabs, len(sm.tabs) + 1)
-		tab := &sm.tabs[len(sm.tabs) - 1]
+		tab, _ := app.session_append_tab(sm)
 		tab.id = base + u32(i) + 1
 	}
 }
@@ -64,10 +63,12 @@ test_session_close_others_and_to_right :: proc(t: ^testing.T) {
 	testing.expect_value(t, sm.tabs[0].id, u32(1))
 
 	// Rebuild with a fresh id range and keep only the second tab.
-	resize(&sm.tabs, 0)
+	for t in sm.tabs {
+		free(t)
+	}
+	clear(&sm.tabs)
 	for i in 0 ..< 4 {
-		resize(&sm.tabs, len(sm.tabs) + 1)
-		tab := &sm.tabs[len(sm.tabs) - 1]
+		tab, _ := app.session_append_tab(&sm)
 		tab.id = 10 + u32(i) + 1
 	}
 	sm.active_idx = 1
@@ -86,7 +87,7 @@ test_session_title_override_survives_osc_update :: proc(t: ^testing.T) {
 	sm: app.Session_Manager
 	_seeded_manager(&sm, 1, 0)
 	defer app.session_manager_destroy(&sm)
-	s := &sm.tabs[0]
+	s := sm.tabs[0]
 
 	s.title_len = app.session_sanitize_title(s.title_buf[:], "zsh")
 	testing.expect_value(t, app.session_title_display(s), "zsh")
@@ -118,7 +119,7 @@ test_session_title_recency :: proc(t: ^testing.T) {
 	sm: app.Session_Manager
 	_seeded_manager(&sm, 1, 0)
 	defer app.session_manager_destroy(&sm)
-	s := &sm.tabs[0]
+	s := sm.tabs[0]
 
 	// 1. Idle in a folder: directory basename is used.
 	app.session_update_title(s, "", "/project", "")
@@ -204,23 +205,6 @@ _dummy_clip_write :: proc(user_data: rawptr, text: string) {}
 _dummy_clip_read :: proc(user_data: rawptr, out: []u8) -> int { return 0 }
 
 @(test)
-test_tab_rebase_updates_observer_user_data :: proc(t: ^testing.T) {
-	tab := new(app.Tab_Session)
-	defer free(tab)
-	_ = app.pane_tree_init(&tab.tree, &tab.backend)
-
-	old_backend_ptr := (^app.Backend)(uintptr(0xDEADBEEF))
-	tab.backend.observer.user_data = rawptr(old_backend_ptr)
-	tab.backend.parser.clipboard_read_user_data = rawptr(old_backend_ptr)
-
-	old_nodes_base := rawptr(uintptr(rawptr(&tab.tree.nodes[0])) - 128)
-	app._tab_rebase_tree(tab, old_nodes_base, old_backend_ptr)
-
-	testing.expect(t, tab.backend.observer.user_data == rawptr(&tab.backend), "observer.user_data must be rebased to new backend")
-	testing.expect(t, tab.backend.parser.clipboard_read_user_data == rawptr(&tab.backend), "clipboard_read_user_data must be rebased to new backend")
-}
-
-@(test)
 test_session_manager_callbacks_propagated_to_host_backed :: proc(t: ^testing.T) {
 	sm: app.Session_Manager
 	app.session_manager_init(&sm, 4)
@@ -239,7 +223,7 @@ test_session_manager_callbacks_propagated_to_host_backed :: proc(t: ^testing.T) 
 	testing.expect(t, ok, "session_spawn_host_backed must succeed")
 	testing.expect_value(t, idx, 0)
 
-	tab := &sm.tabs[0]
+	tab := sm.tabs[0]
 	testing.expect(t, tab.backend.notify_data_ready_cb == _dummy_notify_proc, "notify_data_ready_cb must be propagated")
 	testing.expect(t, tab.backend.notify_user_data == &notify_val, "notify_user_data must be propagated")
 	testing.expect(t, tab.backend.clipboard_write_cb == _dummy_clip_write, "clipboard_write must be propagated")
@@ -269,33 +253,34 @@ test_concurrent_tabs_loop_output_no_starvation :: proc(t: ^testing.T) {
 	app.session_switch_tab(&sm, idx1)
 
 	// Wait up to 3 seconds for both background and foreground tabs to reach Line 2
-	b0 := app.tab_active_backend(&sm.tabs[idx0])
-	b1 := app.tab_active_backend(&sm.tabs[idx1])
+	b0 := app.tab_active_backend(sm.tabs[idx0])
+	b1 := app.tab_active_backend(sm.tabs[idx1])
 
 	t0_seen_line2 := false
 	t1_seen_line2 := false
 
 	for attempt in 0 ..< 150 {
+		app.backend_refresh_snapshot(b0)
+		app.backend_refresh_snapshot(b1)
+
 		if !t0_seen_line2 {
-			app.backend_lock_render(b0)
-			for r in 0 ..< b0.front_terminal.grid.row_count {
-				if _row_matches(&b0.front_terminal, r, "Tab0_Line2") {
+			t0 := app.backend_get_terminal(b0)
+			for r in 0 ..< t0.grid.row_count {
+				if _row_matches(t0, r, "Tab0_Line2") {
 					t0_seen_line2 = true
 					break
 				}
 			}
-			app.backend_unlock_render(b0)
 		}
 
 		if !t1_seen_line2 {
-			app.backend_lock_render(b1)
-			for r in 0 ..< b1.front_terminal.grid.row_count {
-				if _row_matches(&b1.front_terminal, r, "Tab1_Line2") {
+			t1 := app.backend_get_terminal(b1)
+			for r in 0 ..< t1.grid.row_count {
+				if _row_matches(t1, r, "Tab1_Line2") {
 					t1_seen_line2 = true
 					break
 				}
 			}
-			app.backend_unlock_render(b1)
 		}
 
 		if t0_seen_line2 && t1_seen_line2 do break

@@ -85,7 +85,7 @@ test_session_detach_tab_multipane_succeeds :: proc(t: ^testing.T) {
 	idx, spawned := app.session_spawn(&sm, "/bin/sleep", {"30"}, 24, 80, nil, termgrid.Theme{})
 	testing.expect(t, spawned, "session_spawn must succeed")
 
-	tab := &sm.tabs[idx]
+	tab := sm.tabs[idx]
 	testing.expect(t, tab.tree.root != nil, "root pane must exist")
 
 	b2 := new(app.Backend)

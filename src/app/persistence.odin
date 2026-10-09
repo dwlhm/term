@@ -965,7 +965,7 @@ persistence_restore_tab :: proc(a: ^App, layout: Persisted_Layout, context_dir: 
 	new_idx, spawn_ok := session_spawn(&a.session_mgr, shell, shell_argv, rows, cols, &cfg_copy, a.renderer.theme, pixel_w, pixel_h)
 	if !spawn_ok do return -1, false
 
-	tab := &a.session_mgr.tabs[new_idx]
+	tab := a.session_mgr.tabs[new_idx]
 	if tab.backend.notify_data_ready_cb == nil {
 		backend_set_notify_data_ready(&tab.backend, a, _app_on_backend_data_ready)
 	}

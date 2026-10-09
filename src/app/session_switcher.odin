@@ -169,10 +169,8 @@ _app_execute_session_action :: proc(a: ^App, action: platform_tabs.Session_Switc
 			return
 		}
 		_ = session_switch_tab(&a.session_mgr, idx)
-		b := tab_active_backend(&a.session_mgr.tabs[idx])
-		backend_lock_render(b)
-		termgrid.damage_mark_all(&b.front_terminal.damage, nil)
-		backend_unlock_render(b)
+		b := tab_active_backend(a.session_mgr.tabs[idx])
+		termgrid.damage_mark_all(&backend_get_terminal(b).damage, nil)
 		a.session_mgr.tabs[idx].tree.root.dispatched_rows = 0
 		a.session_mgr.tabs[idx].tree.root.dispatched_cols = 0
 		_app_close_session_switcher(a)

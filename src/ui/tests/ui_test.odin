@@ -176,9 +176,9 @@ test_security_pid_guard_and_title_sanitize :: proc(t: ^testing.T) {
 	app.session_manager_init(&sm, 4)
 	defer app.session_manager_destroy(&sm)
 
-	resize(&sm.tabs, 1)
-	sm.tabs[0].status = .Running
-	sm.tabs[0].backend.pty.pid = 1 // Init / launchd PID
+	tab, _ := app.session_append_tab(&sm)
+	tab.status = .Running
+	tab.backend.pty.pid = 1 // Init / launchd PID
 	sm.active_idx = 0
 
 	// session_close_tab on pid = 1: safely closes immediately and skips kill(<=1)
