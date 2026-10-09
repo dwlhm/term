@@ -1,51 +1,280 @@
-// msl_spike/fullscreen.msl — HAND-DERIVED reference translation of fullscreen.wgsl.
+// Production Metal port of fullscreen.wgsl: the fullscreen single-pass
+// renderer. One fullscreen triangle (vertex_id, no vertex buffer) shades every
+// framebuffer pixel directly from the packed V2 grid, mirroring the WGSL
+// reference exactly. Entry points: fullscreen_vs_main / fullscreen_fs_main.
 //
-// STATUS: BLOCKED-EXPLICIT — no WGSL→MSL translator available in this
-// environment (naga: not installed, tint: not installed). Entry points below
-// mirror fullscreen.wgsl (grid + LUT upload, one fullscreen fragment draw);
-// minimal hand mapping for spike reference ONLY. Not translator output, not
-// compiled by the build.
+// Cell unpack mirrors render_cell_unpack_v2 (cells are u64 pairs):
+//   lo = bits 0..31, hi = bits 32..63
+//   content = lo & 0x1FFFFF, style = (lo >> 21) & 0x3FF,
+//   width = ((lo >> 31) & 1) | ((hi & 1) << 1),
+//   slot = (hi >> 8) & 0x1FF (0x1FF = UNRESOLVED -> pinned lookup below).
 //
-// Source: src/render/shaders/fullscreen.wgsl.
-// Maps: grid/LUT storage buffers -> buffer(0)/buffer(1); atlas texture +
-//       sampler -> texture(0) + sampler(0); fullscreen triangle vertex entry
-//       -> bench_fullscreen_vs; fragment entry -> bench_fullscreen_fs.
+// Bindings (must match fullscreen.odin; Metal buffer binding N -> [[buffer(N+1)]]):
+//   0 params uniform -> buffer(1), 1 cells ro storage -> buffer(2),
+//   2 lut ro storage -> buffer(3), 3 atlas texture -> texture(3),
+//   4 sampler -> sampler(4), 5 colors ro storage -> buffer(6).
 
 #include <metal_stdlib>
 using namespace metal;
 
-struct BenchFullscreenParams {
-    float2 screen_size;
-    float2 cell_size;
-    uint   cols;
-    uint   rows;
+struct Fullscreen_Params {
+    float screen_w;
+    float screen_h;
+    uint  cols;
+    uint  rows;
+    float cell_w;
+    float cell_h;
+    float pad_x;
+    float pad_y;
+    uint  atlas_w;
+    uint  atlas_h;
+    float bg_opacity;
+    float cell_opacity;
 };
 
-struct BenchFullscreenVertexOut {
-    float4 clip_position [[position]];
-    float2 tex_coord;
+struct Fullscreen_Output {
+    float4 position [[position]];
 };
 
-vertex BenchFullscreenVertexOut bench_fullscreen_vs(uint vid [[vertex_id]]) {
-    float2 pos[3] = { float2(-1.0, -1.0), float2(3.0, -1.0), float2(-1.0, 3.0) };
-    float2 uv[3] = { float2(0.0, 1.0), float2(2.0, 1.0), float2(0.0, -1.0) };
-    BenchFullscreenVertexOut out;
-    out.clip_position = float4(pos[vid % 3], 0.0, 1.0);
-    out.tex_coord = uv[vid % 3];
+constant uint CELL_FLAG_SELECTED = 2u;
+constant uint CELL_FLAG_DIRECT_COLOR = 8u;
+constant uint LUT_SELECTION_WORD = 1024u;
+constant uint COLOR_WORDS_PER_CELL = 2u;
+constant uint ARGB_A_SHIFT = 24u;
+constant uint ARGB_R_SHIFT = 16u;
+constant uint ARGB_G_SHIFT = 8u;
+constant uint ARGB_COMPONENT_MASK = 0xFFu;
+constant float OPAQUE_ALPHA = 1.0;
+
+// r5g6b5_to_rgb mirrors instance.unpack_r5g6b5.
+inline float3 r5g6b5_to_rgb(uint packed) {
+    float r = float((packed >> 11u) & 0x1Fu) / 31.0;
+    float g = float((packed >> 5u) & 0x3Fu) / 63.0;
+    float b = float(packed & 0x1Fu) / 31.0;
+    return float3(r, g, b);
+}
+
+// unpack_argb decodes a 0xFFRRGGBB word into (r, g, b, a) floats.
+inline float4 unpack_argb(uint c) {
+    float a = float((c >> ARGB_A_SHIFT) & ARGB_COMPONENT_MASK) / 255.0;
+    float r = float((c >> ARGB_R_SHIFT) & ARGB_COMPONENT_MASK) / 255.0;
+    float g = float((c >> ARGB_G_SHIFT) & ARGB_COMPONENT_MASK) / 255.0;
+    float b = float(c & ARGB_COMPONENT_MASK) / 255.0;
+    return float4(r, g, b, a);
+}
+
+// lut_fg/lut_bg decode one R5G6B5 half for style s from the raw Style_LUT
+// words (fg pairs in words 0..511, bg pairs in words 512..1023).
+inline uint lut_fg(uint s, const device uint* lut) {
+    uint w = lut[s >> 1u];
+    if ((s & 1u) == 0u) { return w & 0xFFFFu; }
+    return (w >> 16u) & 0xFFFFu;
+}
+
+inline uint lut_bg(uint s, const device uint* lut) {
+    uint w = lut[512u + (s >> 1u)];
+    if ((s & 1u) == 0u) { return w & 0xFFFFu; }
+    return (w >> 16u) & 0xFFFFu;
+}
+
+inline uint lut_selection_fg(const device uint* lut) {
+    return lut[LUT_SELECTION_WORD] & 0xFFFFu;
+}
+
+inline uint lut_selection_bg(const device uint* lut) {
+    return (lut[LUT_SELECTION_WORD] >> 16u) & 0xFFFFu;
+}
+
+inline bool cell_is_selected(uint cflags) {
+    return (cflags & CELL_FLAG_SELECTED) != 0u;
+}
+
+inline float4 cell_background(uint style, uint cflags, float3 bg_rgb, bool has_direct_bg,
+                              constant Fullscreen_Params& params, const device uint* lut) {
+    bool has_authored_background = cell_is_selected(cflags) ||
+        has_direct_bg ||
+        lut_bg(style, lut) != lut_bg(0u, lut);
+    float3 base_rgb = r5g6b5_to_rgb(lut_bg(0u, lut)) * params.bg_opacity;
+    if (has_authored_background) {
+        float alpha = params.cell_opacity;
+        return float4(bg_rgb * alpha + base_rgb * (1.0 - alpha),
+            alpha + params.bg_opacity * (1.0 - alpha));
+    }
+    return float4(base_rgb, params.bg_opacity);
+}
+
+inline float composited_alpha(float background_alpha, float glyph_coverage) {
+    return background_alpha + glyph_coverage * (OPAQUE_ALPHA - background_alpha);
+}
+
+// pinned_slot mirrors atlas_pinned_slot_index: ASCII 32..126 -> 0..94,
+// box 2500..257F -> 95..222, block 2580..259F -> 223..254,
+// powerline E0B0..E0BF -> 255..270. Returns -1 when not pinned.
+inline int pinned_slot(uint content) {
+    if (content >= 32u && content <= 126u) { return int(content - 32u); }
+    if (content >= 0x2500u && content <= 0x257Fu) { return 95 + int(content - 0x2500u); }
+    if (content >= 0x2580u && content <= 0x259Fu) { return 223 + int(content - 0x2580u); }
+    if (content >= 0xE0B0u && content <= 0xE0BFu) { return 255 + int(content - 0xE0B0u); }
+    return -1;
+}
+
+// slot_uv maps any atlas slot to its UV rect (16px cell, 16-column grid).
+inline float4 slot_uv(uint slot, constant Fullscreen_Params& params) {
+    float col = float(slot % 16u);
+    float row = float(slot / 16u);
+    float aw = float(params.atlas_w);
+    float ah = float(params.atlas_h);
+    return float4(
+        col * 16.0 / aw,
+        row * 16.0 / ah,
+        (col * 16.0 + 16.0) / aw,
+        (row * 16.0 + 16.0) / ah);
+}
+
+vertex Fullscreen_Output fullscreen_vs_main(uint vertex_id [[vertex_id]]) {
+    float2 positions[3] = {
+        float2(-1.0, 1.0),   // top-left
+        float2(3.0, 1.0),    // top-right (oversized)
+        float2(-1.0, -3.0),  // bottom-left (oversized)
+    };
+    Fullscreen_Output out;
+    out.position = float4(positions[vertex_id], 0.0, 1.0);
     return out;
 }
 
-fragment float4 bench_fullscreen_fs(
-    BenchFullscreenVertexOut in [[stage_in]],
-    constant BenchFullscreenParams &params [[buffer(0)]],
-    texture2d<float> atlas [[texture(0)]],
-    sampler          atlas_sampler [[sampler(0)]])
+fragment float4 fullscreen_fs_main(
+    float4 clip_position [[position]],
+    constant Fullscreen_Params& params [[buffer(1)]],
+    const device uint* cells [[buffer(2)]],
+    const device uint* lut [[buffer(3)]],
+    texture2d<float> atlas [[texture(3)]],
+    sampler atlas_sampler [[sampler(4)]],
+    const device uint* colors [[buffer(6)]])
 {
-    // Cell id from fragment position; LUT/grid decode lives in the real
-    // translator output. Reference shape only.
-    constexpr sampler s(address::clamp_to_edge, filter::nearest);
-    float2 cell = floor(in.tex_coord * float2(params.cols, params.rows));
-    float2 f = fract(in.tex_coord * float2(params.cols, params.rows));
-    float2 uv = (cell + f) / float2(params.cols, params.rows);
-    return float4(atlas.sample(s, uv).rrr, 1.0);
+    int px = int(clip_position.x);
+    int py = int(clip_position.y);
+    if (float(px) < params.pad_x || float(py) < params.pad_y ||
+        float(px) >= params.pad_x + float(params.cols) * params.cell_w ||
+        float(py) >= params.pad_y + float(params.rows) * params.cell_h) {
+        return float4(r5g6b5_to_rgb(lut_bg(0u, lut)) * params.bg_opacity, params.bg_opacity);
+    }
+    float content_px = float(px) - params.pad_x;
+    float content_py = float(py) - params.pad_y;
+    uint lc = uint(content_px / params.cell_w);
+    uint lr = uint(content_py / params.cell_h);
+    if (lc >= params.cols || lr >= params.rows) {
+        return float4(r5g6b5_to_rgb(lut_bg(0u, lut)) * params.bg_opacity, params.bg_opacity);
+    }
+    uint ci = lr * params.cols + lc;
+    uint lo = cells[ci * 2u];
+    uint hi = cells[ci * 2u + 1u];
+    uint content = lo & 0x1FFFFFu;
+    uint style = (lo >> 21u) & 0x3FFu;
+    uint width = ((lo >> 31u) & 1u) | ((hi & 1u) << 1u);
+    uint cflags = (hi >> 1u) & 0x7Fu;
+    uint slot = (hi >> 8u) & 0x1FFu;
+
+    // Direct-color cells read per-cell fg/bg ARGB words; a zero word falls
+    // back to the LUT path (0 = unassigned). has_direct_bg marks an authored
+    // background so cell_background keeps it opaque, matching the LUT case.
+    bool has_direct_bg = false;
+    float3 fg_rgb;
+    float3 bg_rgb;
+    if ((cflags & CELL_FLAG_DIRECT_COLOR) != 0u) {
+        uint fg_argb = colors[ci * COLOR_WORDS_PER_CELL];
+        uint bg_argb = colors[ci * COLOR_WORDS_PER_CELL + 1u];
+        has_direct_bg = bg_argb != 0u;
+        if (fg_argb != 0u) {
+            fg_rgb = unpack_argb(fg_argb).rgb;
+        } else {
+            uint fg_packed = cell_is_selected(cflags) ? lut_selection_fg(lut) : lut_fg(style, lut);
+            fg_rgb = r5g6b5_to_rgb(fg_packed);
+        }
+        if (bg_argb != 0u) {
+            bg_rgb = unpack_argb(bg_argb).rgb;
+        } else {
+            uint bg_packed = cell_is_selected(cflags) ? lut_selection_bg(lut) : lut_bg(style, lut);
+            bg_rgb = r5g6b5_to_rgb(bg_packed);
+        }
+    } else {
+        uint fg_packed = cell_is_selected(cflags) ? lut_selection_fg(lut) : lut_fg(style, lut);
+        fg_rgb = r5g6b5_to_rgb(fg_packed);
+        uint bg_packed = cell_is_selected(cflags) ? lut_selection_bg(lut) : lut_bg(style, lut);
+        bg_rgb = r5g6b5_to_rgb(bg_packed);
+    }
+    float4 background = cell_background(style, cflags, bg_rgb, has_direct_bg, params, lut);
+    float background_alpha = background.a;
+
+    float x0 = params.pad_x + float(lc) * params.cell_w;
+    float y0 = params.pad_y + float(lr) * params.cell_h;
+
+    // Continuation cell: authored background plus the left neighbor's
+    // wide-lead right half when present (instance-path parity).
+    if (width == 0u) {
+        float3 col = background.rgb;
+        float glyph_coverage = 0.0;
+        if (lc > 0u) {
+            uint ni = lr * params.cols + (lc - 1u);
+            uint nlo = cells[ni * 2u];
+            uint nhi = cells[ni * 2u + 1u];
+            uint nwidth = ((nlo >> 31u) & 1u) | ((nhi & 1u) << 1u);
+            if (nwidth == 2u) {
+                uint ncontent = nlo & 0x1FFFFFu;
+                uint nstyle = (nlo >> 21u) & 0x3FFu;
+                uint ncflags = (nhi >> 1u) & 0x7Fu;
+                uint nslot = (nhi >> 8u) & 0x1FFu;
+                if (ncontent != 0x20u && ncontent != 0u) {
+                    int su = -1;
+                    if (nslot == 0x1FFu) {
+                        su = pinned_slot(ncontent);
+                    } else if (nslot < 512u) {
+                        su = int(nslot);
+                    }
+                    if (su >= 0) {
+                        uint nfg_packed = cell_is_selected(ncflags) ? lut_selection_fg(lut) : lut_fg(nstyle, lut);
+                        float3 nfg_rgb = r5g6b5_to_rgb(nfg_packed);
+                        float4 uvs = slot_uv(uint(su), params);
+                        float gw = params.cell_w * 2.0;
+                        float fx = (float(px) - (x0 - params.cell_w)) / gw;
+                        float fy = (float(py) - y0) / params.cell_h;
+                        if (fx >= 0.0 && fx < 1.0 && fy >= 0.0 && fy < 1.0) {
+                            float u = uvs.x + fx * (uvs.z - uvs.x);
+                            float v = uvs.y + fy * (uvs.w - uvs.y);
+                            float alpha = atlas.sample(atlas_sampler, float2(u, v)).r;
+                            col = mix(col, nfg_rgb, alpha);
+                            glyph_coverage = alpha;
+                        }
+                    }
+                }
+            }
+        }
+        return float4(col, composited_alpha(background_alpha, glyph_coverage));
+    }
+
+    // Regular cell: LUT background fill, glyph overlay when present.
+    int su = -1;
+    if (slot == 0x1FFu) {
+        su = pinned_slot(content);
+    } else if (slot < 512u) {
+        su = int(slot);
+    }
+    float3 col = background.rgb;
+    float glyph_coverage = 0.0;
+    if (content != 0x20u && content != 0u && su >= 0) {
+        float4 uvs = slot_uv(uint(su), params);
+        float gw = params.cell_w;
+        if (width == 2u) {
+            gw = params.cell_w * 2.0;
+        }
+        float fx = (float(px) - x0) / gw;
+        float fy = (float(py) - y0) / params.cell_h;
+        if (fx >= 0.0 && fx < 1.0 && fy >= 0.0 && fy < 1.0) {
+            float u = uvs.x + fx * (uvs.z - uvs.x);
+            float v = uvs.y + fy * (uvs.w - uvs.y);
+            float alpha = atlas.sample(atlas_sampler, float2(u, v)).r;
+            col = mix(col, fg_rgb, alpha);
+            glyph_coverage = alpha;
+        }
+    }
+    return float4(col, composited_alpha(background_alpha, glyph_coverage));
 }

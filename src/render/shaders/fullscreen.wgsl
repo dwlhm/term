@@ -20,8 +20,9 @@
 //
 // Shader bindings (must match fullscreen.odin):
 //   0 params uniform, 1 cells ro storage, 2 lut ro storage,
-//   3 atlas texture, 4 sampler. Direct-to-surface output keeps explicit and
-//   selected backgrounds opaque while params.bg_opacity scales only the default.
+//   3 atlas texture, 4 sampler, 5 colors ro storage (per-cell fg/bg ARGB).
+//   Direct-to-surface output keeps explicit and selected backgrounds opaque
+//   while params.bg_opacity scales only the default.
 
 struct Fullscreen_Params {
     screen_w: f32,
@@ -43,6 +44,7 @@ struct Fullscreen_Params {
 @group(0) @binding(2) var<storage, read> lut: array<u32, 1025>;
 @group(0) @binding(3) var atlas_texture: texture_2d<f32>;
 @group(0) @binding(4) var atlas_sampler: sampler;
+@group(0) @binding(5) var<storage, read> colors: array<u32>;
 
 struct Fullscreen_Output {
     @builtin(position) clip_position: vec4<f32>,
@@ -54,6 +56,15 @@ fn r5g6b5_to_rgb(packed: u32) -> vec3<f32> {
     let g = f32((packed >> 5u) & 0x3Fu) / 63.0;
     let b = f32(packed & 0x1Fu) / 31.0;
     return vec3<f32>(r, g, b);
+}
+
+// unpack_argb decodes a 0xFFRRGGBB word into (r, g, b, a) floats.
+fn unpack_argb(c: u32) -> vec4<f32> {
+    let a = f32((c >> ARGB_A_SHIFT) & ARGB_COMPONENT_MASK) / 255.0;
+    let r = f32((c >> ARGB_R_SHIFT) & ARGB_COMPONENT_MASK) / 255.0;
+    let g = f32((c >> ARGB_G_SHIFT) & ARGB_COMPONENT_MASK) / 255.0;
+    let b = f32(c & ARGB_COMPONENT_MASK) / 255.0;
+    return vec4<f32>(r, g, b, a);
 }
 
 // lut_color decodes one R5G6B5 half for style s from the raw Style_LUT words
@@ -78,6 +89,11 @@ const CELL_FLAG_SELECTED: u32 = 2u;
 const CELL_FLAG_DIRECT_COLOR: u32 = 8u;
 const LUT_SELECTION_WORD: u32 = 1024u;
 const OPAQUE_ALPHA: f32 = 1.0;
+const COLOR_WORDS_PER_CELL: u32 = 2u;
+const ARGB_A_SHIFT: u32 = 24u;
+const ARGB_R_SHIFT: u32 = 16u;
+const ARGB_G_SHIFT: u32 = 8u;
+const ARGB_COMPONENT_MASK: u32 = 0xFFu;
 
 fn lut_selection_fg() -> u32 {
     return lut[LUT_SELECTION_WORD] & 0xFFFFu;
@@ -91,9 +107,9 @@ fn cell_is_selected(cflags: u32) -> bool {
     return (cflags & CELL_FLAG_SELECTED) != 0u;
 }
 
-fn cell_background(style: u32, cflags: u32, bg_rgb: vec3<f32>) -> vec4<f32> {
+fn cell_background(style: u32, cflags: u32, bg_rgb: vec3<f32>, has_direct_bg: bool) -> vec4<f32> {
     let has_authored_background = cell_is_selected(cflags) ||
-        (cflags & CELL_FLAG_DIRECT_COLOR) != 0u ||
+        has_direct_bg ||
         lut_bg(style) != lut_bg(0u);
     let base_rgb = r5g6b5_to_rgb(lut_bg(0u)) * params.bg_opacity;
     if (has_authored_background) {
@@ -179,9 +195,35 @@ fn fullscreen_fs_main(input: Fullscreen_Output) -> @location(0) vec4<f32> {
     let cflags = (hi >> 1u) & 0x7Fu;
     let slot = (hi >> 8u) & 0x1FFu;
 
-    let bg_packed = select(lut_bg(style), lut_selection_bg(), cell_is_selected(cflags));
-    let bg_rgb = r5g6b5_to_rgb(bg_packed);
-    let background = cell_background(style, cflags, bg_rgb);
+    // Direct-color cells read per-cell fg/bg ARGB words; a zero word falls
+    // back to the LUT path (0 = unassigned). has_direct_bg marks an authored
+    // background so cell_background keeps it opaque, matching the LUT case.
+    var has_direct_bg = false;
+    var fg_rgb: vec3<f32>;
+    var bg_rgb: vec3<f32>;
+    if ((cflags & CELL_FLAG_DIRECT_COLOR) != 0u) {
+        let fg_argb = colors[ci * COLOR_WORDS_PER_CELL];
+        let bg_argb = colors[ci * COLOR_WORDS_PER_CELL + 1u];
+        has_direct_bg = bg_argb != 0u;
+        if (fg_argb != 0u) {
+            fg_rgb = unpack_argb(fg_argb).rgb;
+        } else {
+            let fg_packed = select(lut_fg(style), lut_selection_fg(), cell_is_selected(cflags));
+            fg_rgb = r5g6b5_to_rgb(fg_packed);
+        }
+        if (bg_argb != 0u) {
+            bg_rgb = unpack_argb(bg_argb).rgb;
+        } else {
+            let bg_packed = select(lut_bg(style), lut_selection_bg(), cell_is_selected(cflags));
+            bg_rgb = r5g6b5_to_rgb(bg_packed);
+        }
+    } else {
+        let fg_packed = select(lut_fg(style), lut_selection_fg(), cell_is_selected(cflags));
+        fg_rgb = r5g6b5_to_rgb(fg_packed);
+        let bg_packed = select(lut_bg(style), lut_selection_bg(), cell_is_selected(cflags));
+        bg_rgb = r5g6b5_to_rgb(bg_packed);
+    }
+    let background = cell_background(style, cflags, bg_rgb, has_direct_bg);
     let background_alpha = background.a;
 
     let x0 = params.pad_x + f32(lc) * params.cell_w;
@@ -240,8 +282,6 @@ fn fullscreen_fs_main(input: Fullscreen_Output) -> @location(0) vec4<f32> {
     } else if (slot < 512u) {
         su = i32(slot);
     }
-    let fg_packed = select(lut_fg(style), lut_selection_fg(), cell_is_selected(cflags));
-    let fg_rgb = r5g6b5_to_rgb(fg_packed);
     // Store premultiplied color for the compositor; glyph coverage stays independent.
     var col = background.rgb;
     var glyph_coverage = 0.0;

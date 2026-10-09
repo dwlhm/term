@@ -31,11 +31,17 @@ BG_WGSL :: #load("shaders/bg.wgsl")
 GLYPH_WGSL :: #load("shaders/glyph.wgsl")
 EMOJI_WGSL :: #load("shaders/emoji.wgsl")
 IMAGE_WGSL :: #load("shaders/image.wgsl")
+FULLSCREEN_WGSL :: #load("shaders/fullscreen.wgsl")
+TILE_COMPUTE_WGSL :: #load("shaders/tile_compute.wgsl")
+TILE_BLIT_WGSL :: #load("shaders/tile_blit.wgsl")
 
 BG_MSL :: #load("shaders/msl_spike/bg.msl")
 GLYPH_MSL :: #load("shaders/msl_spike/glyph.msl")
 EMOJI_MSL :: #load("shaders/msl_spike/emoji.msl")
 IMAGE_MSL :: #load("shaders/msl_spike/image.msl")
+FULLSCREEN_MSL :: #load("shaders/msl_spike/fullscreen.msl")
+TILE_COMPUTE_MSL :: #load("shaders/msl_spike/tile_compute.msl")
+TILE_BLIT_MSL :: #load("shaders/msl_spike/tile_blit.msl")
 
 // Pane_Viewport defines a rendering rectangle for a single pane within the app window.
 Pane_Viewport :: struct {
@@ -557,6 +563,48 @@ renderer_init :: proc(
 	// fallback path has valid buffers.
 	dirty_upload_init(&r.dirty, r, allocator)
 	upload_ring_init(&r.upload_ring, backend, device, queue, max(u64(RENDER_UPLOAD_CAPACITY), u64(r.instances.max_instances) * instance.INSTANCE_STRIDE), allocator)
+
+	// Phase 14: Tiled compute renderer sibling path
+	compute_shader := string(TILE_COMPUTE_MSL) if backend.shader_language == .MSL else string(TILE_COMPUTE_WGSL)
+	blit_shader := string(TILE_BLIT_MSL) if backend.shader_language == .MSL else string(TILE_BLIT_WGSL)
+	_ = tile.compute_tile_init(
+		&r.compute_tiles,
+		backend,
+		device,
+		queue,
+		rows,
+		cols,
+		r.cell_width,
+		r.cell_height,
+		r.pad_x,
+		r.pad_y,
+		screen_w,
+		screen_h,
+		format,
+		r.atlas.gpu_view,
+		compute_shader,
+		blit_shader,
+		allocator = allocator,
+	)
+
+	// Phase 15: Fullscreen fragment renderer sibling path
+	fullscreen_shader := string(FULLSCREEN_MSL) if backend.shader_language == .MSL else string(FULLSCREEN_WGSL)
+	_ = fullscreen.fullscreen_init(
+		&r.fullscreen,
+		backend,
+		device,
+		queue,
+		rows,
+		cols,
+		r.cell_width,
+		r.cell_height,
+		r.pad_x,
+		r.pad_y,
+		format,
+		r.atlas.gpu_view,
+		fullscreen_shader,
+		allocator,
+	)
 
 	// Phase 12: async raster queue, worker start LAST (after the chain the
 	// worker reads and every other subsystem is ready).
@@ -1281,7 +1329,7 @@ renderer_frame :: proc(
 	view: ^termgrid.Terminal_View = nil,
 ) -> bool {
 	if r == nil { return false }
-	return renderer_frame_v2(r, terminal, nil, &r.style_lut, view)
+	return renderer_frame_auto(r, terminal, &r.style_lut, view)
 }
 
 _renderer_journal_has_damage :: proc(journal: ^termgrid.Damage_Journal) -> bool {
@@ -2299,24 +2347,17 @@ _renderer_frame_compute_journal :: proc(r: ^Renderer, terminal: ^termgrid.Termin
 	_ = tile.compute_tile_upload_cells(&r.compute_tiles, &r.tile_map, r.compiled_v2.cells, lut_words, lut_rebuilt)
 	frame, ok := _renderer_surface_begin(r)
 	if !ok { return _renderer_frame_failed(r, terminal, journal, &frame, .Compute_Tiles) }
-	if r.cursor_staged && !_renderer_upload_instances(r, 0, &frame) {
+	if !_renderer_upload_instances(r, 0, &frame) {
 		return _renderer_frame_failed(r, terminal, journal, &frame, .Compute_Tiles)
 	}
 	dispatches, _ := tile.compute_tile_dispatch(&r.compute_tiles, &r.tile_map, frame.encoder)
 	if dispatches == 0 {
 		return _renderer_frame_failed(r, terminal, journal, &frame, .Compute_Tiles)
 	}
-	cursor_pipeline := gpu.Gpu_RenderPipeline(nil)
-	cursor_bind_group := gpu.Gpu_BindGroup(nil)
-	cursor_buffer := gpu.Gpu_Buffer(nil)
-	cursor_offset: u64 = 0
-	if r.cursor_staged {
-		cursor_pipeline = r.instances.bg_pipeline
-		cursor_bind_group = r.instances.bind_group_bg
-		cursor_buffer = frame.cursor_buffer
-		cursor_offset = frame.cursor_offset
+	if !tile.compute_tile_blit(&r.compute_tiles, frame.view, frame.encoder, nil, nil, nil, 0) {
+		return _renderer_frame_failed(r, terminal, journal, &frame, .Compute_Tiles)
 	}
-	if !tile.compute_tile_blit(&r.compute_tiles, frame.view, frame.encoder, cursor_pipeline, cursor_bind_group, cursor_buffer, cursor_offset) {
+	if !_draw_overlay_instances(r, &frame, frame.cursor_buffer) {
 		return _renderer_frame_failed(r, terminal, journal, &frame, .Compute_Tiles)
 	}
 	frame.state = .Encoded
@@ -2344,55 +2385,137 @@ renderer_frame_compute :: proc(r: ^Renderer, terminal: ^termgrid.Terminal, lut: 
 	return _renderer_frame_compute_journal(r, terminal, &journal, lut)
 }
 
-// _renderer_frame_fullscreen_journal owns one journal and one shared encoder
-// for the fullscreen shade, optional cursor composition, and publication.
-_renderer_frame_fullscreen_journal :: proc(r: ^Renderer, terminal: ^termgrid.Terminal, journal: ^termgrid.Damage_Journal, lut: ^Style_LUT) -> bool {
-	if r.strategy != .Fullscreen || !r.fullscreen.available || _renderer_terminal_has_direct_color(terminal) ||
-		_renderer_terminal_has_graphics(r, terminal) {
-		return _renderer_frame_v2_journal(r, terminal, journal, lut)
-	}
-	if !_renderer_journal_has_damage(journal) {
-		r.last_dirty = false
+// _draw_overlay_instances draws cursor, interaction, scrollbar, and all UI layers
+// on top of a rendered surface (used by fullscreen & compute sibling passes).
+_draw_overlay_instances :: proc(r: ^Renderer, frame: ^Render_Frame_Transaction, buffer: gpu.Gpu_Buffer) -> bool {
+	if r == nil || frame == nil || rawptr(frame.encoder) == nil || rawptr(frame.view) == nil {
 		return false
 	}
-	r.last_dirty = true
+	has_overlays := (r.cursor_staged && frame.cursor_buffer != gpu.Gpu_Buffer(nil)) ||
+		frame.scrollbar_count > 0 || frame.interaction_count > 0
+	if !has_overlays {
+		for layer in UI_Layer {
+			if frame.ui_bg_count[layer] > 0 || frame.ui_glyph_count[layer] > 0 {
+				has_overlays = true
+				break
+			}
+		}
+	}
+	if !has_overlays do return true
+
+	instance.instance_renderer_upload_uniforms(&r.instances)
+	pass := r.backend.begin_render_pass(frame.encoder, frame.view, {0, 0, 0, 0}, .Load)
+	if rawptr(pass) == nil do return false
+	frame.pass = pass
+
+	ok := true
+	if r.cursor_staged {
+		ok = _draw_cursor_overlay(r, frame)
+	}
+
+	if ok && frame.interaction_count > 0 && rawptr(buffer) != nil {
+		r.backend.render_set_pipeline(pass, r.instances.bg_pipeline)
+		r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_bg)
+		r.backend.render_set_vertex_buffer(pass, 0, buffer, frame.interaction_offset)
+		r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, frame.interaction_count)
+	}
+
+	if ok && frame.scrollbar_count > 0 && rawptr(buffer) != nil {
+		r.backend.render_set_pipeline(pass, r.instances.bg_pipeline)
+		r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_bg)
+		r.backend.render_set_vertex_buffer(pass, 0, buffer, frame.scrollbar_offset)
+		r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, frame.scrollbar_count)
+	}
+
+	for layer in UI_Layer {
+		if ok && frame.ui_bg_count[layer] > 0 && rawptr(buffer) != nil {
+			r.backend.render_set_pipeline(pass, r.instances.bg_pipeline)
+			r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_bg)
+			r.backend.render_set_vertex_buffer(pass, 0, buffer, frame.ui_bg_offset[layer])
+			r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, frame.ui_bg_count[layer])
+		}
+		if ok && frame.ui_glyph_count[layer] > 0 && rawptr(buffer) != nil {
+			r.backend.render_set_pipeline(pass, r.instances.glyph_pipeline)
+			r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_glyph)
+			r.backend.render_set_vertex_buffer(pass, 0, buffer, frame.ui_glyph_offset[layer])
+			r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, frame.ui_glyph_count[layer])
+		}
+	}
+
+	r.backend.end_render_pass(pass)
+	frame.pass = gpu.Gpu_RenderPassEncoder(nil)
+	return ok
+}
+
+// _renderer_frame_fullscreen_journal owns one journal and one shared encoder
+// for the fullscreen shade, optional cursor composition, and publication.
+_renderer_frame_fullscreen_journal :: proc(
+	r:            ^Renderer,
+	terminal:     ^termgrid.Terminal,
+	journal:      ^termgrid.Damage_Journal,
+	lut:          ^Style_LUT,
+	view:         ^termgrid.Terminal_View = nil,
+	view_changed: bool = false,
+) -> bool {
+	if r.strategy != .Fullscreen || !r.fullscreen.available ||
+		_renderer_terminal_has_graphics(r, terminal) {
+		return _renderer_frame_v2_journal(r, terminal, journal, lut, view, view_changed)
+	}
+	has_damage := _renderer_journal_has_damage(journal) || r.cursor_staged
+	force_full := r.full_redraw_pending || view_changed || len(journal.scroll_ops) > 0
+	if !has_damage && force_full {
+		r.last_dirty = true
+	} else if !has_damage && r.last_dirty {
+		r.last_dirty = false
+	} else if !has_damage {
+		return false
+	} else {
+		r.last_dirty = true
+	}
 	if r.backend == nil || rawptr(r.device) == nil || rawptr(r.queue) == nil || lut == nil {
 		return _renderer_frame_unavailable(r, terminal, journal, .Fullscreen)
 	}
 	_renderer_sync_bg_opacity(r, terminal.grid.style_table.theme.background)
 	lut_rebuilt := _style_lut_needs_rebuild(lut, &terminal.grid.style_table)
 	if lut_rebuilt { style_lut_rebuild(lut, &terminal.grid.style_table) }
-	if len(journal.scroll_ops) > 0 {
-		render_compile_full_v2(&r.compiled_v2, terminal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster)
+
+	// Ensure fullscreen params match current renderer padding & surface dimensions
+	if r.fullscreen.pad_x != r.pad_x || r.fullscreen.pad_y != r.pad_y || r.fullscreen.fb_w_px != r.surface_w || r.fullscreen.fb_h_px != r.surface_h {
+		r.fullscreen.pad_x = r.pad_x
+		r.fullscreen.pad_y = r.pad_y
+		r.fullscreen.fb_w_px = r.surface_w
+		r.fullscreen.fb_h_px = r.surface_h
+		fullscreen.fullscreen_write_params(&r.fullscreen)
+	}
+
+	if force_full {
+		render_compile_full_v2(&r.compiled_v2, terminal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster, view)
 	} else {
 		render_compile_v2(&r.compiled_v2, terminal, journal, &r.fallback, &r.shape_cache, &r.atlas, &r.fallback_counters, &r.raster)
 	}
 	cells := transmute([]u64)r.compiled_v2.cells
 	lut_words := ([^]u32)(rawptr(&lut.fg_r5g6b5[0]))[:fullscreen.FULLSCREEN_LUT_WORDS]
 	_ = fullscreen.fullscreen_upload_grid(&r.fullscreen, cells, lut_words, lut_rebuilt)
+	_ = fullscreen.fullscreen_upload_colors(&r.fullscreen, &terminal.grid)
 	frame, ok := _renderer_surface_begin(r)
 	if !ok { return _renderer_frame_failed(r, terminal, journal, &frame, .Fullscreen) }
-	if r.cursor_staged && !_renderer_upload_instances(r, 0, &frame) {
+	if !_renderer_upload_instances(r, 0, &frame) {
 		return _renderer_frame_failed(r, terminal, journal, &frame, .Fullscreen)
 	}
-	cursor_pipeline := gpu.Gpu_RenderPipeline(nil)
-	cursor_bind_group := gpu.Gpu_BindGroup(nil)
-	cursor_buffer := gpu.Gpu_Buffer(nil)
-	cursor_offset: u64 = 0
-	if r.cursor_staged {
-		cursor_pipeline = r.instances.bg_pipeline
-		cursor_bind_group = r.instances.bind_group_bg
-		cursor_buffer = frame.cursor_buffer
-		cursor_offset = frame.cursor_offset
+
+	clear_color := _renderer_theme_clear_color(r.theme, false, r.background_opacity)
+	if !fullscreen.fullscreen_draw(&r.fullscreen, frame.view, frame.encoder, clear_color = clear_color) {
+		return _renderer_frame_failed(r, terminal, journal, &frame, .Fullscreen)
 	}
-	if !fullscreen.fullscreen_draw(&r.fullscreen, frame.view, frame.encoder, cursor_pipeline, cursor_bind_group, cursor_buffer, cursor_offset) {
+	if !_draw_overlay_instances(r, &frame, frame.cursor_buffer) {
 		return _renderer_frame_failed(r, terminal, journal, &frame, .Fullscreen)
 	}
 	frame.state = .Encoded
 	if !_renderer_surface_commit(r, &frame) {
 		return _renderer_frame_failed(r, terminal, journal, &frame, .Fullscreen)
 	}
-	_renderer_frame_published(r)
+	r.full_redraw_pending = false
+	_renderer_frame_published(r, view)
 	return true
 }
 
@@ -2416,15 +2539,22 @@ renderer_frame_fullscreen :: proc(r: ^Renderer, terminal: ^termgrid.Terminal, lu
 // live damage, then exactly one journal is taken and routed to the selected
 // journal-owned helper. Runtime sibling failure is deferred to the next frame
 // through fallback_pending.
-renderer_frame_auto :: proc(r: ^Renderer, terminal: ^termgrid.Terminal, lut: ^Style_LUT) -> bool {
-	if !_renderer_has_pending_work(r, terminal) {
+renderer_frame_auto :: proc(
+	r:            ^Renderer,
+	terminal:     ^termgrid.Terminal,
+	lut:          ^Style_LUT = nil,
+	view:         ^termgrid.Terminal_View = nil,
+) -> bool {
+	lut_ptr := lut != nil ? lut : &r.style_lut
+	view_changed := _renderer_view_changed(r, view)
+	if !_renderer_has_pending_work(r, terminal, view) {
 		r.last_dirty = false
 		return false
 	}
 	renderer_prepare_frame(r, terminal)
 	_renderer_force_pending_redraw(r, terminal)
 	inp := strategy_estimate_inputs(&terminal.damage, r.rows, r.cols)
-	if inp.dirty_cells <= 0 && !inp.scroll && !r.cursor_staged {
+	if inp.dirty_cells <= 0 && !inp.scroll && !r.cursor_staged && !view_changed {
 		r.frame_prepared = false
 		return false
 	}
@@ -2450,18 +2580,18 @@ renderer_frame_auto :: proc(r: ^Renderer, terminal: ^termgrid.Terminal, lut: ^St
 	ok := false
 	switch chosen {
 	case .Instance:
-		ok = _renderer_frame_v2_journal(r, terminal, &journal, lut)
+		ok = _renderer_frame_v2_journal(r, terminal, &journal, lut_ptr, view, view_changed)
 	case .Compute_Tiles:
 		if r.compute_tiles.available && r.tile_map.bits != nil {
-			ok = _renderer_frame_compute_journal(r, terminal, &journal, lut)
+			ok = _renderer_frame_compute_journal(r, terminal, &journal, lut_ptr)
 		} else {
-			ok = _renderer_frame_v2_journal(r, terminal, &journal, lut)
+			ok = _renderer_frame_v2_journal(r, terminal, &journal, lut_ptr, view, view_changed)
 		}
 	case .Fullscreen:
 		if r.fullscreen.available {
-			ok = _renderer_frame_fullscreen_journal(r, terminal, &journal, lut)
+			ok = _renderer_frame_fullscreen_journal(r, terminal, &journal, lut_ptr, view, view_changed)
 		} else {
-			ok = _renderer_frame_v2_journal(r, terminal, &journal, lut)
+			ok = _renderer_frame_v2_journal(r, terminal, &journal, lut_ptr, view, view_changed)
 		}
 	}
 	end := platform.platform_now()

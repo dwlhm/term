@@ -1040,7 +1040,30 @@ _metal_pipeline_get_bind_group_layout :: proc(pipeline: gpu.Gpu_RenderPipeline, 
 // --- Compute Pipelines (45-46) ---
 
 _metal_create_compute_pipeline :: proc(device: gpu.Gpu_Device, shader: gpu.Gpu_ShaderModule, entry: string) -> gpu.Gpu_ComputePipeline {
+	dev := (^Metal_Device)(rawptr(device))
+	mod := (^Metal_ShaderModule)(rawptr(shader))
+	if dev == nil || dev.handle == nil || mod == nil || mod.library == nil do return gpu.Gpu_ComputePipeline(nil)
+
+	fn_name := _create_ns_string(entry)
+	if fn_name == nil do return gpu.Gpu_ComputePipeline(nil)
+	defer fn_name->release()
+
+	function := mod.library->newFunctionWithName(fn_name)
+	if function == nil do return gpu.Gpu_ComputePipeline(nil)
+	defer function->release()
+
+	state, err := dev.handle->newComputePipelineStateWithFunction(function)
+	if state == nil {
+		if err != nil {
+			desc := err->localizedDescription()
+			err_str := desc->UTF8String() if desc != nil else cstring("unknown error")
+			fmt.eprintf("metal create_compute_pipeline error: %s\n", err_str)
+		}
+		return gpu.Gpu_ComputePipeline(nil)
+	}
+
 	pipe := new(Metal_ComputePipeline)
+	pipe.state = state
 	return gpu.Gpu_ComputePipeline(pipe)
 }
 
@@ -1114,7 +1137,11 @@ _metal_compute_set_bind_group :: proc(pass: gpu.Gpu_ComputePassEncoder, index: u
 }
 
 _metal_compute_dispatch :: proc(pass: gpu.Gpu_ComputePassEncoder, x: u32, y: u32, z: u32) {
-	// Stub for compute pass dispatch
+	p := (^Metal_ComputePassEncoder)(rawptr(pass))
+	if p == nil || p.encoder == nil do return
+	grid_size := MTL.Size{NS.Integer(x), NS.Integer(y), NS.Integer(z)}
+	threads_per_group := MTL.Size{8, 8, 1}
+	p.encoder->dispatchThreadgroups(grid_size, threads_per_group)
 }
 
 // --- Compute Pipeline Layout Query (52) ---

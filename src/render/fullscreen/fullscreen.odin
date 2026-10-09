@@ -21,6 +21,7 @@ package fullscreen
 import "base:runtime"
 import "core:mem"
 import gpu "../gpu"
+import termgrid "../../terminal"
 
 // FULLSCREEN_PARAMS_SIZE is the params uniform buffer size in bytes.
 // size_of(Fullscreen_Params) == 48; the trailing 20 bytes stay zero.
@@ -28,6 +29,9 @@ FULLSCREEN_PARAMS_SIZE :: 64
 
 // FULLSCREEN_CELL_BYTES is one packed V2 cell (u64).
 FULLSCREEN_CELL_BYTES :: 8
+
+// FULLSCREEN_COLOR_BYTES is one Direct_Color_Channel (fg: u32, bg: u32 = 8 bytes).
+FULLSCREEN_COLOR_BYTES :: u64(size_of(termgrid.Direct_Color_Channel))
 
 // FULLSCREEN_LUT_WORDS / FULLSCREEN_LUT_BYTES cover the raw Style_LUT
 // fg+bg arrays plus the packed selection foreground/background word.
@@ -84,6 +88,8 @@ Fullscreen_Renderer :: struct {
 	params_buffer: gpu.Gpu_Buffer,
 	cell_buffer:   gpu.Gpu_Buffer,
 	lut_buffer:    gpu.Gpu_Buffer,
+	color_buffer:  gpu.Gpu_Buffer,
+	color_staging: []termgrid.Direct_Color_Channel,
 	atlas_view:    gpu.Gpu_TextureView,
 	sampler:       gpu.Gpu_Sampler,
 	bind_group:    gpu.Gpu_BindGroup,
@@ -169,7 +175,9 @@ fullscreen_init :: proc(
 	r.params_buffer = backend.create_buffer(device, FULLSCREEN_PARAMS_SIZE, gpu.Gpu_Buffer_Usage.Uniform | gpu.Gpu_Buffer_Usage.Copy_Dst, false)
 	r.cell_buffer = backend.create_buffer(device, u64(n) * FULLSCREEN_CELL_BYTES, gpu.Gpu_Buffer_Usage.Storage | gpu.Gpu_Buffer_Usage.Copy_Dst, false)
 	r.lut_buffer = backend.create_buffer(device, FULLSCREEN_LUT_BYTES, gpu.Gpu_Buffer_Usage.Storage | gpu.Gpu_Buffer_Usage.Copy_Dst, false)
-	if rawptr(r.params_buffer) == nil || rawptr(r.cell_buffer) == nil || rawptr(r.lut_buffer) == nil {
+	r.color_buffer = backend.create_buffer(device, u64(n) * FULLSCREEN_COLOR_BYTES, gpu.Gpu_Buffer_Usage.Storage | gpu.Gpu_Buffer_Usage.Copy_Dst, false)
+	r.color_staging = make([]termgrid.Direct_Color_Channel, n, runtime.heap_allocator())
+	if rawptr(r.params_buffer) == nil || rawptr(r.cell_buffer) == nil || rawptr(r.lut_buffer) == nil || rawptr(r.color_buffer) == nil || r.color_staging == nil {
 		fullscreen_destroy(r)
 		return false
 	}
@@ -200,6 +208,7 @@ fullscreen_init :: proc(
 		{binding = 2, buffer = r.lut_buffer, offset = 0, size = FULLSCREEN_LUT_BYTES, entry_type = .Buffer},
 		{binding = 3, view = atlas_view, entry_type = .Texture_View},
 		{binding = 4, sampler = r.sampler, entry_type = .Sampler},
+		{binding = 5, buffer = r.color_buffer, offset = 0, size = u64(n) * FULLSCREEN_COLOR_BYTES, entry_type = .Buffer},
 	}
 	r.bind_group = backend.create_bind_group(device, r.layout, entries)
 
@@ -248,6 +257,10 @@ fullscreen_destroy :: proc(r: ^Fullscreen_Renderer) {
 			r.backend.destroy_buffer(r.cell_buffer)
 			r.cell_buffer = gpu.Gpu_Buffer(nil)
 		}
+		if rawptr(r.color_buffer) != nil {
+			r.backend.destroy_buffer(r.color_buffer)
+			r.color_buffer = gpu.Gpu_Buffer(nil)
+		}
 		if rawptr(r.lut_buffer) != nil {
 			r.backend.destroy_buffer(r.lut_buffer)
 			r.lut_buffer = gpu.Gpu_Buffer(nil)
@@ -256,6 +269,10 @@ fullscreen_destroy :: proc(r: ^Fullscreen_Renderer) {
 			r.backend.destroy_sampler(r.sampler)
 			r.sampler = gpu.Gpu_Sampler(nil)
 		}
+	}
+	if r.color_staging != nil {
+		delete(r.color_staging, runtime.heap_allocator())
+		r.color_staging = nil
 	}
 	r.available = false
 }
@@ -289,9 +306,15 @@ fullscreen_resize :: proc(r: ^Fullscreen_Renderer, rows: i32, cols: i32, cell_w:
 	}
 
 	new_cell_buffer := r.cell_buffer
+	new_color_buffer := r.color_buffer
 	if n != old_n {
 		new_cell_buffer = r.backend.create_buffer(r.device, u64(n) * FULLSCREEN_CELL_BYTES, gpu.Gpu_Buffer_Usage.Storage | gpu.Gpu_Buffer_Usage.Copy_Dst, false)
 		if rawptr(new_cell_buffer) == nil {
+			return false
+		}
+		new_color_buffer = r.backend.create_buffer(r.device, u64(n) * FULLSCREEN_COLOR_BYTES, gpu.Gpu_Buffer_Usage.Storage | gpu.Gpu_Buffer_Usage.Copy_Dst, false)
+		if rawptr(new_color_buffer) == nil {
+			r.backend.destroy_buffer(new_cell_buffer)
 			return false
 		}
 	}
@@ -304,11 +327,15 @@ fullscreen_resize :: proc(r: ^Fullscreen_Renderer, rows: i32, cols: i32, cell_w:
 			{binding = 2, buffer = r.lut_buffer, offset = 0, size = FULLSCREEN_LUT_BYTES, entry_type = .Buffer},
 			{binding = 3, view = r.atlas_view, entry_type = .Texture_View},
 			{binding = 4, sampler = r.sampler, entry_type = .Sampler},
+			{binding = 5, buffer = new_color_buffer, offset = 0, size = u64(n) * FULLSCREEN_COLOR_BYTES, entry_type = .Buffer},
 		}
 		new_group = r.backend.create_bind_group(r.device, r.layout, entries)
 		if rawptr(new_group) == nil {
 			if new_cell_buffer != r.cell_buffer {
 				r.backend.destroy_buffer(new_cell_buffer)
+			}
+			if new_color_buffer != r.color_buffer {
+				r.backend.destroy_buffer(new_color_buffer)
 			}
 			return false
 		}
@@ -325,6 +352,18 @@ fullscreen_resize :: proc(r: ^Fullscreen_Renderer, rows: i32, cols: i32, cell_w:
 			r.backend.destroy_buffer(r.cell_buffer)
 		}
 		r.cell_buffer = new_cell_buffer
+	}
+	if new_color_buffer != r.color_buffer {
+		if rawptr(r.color_buffer) != nil {
+			r.backend.destroy_buffer(r.color_buffer)
+		}
+		r.color_buffer = new_color_buffer
+	}
+	if n != old_n || r.color_staging == nil {
+		if r.color_staging != nil {
+			delete(r.color_staging, runtime.heap_allocator())
+		}
+		r.color_staging = make([]termgrid.Direct_Color_Channel, n, runtime.heap_allocator())
 	}
 	r.rows = rows
 	r.cols = cols
@@ -366,6 +405,43 @@ fullscreen_upload_grid :: proc(r: ^Fullscreen_Renderer, cells: []u64, lut_words:
 	return bytes
 }
 
+// fullscreen_upload_colors reorders direct-color channels from the grid's
+// physical ring-buffer row storage into logical row-major staging memory,
+// then issues a single GPU copy to color_buffer.
+fullscreen_upload_colors :: proc(r: ^Fullscreen_Renderer, g: ^termgrid.Grid) -> u64 {
+	if r == nil || g == nil {
+		return 0
+	}
+	n := int(r.rows) * int(r.cols)
+	if n <= 0 || g.row_count != int(r.rows) || g.col_count != int(r.cols) {
+		return 0
+	}
+	if r.color_staging == nil || len(r.color_staging) < n {
+		return 0
+	}
+
+	cols := g.col_count
+	// Reorder ring-buffer physical rows into logical row-major order:
+	// Logical row lr maps to physical row (g.origin + lr) & g.mask.
+	for lr in 0..<g.row_count {
+		phys := (g.origin + lr) & g.mask
+		src_start := phys * cols
+		src_end := src_start + cols
+		if src_end <= len(g.ext_colors) {
+			src := g.ext_colors[src_start:src_end]
+			dst := r.color_staging[lr * cols : (lr + 1) * cols]
+			copy(dst, src)
+		}
+	}
+
+	size := u64(n) * FULLSCREEN_COLOR_BYTES
+	live := r.backend != nil && rawptr(r.queue) != nil && rawptr(r.color_buffer) != nil
+	if live {
+		r.backend.write_buffer(r.queue, r.color_buffer, 0, &r.color_staging[0], size)
+	}
+	return size
+}
+
 // fullscreen_draw appends the fullscreen shade and optional cursor draw to
 // encoder. It does not finish or submit the encoder; the caller owns the
 // shared command buffer and surface lifecycle. Returns true iff encoding
@@ -374,10 +450,11 @@ fullscreen_draw :: proc(
 	r: ^Fullscreen_Renderer,
 	surface_view: gpu.Gpu_TextureView,
 	encoder: gpu.Gpu_CommandEncoder,
-	cursor_pipeline: gpu.Gpu_RenderPipeline,
-	cursor_bind_group: gpu.Gpu_BindGroup,
-	cursor_buffer: gpu.Gpu_Buffer,
-	cursor_offset: u64,
+	cursor_pipeline: gpu.Gpu_RenderPipeline = nil,
+	cursor_bind_group: gpu.Gpu_BindGroup = nil,
+	cursor_buffer: gpu.Gpu_Buffer = nil,
+	cursor_offset: u64 = 0,
+	clear_color: [4]f64 = {0, 0, 0, 1},
 ) -> bool {
 	if !r.available {
 		return false
@@ -391,18 +468,14 @@ fullscreen_draw :: proc(
 	if rawptr(surface_view) == nil {
 		return false
 	}
-	pass := r.backend.begin_render_pass(encoder, surface_view, {0, 0, 0, 1}, .Clear)
+	pass := r.backend.begin_render_pass(encoder, surface_view, clear_color, .Clear)
 	if rawptr(pass) == nil {
 		return false
 	}
 	r.backend.render_set_pipeline(pass, r.pipeline)
 	r.backend.render_set_bind_group(pass, 0, r.bind_group)
 	r.backend.render_draw(pass, 3, 1)
-	if rawptr(cursor_pipeline) != nil || rawptr(cursor_bind_group) != nil || rawptr(cursor_buffer) != nil {
-		if rawptr(cursor_pipeline) == nil || rawptr(cursor_bind_group) == nil || rawptr(cursor_buffer) == nil {
-			r.backend.end_render_pass(pass)
-			return false
-		}
+	if rawptr(cursor_pipeline) != nil && rawptr(cursor_bind_group) != nil && rawptr(cursor_buffer) != nil {
 		r.backend.render_set_pipeline(pass, cursor_pipeline)
 		r.backend.render_set_bind_group(pass, 0, cursor_bind_group)
 		r.backend.render_set_vertex_buffer(pass, 0, cursor_buffer, cursor_offset)
