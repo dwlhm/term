@@ -41,11 +41,11 @@ TILE_LUT_BYTES :: TILE_LUT_WORDS * size_of(u32)
 TILE_FRAMEBUFFER_FORMAT :: gpu.Gpu_Format.RGBA8_Unorm
 
 // TILE_ATLAS_TEX_W/H mirror the render atlas pixel dimensions
-// (render.ATLAS_COLS * render.ATLAS_GLYPH_SIZE = 256,
-// render.ATLAS_ROWS * render.ATLAS_GLYPH_SIZE = 512); tile cannot import
+// (render.ATLAS_COLS * render.ATLAS_GLYPH_SIZE = 16 * 64 = 1024,
+// render.ATLAS_ROWS * render.ATLAS_GLYPH_SIZE = 32 * 64 = 2048); tile cannot import
 // render (import cycle), so they are mirrored here.
-TILE_ATLAS_TEX_W :: 256
-TILE_ATLAS_TEX_H :: 512
+TILE_ATLAS_TEX_W :: 1024
+TILE_ATLAS_TEX_H :: 2048
 
 // Compute/blit shader entry points (must match the WGSL sources).
 TILE_COMPUTE_ENTRY :: "cs_main"

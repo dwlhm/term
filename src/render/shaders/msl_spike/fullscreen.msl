@@ -118,17 +118,21 @@ inline int pinned_slot(uint content) {
     return -1;
 }
 
-// slot_uv maps any atlas slot to its UV rect (16px cell, 16-column grid).
-inline float4 slot_uv(uint slot, constant Fullscreen_Params& params) {
+// slot_uv maps any atlas slot to its UV rect.
+// Each slot is 64x64 in the 1024x2048 atlas. The glyph ink spans
+// gw (cell_w or cell_w * 2 for wide) by cell_h within the slot origin.
+inline float4 slot_uv(uint slot, float gw, constant Fullscreen_Params& params) {
     float col = float(slot % 16u);
     float row = float(slot / 16u);
     float aw = float(params.atlas_w);
     float ah = float(params.atlas_h);
+    float u0 = col * 64.0 / aw;
+    float v0 = row * 64.0 / ah;
     return float4(
-        col * 16.0 / aw,
-        row * 16.0 / ah,
-        (col * 16.0 + 16.0) / aw,
-        (row * 16.0 + 16.0) / ah);
+        u0,
+        v0,
+        u0 + gw / aw,
+        v0 + params.cell_h / ah);
 }
 
 vertex Fullscreen_Output fullscreen_vs_main(uint vertex_id [[vertex_id]]) {
@@ -233,8 +237,8 @@ fragment float4 fullscreen_fs_main(
                     if (su >= 0) {
                         uint nfg_packed = cell_is_selected(ncflags) ? lut_selection_fg(lut) : lut_fg(nstyle, lut);
                         float3 nfg_rgb = r5g6b5_to_rgb(nfg_packed);
-                        float4 uvs = slot_uv(uint(su), params);
                         float gw = params.cell_w * 2.0;
+                        float4 uvs = slot_uv(uint(su), gw, params);
                         float fx = (float(px) - (x0 - params.cell_w)) / gw;
                         float fy = (float(py) - y0) / params.cell_h;
                         if (fx >= 0.0 && fx < 1.0 && fy >= 0.0 && fy < 1.0) {
@@ -261,11 +265,8 @@ fragment float4 fullscreen_fs_main(
     float3 col = background.rgb;
     float glyph_coverage = 0.0;
     if (content != 0x20u && content != 0u && su >= 0) {
-        float4 uvs = slot_uv(uint(su), params);
-        float gw = params.cell_w;
-        if (width == 2u) {
-            gw = params.cell_w * 2.0;
-        }
+        float gw = (width == 2u) ? params.cell_w * 2.0 : params.cell_w;
+        float4 uvs = slot_uv(uint(su), gw, params);
         float fx = (float(px) - x0) / gw;
         float fy = (float(py) - y0) / params.cell_h;
         if (fx >= 0.0 && fx < 1.0 && fy >= 0.0 && fy < 1.0) {

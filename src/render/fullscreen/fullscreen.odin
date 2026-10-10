@@ -39,11 +39,11 @@ FULLSCREEN_LUT_WORDS :: 1025
 FULLSCREEN_LUT_BYTES :: FULLSCREEN_LUT_WORDS * size_of(u32)
 
 // FULLSCREEN_ATLAS_TEX_W/H mirror the render atlas pixel dimensions
-// (render.ATLAS_COLS * render.ATLAS_GLYPH_SIZE = 256,
-// render.ATLAS_ROWS * render.ATLAS_GLYPH_SIZE = 512); fullscreen cannot
-// import render (import cycle), so they are mirrored here.
-FULLSCREEN_ATLAS_TEX_W :: 256
-FULLSCREEN_ATLAS_TEX_H :: 512
+// (render.ATLAS_COLS * render.ATLAS_GLYPH_SIZE = 16 * 64 = 1024,
+// render.ATLAS_ROWS * render.ATLAS_GLYPH_SIZE = 32 * 64 = 2048); fullscreen
+// cannot import render (import cycle), so they are mirrored here.
+FULLSCREEN_ATLAS_TEX_W :: 1024
+FULLSCREEN_ATLAS_TEX_H :: 2048
 
 // Fullscreen shader entry points (must match the WGSL source).
 FULLSCREEN_VERTEX_ENTRY :: "fullscreen_vs_main"

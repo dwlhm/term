@@ -124,17 +124,21 @@ fn pinned_slot(content: u32) -> i32 {
     return -1;
 }
 
-// slot_uv maps any atlas slot to its UV rect (16px cell, 16-column grid).
-fn slot_uv(slot: u32) -> vec4<f32> {
+// slot_uv maps any atlas slot to its UV rect.
+// Each slot is 64x64 in the 1024x2048 atlas. The glyph ink spans
+// gw (cell_w or cell_w * 2 for wide) by cell_h within the slot origin.
+fn slot_uv(slot: u32, gw: f32) -> vec4<f32> {
     let col = f32(slot % 16u);
     let row = f32(slot / 16u);
     let aw = f32(params.atlas_w);
     let ah = f32(params.atlas_h);
+    let u0 = col * 64.0 / aw;
+    let v0 = row * 64.0 / ah;
     return vec4<f32>(
-        col * 16.0 / aw,
-        row * 16.0 / ah,
-        (col * 16.0 + 16.0) / aw,
-        (row * 16.0 + 16.0) / ah,
+        u0,
+        v0,
+        u0 + gw / aw,
+        v0 + params.cell_h / ah,
     );
 }
 
@@ -211,8 +215,8 @@ fn cs_main(
                         if (su >= 0) {
                             let nfg_packed = select(lut_fg(nstyle), lut_selection_fg(), cell_is_selected(ncflags));
                             fg_rgb = r5g6b5_to_rgb(nfg_packed);
-                            uvs = slot_uv(u32(su));
                             gw = params.cell_w * 2.0;
+                            uvs = slot_uv(u32(su), gw);
                             has_glyph = true;
                         }
                     }
@@ -254,11 +258,11 @@ fn cs_main(
         var has_glyph = false;
         var uvs = vec4<f32>(0.0);
         var gw = params.cell_w;
+        if (width == 2u) {
+            gw = params.cell_w * 2.0;
+        }
         if (content != 0x20u && content != 0u && su >= 0) {
-            uvs = slot_uv(u32(su));
-            if (width == 2u) {
-                gw = params.cell_w * 2.0;
-            }
+            uvs = slot_uv(u32(su), gw);
             has_glyph = true;
         }
         for (var py2 = y0; py2 < y1; py2++) {

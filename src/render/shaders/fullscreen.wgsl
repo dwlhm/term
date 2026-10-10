@@ -143,17 +143,21 @@ fn pinned_slot(content: u32) -> i32 {
     return -1;
 }
 
-// slot_uv maps any atlas slot to its UV rect (16px cell, 16-column grid).
-fn slot_uv(slot: u32) -> vec4<f32> {
+// slot_uv maps any atlas slot to its UV rect.
+// Each slot is 64x64 in the 1024x2048 atlas. The glyph ink spans
+// gw (cell_w or cell_w * 2 for wide) by cell_h within the slot origin.
+fn slot_uv(slot: u32, gw: f32) -> vec4<f32> {
     let col = f32(slot % 16u);
     let row = f32(slot / 16u);
     let aw = f32(params.atlas_w);
     let ah = f32(params.atlas_h);
+    let u0 = col * 64.0 / aw;
+    let v0 = row * 64.0 / ah;
     return vec4<f32>(
-        col * 16.0 / aw,
-        row * 16.0 / ah,
-        (col * 16.0 + 16.0) / aw,
-        (row * 16.0 + 16.0) / ah,
+        u0,
+        v0,
+        u0 + gw / aw,
+        v0 + params.cell_h / ah,
     );
 }
 
@@ -255,8 +259,8 @@ fn fullscreen_fs_main(input: Fullscreen_Output) -> @location(0) vec4<f32> {
                     if (su >= 0) {
                         let nfg_packed = select(lut_fg(nstyle), lut_selection_fg(), cell_is_selected(ncflags));
                         let fg_rgb = r5g6b5_to_rgb(nfg_packed);
-                        let uvs = slot_uv(u32(su));
                         let gw = params.cell_w * 2.0;
+                        let uvs = slot_uv(u32(su), gw);
                         let fx = (f32(px) - (x0 - params.cell_w)) / gw;
                         let fy = (f32(py) - y0) / params.cell_h;
                         if (fx >= 0.0 && fx < 1.0 && fy >= 0.0 && fy < 1.0) {
@@ -286,11 +290,11 @@ fn fullscreen_fs_main(input: Fullscreen_Output) -> @location(0) vec4<f32> {
     var col = background.rgb;
     var glyph_coverage = 0.0;
     if (content != 0x20u && content != 0u && su >= 0) {
-        let uvs = slot_uv(u32(su));
         var gw = params.cell_w;
         if (width == 2u) {
             gw = params.cell_w * 2.0;
         }
+        let uvs = slot_uv(u32(su), gw);
         let fx = (f32(px) - x0) / gw;
         let fy = (f32(py) - y0) / params.cell_h;
         if (fx >= 0.0 && fx < 1.0 && fy >= 0.0 && fy < 1.0) {
