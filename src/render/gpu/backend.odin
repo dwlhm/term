@@ -57,6 +57,8 @@ Gpu_Format :: enum int {
 	BGRA8_Unorm,
 	RGBA8_Unorm,
 	R8_Unorm,
+	Depth24Plus,
+	Depth32_Float,
 }
 
 // Gpu_Buffer_Usage is a bitfield for buffer usage flags.
@@ -187,6 +189,18 @@ Gpu_Backend_VTable :: struct {
 		blend: Gpu_Blend_Mode,
 		topology: Gpu_Primitive_Topology,
 	) -> Gpu_RenderPipeline,
+	create_render_pipeline_with_depth: proc(
+		device: Gpu_Device,
+		vertex_shader: Gpu_ShaderModule,
+		vertex_entry: string,
+		fragment_shader: Gpu_ShaderModule,
+		fragment_entry: string,
+		vertex_layouts: []Gpu_Vertex_Layout,
+		format: Gpu_Format,
+		depth_format: Gpu_Format,
+		blend: Gpu_Blend_Mode,
+		topology: Gpu_Primitive_Topology,
+	) -> Gpu_RenderPipeline,
 	destroy_render_pipeline: proc(pipeline: Gpu_RenderPipeline),
 
 	// Bind groups
@@ -204,6 +218,15 @@ Gpu_Backend_VTable :: struct {
 	// Releases an encoder that has not been consumed by finish.
 	release_command_encoder: proc(encoder: Gpu_CommandEncoder),
 	begin_render_pass: proc(encoder: Gpu_CommandEncoder, color_view: Gpu_TextureView, clear_color: [4]f64, load_op: Gpu_Load_Op) -> Gpu_RenderPassEncoder,
+	begin_render_pass_with_depth: proc(
+		encoder: Gpu_CommandEncoder,
+		color_view: Gpu_TextureView,
+		clear_color: [4]f64,
+		load_op: Gpu_Load_Op,
+		depth_view: Gpu_TextureView,
+		depth_clear: f32,
+		depth_load_op: Gpu_Load_Op,
+	) -> Gpu_RenderPassEncoder,
 	end_render_pass: proc(pass: Gpu_RenderPassEncoder),
 	finish_command_buffer: proc(encoder: Gpu_CommandEncoder) -> rawptr,
 	// Releases a finished command buffer after queue submission or rejection.
@@ -221,6 +244,8 @@ Gpu_Backend_VTable :: struct {
 	render_set_pipeline: proc(pass: Gpu_RenderPassEncoder, pipeline: Gpu_RenderPipeline),
 	render_set_bind_group: proc(pass: Gpu_RenderPassEncoder, index: u32, group: Gpu_BindGroup),
 	render_set_vertex_buffer: proc(pass: Gpu_RenderPassEncoder, slot: u32, buffer: Gpu_Buffer, offset: u64),
+	render_set_index_buffer: proc(pass: Gpu_RenderPassEncoder, buffer: Gpu_Buffer, offset: u64, size: u64),
+	render_set_viewport: proc(pass: Gpu_RenderPassEncoder, x, y, width, height, min_depth, max_depth: f32),
 	render_draw: proc(pass: Gpu_RenderPassEncoder, vertex_count: u32, instance_count: u32),
 	render_draw_indexed: proc(pass: Gpu_RenderPassEncoder, index_count: u32, instance_count: u32),
 

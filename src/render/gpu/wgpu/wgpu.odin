@@ -1,6 +1,6 @@
-#+build !darwin
 package wgpu_backend
 
+import "base:runtime"
 import "core:fmt"
 import "vendor:sdl3"
 import "vendor:wgpu"
@@ -10,6 +10,7 @@ import gpu "../"
 // Wgpu_Surface wraps the native WGPU surface handle and state.
 Wgpu_Surface :: struct {
 	handle:     wgpu.Surface,
+	adapter:    wgpu.Adapter,
 	format:     wgpu.TextureFormat,
 	width:      u32,
 	height:     u32,
@@ -51,8 +52,9 @@ _wgpu_vtable: gpu.Gpu_Backend_VTable = gpu.Gpu_Backend_VTable{
 	destroy_shader_module   = _wgpu_destroy_shader_module,
 
 	// Pipelines
-	create_render_pipeline  = _wgpu_create_render_pipeline,
-	destroy_render_pipeline = _wgpu_destroy_render_pipeline,
+	create_render_pipeline            = _wgpu_create_render_pipeline,
+	create_render_pipeline_with_depth = _wgpu_create_render_pipeline_with_depth,
+	destroy_render_pipeline           = _wgpu_destroy_render_pipeline,
 
 	// Bind groups
 	create_bind_group_layout  = _wgpu_create_bind_group_layout,
@@ -65,10 +67,11 @@ _wgpu_vtable: gpu.Gpu_Backend_VTable = gpu.Gpu_Backend_VTable{
 	destroy_sampler         = _wgpu_destroy_sampler,
 
 	// Command encoding
-	create_command_encoder  = _wgpu_create_command_encoder,
-	release_command_encoder = _wgpu_release_command_encoder,
-	begin_render_pass       = _wgpu_begin_render_pass,
-	end_render_pass         = _wgpu_end_render_pass,
+	create_command_encoder       = _wgpu_create_command_encoder,
+	release_command_encoder      = _wgpu_release_command_encoder,
+	begin_render_pass            = _wgpu_begin_render_pass,
+	begin_render_pass_with_depth = _wgpu_begin_render_pass_with_depth,
+	end_render_pass              = _wgpu_end_render_pass,
 	finish_command_buffer   = _wgpu_finish_command_buffer,
 	release_command_buffer  = _wgpu_release_command_buffer,
 	submit                  = _wgpu_submit,
@@ -78,6 +81,8 @@ _wgpu_vtable: gpu.Gpu_Backend_VTable = gpu.Gpu_Backend_VTable{
 	render_set_pipeline       = _wgpu_render_set_pipeline,
 	render_set_bind_group     = _wgpu_render_set_bind_group,
 	render_set_vertex_buffer  = _wgpu_render_set_vertex_buffer,
+	render_set_index_buffer   = _wgpu_render_set_index_buffer,
+	render_set_viewport       = _wgpu_render_set_viewport,
 	render_draw               = _wgpu_render_draw,
 	render_draw_indexed       = _wgpu_render_draw_indexed,
 
@@ -128,6 +133,10 @@ destroy_surface :: proc(surf: ^Wgpu_Surface) {
 		}
 		wgpu.SurfaceRelease(surf.handle)
 		surf.handle = nil
+	}
+	if surf.adapter != nil {
+		wgpu.AdapterRelease(surf.adapter)
+		surf.adapter = nil
 	}
 	free(surf)
 }
@@ -187,6 +196,28 @@ _on_device :: proc "c" (
 	}
 }
 
+_on_uncaptured_error :: proc "c" (
+	device: ^wgpu.Device,
+	type: wgpu.ErrorType,
+	message: wgpu.StringView,
+	userdata1: rawptr,
+	userdata2: rawptr,
+) {
+	context = runtime.default_context()
+	fmt.eprintfln("[wgpu] uncaptured error (%v): %s", type, message)
+}
+
+_on_device_lost :: proc "c" (
+	device: ^wgpu.Device,
+	reason: wgpu.DeviceLostReason,
+	message: wgpu.StringView,
+	userdata1: rawptr,
+	userdata2: rawptr,
+) {
+	context = runtime.default_context()
+	fmt.eprintfln("[wgpu] device lost (%v): %s", reason, message)
+}
+
 _wgpu_request_device :: proc(instance: rawptr, surface: rawptr) -> (device: gpu.Gpu_Device, queue: gpu.Gpu_Queue) {
 	inst := wgpu.Instance(instance)
 	if inst == nil {
@@ -204,18 +235,16 @@ _wgpu_request_device :: proc(instance: rawptr, surface: rawptr) -> (device: gpu.
 	}
 
 	adapter_res: _Adapter_Result
-	adapter_future := wgpu.InstanceRequestAdapter(
+	_ = wgpu.InstanceRequestAdapter(
 		inst,
 		&options,
 		wgpu.RequestAdapterCallbackInfo{
-			mode      = .WaitAnyOnly,
+			mode      = .AllowProcessEvents,
 			callback  = _on_adapter,
 			userdata1 = &adapter_res,
 		},
 	)
-
-	wait_adapter := [1]wgpu.FutureWaitInfo{ { future = adapter_future, completed = false } }
-	wgpu.InstanceWaitAny(inst, 1, raw_data(wait_adapter[:]), max(u64))
+	wgpu.InstanceProcessEvents(inst)
 
 	if adapter_res.status != .Success || adapter_res.adapter == nil {
 		return gpu.Gpu_Device(nil), gpu.Gpu_Queue(nil)
@@ -223,23 +252,41 @@ _wgpu_request_device :: proc(instance: rawptr, surface: rawptr) -> (device: gpu.
 	adapter := adapter_res.adapter
 	defer wgpu.AdapterRelease(adapter)
 
+	dev_desc := wgpu.DeviceDescriptor{
+		uncapturedErrorCallbackInfo = {
+			callback = _on_uncaptured_error,
+		},
+		deviceLostCallbackInfo = {
+			mode     = .WaitAnyOnly,
+			callback = _on_device_lost,
+		},
+	}
+
 	device_res: _Device_Result
-	device_future := wgpu.AdapterRequestDevice(
+	_ = wgpu.AdapterRequestDevice(
 		adapter,
-		nil,
+		&dev_desc,
 		wgpu.RequestDeviceCallbackInfo{
-			mode      = .WaitAnyOnly,
+			mode      = .AllowProcessEvents,
 			callback  = _on_device,
 			userdata1 = &device_res,
 		},
 	)
-
-	wait_device := [1]wgpu.FutureWaitInfo{ { future = device_future, completed = false } }
-	wgpu.InstanceWaitAny(inst, 1, raw_data(wait_device[:]), max(u64))
+	wgpu.InstanceProcessEvents(inst)
 
 	if device_res.status != .Success || device_res.device == nil {
 		return gpu.Gpu_Device(nil), gpu.Gpu_Queue(nil)
 	}
+
+	if surface != nil {
+		surf := (^Wgpu_Surface)(surface)
+		if surf.adapter != nil {
+			wgpu.AdapterRelease(surf.adapter)
+		}
+		wgpu.AdapterAddRef(adapter)
+		surf.adapter = adapter
+	}
+
 	dev := device_res.device
 	q := wgpu.DeviceGetQueue(dev)
 
@@ -269,8 +316,42 @@ _wgpu_configure_surface :: proc(surface: rawptr, device: gpu.Gpu_Device, format:
 	if dev == nil do return
 
 	wgpu_fmt := _gpu_to_wgpu_format(format)
+	if surf.adapter != nil {
+		caps, status := wgpu.SurfaceGetCapabilities(surf.handle, surf.adapter)
+		if status == .Success {
+			defer wgpu.SurfaceCapabilitiesFreeMembers(caps)
+			preferred_target := wgpu.TextureFormat.BGRA8Unorm when ODIN_OS == .Darwin else wgpu.TextureFormat.RGBA8Unorm
+			formats := caps.formats[:caps.formatCount]
+			found_req := false
+			if wgpu_fmt != .Undefined {
+				for f in formats {
+					if f == wgpu_fmt {
+						found_req = true
+						break
+					}
+				}
+			}
+			if !found_req {
+				wgpu_fmt = .Undefined
+				for f in formats {
+					if f == preferred_target {
+						wgpu_fmt = f
+						break
+					}
+				}
+				if wgpu_fmt == .Undefined && len(formats) > 0 {
+					wgpu_fmt = formats[0]
+				}
+			}
+		}
+	}
+
 	if wgpu_fmt == .Undefined {
-		wgpu_fmt = .BGRA8Unorm
+		when ODIN_OS == .Darwin {
+			wgpu_fmt = .BGRA8Unorm
+		} else {
+			wgpu_fmt = .RGBA8Unorm
+		}
 	}
 
 	w := max(u32(1), width)
@@ -282,7 +363,7 @@ _wgpu_configure_surface :: proc(surface: rawptr, device: gpu.Gpu_Device, format:
 		usage       = { .RenderAttachment },
 		width       = w,
 		height      = h,
-		alphaMode   = .Auto,
+		alphaMode   = .Opaque,
 		presentMode = .Fifo,
 	}
 	wgpu.SurfaceConfigure(surf.handle, &config)
@@ -323,7 +404,28 @@ _wgpu_present_surface :: proc(surface: rawptr) -> bool {
 }
 
 _wgpu_get_preferred_format :: proc(surface: rawptr, device: gpu.Gpu_Device) -> gpu.Gpu_Format {
-	return .BGRA8_Unorm
+	surf := (^Wgpu_Surface)(surface)
+	if surf != nil && surf.handle != nil && surf.adapter != nil {
+		caps, status := wgpu.SurfaceGetCapabilities(surf.handle, surf.adapter)
+		if status == .Success {
+			defer wgpu.SurfaceCapabilitiesFreeMembers(caps)
+			preferred_target := wgpu.TextureFormat.BGRA8Unorm when ODIN_OS == .Darwin else wgpu.TextureFormat.RGBA8Unorm
+			formats := caps.formats[:caps.formatCount]
+			for f in formats {
+				if f == preferred_target {
+					return _wgpu_to_gpu_format(f)
+				}
+			}
+			if len(formats) > 0 {
+				return _wgpu_to_gpu_format(formats[0])
+			}
+		}
+	}
+	when ODIN_OS == .Darwin {
+		return .BGRA8_Unorm
+	} else {
+		return .RGBA8_Unorm
+	}
 }
 
 // --- Buffers (10-14) ---
@@ -517,7 +619,11 @@ _wgpu_create_render_pipeline :: proc(
 
 	target_fmt := _gpu_to_wgpu_format(format)
 	if target_fmt == .Undefined {
-		target_fmt = .BGRA8Unorm
+		when ODIN_OS == .Darwin {
+			target_fmt = .BGRA8Unorm
+		} else {
+			target_fmt = .RGBA8Unorm
+		}
 	}
 
 	blend_state := wgpu.BlendState{
@@ -559,6 +665,113 @@ _wgpu_create_render_pipeline :: proc(
 			alphaToCoverageEnabled = false,
 		},
 		fragment    = &fragment_state if fragment_shader != nil else nil,
+	}
+
+	pipeline := wgpu.DeviceCreateRenderPipeline(dev, &desc)
+	return gpu.Gpu_RenderPipeline(pipeline)
+}
+
+_wgpu_create_render_pipeline_with_depth :: proc(
+	device: gpu.Gpu_Device,
+	vertex_shader: gpu.Gpu_ShaderModule,
+	vertex_entry: string,
+	fragment_shader: gpu.Gpu_ShaderModule,
+	fragment_entry: string,
+	vertex_layouts: []gpu.Gpu_Vertex_Layout,
+	format: gpu.Gpu_Format,
+	depth_format: gpu.Gpu_Format,
+	blend: gpu.Gpu_Blend_Mode,
+	topology: gpu.Gpu_Primitive_Topology,
+) -> gpu.Gpu_RenderPipeline {
+	dev := wgpu.Device(rawptr(device))
+	if dev == nil do return gpu.Gpu_RenderPipeline(nil)
+
+	wgpu_layouts := make([]wgpu.VertexBufferLayout, len(vertex_layouts), context.temp_allocator)
+	for vl, i in vertex_layouts {
+		attrs := make([]wgpu.VertexAttribute, len(vl.attributes), context.temp_allocator)
+		for a, j in vl.attributes {
+			attrs[j] = wgpu.VertexAttribute{
+				format         = _gpu_to_wgpu_vertex_format(a.format),
+				offset         = a.offset,
+				shaderLocation = a.shader_location,
+			}
+		}
+		wgpu_layouts[i] = wgpu.VertexBufferLayout{
+			stepMode       = _gpu_to_wgpu_step_mode(vl.step_mode),
+			arrayStride    = vl.array_stride,
+			attributeCount = uint(len(attrs)),
+			attributes     = raw_data(attrs),
+		}
+	}
+
+	vertex_state := wgpu.VertexState{
+		module      = wgpu.ShaderModule(rawptr(vertex_shader)),
+		entryPoint  = vertex_entry,
+		bufferCount = uint(len(wgpu_layouts)),
+		buffers     = raw_data(wgpu_layouts),
+	}
+
+	target_fmt := _gpu_to_wgpu_format(format)
+	if target_fmt == .Undefined {
+		when ODIN_OS == .Darwin {
+			target_fmt = .BGRA8Unorm
+		} else {
+			target_fmt = .RGBA8Unorm
+		}
+	}
+
+	blend_state := wgpu.BlendState{
+		color = {
+			operation = .Add,
+			srcFactor = .SrcAlpha,
+			dstFactor = .OneMinusSrcAlpha,
+		},
+		alpha = {
+			operation = .Add,
+			srcFactor = .One,
+			dstFactor = .OneMinusSrcAlpha,
+		},
+	}
+
+	target := wgpu.ColorTargetState{
+		format    = target_fmt,
+		blend     = &blend_state if blend == .Alpha_Blend else nil,
+		writeMask = { .Red, .Green, .Blue, .Alpha },
+	}
+
+	fragment_state := wgpu.FragmentState{
+		module      = wgpu.ShaderModule(rawptr(fragment_shader)),
+		entryPoint  = fragment_entry,
+		targetCount = 1,
+		targets     = &target,
+	}
+
+	depth_fmt := _gpu_to_wgpu_format(depth_format)
+	depth_stencil_state: wgpu.DepthStencilState
+	depth_stencil_ptr: ^wgpu.DepthStencilState = nil
+	if depth_fmt != .Undefined {
+		depth_stencil_state = wgpu.DepthStencilState{
+			format            = depth_fmt,
+			depthWriteEnabled = .True,
+			depthCompare      = .Less,
+		}
+		depth_stencil_ptr = &depth_stencil_state
+	}
+
+	desc := wgpu.RenderPipelineDescriptor{
+		vertex       = vertex_state,
+		primitive    = wgpu.PrimitiveState{
+			topology  = _gpu_to_wgpu_topology(topology),
+			frontFace = .CCW,
+			cullMode  = .None,
+		},
+		depthStencil = depth_stencil_ptr,
+		multisample  = wgpu.MultisampleState{
+			count                  = 1,
+			mask                   = ~u32(0),
+			alphaToCoverageEnabled = false,
+		},
+		fragment     = &fragment_state if fragment_shader != nil else nil,
 	}
 
 	pipeline := wgpu.DeviceCreateRenderPipeline(dev, &desc)
@@ -758,6 +971,64 @@ _wgpu_begin_render_pass :: proc(
 	return gpu.Gpu_RenderPassEncoder(pass)
 }
 
+_wgpu_begin_render_pass_with_depth :: proc(
+	encoder: gpu.Gpu_CommandEncoder,
+	color_view: gpu.Gpu_TextureView,
+	clear_color: [4]f64,
+	load_op: gpu.Gpu_Load_Op,
+	depth_view: gpu.Gpu_TextureView,
+	depth_clear: f32,
+	depth_load_op: gpu.Gpu_Load_Op,
+) -> gpu.Gpu_RenderPassEncoder {
+	enc := wgpu.CommandEncoder(rawptr(encoder))
+	tv := wgpu.TextureView(rawptr(color_view))
+	dv := wgpu.TextureView(rawptr(depth_view))
+	if enc == nil || tv == nil do return gpu.Gpu_RenderPassEncoder(nil)
+
+	wgpu_load_op: wgpu.LoadOp = .Clear
+	switch load_op {
+	case .Load:      wgpu_load_op = .Load
+	case .Clear:     wgpu_load_op = .Clear
+	case .Undefined: wgpu_load_op = .Clear
+	}
+
+	color_attachment := wgpu.RenderPassColorAttachment{
+		view       = tv,
+		loadOp     = wgpu_load_op,
+		storeOp    = .Store,
+		clearValue = wgpu.Color{ clear_color[0], clear_color[1], clear_color[2], clear_color[3] },
+		depthSlice = wgpu.DEPTH_SLICE_UNDEFINED,
+	}
+
+	wgpu_depth_load_op: wgpu.LoadOp = .Clear
+	switch depth_load_op {
+	case .Load:      wgpu_depth_load_op = .Load
+	case .Clear:     wgpu_depth_load_op = .Clear
+	case .Undefined: wgpu_depth_load_op = .Clear
+	}
+
+	depth_attachment: wgpu.RenderPassDepthStencilAttachment
+	depth_attachment_ptr: ^wgpu.RenderPassDepthStencilAttachment = nil
+	if dv != nil {
+		depth_attachment = wgpu.RenderPassDepthStencilAttachment{
+			view            = dv,
+			depthLoadOp     = wgpu_depth_load_op,
+			depthStoreOp    = .Store,
+			depthClearValue = depth_clear,
+			depthReadOnly   = false,
+		}
+		depth_attachment_ptr = &depth_attachment
+	}
+
+	desc := wgpu.RenderPassDescriptor{
+		colorAttachmentCount   = 1,
+		colorAttachments       = &color_attachment,
+		depthStencilAttachment = depth_attachment_ptr,
+	}
+	pass := wgpu.CommandEncoderBeginRenderPass(enc, &desc)
+	return gpu.Gpu_RenderPassEncoder(pass)
+}
+
 _wgpu_end_render_pass :: proc(pass: gpu.Gpu_RenderPassEncoder) {
 	p := wgpu.RenderPassEncoder(rawptr(pass))
 	if p != nil {
@@ -822,6 +1093,22 @@ _wgpu_render_set_vertex_buffer :: proc(pass: gpu.Gpu_RenderPassEncoder, slot: u3
 			size = total - offset
 		}
 		wgpu.RenderPassEncoderSetVertexBuffer(p, slot, b, offset, size)
+	}
+}
+
+_wgpu_render_set_index_buffer :: proc(pass: gpu.Gpu_RenderPassEncoder, buffer: gpu.Gpu_Buffer, offset: u64, size: u64) {
+	p := wgpu.RenderPassEncoder(rawptr(pass))
+	buf := wgpu.Buffer(rawptr(buffer))
+	if p != nil && buf != nil {
+		sz := size if size > 0 else wgpu.WHOLE_SIZE
+		wgpu.RenderPassEncoderSetIndexBuffer(p, buf, .Uint32, offset, sz)
+	}
+}
+
+_wgpu_render_set_viewport :: proc(pass: gpu.Gpu_RenderPassEncoder, x, y, width, height: f32, min_depth, max_depth: f32) {
+	p := wgpu.RenderPassEncoder(rawptr(pass))
+	if p != nil {
+		wgpu.RenderPassEncoderSetViewport(p, x, y, width, height, min_depth, max_depth)
 	}
 }
 
@@ -935,10 +1222,12 @@ _wgpu_compute_get_bind_group_layout :: proc(pipeline: gpu.Gpu_ComputePipeline, i
 
 _gpu_to_wgpu_format :: proc(fmt: gpu.Gpu_Format) -> wgpu.TextureFormat {
 	switch fmt {
-	case .BGRA8_Unorm: return .BGRA8Unorm
-	case .RGBA8_Unorm: return .RGBA8Unorm
-	case .R8_Unorm:    return .R8Unorm
-	case .Undefined:   return .Undefined
+	case .BGRA8_Unorm:   return .BGRA8Unorm
+	case .RGBA8_Unorm:   return .RGBA8Unorm
+	case .R8_Unorm:      return .R8Unorm
+	case .Depth24Plus:   return .Depth24Plus
+	case .Depth32_Float: return .Depth32Float
+	case .Undefined:     return .Undefined
 	}
 	return .Undefined
 }
@@ -948,6 +1237,8 @@ _wgpu_to_gpu_format :: proc(fmt: wgpu.TextureFormat) -> gpu.Gpu_Format {
 	case .BGRA8Unorm, .BGRA8UnormSrgb: return .BGRA8_Unorm
 	case .RGBA8Unorm, .RGBA8UnormSrgb: return .RGBA8_Unorm
 	case .R8Unorm:                     return .R8_Unorm
+	case .Depth24Plus:                 return .Depth24Plus
+	case .Depth32Float:                return .Depth32_Float
 	case:                              return .Undefined
 	}
 }

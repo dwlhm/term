@@ -126,8 +126,9 @@ _metal_vtable: gpu.Gpu_Backend_VTable = gpu.Gpu_Backend_VTable{
 	destroy_shader_module   = _metal_destroy_shader_module,
 
 	// Pipelines
-	create_render_pipeline  = _metal_create_render_pipeline,
-	destroy_render_pipeline = _metal_destroy_render_pipeline,
+	create_render_pipeline            = _metal_create_render_pipeline,
+	create_render_pipeline_with_depth = _metal_create_render_pipeline_with_depth,
+	destroy_render_pipeline           = _metal_destroy_render_pipeline,
 
 	// Bind groups
 	create_bind_group_layout  = _metal_create_bind_group_layout,
@@ -140,10 +141,11 @@ _metal_vtable: gpu.Gpu_Backend_VTable = gpu.Gpu_Backend_VTable{
 	destroy_sampler         = _metal_destroy_sampler,
 
 	// Command encoding
-	create_command_encoder  = _metal_create_command_encoder,
-	release_command_encoder = _metal_release_command_encoder,
-	begin_render_pass       = _metal_begin_render_pass,
-	end_render_pass         = _metal_end_render_pass,
+	create_command_encoder       = _metal_create_command_encoder,
+	release_command_encoder      = _metal_release_command_encoder,
+	begin_render_pass            = _metal_begin_render_pass,
+	begin_render_pass_with_depth = _metal_begin_render_pass_with_depth,
+	end_render_pass              = _metal_end_render_pass,
 	finish_command_buffer   = _metal_finish_command_buffer,
 	release_command_buffer  = _metal_release_command_buffer,
 	submit                  = _metal_submit,
@@ -153,6 +155,8 @@ _metal_vtable: gpu.Gpu_Backend_VTable = gpu.Gpu_Backend_VTable{
 	render_set_pipeline       = _metal_render_set_pipeline,
 	render_set_bind_group     = _metal_render_set_bind_group,
 	render_set_vertex_buffer  = _metal_render_set_vertex_buffer,
+	render_set_index_buffer   = _metal_render_set_index_buffer,
+	render_set_viewport       = _metal_render_set_viewport,
 	render_draw               = _metal_render_draw,
 	render_draw_indexed       = _metal_render_draw_indexed,
 
@@ -396,10 +400,11 @@ _metal_create_texture :: proc(device: gpu.Gpu_Device, width, height: u32, format
 
 	pixel_format: MTL.PixelFormat = .Invalid
 	#partial switch format {
-	case .BGRA8_Unorm: pixel_format = .BGRA8Unorm
-	case .RGBA8_Unorm: pixel_format = .RGBA8Unorm
-	case .R8_Unorm:    pixel_format = .R8Unorm
-	case:              pixel_format = .RGBA8Unorm
+	case .BGRA8_Unorm:              pixel_format = .BGRA8Unorm
+	case .RGBA8_Unorm:              pixel_format = .RGBA8Unorm
+	case .R8_Unorm:                 pixel_format = .R8Unorm
+	case .Depth24Plus, .Depth32_Float: pixel_format = .Depth32Float
+	case:                           pixel_format = .RGBA8Unorm
 	}
 
 	w := NS.UInteger(max(width, 1))
@@ -651,6 +656,99 @@ _metal_create_render_pipeline :: proc(
 	return gpu.Gpu_RenderPipeline(pipeline)
 }
 
+_metal_create_render_pipeline_with_depth :: proc(
+	device: gpu.Gpu_Device,
+	vertex_shader: gpu.Gpu_ShaderModule,
+	vertex_entry: string,
+	fragment_shader: gpu.Gpu_ShaderModule,
+	fragment_entry: string,
+	vertex_layouts: []gpu.Gpu_Vertex_Layout,
+	format: gpu.Gpu_Format,
+	depth_format: gpu.Gpu_Format,
+	blend: gpu.Gpu_Blend_Mode,
+	topology: gpu.Gpu_Primitive_Topology,
+) -> gpu.Gpu_RenderPipeline {
+	dev := (^Metal_Device)(rawptr(device))
+	if dev == nil || dev.handle == nil do return gpu.Gpu_RenderPipeline(nil)
+
+	v_mod := (^Metal_ShaderModule)(rawptr(vertex_shader))
+	f_mod := (^Metal_ShaderModule)(rawptr(fragment_shader))
+	if v_mod == nil || v_mod.library == nil do return gpu.Gpu_RenderPipeline(nil)
+
+	desc := MTL.RenderPipelineDescriptor.alloc()->init()
+	if desc == nil do return gpu.Gpu_RenderPipeline(nil)
+	defer desc->release()
+
+	ns_v_entry := _create_ns_string(vertex_entry)
+	if ns_v_entry != nil {
+		defer ns_v_entry->release()
+		v_fn := v_mod.library->newFunctionWithName(ns_v_entry)
+		if v_fn != nil {
+			desc->setVertexFunction(v_fn)
+		}
+	}
+
+	if f_mod != nil && f_mod.library != nil && len(fragment_entry) > 0 {
+		ns_f_entry := _create_ns_string(fragment_entry)
+		if ns_f_entry != nil {
+			defer ns_f_entry->release()
+			f_fn := f_mod.library->newFunctionWithName(ns_f_entry)
+			if f_fn != nil {
+				desc->setFragmentFunction(f_fn)
+			}
+		}
+	}
+
+	mtl_format: MTL.PixelFormat = .Invalid
+	#partial switch format {
+	case .BGRA8_Unorm: mtl_format = .BGRA8Unorm
+	case .RGBA8_Unorm: mtl_format = .RGBA8Unorm
+	case .R8_Unorm:    mtl_format = .R8Unorm
+	case:              mtl_format = .BGRA8Unorm
+	}
+	attachments := desc->colorAttachments()
+	if attachments != nil {
+		color_attach := attachments->object(0)
+		if color_attach != nil {
+			color_attach->setPixelFormat(mtl_format)
+			switch blend {
+			case .Alpha_Blend:
+				color_attach->setBlendingEnabled(true)
+				color_attach->setRgbBlendOperation(.Add)
+				color_attach->setAlphaBlendOperation(.Add)
+				color_attach->setSourceRGBBlendFactor(.SourceAlpha)
+				color_attach->setDestinationRGBBlendFactor(.OneMinusSourceAlpha)
+				color_attach->setSourceAlphaBlendFactor(.One)
+				color_attach->setDestinationAlphaBlendFactor(.OneMinusSourceAlpha)
+			case .Opaque:
+				color_attach->setBlendingEnabled(false)
+			}
+		}
+	}
+
+	if depth_format != .Undefined {
+		mtl_depth: MTL.PixelFormat = .Depth32Float
+		desc->setDepthAttachmentPixelFormat(mtl_depth)
+	}
+
+	pipeline_state, _ := dev.handle->newRenderPipelineStateWithDescriptor(desc)
+	if pipeline_state == nil do return gpu.Gpu_RenderPipeline(nil)
+
+	mtl_topology: MTL.PrimitiveType = .Triangle
+	#partial switch topology {
+	case .Point_List:     mtl_topology = .Point
+	case .Line_List:      mtl_topology = .Line
+	case .Line_Strip:     mtl_topology = .LineStrip
+	case .Triangle_List:  mtl_topology = .Triangle
+	case .Triangle_Strip: mtl_topology = .TriangleStrip
+	}
+
+	p := new(Metal_RenderPipeline)
+	p.state = pipeline_state
+	p.topology = mtl_topology
+	return gpu.Gpu_RenderPipeline(p)
+}
+
 _metal_destroy_render_pipeline :: proc(pipeline: gpu.Gpu_RenderPipeline) {
 	p := (^Metal_RenderPipeline)(rawptr(pipeline))
 	if p != nil {
@@ -802,6 +900,69 @@ _metal_begin_render_pass :: proc(
 	return gpu.Gpu_RenderPassEncoder(pass)
 }
 
+_metal_begin_render_pass_with_depth :: proc(
+	encoder: gpu.Gpu_CommandEncoder,
+	color_view: gpu.Gpu_TextureView,
+	clear_color: [4]f64,
+	load_op: gpu.Gpu_Load_Op,
+	depth_view: gpu.Gpu_TextureView,
+	depth_clear: f32,
+	depth_load_op: gpu.Gpu_Load_Op,
+) -> gpu.Gpu_RenderPassEncoder {
+	enc := (^Metal_CommandEncoder)(rawptr(encoder))
+	view := (^Metal_TextureView)(rawptr(color_view))
+	dview := (^Metal_TextureView)(rawptr(depth_view))
+	if enc == nil || enc.cmd_buf == nil || view == nil || view.texture == nil {
+		return gpu.Gpu_RenderPassEncoder(nil)
+	}
+
+	pass_desc := MTL.RenderPassDescriptor.renderPassDescriptor()
+	if pass_desc == nil do return gpu.Gpu_RenderPassEncoder(nil)
+
+	attachments := pass_desc->colorAttachments()
+	if attachments != nil {
+		color_attach := attachments->object(0)
+		if color_attach != nil {
+			color_attach->setTexture(view.texture)
+			switch load_op {
+			case .Clear:
+				color_attach->setLoadAction(MTL.LoadAction.Clear)
+				color_attach->setClearColor(MTL.ClearColor{clear_color[0], clear_color[1], clear_color[2], clear_color[3]})
+			case .Load:
+				color_attach->setLoadAction(MTL.LoadAction.Load)
+			case .Undefined:
+				color_attach->setLoadAction(MTL.LoadAction.DontCare)
+			}
+			color_attach->setStoreAction(MTL.StoreAction.Store)
+		}
+	}
+
+	if dview != nil && dview.texture != nil {
+		depth_attach := pass_desc->depthAttachment()
+		if depth_attach != nil {
+			depth_attach->setTexture(dview.texture)
+			switch depth_load_op {
+			case .Clear:
+				depth_attach->setLoadAction(MTL.LoadAction.Clear)
+				depth_attach->setClearDepth(f64(depth_clear))
+			case .Load:
+				depth_attach->setLoadAction(MTL.LoadAction.Load)
+			case .Undefined:
+				depth_attach->setLoadAction(MTL.LoadAction.DontCare)
+			}
+			depth_attach->setStoreAction(MTL.StoreAction.Store)
+		}
+	}
+
+	r_enc := enc.cmd_buf->renderCommandEncoderWithDescriptor(pass_desc)
+	if r_enc == nil do return gpu.Gpu_RenderPassEncoder(nil)
+
+	pass := new(Metal_RenderPassEncoder)
+	pass.encoder = r_enc
+	pass.cmd_buf = enc.cmd_buf
+	return gpu.Gpu_RenderPassEncoder(pass)
+}
+
 _metal_end_render_pass :: proc(pass: gpu.Gpu_RenderPassEncoder) {
 	p := (^Metal_RenderPassEncoder)(rawptr(pass))
 	if p != nil {
@@ -846,6 +1007,7 @@ Metal_Command_Buffer_Handler_Block :: struct {
 
 foreign import libSystem "system:System"
 foreign libSystem {
+	@(link_name = "_NSConcreteGlobalBlock")
 	_NSConcreteGlobalBlock: intrinsics.objc_class
 }
 
@@ -994,6 +1156,17 @@ _metal_render_set_vertex_buffer :: proc(pass: gpu.Gpu_RenderPassEncoder, slot: u
 	buf := (^Metal_Buffer)(rawptr(buffer))
 	if p == nil || p.encoder == nil || buf == nil || buf.handle == nil do return
 	p.encoder->setVertexBuffer(buf.handle, NS.UInteger(offset), NS.UInteger(slot))
+}
+
+_metal_render_set_index_buffer :: proc(pass: gpu.Gpu_RenderPassEncoder, buffer: gpu.Gpu_Buffer, offset: u64, size: u64) {
+	// Fallback stub for Metal backend
+}
+
+_metal_render_set_viewport :: proc(pass: gpu.Gpu_RenderPassEncoder, x, y, width, height: f32, min_depth, max_depth: f32) {
+	p := (^Metal_RenderPassEncoder)(rawptr(pass))
+	if p != nil && p.encoder != nil {
+		p.encoder->setViewport(MTL.Viewport{f64(x), f64(y), f64(width), f64(height), f64(min_depth), f64(max_depth)})
+	}
 }
 
 _metal_render_draw :: proc(pass: gpu.Gpu_RenderPassEncoder, vertex_count: u32, instance_count: u32) {
