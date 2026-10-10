@@ -24,7 +24,7 @@ TEST_FLAGS ?= -define:ODIN_TEST_THREADS=1
 DEBUG_FLAGS ?= -debug
 RELEASE_FLAGS ?= -o:speed -no-bounds-check
 
-.PHONY: all build release build-host build-monitor build-mcp release-mcp test-host test-session-host test-mcp test-version bench-mcp bundle install uninstall dist-linux dmg run check check-linux test test-terminal test-parser test-pty test-input test-tabs test-ui test-interaction test-render test-app test-bench test-mcp test-diag test-probe test-session-core test-session-runtime test-session-ipc bench bench-run bench-session-runtime bench-transport build-bench-transport bench-video bench-vte clean help version-info
+.PHONY: all build release build-host build-monitor build-mcp release-mcp harness-renderer run-harness-renderer test-host test-session-host test-mcp test-version bench-mcp bundle install uninstall dist-linux dmg run check check-linux test test-terminal test-parser test-pty test-input test-tabs test-ui test-interaction test-render test-app test-bench test-mcp test-diag test-probe test-session-core test-session-runtime test-session-ipc bench bench-run bench-session-runtime bench-transport build-bench-transport bench-video bench-vte clean help version-info
 
 all: build
 
@@ -148,6 +148,13 @@ dist-linux: release
 run: build
 	./$(TARGET)
 
+harness-renderer: version-info $(PLATFORM_DEPS)
+	@mkdir -p $(OUT_DIR)
+	$(ODIN) build src/cmd/harness_renderer -out:$(OUT_DIR)/harness_renderer $(DEBUG_FLAGS) $(APP_FLAGS)
+
+run-harness-renderer: harness-renderer
+	./$(OUT_DIR)/harness_renderer
+
 check: version-info
 	$(ODIN) check src/app $(CHECK_FLAGS)
 	$(ODIN) check src/session_host $(CHECK_FLAGS) -no-entry-point
@@ -167,6 +174,25 @@ check: version-info
 	$(ODIN) check src/diag $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/bench/probe $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/bench/cmd_transport_comparative $(CHECK_FLAGS)
+	$(ODIN) check src/cmd/harness_renderer $(CHECK_FLAGS)
+	$(ODIN) check src/core/render/contract $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/core/platform/gpu/metal $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/core/platform/gpu/wgpu $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/core/render/atlas $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/core/render/terminal $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/core/render/terminal/instance $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/core/render/terminal/tile $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/core/render/terminal/fullscreen $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/core/chrome/draw_list $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/core/chrome/tabs $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/core/chrome/splits $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/core/chrome/hit_test $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/core/chrome/modals $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/core/render/chrome/surface $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/core/render/chrome/batch $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/core/render/chrome/sdf $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/core/render/chrome $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/core/render/three_d $(CHECK_FLAGS) -no-entry-point
 
 check-linux: version-info
 	$(ODIN) check src/session_ipc $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
@@ -181,6 +207,24 @@ check-linux: version-info
 	$(ODIN) check src/interaction $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
 	$(ODIN) check src/diag $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
 	$(ODIN) check src/bench/probe $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
+	$(ODIN) check src/core/render/contract $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
+	$(ODIN) check src/core/platform/gpu/metal $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
+	$(ODIN) check src/core/platform/gpu/wgpu $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/core/render/atlas $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
+	$(ODIN) check src/core/render/terminal $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
+	$(ODIN) check src/core/render/terminal/instance $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
+	$(ODIN) check src/core/render/terminal/tile $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
+	$(ODIN) check src/core/render/terminal/fullscreen $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
+	$(ODIN) check src/core/chrome/draw_list $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
+	$(ODIN) check src/core/chrome/tabs $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
+	$(ODIN) check src/core/chrome/splits $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
+	$(ODIN) check src/core/chrome/hit_test $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
+	$(ODIN) check src/core/chrome/modals $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
+	$(ODIN) check src/core/render/chrome/surface $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
+	$(ODIN) check src/core/render/chrome/batch $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
+	$(ODIN) check src/core/render/chrome/sdf $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
+	$(ODIN) check src/core/render/chrome $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
+	$(ODIN) check src/core/render/three_d $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
 
 test: version-info test-version test-config test-terminal test-parser test-pty test-input test-tabs test-ui test-interaction test-render test-app test-bench test-mcp test-diag test-probe test-session-core test-session-runtime test-session-ipc test-session-host
 
