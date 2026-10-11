@@ -50,7 +50,7 @@ split_node_split :: proc(node: ^Split_Node, kind: Split_Kind, ratio: f32, new_pa
 	right.ratio = 0.5
 
 	node.kind = kind
-	node.ratio = clamp(ratio, 0.1, 0.9)
+	node.ratio = clamp(ratio, 0.05, 0.95)
 	node.pane_id = 0
 	node.left = left
 	node.right = right
