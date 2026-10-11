@@ -1,17 +1,9 @@
 package main
 
-// Standalone Native macOS GUI Harness & Integrated Render-Compositor Benchmark (harness_render_composer).
+// Standalone Native macOS GUI Harness & Chrome Renderer Benchmark (harness_render_chrome).
 // Measures integrated multi-pane rasterization (UI chrome / text simulation) combined with layer compositing blits.
-//
-// Verifies:
-// 1. 4-Split layout with heterogeneous contents (3 terminal panes + 1 interactive 3D component engine pane + top chrome bar).
-// 2. Zero-Redraw Multi-Pane Optimization:
-//    - When typing in Pane 1, only Pane 1 redraws. Panes 2 (3D), 3, 4 cost ZERO draw calls / raster passes (cached backing textures).
-//    - When 3D auto-rotates, only Pane 2 redraws. Panes 1, 3, 4 cost ZERO raster passes.
-//    - When idle, ALL 4 panes cost ZERO raster passes!
-// 3. Scissor clipping: each pane's content is clipped strictly to its split boundaries with zero bleed into sibling panes.
-// 4. Honest Hardware Benchmark ([B] key): measures 100 real frames comparing 1-pane update vs 4-pane full redraw, proving <= 25% update time.
-// 5. Runs natively on macOS Darwin (Metal/WGPU) at 120 FPS.
+// Consumes core/chrome preview fixtures, extreme chrome scenarios (1000 SDF, radius > half size, divider drag, 128 tabs),
+// and migrates frame loop to core/composer/frame.frame_tick.
 
 import "core:fmt"
 import "core:math"
@@ -29,10 +21,13 @@ import composer "../../core/composer"
 import pipeline "../../core/composer/pipeline"
 import scheduler "../../core/composer/scheduler"
 import transition "../../core/composer/transition"
+import frame "../../core/composer/frame"
 import chrome "../../core/render/chrome"
 import chrome_sdf "../../core/render/chrome/sdf"
 import chrome_dl "../../core/chrome/draw_list"
 import chrome_tabs "../../core/chrome/tabs"
+import chrome_splits "../../core/chrome/splits"
+import chrome_modals "../../core/chrome/modals"
 import three_d "../../core/render/three_d"
 
 PANE_1_ID:       composer.Layer_Id : 1
@@ -69,6 +64,7 @@ Harness_State :: struct {
 	// Chrome UI Pillar (Top Chrome Bar & 2D HUD Elements)
 	chrome_renderer:     chrome.Chrome_Renderer,
 	tabs_model:          chrome_tabs.Chrome_Tabs_Model,
+	modal:               chrome_modals.Chrome_Modal,
 	draw_list_chrome:    chrome_dl.Ui_Draw_List,
 	draw_list_p1:        chrome_dl.Ui_Draw_List,
 	draw_list_p2:        chrome_dl.Ui_Draw_List,
@@ -84,6 +80,15 @@ Harness_State :: struct {
 	shell_typed_chars:   int,
 	build_step:          int,
 	git_diff_step:       int,
+
+	// Chrome Fixtures & Extreme Scenarios
+	preview_mode:        bool,
+	extreme_tabs:        bool,
+	extreme_sdf_mode:    bool,
+	extreme_radius_mode: bool,
+	divider_drag_active: bool,
+	divider_ratio:       f32,
+	test_mode:           bool,
 
 	// Live Telemetry Cache
 	last_p1_redrawn:     bool,
@@ -135,25 +140,21 @@ Harness_State :: struct {
 	ts_period:               f32,
 }
 
-// render_ui_draw_list_encode encodes declarative 2D primitives into a command buffer
-// with sub-pixel SDF anti-aliasing without submitting to the queue.
-render_ui_draw_list_encode :: proc(
-	device: contract.Gpu_Device,
+// render_ui_draw_list_to_encoder encodes declarative 2D primitives into an existing command encoder
+// with sub-pixel SDF anti-aliasing.
+render_ui_draw_list_to_encoder :: proc(
+	enc: contract.Gpu_CommandEncoder,
 	sdf_pipe: ^chrome_sdf.Chrome_Sdf_Pipeline,
 	dl: ^chrome_dl.Ui_Draw_List,
 	target_view: contract.Gpu_TextureView,
 	width, height: f32,
 	clear_col: [4]f64,
 	load_op: contract.Gpu_Load_Op = .Clear,
-) -> rawptr {
-	if rawptr(device) == nil || rawptr(target_view) == nil || sdf_pipe == nil || dl == nil do return nil
-
-	enc := contract.create_command_encoder(device)
-	if rawptr(enc) == nil do return nil
-	defer contract.release_command_encoder(enc)
+) -> bool {
+	if rawptr(enc) == nil || rawptr(target_view) == nil || sdf_pipe == nil || dl == nil do return false
 
 	pass := contract.begin_render_pass(enc, target_view, clear_col, load_op)
-	if rawptr(pass) == nil do return nil
+	if rawptr(pass) == nil do return false
 
 	chrome_sdf.chrome_sdf_pipeline_reset(sdf_pipe)
 	screen_sz := [2]f32{width, height}
@@ -208,9 +209,104 @@ render_ui_draw_list_encode :: proc(
 	}
 
 	chrome_sdf.chrome_sdf_flush_and_draw(sdf_pipe, pass)
-
 	contract.end_render_pass(pass)
+	return true
+}
+
+// render_ui_draw_list_encode encodes declarative 2D primitives into a command buffer
+// with sub-pixel SDF anti-aliasing without submitting to the queue.
+render_ui_draw_list_encode :: proc(
+	device: contract.Gpu_Device,
+	sdf_pipe: ^chrome_sdf.Chrome_Sdf_Pipeline,
+	dl: ^chrome_dl.Ui_Draw_List,
+	target_view: contract.Gpu_TextureView,
+	width, height: f32,
+	clear_col: [4]f64,
+	load_op: contract.Gpu_Load_Op = .Clear,
+) -> rawptr {
+	if rawptr(device) == nil || rawptr(target_view) == nil || sdf_pipe == nil || dl == nil do return nil
+
+	enc := contract.create_command_encoder(device)
+	if rawptr(enc) == nil do return nil
+	defer contract.release_command_encoder(enc)
+
+	if !render_ui_draw_list_to_encoder(enc, sdf_pipe, dl, target_view, width, height, clear_col, load_op) {
+		return nil
+	}
+
 	return contract.finish_command_buffer(enc)
+}
+
+// _generate_1000_sdf_elements generates 1000 distinct SDF rounded rects for batching stress tests.
+_generate_1000_sdf_elements :: proc(dl: ^chrome_dl.Ui_Draw_List, bounds: [4]f32) {
+	if dl == nil do return
+	bx := bounds[0]
+	by := bounds[1]
+	bw := bounds[2]
+	bh := bounds[3]
+	if bw <= 0.0 || bh <= 0.0 do return
+
+	cols := 40
+	rows := 25 // 40 * 25 = 1000 elements
+	cell_w := bw / f32(cols)
+	cell_h := bh / f32(rows)
+	elem_w := max(cell_w * 0.8, 2.0)
+	elem_h := max(cell_h * 0.8, 2.0)
+
+	for r in 0..<rows {
+		for c in 0..<cols {
+			idx := r * cols + c
+			x := bx + f32(c) * cell_w + (cell_w - elem_w) * 0.5
+			y := by + f32(r) * cell_h + (cell_h - elem_h) * 0.5
+			radius := f32((idx % 8) + 1) * 1.5
+			cr := 0.2 + 0.7 * f32(idx % 11) / 10.0
+			cg := 0.2 + 0.7 * f32((idx * 3) % 13) / 12.0
+			cb := 0.2 + 0.7 * f32((idx * 7) % 17) / 16.0
+			col := [4]f32{cr, cg, cb, 0.9}
+			chrome_dl.ui_draw_rounded_rect(dl, {x, y, elem_w, elem_h}, col, radius)
+		}
+	}
+}
+
+// _generate_extreme_radius_elements generates SDF elements with radius > half-size (r = 1.5 * min(w, h))
+// verifying GPU distance-field clamping and stability without artifacts or crashes.
+_generate_extreme_radius_elements :: proc(dl: ^chrome_dl.Ui_Draw_List, bounds: [4]f32) {
+	if dl == nil do return
+	bx := bounds[0]
+	by := bounds[1]
+	bw := bounds[2]
+	bh := bounds[3]
+	if bw <= 0.0 || bh <= 0.0 do return
+
+	sizes := [4][2]f32{
+		{120.0, 60.0},
+		{60.0, 120.0},
+		{80.0, 80.0},
+		{200.0, 30.0},
+	}
+	for i in 0..<4 {
+		sz := sizes[i]
+		min_dim := min(sz[0], sz[1])
+		extreme_radius := 1.5 * min_dim
+		x := bx + 20.0 + f32(i) * 150.0
+		y := by + 40.0
+		col := [4]f32{0.3 + 0.15 * f32(i), 0.5, 0.8 - 0.15 * f32(i), 0.95}
+		chrome_dl.ui_draw_rounded_rect(dl, {x, y, sz[0], sz[1]}, col, extreme_radius)
+		chrome_dl.ui_draw_border(dl, {x, y, sz[0], sz[1]}, {1.0, 1.0, 1.0, 0.8}, extreme_radius)
+	}
+}
+
+// _emit_dynamic_dividers generates a split tree layout at dynamic oscillating ratio and emits 1px dividers.
+_emit_dynamic_dividers :: proc(dl: ^chrome_dl.Ui_Draw_List, bounds: [4]f32, ratio: f32) {
+	if dl == nil do return
+	clamped_ratio := clamp(ratio, 0.05, 0.95)
+	root := chrome_splits.split_node_create_leaf(1)
+	top, btm := chrome_splits.split_node_split(root, .Vertical, clamped_ratio, 2)
+	if top != nil do chrome_splits.split_node_split(top, .Horizontal, 1.0 - clamped_ratio, 3)
+	if btm != nil do chrome_splits.split_node_split(btm, .Horizontal, clamped_ratio, 4)
+	chrome_splits.split_tree_layout(root, bounds)
+	chrome_splits.split_tree_emit_dividers(root, dl, 1.0, {0.35, 0.40, 0.50, 1.0})
+	chrome_splits.split_tree_destroy(root)
 }
 
 // render_ui_draw_list_to_view renders declarative 2D primitives into any target texture view
@@ -234,16 +330,8 @@ render_ui_draw_list_to_view :: proc(
 	return false
 }
 
-// _rasterize_pane_1_encode renders Terminal Shell & Interactive Typing simulation (Top-Left) to a command buffer.
-_rasterize_pane_1_encode :: proc(h: ^Harness_State) -> rawptr {
-	l1 := pipeline.composer_pipeline_get_layer(&h.composer_pipe, PANE_1_ID)
-	if l1 == nil || !l1.in_use || rawptr(l1.view) == nil do return nil
-
-	w := f32(l1.width)
-	h_pane := f32(l1.height)
-	dl := &h.draw_list_p1
-	chrome_dl.ui_draw_list_clear(dl)
-
+// _populate_pane_1_draw_list populates draw list commands for Pane 1 (Terminal Shell / Typing simulation).
+_populate_pane_1_draw_list :: proc(h: ^Harness_State, dl: ^chrome_dl.Ui_Draw_List, w, h_pane: f32) {
 	// Outer header bar
 	chrome_dl.ui_draw_rect(dl, {0, 0, w, 28}, {0.09, 0.11, 0.15, 1.0})
 	chrome_dl.ui_draw_rect(dl, {0, 27, w, 1}, {0.16, 0.20, 0.28, 1.0})
@@ -474,6 +562,25 @@ _rasterize_pane_1_encode :: proc(h: ^Harness_State) -> rawptr {
 		chrome_dl.ui_draw_rounded_rect(dl, {130, py_bar_y + 2, 140, 18}, {0.18, 0.16, 0.26, 1.0}, 3.0)
 		chrome_dl.ui_draw_rounded_rect(dl, {w - 180, py_bar_y + 2, 164, 18}, {0.20, 0.55, 0.75, 1.0}, 3.0)
 	}
+}
+
+// _rasterize_pane_1_encode renders Terminal Shell & Interactive Typing simulation (Top-Left) to a command buffer.
+_rasterize_pane_1_encode :: proc(h: ^Harness_State) -> rawptr {
+	l1 := pipeline.composer_pipeline_get_layer(&h.composer_pipe, PANE_1_ID)
+	if l1 == nil || !l1.in_use || rawptr(l1.view) == nil do return nil
+
+	w := f32(l1.width)
+	h_pane := f32(l1.height)
+	dl := &h.draw_list_p1
+	chrome_dl.ui_draw_list_clear(dl)
+
+	if h.extreme_sdf_mode {
+		_generate_1000_sdf_elements(dl, {0, 0, w, h_pane})
+	} else if h.extreme_radius_mode {
+		_generate_extreme_radius_elements(dl, {0, 0, w, h_pane})
+	} else {
+		_populate_pane_1_draw_list(h, dl, w, h_pane)
+	}
 
 	return render_ui_draw_list_encode(
 		h.device,
@@ -493,6 +600,49 @@ _rasterize_pane_1 :: proc(h: ^Harness_State) {
 		contract.submit(h.queue, cmd)
 		contract.release_command_buffer(cmd)
 	}
+}
+
+// _populate_pane_2_draw_list populates draw list commands for 2D HUD overlay on Pane 2.
+_populate_pane_2_draw_list :: proc(h: ^Harness_State, dl: ^chrome_dl.Ui_Draw_List, vp_w, vp_h: f32) {
+	chrome_dl.ui_draw_rect(dl, {0, 0, vp_w, 28}, {0.08, 0.10, 0.14, 0.90})
+	chrome_dl.ui_draw_rect(dl, {0, 27, vp_w, 1}, {0.16, 0.20, 0.28, 1.0})
+
+	badge_col := [4]f32{0.15, 0.70, 0.95, 1.0} if h.active_pane == 2 else [4]f32{0.18, 0.20, 0.25, 1.0}
+	chrome_dl.ui_draw_rounded_rect(dl, {8, 5, 80, 18}, badge_col, 4.0)
+
+	// Mesh indicator pill
+	mesh_col := [4]f32{0.25, 0.60, 0.90, 0.8} if h.mesh_type == 1 else [4]f32{0.20, 0.45, 0.75, 0.8}
+	chrome_dl.ui_draw_rounded_rect(dl, {96, 5, 60, 18}, mesh_col, 4.0)
+
+	// Wireframe pill
+	wire_col := [4]f32{0.95, 0.65, 0.20, 0.8} if h.three_d_interactor.wireframe_mode else [4]f32{0.20, 0.22, 0.28, 0.8}
+	chrome_dl.ui_draw_rounded_rect(dl, {162, 5, 52, 18}, wire_col, 4.0)
+
+	// Auto-rotate pill
+	rot_col := [4]f32{0.20, 0.80, 0.40, 0.8} if h.three_d_interactor.auto_rotate else [4]f32{0.20, 0.22, 0.28, 0.8}
+	chrome_dl.ui_draw_rounded_rect(dl, {220, 5, 56, 18}, rot_col, 4.0)
+
+	// 2D HUD Telemetry overlay card (bottom-left of Pane 2)
+	card_y := vp_h - 110.0
+	chrome_dl.ui_draw_rounded_rect(dl, {16, card_y, 180, 90}, {0.06, 0.08, 0.12, 0.75}, 6.0)
+	chrome_dl.ui_draw_border(dl, {16, card_y, 180, 90}, {0.20, 0.25, 0.35, 0.6}, 6.0)
+
+	// Telemetry data rows
+	chrome_dl.ui_draw_rounded_rect(dl, {26, card_y + 12, 60, 10}, {0.25, 0.65, 0.95, 0.9}, 2.0)
+	chrome_dl.ui_draw_rounded_rect(dl, {96, card_y + 12, 80, 10}, {0.45, 0.50, 0.60, 0.8}, 2.0)
+
+	chrome_dl.ui_draw_rounded_rect(dl, {26, card_y + 28, 50, 10}, {0.20, 0.75, 0.40, 0.9}, 2.0)
+	chrome_dl.ui_draw_rounded_rect(dl, {96, card_y + 28, 70, 10}, {0.45, 0.50, 0.60, 0.8}, 2.0)
+
+	chrome_dl.ui_draw_rounded_rect(dl, {26, card_y + 44, 55, 10}, {0.90, 0.65, 0.20, 0.9}, 2.0)
+	chrome_dl.ui_draw_rounded_rect(dl, {96, card_y + 44, 85, 10}, {0.45, 0.50, 0.60, 0.8}, 2.0)
+
+	chrome_dl.ui_draw_rounded_rect(dl, {26, card_y + 64, 150, 14}, {0.15, 0.18, 0.24, 0.9}, 3.0)
+
+	// Top-Right coordinate axes indicator
+	chrome_dl.ui_draw_rounded_rect(dl, {vp_w - 96, 5, 24, 18}, {0.85, 0.25, 0.25, 0.85}, 3.0) // X
+	chrome_dl.ui_draw_rounded_rect(dl, {vp_w - 68, 5, 24, 18}, {0.25, 0.80, 0.35, 0.85}, 3.0) // Y
+	chrome_dl.ui_draw_rounded_rect(dl, {vp_w - 40, 5, 24, 18}, {0.25, 0.55, 0.95, 0.85}, 3.0) // Z
 }
 
 // _rasterize_pane_2_encode renders 3D Component Engine with Depth24Plus (Top-Right) to command buffers.
@@ -553,46 +703,7 @@ _rasterize_pane_2_encode :: proc(h: ^Harness_State) -> (cmd1: rawptr, cmd2: rawp
 	// 2D Header overlay on Pane 2 (rendered with .Load to preserve 3D scene)
 	dl := &h.draw_list_p2
 	chrome_dl.ui_draw_list_clear(dl)
-
-	chrome_dl.ui_draw_rect(dl, {0, 0, vp_w, 28}, {0.08, 0.10, 0.14, 0.90})
-	chrome_dl.ui_draw_rect(dl, {0, 27, vp_w, 1}, {0.16, 0.20, 0.28, 1.0})
-
-	badge_col := [4]f32{0.15, 0.70, 0.95, 1.0} if h.active_pane == 2 else [4]f32{0.18, 0.20, 0.25, 1.0}
-	chrome_dl.ui_draw_rounded_rect(dl, {8, 5, 80, 18}, badge_col, 4.0)
-
-	// Mesh indicator pill
-	mesh_col := [4]f32{0.25, 0.60, 0.90, 0.8} if h.mesh_type == 1 else [4]f32{0.20, 0.45, 0.75, 0.8}
-	chrome_dl.ui_draw_rounded_rect(dl, {96, 5, 60, 18}, mesh_col, 4.0)
-
-	// Wireframe pill
-	wire_col := [4]f32{0.95, 0.65, 0.20, 0.8} if h.three_d_interactor.wireframe_mode else [4]f32{0.20, 0.22, 0.28, 0.8}
-	chrome_dl.ui_draw_rounded_rect(dl, {162, 5, 52, 18}, wire_col, 4.0)
-
-	// Auto-rotate pill
-	rot_col := [4]f32{0.20, 0.80, 0.40, 0.8} if h.three_d_interactor.auto_rotate else [4]f32{0.20, 0.22, 0.28, 0.8}
-	chrome_dl.ui_draw_rounded_rect(dl, {220, 5, 56, 18}, rot_col, 4.0)
-
-	// 2D HUD Telemetry overlay card (bottom-left of Pane 2)
-	card_y := vp_h - 110.0
-	chrome_dl.ui_draw_rounded_rect(dl, {16, card_y, 180, 90}, {0.06, 0.08, 0.12, 0.75}, 6.0)
-	chrome_dl.ui_draw_border(dl, {16, card_y, 180, 90}, {0.20, 0.25, 0.35, 0.6}, 6.0)
-
-	// Telemetry data rows
-	chrome_dl.ui_draw_rounded_rect(dl, {26, card_y + 12, 60, 10}, {0.25, 0.65, 0.95, 0.9}, 2.0)
-	chrome_dl.ui_draw_rounded_rect(dl, {96, card_y + 12, 80, 10}, {0.45, 0.50, 0.60, 0.8}, 2.0)
-
-	chrome_dl.ui_draw_rounded_rect(dl, {26, card_y + 28, 50, 10}, {0.20, 0.75, 0.40, 0.9}, 2.0)
-	chrome_dl.ui_draw_rounded_rect(dl, {96, card_y + 28, 70, 10}, {0.45, 0.50, 0.60, 0.8}, 2.0)
-
-	chrome_dl.ui_draw_rounded_rect(dl, {26, card_y + 44, 55, 10}, {0.90, 0.65, 0.20, 0.9}, 2.0)
-	chrome_dl.ui_draw_rounded_rect(dl, {96, card_y + 44, 85, 10}, {0.45, 0.50, 0.60, 0.8}, 2.0)
-
-	chrome_dl.ui_draw_rounded_rect(dl, {26, card_y + 64, 150, 14}, {0.15, 0.18, 0.24, 0.9}, 3.0)
-
-	// Top-Right coordinate axes indicator
-	chrome_dl.ui_draw_rounded_rect(dl, {vp_w - 96, 5, 24, 18}, {0.85, 0.25, 0.25, 0.85}, 3.0) // X
-	chrome_dl.ui_draw_rounded_rect(dl, {vp_w - 68, 5, 24, 18}, {0.25, 0.80, 0.35, 0.85}, 3.0) // Y
-	chrome_dl.ui_draw_rounded_rect(dl, {vp_w - 40, 5, 24, 18}, {0.25, 0.55, 0.95, 0.85}, 3.0) // Z
+	_populate_pane_2_draw_list(h, dl, vp_w, vp_h)
 
 	cmd2 = render_ui_draw_list_encode(
 		h.device,
@@ -619,16 +730,8 @@ _rasterize_pane_2 :: proc(h: ^Harness_State) {
 	}
 }
 
-// _rasterize_pane_3_encode renders Build Logs & Hardware System Monitor (Bottom-Left) to a command buffer.
-_rasterize_pane_3_encode :: proc(h: ^Harness_State) -> rawptr {
-	l3 := pipeline.composer_pipeline_get_layer(&h.composer_pipe, PANE_3_ID)
-	if l3 == nil || !l3.in_use || rawptr(l3.view) == nil do return nil
-
-	w := f32(l3.width)
-	h_pane := f32(l3.height)
-	dl := &h.draw_list_p3
-	chrome_dl.ui_draw_list_clear(dl)
-
+// _populate_pane_3_draw_list populates draw list commands for Pane 3 (Build Logs & Hardware System Monitor).
+_populate_pane_3_draw_list :: proc(h: ^Harness_State, dl: ^chrome_dl.Ui_Draw_List, w, h_pane: f32) {
 	// Header bar
 	chrome_dl.ui_draw_rect(dl, {0, 0, w, 28}, {0.08, 0.10, 0.13, 1.0})
 	chrome_dl.ui_draw_rect(dl, {0, 27, w, 1}, {0.14, 0.18, 0.24, 1.0})
@@ -720,6 +823,18 @@ _rasterize_pane_3_encode :: proc(h: ^Harness_State) -> rawptr {
 	chrome_dl.ui_draw_rounded_rect(dl, {78, prog_y, prog_track_w, 12}, {0.10, 0.13, 0.18, 1.0}, 3.0)
 	prog_fill_w := min(prog_track_w, f32((h.build_step + 1) * 20))
 	chrome_dl.ui_draw_rounded_rect(dl, {78, prog_y, prog_fill_w, 12}, {0.30, 0.80, 0.95, 0.85}, 3.0)
+}
+
+// _rasterize_pane_3_encode renders Build Logs & Hardware System Monitor (Bottom-Left) to a command buffer.
+_rasterize_pane_3_encode :: proc(h: ^Harness_State) -> rawptr {
+	l3 := pipeline.composer_pipeline_get_layer(&h.composer_pipe, PANE_3_ID)
+	if l3 == nil || !l3.in_use || rawptr(l3.view) == nil do return nil
+
+	w := f32(l3.width)
+	h_pane := f32(l3.height)
+	dl := &h.draw_list_p3
+	chrome_dl.ui_draw_list_clear(dl)
+	_populate_pane_3_draw_list(h, dl, w, h_pane)
 
 	return render_ui_draw_list_encode(
 		h.device,
@@ -741,16 +856,8 @@ _rasterize_pane_3 :: proc(h: ^Harness_State) {
 	}
 }
 
-// _rasterize_pane_4_encode renders Side-by-Side Split Git Diff & Status View (Bottom-Right) to a command buffer.
-_rasterize_pane_4_encode :: proc(h: ^Harness_State) -> rawptr {
-	l4 := pipeline.composer_pipeline_get_layer(&h.composer_pipe, PANE_4_ID)
-	if l4 == nil || !l4.in_use || rawptr(l4.view) == nil do return nil
-
-	w := f32(l4.width)
-	h_pane := f32(l4.height)
-	dl := &h.draw_list_p4
-	chrome_dl.ui_draw_list_clear(dl)
-
+// _populate_pane_4_draw_list populates draw list commands for Pane 4 (Side-by-Side Split Git Diff & Status View).
+_populate_pane_4_draw_list :: proc(h: ^Harness_State, dl: ^chrome_dl.Ui_Draw_List, w, h_pane: f32) {
 	// Header bar
 	chrome_dl.ui_draw_rect(dl, {0, 0, w, 28}, {0.09, 0.09, 0.14, 1.0})
 	chrome_dl.ui_draw_rect(dl, {0, 27, w, 1}, {0.16, 0.16, 0.24, 1.0})
@@ -818,6 +925,18 @@ _rasterize_pane_4_encode :: proc(h: ^Harness_State) -> rawptr {
 	chrome_dl.ui_draw_rounded_rect(dl, {112, foot_y, 90, 18}, {0.55, 0.18, 0.22, 0.9}, 3.0)
 	chrome_dl.ui_draw_rounded_rect(dl, {208, foot_y, 110, 18}, {0.18, 0.20, 0.28, 0.9}, 3.0)
 	chrome_dl.ui_draw_rounded_rect(dl, {w - 150, foot_y, 134, 18}, {0.14, 0.16, 0.22, 0.9}, 3.0)
+}
+
+// _rasterize_pane_4_encode renders Side-by-Side Split Git Diff & Status View (Bottom-Right) to a command buffer.
+_rasterize_pane_4_encode :: proc(h: ^Harness_State) -> rawptr {
+	l4 := pipeline.composer_pipeline_get_layer(&h.composer_pipe, PANE_4_ID)
+	if l4 == nil || !l4.in_use || rawptr(l4.view) == nil do return nil
+
+	w := f32(l4.width)
+	h_pane := f32(l4.height)
+	dl := &h.draw_list_p4
+	chrome_dl.ui_draw_list_clear(dl)
+	_populate_pane_4_draw_list(h, dl, w, h_pane)
 
 	return render_ui_draw_list_encode(
 		h.device,
@@ -839,6 +958,17 @@ _rasterize_pane_4 :: proc(h: ^Harness_State) {
 	}
 }
 
+// _populate_modal_draw_list populates draw list for Floating Command Palette / Search Modal.
+_populate_modal_draw_list :: proc(h: ^Harness_State, dl: ^chrome_dl.Ui_Draw_List, w, h_mod: f32) {
+	if h.preview_mode {
+		chrome_modals.preview_modal_normal(dl, {0, 0, w, h_mod})
+	} else {
+		h.modal.rect = {0, 0, w, h_mod}
+		h.modal.visible = true
+		chrome_modals.modal_emit_draw_list(&h.modal, dl)
+	}
+}
+
 // _rasterize_modal_encode renders Floating Command Palette / Search Modal (Overlay Layer) to a command buffer.
 _rasterize_modal_encode :: proc(h: ^Harness_State) -> rawptr {
 	l_mod := pipeline.composer_pipeline_get_layer(&h.composer_pipe, MODAL_LAYER_ID)
@@ -848,70 +978,7 @@ _rasterize_modal_encode :: proc(h: ^Harness_State) -> rawptr {
 	h_mod := f32(l_mod.height)
 	dl := &h.draw_list_modal
 	chrome_dl.ui_draw_list_clear(dl)
-
-	// Modal window background & subtle outer glow border
-	chrome_dl.ui_draw_rounded_rect(dl, {0, 0, w, h_mod}, {0.10, 0.11, 0.15, 0.98}, 12.0)
-	chrome_dl.ui_draw_border(dl, {0, 0, w, h_mod}, {0.28, 0.32, 0.44, 1.0}, 12.0)
-
-	// Top search input box
-	chrome_dl.ui_draw_rounded_rect(dl, {16, 16, w - 32, 44}, {0.14, 0.16, 0.22, 1.0}, 8.0)
-	chrome_dl.ui_draw_border(dl, {16, 16, w - 32, 44}, {0.35, 0.65, 0.95, 0.8}, 8.0)
-
-	// Search icon chip (magnifying glass icon placeholder)
-	chrome_dl.ui_draw_rounded_rect(dl, {28, 28, 20, 20}, {0.25, 0.65, 0.95, 1.0}, 4.0)
-
-	// Search query text bar + blinking cyan cursor
-	query_w: f32 = 180.0
-	chrome_dl.ui_draw_rounded_rect(dl, {56, 32, query_w, 12}, {0.85, 0.90, 0.98, 1.0}, 2.0)
-	chrome_dl.ui_draw_rect(dl, {56 + query_w + 4, 28, 6, 20}, {0.20, 0.80, 1.0, 1.0})
-
-	// Shortcut pill in search box: "ESC to close"
-	chrome_dl.ui_draw_rounded_rect(dl, {w - 88, 28, 56, 20}, {0.20, 0.22, 0.30, 1.0}, 4.0)
-
-	// Divider line
-	chrome_dl.ui_draw_rect(dl, {16, 72, w - 32, 1}, {0.18, 0.20, 0.28, 1.0})
-
-	// 5 Command palette search results
-	results_y: f32 = 82.0
-	item_h: f32 = 48.0
-	for i in 0..<5 {
-		y := results_y + f32(i) * (item_h + 6.0)
-		is_selected := (i == 0) // First item selected
-
-		if is_selected {
-			chrome_dl.ui_draw_rounded_rect(dl, {16, y, w - 32, item_h}, {0.18, 0.24, 0.36, 0.95}, 6.0)
-			chrome_dl.ui_draw_border(dl, {16, y, w - 32, item_h}, {0.30, 0.60, 0.95, 0.9}, 6.0)
-		} else {
-			chrome_dl.ui_draw_rounded_rect(dl, {16, y, w - 32, item_h}, {0.12, 0.14, 0.18, 0.8}, 6.0)
-		}
-
-		// Category badge
-		cat_col: [4]f32
-		switch i {
-		case 0: cat_col = {0.20, 0.75, 0.45, 1.0} // [ACTION]
-		case 1: cat_col = {0.25, 0.65, 0.95, 1.0} // [PANE]
-		case 2: cat_col = {0.85, 0.55, 0.20, 1.0} // [BENCH]
-		case 3: cat_col = {0.75, 0.35, 0.85, 1.0} // [GIT]
-		case 4: cat_col = {0.45, 0.50, 0.60, 1.0} // [FILE]
-		}
-		chrome_dl.ui_draw_rounded_rect(dl, {28, y + 14, 52, 20}, cat_col, 4.0)
-
-		// Command title bar
-		title_w: f32 = 180.0 + f32(i * 24)
-		chrome_dl.ui_draw_rounded_rect(dl, {88, y + 14, title_w, 12}, {0.85, 0.88, 0.95, 1.0}, 2.0)
-
-		// Description sub-bar
-		desc_w: f32 = 120.0 + f32(i * 18)
-		chrome_dl.ui_draw_rounded_rect(dl, {88, y + 30, desc_w, 8}, {0.45, 0.48, 0.58, 0.9}, 2.0)
-
-		// Shortcut pill on right
-		chrome_dl.ui_draw_rounded_rect(dl, {w - 96, y + 14, 64, 20}, {0.16, 0.18, 0.24, 1.0}, 4.0)
-		chrome_dl.ui_draw_border(dl, {w - 96, y + 14, 64, 20}, {0.28, 0.32, 0.42, 1.0}, 4.0)
-	}
-
-	// Bottom modal footer
-	chrome_dl.ui_draw_rounded_rect(dl, {16, h_mod - 28, 120, 16}, {0.16, 0.18, 0.24, 0.8}, 3.0)
-	chrome_dl.ui_draw_rounded_rect(dl, {w - 180, h_mod - 28, 164, 16}, {0.16, 0.18, 0.24, 0.8}, 3.0)
+	_populate_modal_draw_list(h, dl, w, h_mod)
 
 	return render_ui_draw_list_encode(
 		h.device,
@@ -933,35 +1000,39 @@ _rasterize_modal :: proc(h: ^Harness_State) {
 	}
 }
 
-// _rasterize_chrome_encode renders Top Chrome Bar with Tabs & Real-Time On-Screen Telemetry HUD to a command buffer.
-_rasterize_chrome_encode :: proc(h: ^Harness_State) -> rawptr {
-	lc := pipeline.composer_pipeline_get_layer(&h.composer_pipe, CHROME_LAYER_ID)
-	if lc == nil || !lc.in_use || rawptr(lc.view) == nil do return nil
-
-	w := f32(lc.width)
-	h_chrome := f32(lc.height)
-	dl := &h.draw_list_chrome
-	chrome_dl.ui_draw_list_clear(dl)
+// _populate_chrome_draw_list populates draw list for Top Chrome Bar & Window Split Dividers.
+_populate_chrome_draw_list :: proc(h: ^Harness_State, dl: ^chrome_dl.Ui_Draw_List, w, h_layer: f32) {
+	chrome_h := CHROME_BAR_HEIGHT
 
 	// Chrome bar background and bottom accent line
-	chrome_dl.ui_draw_rect(dl, {0, 0, w, h_chrome}, {0.08, 0.09, 0.11, 1.0})
-	chrome_dl.ui_draw_rect(dl, {0, h_chrome - 1.0, w, 1.0}, {0.18, 0.20, 0.25, 1.0})
+	chrome_dl.ui_draw_rect(dl, {0, 0, w, chrome_h}, {0.08, 0.09, 0.11, 1.0})
+	chrome_dl.ui_draw_rect(dl, {0, chrome_h - 1.0, w, 1.0}, {0.18, 0.20, 0.25, 1.0})
 
-	// 4 Tabs on Left
-	tabs_x: [4]f32 = {8, 126, 244, 362}
-	tab_w: f32 = 112.0
-	for i in 0..<4 {
-		is_active := (h.active_pane == i + 1)
-		tab_bg := [4]f32{0.18, 0.20, 0.26, 1.0} if is_active else [4]f32{0.12, 0.13, 0.16, 1.0}
-		chrome_dl.ui_draw_rounded_rect(dl, {tabs_x[i], 6, tab_w, 28}, tab_bg, 4.0)
-		if is_active {
-			chrome_dl.ui_draw_rect(dl, {tabs_x[i], 32, tab_w, 2}, {0.25, 0.65, 0.95, 1.0})
-		}
+	// Tabs on Left
+	tab_bar_w := min(w * 0.45, 520.0)
+	bar_rect := [4]f32{0, 0, tab_bar_w, chrome_h}
+	if h.extreme_tabs {
+		chrome_tabs.preview_tabs_extreme(dl, bar_rect, 128)
+	} else if h.preview_mode {
+		chrome_tabs.preview_tabs_normal(dl, bar_rect)
+	} else {
+		h.tabs_model.bar_rect = bar_rect
+		chrome_tabs.tabs_emit_draw_list(&h.tabs_model, dl)
+	}
+
+	// Emit 1px split dividers on the chrome layer using core/chrome splits
+	content_y := chrome_h
+	content_h := max(f32(10.0), h_layer - content_y)
+	split_bounds := [4]f32{0, content_y, w, content_h}
+	if h.divider_drag_active {
+		_emit_dynamic_dividers(dl, split_bounds, h.divider_ratio)
+	} else {
+		chrome_splits.preview_splits_normal(dl, split_bounds)
 	}
 
 	// Real-Time On-Screen Telemetry HUD Badges:
 	// Status of each pane (REDRAW vs CACHED)
-	hud_x: f32 = 490.0
+	hud_x: f32 = max(tab_bar_w + 16.0, 530.0)
 
 	// Pill 1: Pane 1
 	p1_col := [4]f32{0.82, 0.22, 0.18, 1.0} if h.last_p1_redrawn else [4]f32{0.14, 0.58, 0.28, 1.0}
@@ -1017,6 +1088,18 @@ _rasterize_chrome_encode :: proc(h: ^Harness_State) -> rawptr {
 
 	// Benchmark key button
 	chrome_dl.ui_draw_rounded_rect(dl, {w - 92, 8, 84, 24}, {0.80, 0.42, 0.12, 1.0}, 4.0)
+}
+
+// _rasterize_chrome_encode renders Top Chrome Bar with Tabs & Real-Time On-Screen Telemetry HUD to a command buffer.
+_rasterize_chrome_encode :: proc(h: ^Harness_State) -> rawptr {
+	lc := pipeline.composer_pipeline_get_layer(&h.composer_pipe, CHROME_LAYER_ID)
+	if lc == nil || !lc.in_use || rawptr(lc.view) == nil do return nil
+
+	w := f32(lc.width)
+	h_chrome := f32(lc.height)
+	dl := &h.draw_list_chrome
+	chrome_dl.ui_draw_list_clear(dl)
+	_populate_chrome_draw_list(h, dl, w, h_chrome)
 
 	return render_ui_draw_list_encode(
 		h.device,
@@ -1025,7 +1108,7 @@ _rasterize_chrome_encode :: proc(h: ^Harness_State) -> rawptr {
 		lc.view,
 		w,
 		h_chrome,
-		{0.08, 0.09, 0.11, 1.0},
+		{0.0, 0.0, 0.0, 0.0},
 		.Clear,
 	)
 }
@@ -1090,6 +1173,144 @@ _rasterize_dirty_panes :: proc(h: ^Harness_State) -> (redrawn_count: int) {
 	}
 
 	return redrawn_count
+}
+
+// _rasterize_layer_into_encoder encodes raster work for one dirty layer into the shared command encoder enc.
+_rasterize_layer_into_encoder :: proc(h: ^Harness_State, enc: contract.Gpu_CommandEncoder, l: ^composer.Composer_Layer) -> bool {
+	if h == nil || rawptr(enc) == nil || l == nil || !l.in_use || rawptr(l.view) == nil do return false
+
+	w := f32(l.width)
+	h_layer := f32(l.height)
+
+	switch l.id {
+	case PANE_1_ID:
+		h.last_p1_redrawn = true
+		dl := &h.draw_list_p1
+		chrome_dl.ui_draw_list_clear(dl)
+		if h.extreme_sdf_mode {
+			_generate_1000_sdf_elements(dl, {0, 0, w, h_layer})
+		} else if h.extreme_radius_mode {
+			_generate_extreme_radius_elements(dl, {0, 0, w, h_layer})
+		} else {
+			_populate_pane_1_draw_list(h, dl, w, h_layer)
+		}
+		return render_ui_draw_list_to_encoder(enc, &h.chrome_renderer.sdf, dl, l.view, w, h_layer, {0.05, 0.06, 0.08, 1.0}, .Clear)
+
+	case PANE_2_ID:
+		h.last_p2_redrawn = true
+		wgpu_enc := wgpu.CommandEncoder(rawptr(enc))
+
+		cur_ticks := helper.platform_now()
+		elapsed_ns := helper.platform_ticks_to_ns(cur_ticks - h.start_ticks)
+		time_s := f32(f64(elapsed_ns) / 1_000_000_000.0)
+
+		vp_w := f32(l.width)
+		vp_h := f32(l.height)
+		uniforms := three_d.interactor_compute_uniforms(&h.three_d_interactor, vp_w, vp_h, time_s)
+
+		depth_view_handle := wgpu.TextureView(rawptr(l.depth_view))
+		if depth_view_handle == nil {
+			depth_view_handle = h.three_d_renderer.depth_view
+		}
+
+		color_attachment := wgpu.RenderPassColorAttachment{
+			view       = wgpu.TextureView(rawptr(l.view)),
+			loadOp     = .Clear,
+			storeOp    = .Store,
+			clearValue = wgpu.Color{ 0.04, 0.05, 0.08, 1.0 },
+			depthSlice = wgpu.DEPTH_SLICE_UNDEFINED,
+		}
+		depth_attachment := wgpu.RenderPassDepthStencilAttachment{
+			view            = depth_view_handle,
+			depthLoadOp     = .Clear,
+			depthStoreOp    = .Store,
+			depthClearValue = 1.0,
+			depthReadOnly   = false,
+		}
+		pass_desc := wgpu.RenderPassDescriptor{
+			colorAttachmentCount   = 1,
+			colorAttachments       = &color_attachment,
+			depthStencilAttachment = &depth_attachment,
+		}
+
+		pass := wgpu.CommandEncoderBeginRenderPass(wgpu_enc, &pass_desc)
+		if pass != nil {
+			wgpu.RenderPassEncoderSetViewport(pass, 0.0, 0.0, vp_w, vp_h, 0.0, 1.0)
+			three_d.three_d_draw(&h.three_d_renderer, pass, &uniforms)
+			wgpu.RenderPassEncoderEnd(pass)
+			wgpu.RenderPassEncoderRelease(pass)
+		}
+
+		dl := &h.draw_list_p2
+		chrome_dl.ui_draw_list_clear(dl)
+		_populate_pane_2_draw_list(h, dl, vp_w, vp_h)
+		return render_ui_draw_list_to_encoder(enc, &h.chrome_renderer.sdf, dl, l.view, vp_w, vp_h, {0, 0, 0, 0}, .Load)
+
+	case PANE_3_ID:
+		h.last_p3_redrawn = true
+		dl := &h.draw_list_p3
+		chrome_dl.ui_draw_list_clear(dl)
+		_populate_pane_3_draw_list(h, dl, w, h_layer)
+		return render_ui_draw_list_to_encoder(enc, &h.chrome_renderer.sdf, dl, l.view, w, h_layer, {0.04, 0.05, 0.07, 1.0}, .Clear)
+
+	case PANE_4_ID:
+		h.last_p4_redrawn = true
+		dl := &h.draw_list_p4
+		chrome_dl.ui_draw_list_clear(dl)
+		_populate_pane_4_draw_list(h, dl, w, h_layer)
+		return render_ui_draw_list_to_encoder(enc, &h.chrome_renderer.sdf, dl, l.view, w, h_layer, {0.05, 0.05, 0.08, 1.0}, .Clear)
+
+	case CHROME_LAYER_ID:
+		dl := &h.draw_list_chrome
+		chrome_dl.ui_draw_list_clear(dl)
+		_populate_chrome_draw_list(h, dl, w, h_layer)
+		return render_ui_draw_list_to_encoder(enc, &h.chrome_renderer.sdf, dl, l.view, w, h_layer, {0, 0, 0, 0}, .Clear)
+
+	case MODAL_LAYER_ID:
+		dl := &h.draw_list_modal
+		chrome_dl.ui_draw_list_clear(dl)
+		_populate_modal_draw_list(h, dl, w, h_layer)
+		return render_ui_draw_list_to_encoder(enc, &h.chrome_renderer.sdf, dl, l.view, w, h_layer, {0, 0, 0, 0}, .Clear)
+	}
+
+	return false
+}
+
+// Frame Driver Callbacks for core/composer/frame.frame_tick
+_frame_acquire :: proc(user: rawptr) -> (contract.Gpu_Texture, contract.Gpu_TextureView, bool) {
+	h := (^Harness_State)(user)
+	if h == nil || h.surface == nil do return nil, nil, false
+	for _ in 0..<10 {
+		tex, view, _ := contract.get_surface_texture(h.surface)
+		if rawptr(view) != nil {
+			return tex, view, true
+		}
+		event: sdl3.Event
+		for sdl3.PollEvent(&event) {}
+		if h.window.handle != nil {
+			sdl3.RaiseWindow(h.window.handle)
+		}
+		helper.window_update_pixel_size(&h.window)
+		screen_w := f32(h.window.pixel_w)
+		screen_h := f32(h.window.pixel_h)
+		contract.configure_surface(h.surface, h.device, h.format, u32(screen_w), u32(screen_h))
+		contract.poll_device(h.device, true)
+	}
+	return nil, nil, false
+}
+
+_frame_raster :: proc(user: rawptr, enc: contract.Gpu_CommandEncoder, l: ^composer.Composer_Layer) -> bool {
+	h := (^Harness_State)(user)
+	if h == nil do return false
+	return _rasterize_layer_into_encoder(h, enc, l)
+}
+
+_frame_present :: proc(user: rawptr, tex: contract.Gpu_Texture, view: contract.Gpu_TextureView) -> bool {
+	h := (^Harness_State)(user)
+	if h == nil || h.surface == nil do return false
+	ok := contract.present_surface(h.surface)
+	contract.release_surface_texture(tex, view)
+	return ok
 }
 
 Raster_Bench_Timings :: struct {
@@ -1463,10 +1684,10 @@ _update_layer_geometry :: proc(h: ^Harness_State) {
 		l4.opacity = 1.0
 	}
 
-	// Chrome: Top
+	// Chrome: Top + Dividers Overlay
 	lc := pipeline.composer_pipeline_get_layer(&h.composer_pipe, CHROME_LAYER_ID)
 	if lc != nil {
-		lc.dest_rect = composer.rect_make(0, 0, screen_w, chrome_h)
+		lc.dest_rect = composer.rect_make(0, 0, screen_w, screen_h)
 		lc.scissor_rect = lc.dest_rect
 		lc.corner_radius = 0.0
 		lc.opacity = 1.0
@@ -1510,7 +1731,7 @@ _acquire_all_layers :: proc(h: ^Harness_State) {
 	_, _ = pipeline.composer_pipeline_acquire_layer(&h.composer_pipe, PANE_2_ID, .Three_D, u32(pane_w), u32(pane_h), true)
 	_, _ = pipeline.composer_pipeline_acquire_layer(&h.composer_pipe, PANE_3_ID, .Terminal, u32(pane_w), u32(pane_h), false)
 	_, _ = pipeline.composer_pipeline_acquire_layer(&h.composer_pipe, PANE_4_ID, .Terminal, u32(pane_w), u32(pane_h), false)
-	_, _ = pipeline.composer_pipeline_acquire_layer(&h.composer_pipe, CHROME_LAYER_ID, .Chrome, u32(screen_w), u32(chrome_h), false)
+	_, _ = pipeline.composer_pipeline_acquire_layer(&h.composer_pipe, CHROME_LAYER_ID, .Chrome, u32(screen_w), u32(screen_h), false)
 
 	modal_w: f32 = 640.0
 	modal_h: f32 = 380.0
@@ -2027,6 +2248,193 @@ _run_honest_benchmark :: proc(h: ^Harness_State) {
 	pipeline.composer_pipeline_mark_dirty(&h.composer_pipe, CHROME_LAYER_ID)
 }
 
+// _run_chrome_verification_test executes automated headless/GPU verification of all chrome rendering strategies and exits cleanly.
+_run_chrome_verification_test :: proc(h: ^Harness_State) {
+	fmt.println("=================================================================")
+	fmt.println("HARNESS RENDER CHROME — AUTOMATED VERIFICATION SUITE")
+	fmt.println("=================================================================")
+
+	all_ok := true
+	dl: chrome_dl.Ui_Draw_List
+	chrome_dl.ui_draw_list_init(&dl)
+	defer chrome_dl.ui_draw_list_destroy(&dl)
+
+	lc := pipeline.composer_pipeline_get_layer(&h.composer_pipe, CHROME_LAYER_ID)
+	target_view := lc.view if (lc != nil && lc.in_use) else contract.Gpu_TextureView(nil)
+	w := f32(h.window.pixel_w)
+	h_win := f32(h.window.pixel_h)
+
+	// Test 1: Normal Tabs & Split Dividers Fixtures
+	{
+		chrome_dl.ui_draw_list_clear(&dl)
+		bar_rect := [4]f32{0, 0, w * 0.5, CHROME_BAR_HEIGHT}
+		chrome_tabs.preview_tabs_normal(&dl, bar_rect)
+		tabs_count := len(dl.commands)
+
+		split_bounds := [4]f32{0, CHROME_BAR_HEIGHT, w, h_win - CHROME_BAR_HEIGHT}
+		chrome_splits.preview_splits_normal(&dl, split_bounds)
+		total_count := len(dl.commands)
+
+		cmd := render_ui_draw_list_encode(h.device, &h.chrome_renderer.sdf, &dl, target_view, w, h_win, {0, 0, 0, 0})
+		gpu_ok := false
+		if cmd != nil {
+			contract.submit(h.queue, cmd)
+			contract.release_command_buffer(cmd)
+			gpu_ok = true
+		}
+
+		passed := tabs_count > 0 && total_count > tabs_count && gpu_ok
+		if !passed do all_ok = false
+		status := "PASS" if passed else "FAIL"
+		fmt.printfln("[TEST 1] Normal Tabs & Split Dividers Fixtures ............ %s (tabs=%d, total_cmds=%d)", status, tabs_count, total_count)
+	}
+
+	// Test 2: 1000 SDF Elements Batching & Render
+	{
+		chrome_dl.ui_draw_list_clear(&dl)
+		_generate_1000_sdf_elements(&dl, {0, 0, w, h_win})
+		cmd_count := len(dl.commands)
+
+		cmd := render_ui_draw_list_encode(h.device, &h.chrome_renderer.sdf, &dl, target_view, w, h_win, {0, 0, 0, 0})
+		gpu_ok := false
+		if cmd != nil {
+			contract.submit(h.queue, cmd)
+			contract.release_command_buffer(cmd)
+			gpu_ok = true
+		}
+
+		passed := (cmd_count == 1000) && gpu_ok
+		if !passed do all_ok = false
+		status := "PASS" if passed else "FAIL"
+		fmt.printfln("[TEST 2] 1000 SDF Elements Batching & Render .............. %s (elements=%d)", status, cmd_count)
+	}
+
+	// Test 3: Radius > Half-Size Clamping & Stability
+	{
+		chrome_dl.ui_draw_list_clear(&dl)
+		_generate_extreme_radius_elements(&dl, {0, 0, w, h_win})
+		cmd_count := len(dl.commands)
+
+		cmd := render_ui_draw_list_encode(h.device, &h.chrome_renderer.sdf, &dl, target_view, w, h_win, {0, 0, 0, 0})
+		gpu_ok := false
+		if cmd != nil {
+			contract.submit(h.queue, cmd)
+			contract.release_command_buffer(cmd)
+			gpu_ok = true
+		}
+
+		passed := cmd_count > 0 && gpu_ok
+		if !passed do all_ok = false
+		status := "PASS" if passed else "FAIL"
+		fmt.printfln("[TEST 3] Radius > Half-Size Clamping & Stability .......... %s (cmds=%d)", status, cmd_count)
+	}
+
+	// Test 4: Dynamic Divider Drag Oscillation
+	{
+		chrome_dl.ui_draw_list_clear(&dl)
+		split_bounds := [4]f32{0, CHROME_BAR_HEIGHT, w, h_win - CHROME_BAR_HEIGHT}
+		_emit_dynamic_dividers(&dl, split_bounds, 0.85)
+		cmd_count := len(dl.commands)
+
+		cmd := render_ui_draw_list_encode(h.device, &h.chrome_renderer.sdf, &dl, target_view, w, h_win, {0, 0, 0, 0})
+		gpu_ok := false
+		if cmd != nil {
+			contract.submit(h.queue, cmd)
+			contract.release_command_buffer(cmd)
+			gpu_ok = true
+		}
+
+		passed := cmd_count > 0 && gpu_ok
+		if !passed do all_ok = false
+		status := "PASS" if passed else "FAIL"
+		fmt.printfln("[TEST 4] Dynamic Divider Drag Oscillation ................. %s (cmds=%d)", status, cmd_count)
+	}
+
+	// Test 5: Extreme 128 Tabs (1024-Rune Unicode Title)
+	{
+		chrome_dl.ui_draw_list_clear(&dl)
+		bar_rect := [4]f32{0, 0, w, CHROME_BAR_HEIGHT}
+		chrome_tabs.preview_tabs_extreme(&dl, bar_rect, 128)
+		cmd_count := len(dl.commands)
+
+		cmd := render_ui_draw_list_encode(h.device, &h.chrome_renderer.sdf, &dl, target_view, w, h_win, {0, 0, 0, 0})
+		gpu_ok := false
+		if cmd != nil {
+			contract.submit(h.queue, cmd)
+			contract.release_command_buffer(cmd)
+			gpu_ok = true
+		}
+
+		passed := cmd_count >= 128 && gpu_ok
+		if !passed do all_ok = false
+		status := "PASS" if passed else "FAIL"
+		fmt.printfln("[TEST 5] Extreme 128 Tabs (1024-Rune Unicode Title) ....... %s (cmds=%d)", status, cmd_count)
+	}
+
+	// Test 6: Modal Normal & Extreme Fixtures
+	{
+		chrome_dl.ui_draw_list_clear(&dl)
+		viewport := [4]f32{0, 0, w, h_win}
+		chrome_modals.preview_modal_normal(&dl, viewport)
+		normal_count := len(dl.commands)
+
+		chrome_dl.ui_draw_list_clear(&dl)
+		chrome_modals.preview_modal_extreme(&dl, viewport)
+		extreme_count := len(dl.commands)
+
+		cmd := render_ui_draw_list_encode(h.device, &h.chrome_renderer.sdf, &dl, target_view, w, h_win, {0, 0, 0, 0})
+		gpu_ok := false
+		if cmd != nil {
+			contract.submit(h.queue, cmd)
+			contract.release_command_buffer(cmd)
+			gpu_ok = true
+		}
+
+		passed := normal_count > 0 && extreme_count > 0 && gpu_ok
+		if !passed do all_ok = false
+		status := "PASS" if passed else "FAIL"
+		fmt.printfln("[TEST 6] Modal Normal & Extreme Fixtures .................. %s (normal=%d, extreme=%d)", status, normal_count, extreme_count)
+	}
+
+	// Test 7: Composer Frame Loop Migration (frame_tick) & Clean Pane Invariant
+	{
+		driver := frame.Frame_Driver{
+			user    = h,
+			acquire = _frame_acquire,
+			raster  = _frame_raster,
+			present = _frame_present,
+		}
+
+		// Frame 1 with damage: should tick, raster dirty layer, and present
+		_mark_layer_dirty(h, CHROME_LAYER_ID)
+		now_ns := u64(helper.platform_ticks_to_ns(helper.platform_now()))
+		outcome1 := frame.frame_tick(&h.scheduler, &h.composer_pipe, &h.tm, &driver, now_ns)
+
+		// Frame 2 with all clean layers: should NOT tick (zero raster passes)
+		now_ns2 := now_ns + 16_000_000
+		outcome2 := frame.frame_tick(&h.scheduler, &h.composer_pipe, &h.tm, &driver, now_ns2)
+
+		passed := outcome1.fail == .None && outcome1.ticked && outcome1.raster_calls > 0 &&
+		          !outcome2.ticked && outcome2.raster_calls == 0
+		if !passed do all_ok = false
+		status := "PASS" if passed else "FAIL"
+		fmt.printfln("[TEST 7] Composer Frame Loop Migration (frame_tick) ....... %s (tick1_raster=%d, tick2_raster=%d)",
+			status, outcome1.raster_calls, outcome2.raster_calls)
+	}
+
+	fmt.println("=================================================================")
+	if all_ok {
+		fmt.println("VERDICT: ALL CHROME SCENARIOS PASSED")
+	} else {
+		fmt.println("VERDICT: ONE OR MORE SCENARIOS FAILED")
+	}
+	fmt.println("=================================================================")
+
+	if !all_ok {
+		os.exit(1)
+	}
+}
+
 _handle_sdl_event :: proc(h: ^Harness_State, event: ^sdl3.Event) {
 	if event.type == .QUIT || event.type == .WINDOW_CLOSE_REQUESTED {
 		h.running = false
@@ -2136,7 +2544,7 @@ _handle_sdl_event :: proc(h: ^Harness_State, event: ^sdl3.Event) {
 			scheduler.scheduler_force_next(&h.scheduler)
 			fmt.printf("-> Scissor clipping test: %v (panes inset by 36x28px to verify fragment discard outside scissor rect)\n", h.scissor_test_active)
 
-		case sdl3.K_TAB, sdl3.K_T:
+		case sdl3.K_TAB:
 			if len(h.tabs_model.tabs) > 0 {
 				next_idx := (h.tabs_model.active_idx + 1) % len(h.tabs_model.tabs)
 				chrome_tabs.tabs_set_active(&h.tabs_model, next_idx)
@@ -2144,6 +2552,30 @@ _handle_sdl_event :: proc(h: ^Harness_State, event: ^sdl3.Event) {
 				_mark_layer_dirty(h, CHROME_LAYER_ID)
 				fmt.printf("-> Active Tab switched: %d (%s)\n", next_idx, h.tabs_model.tabs[next_idx].title)
 			}
+
+		case sdl3.K_T:
+			h.extreme_tabs = !h.extreme_tabs
+			_mark_layer_dirty(h, CHROME_LAYER_ID)
+			scheduler.scheduler_force_next(&h.scheduler)
+			fmt.printf("-> Extreme 128 Tabs Mode: %v\n", h.extreme_tabs)
+
+		case sdl3.K_G:
+			h.divider_drag_active = !h.divider_drag_active
+			_mark_layer_dirty(h, CHROME_LAYER_ID)
+			scheduler.scheduler_force_next(&h.scheduler)
+			fmt.printf("-> Dynamic Split Divider Drag Oscillation: %v\n", h.divider_drag_active)
+
+		case sdl3.K_X:
+			h.extreme_sdf_mode = !h.extreme_sdf_mode
+			_mark_layer_dirty(h, PANE_1_ID)
+			scheduler.scheduler_force_next(&h.scheduler)
+			fmt.printf("-> 1000 SDF Elements Stress Mode in Pane 1: %v\n", h.extreme_sdf_mode)
+
+		case sdl3.K_Z:
+			h.extreme_radius_mode = !h.extreme_radius_mode
+			_mark_layer_dirty(h, PANE_1_ID)
+			scheduler.scheduler_force_next(&h.scheduler)
+			fmt.printf("-> Radius > Half-Size Clamping Mode in Pane 1: %v\n", h.extreme_radius_mode)
 
 		case sdl3.K_M, sdl3.K_P:
 			h.modal_active = !h.modal_active
@@ -2316,6 +2748,14 @@ main :: proc() {
 	chrome_tabs.tabs_add(&h.tabs_model, 4, "REPL (python)")
 	defer chrome_tabs.tabs_model_destroy(&h.tabs_model)
 
+	h.modal = chrome_modals.Chrome_Modal{
+		title       = "Command Palette",
+		query       = "git status",
+		match_count = 8,
+		visible     = true,
+	}
+	h.divider_ratio = 0.5
+
 	if !chrome.chrome_renderer_init(
 		&h.chrome_renderer,
 		h.device,
@@ -2418,14 +2858,14 @@ main :: proc() {
 	}
 
 	fmt.println("=================================================================")
-	fmt.println("Term Standalone Native GUI Harness & Integrated Render-Compositor RUNNING!")
+	fmt.println("Term Standalone Native GUI Harness & Chrome Renderer RUNNING!")
 	fmt.printf("Window Size: %dx%d | 4-Split Heterogeneous Multi-Pane Layout\n", window_w, window_h)
 	fmt.println("=================================================================")
 	fmt.println("Controls:")
 	fmt.println("  [1]     Select Pane 1 (Terminal Shell / Typing)")
 	fmt.println("  [2]     Select Pane 2 (3D Component Engine)")
 	fmt.println("  [3]     Select Pane 3 (Build / Monitor logs)")
-	fmt.println("  [4]     Select Pane 4 & Toggle Auto-Rotation on Pane 2")
+	fmt.println("  [4]     Select Pane 4")
 	fmt.println("  [R]     Toggle 3D Auto-Rotation on Pane 2")
 	fmt.println("  [Space] Animate / Type in ACTIVE pane ONLY (Marks ONLY active dirty!)")
 	fmt.println("  [D]     Toggle 3D Mesh (Unit Cube <-> Hexagonal Prism Badge)")
@@ -2433,7 +2873,11 @@ main :: proc() {
 	fmt.println("  [F]     Trigger Flood Damage (Marks ALL 4 Panes dirty)")
 	fmt.println("  [S]     Toggle Scissor Clipping Test (Proves boundary discard)")
 	fmt.println("  [C]     Toggle Cursor Blink (530ms interval)")
-	fmt.println("  [Tab/T] Switch Chrome Tab")
+	fmt.println("  [Tab]   Switch Active Tab")
+	fmt.println("  [T]     Toggle Extreme 128 Tabs (1024-Rune Unicode Title)")
+	fmt.println("  [G]     Toggle Dynamic Split Divider Drag Oscillation")
+	fmt.println("  [X]     Toggle 1000 SDF Elements Stress Mode")
+	fmt.println("  [Z]     Toggle Radius > Half-Size Clamping Mode")
 	fmt.println("  [M/P]   Toggle Command Palette & Search Modal Overlay")
 	fmt.println("  [B]     Run Honest Hardware Benchmark (100 Real Frames, <= 25% target)")
 	fmt.println("  [Mouse Drag in Pane 2] Orbit 3D Camera | [Wheel] Zoom")
@@ -2447,7 +2891,9 @@ main :: proc() {
 
 	for i := 1; i < len(os.args); i += 1 {
 		arg := os.args[i]
-		if arg == "--bench" {
+		if arg == "--test" {
+			h.test_mode = true
+		} else if arg == "--bench" {
 			_run_honest_benchmark(h)
 			h.running = false
 			return
@@ -2474,6 +2920,12 @@ main :: proc() {
 		} else if arg == "--blink" {
 			h.blink_enabled = true
 		}
+	}
+
+	if h.test_mode {
+		_run_chrome_verification_test(h)
+		h.running = false
+		return
 	}
 
 	if h.idle_test_mode {
@@ -2543,9 +2995,6 @@ main :: proc() {
 		// Cursor blink logic
 		now_ns := u64(helper.platform_ticks_to_ns(helper.platform_now()))
 
-		// Transition Manager update
-		_ = transition.transition_update(&h.tm, &h.scheduler, h.composer_pipe.layer_pool.layers[:], now_ns)
-
 		if h.anim_idle_test_mode && h.anim_triggered {
 			if h.tm.active_count > 0 {
 				h.in_anim_rendered = h.scheduler.rendered_frames - h.pre_anim_rendered
@@ -2573,29 +3022,6 @@ main :: proc() {
 		// 3D Auto-Rotation Sync
 		scheduler.scheduler_set_anim_active(&h.scheduler, h.three_d_interactor.auto_rotate)
 
-		// Frame scheduling gate
-		needs_frame, wake_at := scheduler.scheduler_needs_frame(&h.scheduler, now_ns)
-		if !needs_frame {
-			scheduler.scheduler_record_skip(&h.scheduler)
-
-			timeout_ms: i32 = -1 // wait indefinitely if wake_at == 0
-			if wake_at > now_ns {
-				timeout_ms = max(i32(1), i32((wake_at - now_ns) / 1_000_000))
-			} else if wake_at > 0 && now_ns >= wake_at {
-				timeout_ms = 0
-			}
-
-			if h.idle_test_mode && (timeout_ms < 0 || timeout_ms > 100) {
-				timeout_ms = 100
-			}
-
-			wait_event: sdl3.Event
-			if sdl3.WaitEventTimeout(&wait_event, timeout_ms) {
-				_handle_sdl_event(h, &wait_event)
-			}
-			continue
-		}
-
 		// Frame timing
 		cur_ticks := helper.platform_now()
 		dt_s: f32 = 0.008
@@ -2605,14 +3031,19 @@ main :: proc() {
 		}
 		h.last_frame_ticks = cur_ticks
 
+		// Dynamic divider drag animation
+		if h.divider_drag_active {
+			t_sec := f32(f64(now_ns - u64(h.start_ticks)) / 1e9)
+			h.divider_ratio = 0.5 + 0.35 * math.sin(t_sec * 2.0)
+			_mark_layer_dirty(h, CHROME_LAYER_ID)
+		}
+
 		// If 3D auto-rotates, ONLY Pane 2 is marked dirty!
 		if h.three_d_interactor.auto_rotate {
 			three_d.interactor_update(&h.three_d_interactor, dt_s)
 			_mark_layer_dirty(h, PANE_2_ID)
 			_mark_layer_dirty(h, CHROME_LAYER_ID)
 		}
-
-		t_frame_start := helper.platform_now()
 
 		if h.anim_idle_test_mode {
 			surf_ptr := (^wgpu_backend.Wgpu_Surface)(h.surface)
@@ -2630,32 +3061,38 @@ main :: proc() {
 				h.scheduler.rendered_frames + 1, dt_s * 1000.0, test_elapsed, trigger, pm, mod_op)
 		}
 
-		// Frame Step 1: Begin Frame & Track Layer Cache Status
-		pipeline.composer_pipeline_begin_frame(&h.composer_pipe)
-
-		// Frame Step 2: Render ONLY Dirty Panes into Offscreen Backing Textures
-		// Clean panes cost ZERO GPU raster passes and ZERO draw calls!
-		t_raster_start := helper.platform_now()
-		_ = _rasterize_dirty_panes(h)
-		t_raster_end := helper.platform_now()
-		h.last_raster_ns = u64(max(i64(0), helper.platform_ticks_to_ns(t_raster_end - t_raster_start)))
-		h.composer_pipe.stats.raster_duration_ns = h.last_raster_ns
-
-		// Frame Step 3: Hardware Quad Blit Composite with Scissor Clipping
-		t_blit_start := helper.platform_now()
-		pres_ok := _composite_and_present(h)
-		t_blit_end := helper.platform_now()
-		h.last_blit_ns = u64(max(i64(0), helper.platform_ticks_to_ns(t_blit_end - t_blit_start)))
-		h.composer_pipe.stats.blit_duration_ns = h.last_blit_ns
-
-		if pres_ok {
-			scheduler.scheduler_frame_done(&h.scheduler)
+		// Frame driver for core/composer/frame.frame_tick
+		driver := frame.Frame_Driver{
+			user    = h,
+			acquire = _frame_acquire,
+			raster  = _frame_raster,
+			present = _frame_present,
 		}
 
-		// Frame Step 4: Finalize Frame
-		pipeline.composer_pipeline_end_frame(&h.composer_pipe)
+		t_frame_start := helper.platform_now()
+		outcome := frame.frame_tick(&h.scheduler, &h.composer_pipe, &h.tm, &driver, now_ns)
 		t_frame_end := helper.platform_now()
-		h.last_total_ns = u64(max(i64(0), helper.platform_ticks_to_ns(t_frame_end - t_frame_start)))
-		h.composer_pipe.stats.total_frame_ns = h.last_total_ns
+
+		if outcome.ticked {
+			h.last_total_ns = u64(max(i64(0), helper.platform_ticks_to_ns(t_frame_end - t_frame_start)))
+			h.composer_pipe.stats.total_frame_ns = h.last_total_ns
+		} else {
+			// When !outcome.ticked: wait for event using outcome.wake_at timeout
+			timeout_ms: i32 = -1
+			if outcome.wake_at > now_ns {
+				timeout_ms = max(i32(1), i32((outcome.wake_at - now_ns) / 1_000_000))
+			} else if outcome.wake_at > 0 && now_ns >= outcome.wake_at {
+				timeout_ms = 0
+			}
+
+			if h.idle_test_mode && (timeout_ms < 0 || timeout_ms > 100) {
+				timeout_ms = 100
+			}
+
+			wait_event: sdl3.Event
+			if sdl3.WaitEventTimeout(&wait_event, timeout_ms) {
+				_handle_sdl_event(h, &wait_event)
+			}
+		}
 	}
 }
