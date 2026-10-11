@@ -18,7 +18,7 @@ TEST_FLAGS ?= -define:ODIN_TEST_THREADS=1
 DEBUG_FLAGS ?= -debug
 RELEASE_FLAGS ?= -o:speed -no-bounds-check
 
-.PHONY: all harness-render-composer run-harness-render-composer harness-composer run-harness-composer test test-composer test-render-contract check check-linux clean help
+.PHONY: all harness-render-composer run-harness-render-composer harness-composer run-harness-composer test test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract check check-linux clean help
 
 all: harness-render-composer harness-composer
 
@@ -36,10 +36,26 @@ harness-composer:
 run-harness-composer: harness-composer
 	./$(OUT_DIR)/harness_composer
 
-test: test-composer test-render-contract
+test: test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract
 
 test-composer:
 	$(ODIN) test src/core/composer/tests $(CHECK_FLAGS) $(TEST_FLAGS)
+
+test-composer-frame:
+	$(ODIN) test src/core/composer/frame/tests $(CHECK_FLAGS) $(TEST_FLAGS)
+
+test-composer-scheduler:
+	$(ODIN) test src/core/composer/scheduler/tests $(CHECK_FLAGS) $(TEST_FLAGS)
+
+test-composer-transition:
+	$(ODIN) test src/core/composer/transition/tests $(CHECK_FLAGS) $(TEST_FLAGS)
+
+test-chrome:
+	$(ODIN) test src/core/chrome/draw_list $(CHECK_FLAGS) $(TEST_FLAGS)
+	$(ODIN) test src/core/chrome/tabs $(CHECK_FLAGS) $(TEST_FLAGS)
+	$(ODIN) test src/core/chrome/splits $(CHECK_FLAGS) $(TEST_FLAGS)
+	$(ODIN) test src/core/chrome/modals $(CHECK_FLAGS) $(TEST_FLAGS)
+	$(ODIN) test src/core/chrome/hit_test $(CHECK_FLAGS) $(TEST_FLAGS)
 
 test-render-contract:
 	$(ODIN) test src/core/render/contract/tests $(CHECK_FLAGS) $(TEST_FLAGS)
@@ -54,6 +70,7 @@ check:
 	$(ODIN) check src/core/composer/pipeline $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/core/composer/scheduler $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/core/composer/transition $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/core/composer/frame $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/core/render/contract $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/core/platform/gpu/wgpu $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/core/render/atlas $(CHECK_FLAGS) -no-entry-point
@@ -77,6 +94,7 @@ check-linux:
 	$(ODIN) check src/core/composer/layer $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
 	$(ODIN) check src/core/composer/blit $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
 	$(ODIN) check src/core/composer/pipeline $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
+	$(ODIN) check src/core/composer/frame $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
 	$(ODIN) check src/core/render/contract $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
 	$(ODIN) check src/core/platform/gpu/wgpu $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/core/render/atlas $(CHECK_FLAGS) -no-entry-point -target:linux_arm64

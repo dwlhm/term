@@ -227,6 +227,7 @@ composer_pipeline_begin_frame :: proc(cp: ^Composer_Pipeline) {
 
 // composer_pipeline_should_render returns true if any backing layer was redrawn this frame,
 // enabling zero-work frame skipping on idle frames.
+// true iff raster work exists this frame; NOT a composite/present gate — transitions move clean layers without raster.
 composer_pipeline_should_render :: proc(cp: ^Composer_Pipeline) -> bool {
 	return cp != nil && cp.stats.redrawn_layers > 0
 }
