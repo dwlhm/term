@@ -71,6 +71,70 @@ test_atlas_zoomed_metrics_fit_slot :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_atlas_audit_glyph_overhang_bounds :: proc(t: ^testing.T) {
+	font_path, ok := find_test_font()
+	testing.expect(t, ok, "Test font should be available")
+
+	r: render.Font_Rasterizer
+	success := render.font_rasterizer_init(&r, font_path, 16.0)
+	testing.expect(t, success, "font_rasterizer_init should succeed")
+	defer render.font_rasterizer_destroy(&r)
+
+	fonts_to_test := [?]string{
+		"assets/fonts/MapleMono-NF-Regular.ttf",
+		TEST_FONT_MENLO,
+	}
+
+	for f_path in fonts_to_test {
+		if !os.is_file(f_path) do continue
+		r: render.Font_Rasterizer
+		if !render.font_rasterizer_init(&r, f_path, 16.0) do continue
+		defer render.font_rasterizer_destroy(&r)
+
+		cw := int(r.metrics.cell_width)
+		max_overhang_left := 0
+		max_overhang_right := 0
+		worst_char_left := rune(0)
+		worst_char_right := rune(0)
+
+		// Audit ASCII + Box Drawing + Extended
+		cps := [?]u32{
+			// ASCII
+			33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
+			48, 49, 57, 65, 77, 87, 90, 97, 102, 106, 119, 122, 124, 126,
+			// Box drawing and block elements
+			0x2500, 0x2502, 0x250C, 0x2510, 0x2514, 0x2518, 0x2588, 0x2592,
+			// Powerline / symbols
+			0xE0A0, 0xE0B0, 0xE0B2,
+		}
+
+		for cp in cps {
+			bmp := render.font_rasterize_glyph(&r, cp)
+			defer delete(bmp.pixels)
+			left_overhang := max(0, -int(bmp.bearing_x))
+			right_overhang := max(0, int(bmp.bearing_x) + bmp.width - cw)
+			if left_overhang > max_overhang_left {
+				max_overhang_left = left_overhang
+				worst_char_left = rune(cp)
+			}
+			if right_overhang > max_overhang_right {
+				max_overhang_right = right_overhang
+				worst_char_right = rune(cp)
+			}
+		}
+
+		fmt.printfln("\n--- GLYPH OVERHANG AUDIT (Font: %s, cell_w=%d px) ---", f_path, cw)
+		fmt.printfln("  Max Left Overhang:  %d px (Char: '%c' U+%04X)", max_overhang_left, worst_char_left, int(worst_char_left))
+		fmt.printfln("  Max Right Overhang: %d px (Char: '%c' U+%04X)", max_overhang_right, worst_char_right, int(worst_char_right))
+		fmt.printfln("  1-Column Widen Budget: %d px", cw)
+
+		// Invariant: Overhang must NOT exceed 1 full column (cell width cw)
+		testing.expect(t, max_overhang_left <= cw, "Left overhang exceeds 1 column width!")
+		testing.expect(t, max_overhang_right <= cw, "Right overhang exceeds 1 column width!")
+	}
+}
+
+@(test)
 test_font_rasterizer_init_missing :: proc(t: ^testing.T) {
 	err: render.Font_Error
 	r: render.Font_Rasterizer

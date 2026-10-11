@@ -157,6 +157,7 @@ _metal_vtable: gpu.Gpu_Backend_VTable = gpu.Gpu_Backend_VTable{
 	render_set_vertex_buffer  = _metal_render_set_vertex_buffer,
 	render_set_index_buffer   = _metal_render_set_index_buffer,
 	render_set_viewport       = _metal_render_set_viewport,
+	render_set_scissor_rect   = _metal_render_set_scissor_rect,
 	render_draw               = _metal_render_draw,
 	render_draw_indexed       = _metal_render_draw_indexed,
 
@@ -1166,6 +1167,13 @@ _metal_render_set_viewport :: proc(pass: gpu.Gpu_RenderPassEncoder, x, y, width,
 	p := (^Metal_RenderPassEncoder)(rawptr(pass))
 	if p != nil && p.encoder != nil {
 		p.encoder->setViewport(MTL.Viewport{f64(x), f64(y), f64(width), f64(height), f64(min_depth), f64(max_depth)})
+	}
+}
+
+_metal_render_set_scissor_rect :: proc(pass: gpu.Gpu_RenderPassEncoder, x, y, width, height: u32) {
+	p := (^Metal_RenderPassEncoder)(rawptr(pass))
+	if p != nil && p.encoder != nil {
+		p.encoder->setScissorRect(MTL.ScissorRect{NS.Integer(x), NS.Integer(y), NS.Integer(width), NS.Integer(height)})
 	}
 }
 

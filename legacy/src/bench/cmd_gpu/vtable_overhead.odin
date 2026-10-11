@@ -112,6 +112,7 @@ _null_vtable: gpu.Gpu_Backend_VTable = gpu.Gpu_Backend_VTable{
 	render_set_pipeline          = _null_render_set_pipeline,
 	render_set_bind_group        = _null_render_set_bind_group,
 	render_set_vertex_buffer     = _null_render_set_vertex_buffer,
+	render_set_scissor_rect      = _null_render_set_scissor_rect,
 	render_draw                  = _null_render_draw,
 	render_draw_indexed          = _null_render_draw_indexed,
 	release_surface_texture      = _null_release_surface_texture,
@@ -295,6 +296,10 @@ _null_render_set_bind_group :: proc(pass: gpu.Gpu_RenderPassEncoder, index: u32,
 }
 
 _null_render_set_vertex_buffer :: proc(pass: gpu.Gpu_RenderPassEncoder, slot: u32, buffer: gpu.Gpu_Buffer, offset: u64) {
+	_null_sink += 1
+}
+
+_null_render_set_scissor_rect :: proc(pass: gpu.Gpu_RenderPassEncoder, x, y, width, height: u32) {
 	_null_sink += 1
 }
 

@@ -17,6 +17,7 @@ import "core:fmt"
 
 import "base:runtime"
 import "core:mem"
+import contract "../core/render/contract"
 import "../platform"
 import diag "../diag"
 import fullscreen "fullscreen"
@@ -218,6 +219,8 @@ Renderer :: struct {
 	surface:    gpu.Gpu_Surface,
 	surface_w:  u32,
 	surface_h:  u32,
+	scissor_padding:      u32,
+	partial_load_enabled: bool,
 
 	// State
 	frame_count:     u64,
@@ -450,6 +453,8 @@ renderer_init :: proc(
 	r.surface     = gpu.Gpu_Surface(nil)
 	r.surface_w   = 0
 	r.surface_h   = 0
+	r.scissor_padding = 2
+	r.partial_load_enabled = true
 	r.first_frame_pending = true
 	r.full_redraw_pending = false
 
@@ -1410,8 +1415,6 @@ _renderer_theme_clear_color :: proc(theme: termgrid.Theme, visual_mode: bool = f
 	if visual_mode {
 		argb = _renderer_visual_background_color(theme.background)
 	}
-	// The drawable is composited as premultiplied alpha. Instance blending
-	// adds straight-source glyphs over this premultiplied destination.
 	alpha := f64(_renderer_default_background_alpha(argb, opacity))
 	return [4]f64{
 		f64((argb >> 16) & 0xFF) / 255.0 * alpha,
@@ -2006,6 +2009,8 @@ _draw_image_focus :: proc(r: ^Renderer, frame: ^Render_Frame_Transaction) -> boo
 	return true
 }
 
+invert_draw_order: bool = false
+
 _draw_instance_buffer :: proc(
 	r: ^Renderer,
 	frame: ^Render_Frame_Transaction,
@@ -2020,6 +2025,8 @@ _draw_instance_buffer :: proc(
 	transparent_clear: bool = false,
 	image_under_count: u32 = 0,
 	image_over_count: u32 = 0,
+	load_op: gpu.Gpu_Load_Op = .Clear,
+	scissor_rect: ^contract.Damage_Rect = nil,
 ) -> bool {
 	if r == nil || frame == nil || frame.state != .Acquired || rawptr(frame.encoder) == nil {
 		return false
@@ -2029,45 +2036,83 @@ _draw_instance_buffer :: proc(
 	if transparent_clear {
 		clear_color = {}
 	}
-	pass := r.backend.begin_render_pass(frame.encoder, frame.view, clear_color, .Clear)
+	pass := r.backend.begin_render_pass(frame.encoder, frame.view, clear_color, load_op)
 	if rawptr(pass) == nil { return false }
 	frame.pass = pass
+	if scissor_rect != nil && r.backend.render_set_scissor_rect != nil {
+		r.backend.render_set_scissor_rect(pass, scissor_rect.x, scissor_rect.y, scissor_rect.w, scissor_rect.h)
+	}
 	ok := _draw_image_range(r, frame, 0, image_under_count)
 	if bg_count > 0 || glyph_count > 0 || decor_count > 0 {
 		ok = rawptr(buffer) != nil && rawptr(r.instances.bg_pipeline) != nil && rawptr(r.instances.glyph_pipeline) != nil &&
 			rawptr(r.instances.bind_group_bg) != nil && rawptr(r.instances.bind_group_glyph) != nil
 	}
 	if ok {
-		r.backend.render_set_pipeline(pass, r.instances.bg_pipeline)
-		r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_bg)
-		r.backend.render_set_vertex_buffer(pass, 0, buffer, 0)
-		r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, bg_count)
+		if invert_draw_order {
+			r.backend.render_set_pipeline(pass, r.instances.glyph_pipeline)
+			r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_glyph)
+			r.backend.render_set_vertex_buffer(pass, 0, buffer, glyph_offset)
+			r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, glyph_count)
 
-		if decor_count > 0 {
+			when ODIN_OS == .Darwin {
+				if emoji_count > 0 && rawptr(r.instances.emoji_pipeline) != nil && rawptr(r.instances.emoji_buffer) != nil {
+					r.backend.render_set_pipeline(pass, r.instances.emoji_pipeline)
+					r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_emoji)
+					r.backend.render_set_vertex_buffer(pass, 0, r.instances.emoji_buffer, 0)
+					r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, emoji_count)
+				}
+			}
+
 			r.backend.render_set_pipeline(pass, r.instances.bg_pipeline)
 			r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_bg)
-			r.backend.render_set_vertex_buffer(pass, 0, buffer, decor_offset)
-			r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, decor_count)
-		}
+			r.backend.render_set_vertex_buffer(pass, 0, buffer, 0)
+			r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, bg_count)
 
-		if ok && frame.interaction_count > 0 {
+			if decor_count > 0 {
+				r.backend.render_set_pipeline(pass, r.instances.bg_pipeline)
+				r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_bg)
+				r.backend.render_set_vertex_buffer(pass, 0, buffer, decor_offset)
+				r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, decor_count)
+			}
+
+			if ok && frame.interaction_count > 0 {
+				r.backend.render_set_pipeline(pass, r.instances.bg_pipeline)
+				r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_bg)
+				r.backend.render_set_vertex_buffer(pass, 0, buffer, frame.interaction_offset)
+				r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, frame.interaction_count)
+			}
+		} else {
 			r.backend.render_set_pipeline(pass, r.instances.bg_pipeline)
 			r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_bg)
-			r.backend.render_set_vertex_buffer(pass, 0, buffer, frame.interaction_offset)
-			r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, frame.interaction_count)
-		}
+			r.backend.render_set_vertex_buffer(pass, 0, buffer, 0)
+			r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, bg_count)
 
-		r.backend.render_set_pipeline(pass, r.instances.glyph_pipeline)
-		r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_glyph)
-		r.backend.render_set_vertex_buffer(pass, 0, buffer, glyph_offset)
-		r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, glyph_count)
+			if decor_count > 0 {
+				r.backend.render_set_pipeline(pass, r.instances.bg_pipeline)
+				r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_bg)
+				r.backend.render_set_vertex_buffer(pass, 0, buffer, decor_offset)
+				r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, decor_count)
+			}
 
-		when ODIN_OS == .Darwin {
-			if emoji_count > 0 && rawptr(r.instances.emoji_pipeline) != nil && rawptr(r.instances.emoji_buffer) != nil {
-				r.backend.render_set_pipeline(pass, r.instances.emoji_pipeline)
-				r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_emoji)
-				r.backend.render_set_vertex_buffer(pass, 0, r.instances.emoji_buffer, 0)
-				r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, emoji_count)
+			if ok && frame.interaction_count > 0 {
+				r.backend.render_set_pipeline(pass, r.instances.bg_pipeline)
+				r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_bg)
+				r.backend.render_set_vertex_buffer(pass, 0, buffer, frame.interaction_offset)
+				r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, frame.interaction_count)
+			}
+
+			r.backend.render_set_pipeline(pass, r.instances.glyph_pipeline)
+			r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_glyph)
+			r.backend.render_set_vertex_buffer(pass, 0, buffer, glyph_offset)
+			r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, glyph_count)
+
+			when ODIN_OS == .Darwin {
+				if emoji_count > 0 && rawptr(r.instances.emoji_pipeline) != nil && rawptr(r.instances.emoji_buffer) != nil {
+					r.backend.render_set_pipeline(pass, r.instances.emoji_pipeline)
+					r.backend.render_set_bind_group(pass, 0, r.instances.bind_group_emoji)
+					r.backend.render_set_vertex_buffer(pass, 0, r.instances.emoji_buffer, 0)
+					r.backend.render_draw(pass, instance.QUAD_VERTEX_COUNT, emoji_count)
+				}
 			}
 		}
 	}
@@ -2158,6 +2203,39 @@ _renderer_frame_unavailable :: proc(r: ^Renderer, terminal: ^termgrid.Terminal, 
 	return false
 }
 
+_renderer_compute_damage_rect :: proc(r: ^Renderer, journal: ^termgrid.Damage_Journal) -> contract.Damage_Rect {
+	combined := contract.Damage_Rect{}
+	rows := int(r.rows)
+	cols := int(r.cols)
+	cw := u32(r.cell_width)
+	ch := u32(r.cell_height)
+	px := u32(r.pad_x)
+	py := u32(r.pad_y)
+	for row_idx in 0..<rows {
+		if row_idx >= len(journal.dirty_rows) do break
+		dr := &journal.dirty_rows[row_idx]
+		if !dr.full && dr.span_count == 0 do continue
+		if dr.full {
+			rect := contract.Damage_Rect{x = px, y = py + u32(row_idx) * ch, w = u32(cols) * cw, h = ch}
+			combined = contract.damage_rect_union(combined, rect)
+		} else {
+			for s in 0..<int(dr.span_count) {
+				sp := &dr.spans[s]
+				cs := int(sp.col_start)
+				ce := int(sp.col_end)
+				if !disable_compiler_widen {
+					cs = max(0, cs - 1)
+					ce = min(cols, ce + 1)
+				}
+				rect := contract.Damage_Rect{x = px + u32(cs) * cw, y = py + u32(row_idx) * ch, w = u32(ce - cs) * cw, h = ch}
+				combined = contract.damage_rect_union(combined, rect)
+			}
+		}
+	}
+	if contract.damage_rect_is_empty(combined) do return combined
+	return contract.damage_rect_expand(combined, r.scissor_padding, r.surface_w, r.surface_h)
+}
+
 _renderer_frame_v2_journal :: proc(
 	r: ^Renderer,
 	terminal: ^termgrid.Terminal,
@@ -2228,7 +2306,17 @@ _renderer_frame_v2_journal :: proc(
 			if (r.cursor_staged || r.image_count > 0) && !_renderer_upload_instances(r, 0, &frame, r.image_count) {
 				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
 			}
-			if !_draw_instance_buffer(r, &frame, r.dirty.buffer, n, n, u64(n) * instance.INSTANCE_STRIDE, emoji_count = n, image_under_count = r.image_under_count, image_over_count = r.image_count - r.image_under_count) {
+			load_op: gpu.Gpu_Load_Op = .Clear
+			var_scissor: contract.Damage_Rect
+			p_scissor: ^contract.Damage_Rect = nil
+			if r.partial_load_enabled && !force_full && r.frame_count > 1 {
+				load_op = .Load
+				var_scissor = _renderer_compute_damage_rect(r, journal)
+				if !contract.damage_rect_is_empty(var_scissor) {
+					p_scissor = &var_scissor
+				}
+			}
+			if !_draw_instance_buffer(r, &frame, r.dirty.buffer, n, n, u64(n) * instance.INSTANCE_STRIDE, emoji_count = n, image_under_count = r.image_under_count, image_over_count = r.image_count - r.image_under_count, load_op = load_op, scissor_rect = p_scissor) {
 				return _renderer_frame_failed(r, terminal, journal, &frame, .Instance)
 			}
 			if !_renderer_surface_commit(r, &frame) {

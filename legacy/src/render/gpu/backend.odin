@@ -246,6 +246,7 @@ Gpu_Backend_VTable :: struct {
 	render_set_vertex_buffer: proc(pass: Gpu_RenderPassEncoder, slot: u32, buffer: Gpu_Buffer, offset: u64),
 	render_set_index_buffer: proc(pass: Gpu_RenderPassEncoder, buffer: Gpu_Buffer, offset: u64, size: u64),
 	render_set_viewport: proc(pass: Gpu_RenderPassEncoder, x, y, width, height, min_depth, max_depth: f32),
+	render_set_scissor_rect: proc(pass: Gpu_RenderPassEncoder, x, y, width, height: u32),
 	render_draw: proc(pass: Gpu_RenderPassEncoder, vertex_count: u32, instance_count: u32),
 	render_draw_indexed: proc(pass: Gpu_RenderPassEncoder, index_count: u32, instance_count: u32),
 

@@ -173,6 +173,7 @@ Style_LUT :: struct {
 	count:               u16,
 	ul_r5g6b5:           [1024]u16,
 	flags:               [1024]u16,
+	default_bg_argb:     u32,
 }
 
 // render_cell_pack_v2 packs content/style/width/cflags/glyph_slot into a Render_Cell_V2.
@@ -270,6 +271,7 @@ style_lut_rebuild :: proc(lut: ^Style_LUT, table: ^termgrid.Style_Table) {
 		count = 1024
 	}
 	default_style := termgrid.style_table_default(table)
+	lut.default_bg_argb = default_style.bg
 	for i in 0..<1024 {
 		style := default_style
 		if i < count {
@@ -300,6 +302,14 @@ style_lut_rebuild :: proc(lut: ^Style_LUT, table: ^termgrid.Style_Table) {
 	lut.count = u16(count)
 }
 
+disable_partial_space_bg: bool = false
+
+// Raster_Mode distinguishes full clears from incremental partial loads.
+Raster_Mode :: enum int {
+	Full_Clear,
+	Partial_Load,
+}
+
 // render_cell_expand_instance expands one packed V2 cell into bg/glyph instances.
 // Owns the empty + continuation skip rules. Atlas is read read-only.
 // MUST NOT call style_table_get or color_to_r5g6b5 (colors come pre-resolved from lut).
@@ -319,6 +329,7 @@ render_cell_expand_instance :: proc(
 	decor_out: ^instance.Instance_Data = nil,
 	direct_color: ^termgrid.Direct_Color_Channel = nil,
 	background_opacity: f32 = 1,
+	mode: Raster_Mode = .Full_Clear,
 ) -> (emit_bg: bool, emit_glyph: bool, emit_emoji: bool, emit_decor: bool) {
 	content, style, width, cflags, slot := render_cell_unpack_v2(cell)
 
@@ -349,9 +360,13 @@ render_cell_expand_instance :: proc(
 	}
 	flags := lut.flags[lut_idx]
 
+	bg_is_default := !has_direct_bg && !selected && bg == lut.bg_r5g6b5[0]
+
 	bg_r, bg_g, bg_b: f32
 	if has_direct_bg {
 		bg_r, bg_g, bg_b = unpack_argb_float(direct_color.bg)
+	} else if bg_is_default && lut.default_bg_argb != 0 {
+		bg_r, bg_g, bg_b = unpack_argb_float(lut.default_bg_argb)
 	} else {
 		bg_r, bg_g, bg_b = instance.unpack_r5g6b5(bg)
 	}
@@ -402,17 +417,17 @@ render_cell_expand_instance :: proc(
 	// Selected cells are exempt: a selection highlight is a real background
 	// even when it happens to compare equal to the default, and dropping its
 	// quad would make the selection invisible.
-	bg_is_default := !has_direct_bg && !selected && bg == lut.bg_r5g6b5[0]
 	is_blank := content == 0x20 || content == 0 || content == u32(termgrid.KITTY_GRAPHICS_PLACEHOLDER)
 
-	// Empty skip: space or NUL with the default background emits nothing.
-	if is_blank && bg_is_default {
+	// In Full_Clear mode, empty spaces with default background emit nothing (clear pass already painted them).
+	if is_blank && bg_is_default && (mode == .Full_Clear || disable_partial_space_bg) {
 		return false, false, false, emit_decor
 	}
 
-	// Background instance (non-default backgrounds only). Wide leads span
-	// double width. Background opacity never changes foreground coverage.
-	if !bg_is_default {
+	// Background instance:
+	// In Full_Clear mode: non-default backgrounds only (clear pass painted default bg).
+	// In Partial_Load mode: EVERY dirty cell emits its background quad to erase previous pixels!
+	if !bg_is_default || (mode == .Partial_Load && !disable_partial_space_bg) {
 		if bg_out != nil {
 			bg_cw := cell_w
 			if width == RENDER_CELL_V2_WIDTH_WIDE_LEAD {
@@ -431,7 +446,7 @@ render_cell_expand_instance :: proc(
 
 	// Spaces and NUL emit no glyph.
 	if is_blank {
-		return true, false, false, emit_decor
+		return emit_bg, false, false, emit_decor
 	}
 
 	is_emoji := cflags & RENDER_CELL_V2_CFLAG_EMOJI != 0

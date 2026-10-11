@@ -15,6 +15,8 @@ import "base:runtime"
 import termgrid "../terminal"
 
 // Compiled_Frame holds the output of the render compiler.
+disable_compiler_widen: bool = false
+
 Compiled_Frame :: struct {
 	cells:      []Render_Cell,  // packed render cells, row-major order
 	rows:       i32,
@@ -547,7 +549,7 @@ shaped_cell_from_cluster :: proc(
 			if counters != nil {
 				counters.tofu_missing += 1
 			}
-			return render_cell_pack_v2(0, style, RENDER_CELL_V2_WIDTH_NARROW, cf, RENDER_CELL_V2_SLOT_UNRESOLVED)
+			return render_cell_pack_v2(0, style, w, cf, RENDER_CELL_V2_SLOT_UNRESOLVED)
 		}
 	} else {
 		// Keep only covered marks (independent probes, nil counters: a
@@ -573,11 +575,11 @@ shaped_cell_from_cluster :: proc(
 		wide := termgrid.wcwidth(rune(key.runes[0])) == 2
 		request_result := raster_request_async(rq, key, font_index, shaped, marks, wide, target)
 		if result != nil { result^ = request_result }
-		return render_cell_pack_v2(0, style, RENDER_CELL_V2_WIDTH_NARROW, cf, RENDER_CELL_V2_SLOT_UNRESOLVED)
+		return render_cell_pack_v2(0, style, w, cf, RENDER_CELL_V2_SLOT_UNRESOLVED)
 	}
 	g := atlas_ensure_glyph(atlas, chain, cache, key, font_index, shaped, marks, counters)
 	if g.atlas_slot == RENDER_CELL_V2_SLOT_UNRESOLVED {
-		return render_cell_pack_v2(0, style, RENDER_CELL_V2_WIDTH_NARROW, cf, RENDER_CELL_V2_SLOT_UNRESOLVED)
+		return render_cell_pack_v2(0, style, w, cf, RENDER_CELL_V2_SLOT_UNRESOLVED)
 	}
 	return render_cell_pack_v2(cell.content, style, w, cf, g.atlas_slot)
 }
@@ -609,6 +611,7 @@ render_compile_v2 :: proc(
 	atlas: ^Atlas = nil,
 	counters: ^Fallback_Counters = nil,
 	rq: ^Raster_Queue = nil,
+	view: ^termgrid.Terminal_View = nil,
 ) {
 	rows := int(f.rows)
 	cols := int(f.cols)
@@ -625,13 +628,17 @@ render_compile_v2 :: proc(
 		}
 
 		if dr.full {
-			_compile_row_range_v2(f, terminal, row_idx, 0, cols, chain, cache, atlas, counters, rq)
+			_compile_row_range_v2(f, terminal, row_idx, 0, cols, chain, cache, atlas, counters, rq, view)
 		} else {
 			for span_idx in 0..<int(dr.span_count) {
 				span := &dr.spans[span_idx]
 				col_start := int(span.col_start)
 				col_end   := int(span.col_end)
-				_compile_row_range_v2(f, terminal, row_idx, col_start, col_end, chain, cache, atlas, counters, rq)
+				if !disable_compiler_widen {
+					col_start = max(0, col_start - 1)
+					col_end   = min(cols, col_end + 1)
+				}
+				_compile_row_range_v2(f, terminal, row_idx, col_start, col_end, chain, cache, atlas, counters, rq, view)
 			}
 		}
 	}

@@ -12,6 +12,8 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <pthread/qos.h>
+#import <IOKit/ps/IOPowerSources.h>
 
 static Uint32 term_service_event_type = 0;
 static NSMutableArray<NSDictionary<NSString *, id> *> *term_service_requests;
@@ -110,3 +112,31 @@ int term_macos_services_pop(int *kind, char **path) {
 }
 
 void term_macos_services_free_path(char *path) { free(path); }
+
+int term_macos_is_low_power_mode(void) {
+    if (@available(macOS 12.0, *)) {
+        return [[NSProcessInfo processInfo] isLowPowerModeEnabled] ? 1 : 0;
+    }
+    return 0;
+}
+
+void term_macos_get_power_source(char *buf, int max_len) {
+    if (!buf || max_len <= 0) return;
+    buf[0] = '\0';
+    CFTypeRef blob = IOPSCopyPowerSourcesInfo();
+    if (blob) {
+        CFStringRef psType = IOPSGetProvidingPowerSourceType(blob);
+        if (psType) {
+            CFStringGetCString(psType, buf, max_len, kCFStringEncodingUTF8);
+        }
+        CFRelease(blob);
+    }
+    if (buf[0] == '\0') {
+        strncpy(buf, "Unknown", max_len - 1);
+        buf[max_len - 1] = '\0';
+    }
+}
+
+int term_macos_set_user_interactive_qos(void) {
+    return pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+}

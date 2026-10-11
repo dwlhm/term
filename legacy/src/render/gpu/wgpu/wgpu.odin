@@ -83,6 +83,7 @@ _wgpu_vtable: gpu.Gpu_Backend_VTable = gpu.Gpu_Backend_VTable{
 	render_set_vertex_buffer  = _wgpu_render_set_vertex_buffer,
 	render_set_index_buffer   = _wgpu_render_set_index_buffer,
 	render_set_viewport       = _wgpu_render_set_viewport,
+	render_set_scissor_rect   = _wgpu_render_set_scissor_rect,
 	render_draw               = _wgpu_render_draw,
 	render_draw_indexed       = _wgpu_render_draw_indexed,
 
@@ -378,7 +379,8 @@ _wgpu_get_surface_texture :: proc(surface: rawptr) -> (texture: gpu.Gpu_Texture,
 	if surf == nil || surf.handle == nil do return gpu.Gpu_Texture(nil), gpu.Gpu_TextureView(nil), .Undefined
 
 	st := wgpu.SurfaceGetCurrentTexture(surf.handle)
-	if st.status != .SuccessOptimal && st.status != .SuccessSuboptimal {
+	if st.status != .SuccessOptimal && st.status != .SuccessSuboptimal && st.status != .Occluded {
+		fmt.printfln("DEBUG _wgpu_get_surface_texture FAILED st.status=%v", st.status)
 		return gpu.Gpu_Texture(nil), gpu.Gpu_TextureView(nil), .Undefined
 	}
 
@@ -1109,6 +1111,13 @@ _wgpu_render_set_viewport :: proc(pass: gpu.Gpu_RenderPassEncoder, x, y, width, 
 	p := wgpu.RenderPassEncoder(rawptr(pass))
 	if p != nil {
 		wgpu.RenderPassEncoderSetViewport(p, x, y, width, height, min_depth, max_depth)
+	}
+}
+
+_wgpu_render_set_scissor_rect :: proc(pass: gpu.Gpu_RenderPassEncoder, x, y, width, height: u32) {
+	p := wgpu.RenderPassEncoder(rawptr(pass))
+	if p != nil {
+		wgpu.RenderPassEncoderSetScissorRect(p, x, y, width, height)
 	}
 }
 

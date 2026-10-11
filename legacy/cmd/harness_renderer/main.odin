@@ -23,6 +23,7 @@ import platform "../../platform"
 
 // Core contracts and Chrome Pillar imports
 import contract "../../core/render/contract"
+import core_wgpu "../../core/platform/gpu/wgpu"
 import chrome "../../core/render/chrome"
 import chrome_dl "../../core/chrome/draw_list"
 import chrome_tabs "../../core/chrome/tabs"
@@ -34,13 +35,13 @@ import three_d "../../core/render/three_d"
 HARNESS_FONT_PATH :: "/System/Library/Fonts/Menlo.ttc"
 HARNESS_FONT_SIZE: f32 : 14.0
 
-_real_wgpu_vtable: contract.Gpu_Backend_VTable
+_real_wgpu_vtable: gpu.Gpu_Backend_VTable
 _captured_surface: rawptr
-_captured_texture: contract.Gpu_Texture
-_captured_view:    contract.Gpu_TextureView
+_captured_texture: gpu.Gpu_Texture
+_captured_view:    gpu.Gpu_TextureView
 _defer_present:    bool
 
-_harness_get_surface_texture :: proc(surface: rawptr) -> (contract.Gpu_Texture, contract.Gpu_TextureView, contract.Gpu_Format) {
+_harness_get_surface_texture :: proc(surface: rawptr) -> (gpu.Gpu_Texture, gpu.Gpu_TextureView, gpu.Gpu_Format) {
 	tex, view, fmt := _real_wgpu_vtable.get_surface_texture(surface)
 	_captured_surface = surface
 	_captured_texture = tex
@@ -55,7 +56,7 @@ _harness_present_surface :: proc(surface: rawptr) -> bool {
 	return _real_wgpu_vtable.present_surface(surface)
 }
 
-_harness_release_surface_texture :: proc(texture: contract.Gpu_Texture, view: contract.Gpu_TextureView) {
+_harness_release_surface_texture :: proc(texture: gpu.Gpu_Texture, view: gpu.Gpu_TextureView) {
 	if _defer_present {
 		return
 	}
@@ -197,6 +198,10 @@ _run_honest_benchmark :: proc(h: ^Harness_State) {
 			t0 := platform.platform_now()
 			ok := render.renderer_frame(&h.renderer, &h.terminal)
 			t1 := platform.platform_now()
+			if !ok {
+				fmt.printfln("DEBUG renderer_frame failed on strategy %v", s)
+				break
+			}
 			if ok {
 				dt_ns := u64(platform.platform_ticks_to_ns(t1 - t0))
 				total_ns += dt_ns
@@ -265,19 +270,20 @@ main :: proc() {
 	defer win.window_destroy(&h.window)
 
 	// Unified WGPU Hardware Setup across Darwin and Linux
+	core_wgpu.init_wgpu_driver()
 	h.gpu_backend = wgpu_backend.wgpu_backend_vtable()
 	h.instance = h.gpu_backend.create_instance()
 	h.surface = gpu.Gpu_Surface(wgpu_backend.create_surface(h.instance, h.window.handle))
 	h.device, h.queue = h.gpu_backend.request_device(h.instance, rawptr(h.surface))
 	format := h.gpu_backend.get_preferred_format(rawptr(h.surface), h.device)
 
-	_real_wgpu_vtable = (transmute(^contract.Gpu_Backend_VTable)h.gpu_backend)^
-	harness_vtable := new(contract.Gpu_Backend_VTable)
+	_real_wgpu_vtable = h.gpu_backend^
+	harness_vtable := new(gpu.Gpu_Backend_VTable)
 	harness_vtable^ = _real_wgpu_vtable
 	harness_vtable.get_surface_texture = _harness_get_surface_texture
 	harness_vtable.present_surface = _harness_present_surface
 	harness_vtable.release_surface_texture = _harness_release_surface_texture
-	h.gpu_backend = transmute(^gpu.Gpu_Backend_VTable)harness_vtable
+	h.gpu_backend = harness_vtable
 
 	win.window_update_pixel_size(&h.window)
 	screen_w := f32(h.window.pixel_w)
@@ -326,13 +332,11 @@ main :: proc() {
 	defer chrome_dl.ui_draw_list_destroy(&h.draw_list)
 
 	// Initialize Chrome Renderer with Dual 3-Strategy GPU Engine
-	core_backend := transmute(^contract.Gpu_Backend_VTable)h.gpu_backend
 	core_device := contract.Gpu_Device(h.device)
 	core_queue := contract.Gpu_Queue(h.queue)
 	core_format := contract.Gpu_Format(format)
 	h.chrome_enabled = chrome.chrome_renderer_init(
 		&h.chrome_renderer,
-		core_backend,
 		core_device,
 		core_queue,
 		u32(screen_w),
@@ -364,6 +368,14 @@ main :: proc() {
 
 	pinned_mode := "Adaptive Auto"
 	_setup_terminal_content(h, pinned_mode)
+
+	for _ in 0..<15 {
+		event: sdl3.Event
+		for sdl3.PollEvent(&event) {}
+	}
+	if h.window.handle != nil {
+		sdl3.RaiseWindow(h.window.handle)
+	}
 
 	bench_cli := false
 	for arg in os.args {

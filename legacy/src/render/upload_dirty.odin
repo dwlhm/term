@@ -137,6 +137,7 @@ dirty_upload_rebase :: proc(
 			emoji_inst_ptr, emoji_atlas_ptr, store,
 			direct_color = dc,
 			background_opacity = r.background_opacity,
+			mode = .Partial_Load,
 		)
 		if !emit_bg {
 			d.mirror[idx] = instance.Instance_Data{}
@@ -211,8 +212,12 @@ dirty_upload_frame :: proc(
 		m := 0
 		for s in 0..<nspans {
 			sp := dr.spans[s]
-			cs := int(sp.col_start) - 1
-			ce := int(sp.col_end) + 1
+			cs := int(sp.col_start)
+			ce := int(sp.col_end)
+			if !disable_compiler_widen {
+				cs -= 1
+				ce += 1
+			}
 			if cs < 0 {
 				cs = 0
 			}
@@ -326,6 +331,7 @@ _dirty_expand_row :: proc(
 			emoji_inst_ptr, emoji_atlas_ptr, store,
 			direct_color = dc,
 			background_opacity = r.background_opacity,
+			mode = .Partial_Load,
 		)
 		if !emit_bg {
 			d.mirror[idx] = instance.Instance_Data{}

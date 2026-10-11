@@ -88,6 +88,7 @@ _pane_gpu_trace_backend: gpu.Gpu_Backend_VTable = gpu.Gpu_Backend_VTable{
 	render_set_pipeline = _pane_gpu_trace_render_set_pipeline,
 	render_set_bind_group = _pane_gpu_trace_render_set_bind_group,
 	render_set_vertex_buffer = _pane_gpu_trace_render_set_vertex_buffer,
+	render_set_scissor_rect = _pane_gpu_trace_render_set_scissor_rect,
 	render_draw = _pane_gpu_trace_render_draw,
 	release_surface_texture = _pane_gpu_trace_release_surface_texture,
 	}
@@ -151,6 +152,8 @@ _pane_gpu_trace_submit :: proc(queue: gpu.Gpu_Queue, command_buffer: rawptr) -> 
 _pane_gpu_trace_render_set_pipeline :: proc(pass: gpu.Gpu_RenderPassEncoder, pipeline: gpu.Gpu_RenderPipeline) {}
 _pane_gpu_trace_render_set_bind_group :: proc(pass: gpu.Gpu_RenderPassEncoder, index: u32, group: gpu.Gpu_BindGroup) {}
 _pane_gpu_trace_render_set_vertex_buffer :: proc(pass: gpu.Gpu_RenderPassEncoder, slot: u32, buffer: gpu.Gpu_Buffer, offset: u64) {}
+_pane_gpu_trace_render_set_scissor_rect :: proc(pass: gpu.Gpu_RenderPassEncoder, x, y, width, height: u32) {}
+
 _pane_gpu_trace_render_draw :: proc(pass: gpu.Gpu_RenderPassEncoder, vertex_count: u32, instance_count: u32) {}
 
 _pane_gpu_trace_release_surface_texture :: proc(texture: gpu.Gpu_Texture, view: gpu.Gpu_TextureView) {
