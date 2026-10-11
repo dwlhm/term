@@ -1,9 +1,10 @@
 package splits
 
 // Automated Unit Tests for Binary Split Tree Declarative Geometry Engine.
-// Verifies leaf creation, splitting, ratio clamping [0.05 .. 0.95],
+// Verifies leaf creation, splitting, ratio clamping [0.1 .. 0.9],
 // spatial layout calculations, deep depth-16 tree destruction, and zero memory leaks.
 
+import "core:math"
 import "core:mem"
 import "core:testing"
 import "../draw_list"
@@ -53,28 +54,28 @@ test_splits_ratio_clamping :: proc(t: ^testing.T) {
 	defer mem.tracking_allocator_destroy(&track)
 	alloc := mem.tracking_allocator(&track)
 
-	// Underflow: ratio < 0.05 clamps to 0.05
+	// Underflow: ratio < 0.1 clamps to 0.1
 	n1 := split_node_create_leaf(1, alloc)
 	split_node_split(n1, .Horizontal, 0.0001, 2, alloc)
-	testing.expect_value(t, n1.ratio, f32(0.05))
+	testing.expect_value(t, n1.ratio, f32(0.1))
 	split_tree_destroy(n1, alloc)
 
-	// Negative ratio clamps to 0.05
+	// Negative ratio clamps to 0.1
 	n2 := split_node_create_leaf(1, alloc)
 	split_node_split(n2, .Horizontal, -1.0, 2, alloc)
-	testing.expect_value(t, n2.ratio, f32(0.05))
+	testing.expect_value(t, n2.ratio, f32(0.1))
 	split_tree_destroy(n2, alloc)
 
-	// Overflow: ratio > 0.95 clamps to 0.95
+	// Overflow: ratio > 0.9 clamps to 0.9
 	n3 := split_node_create_leaf(1, alloc)
-	split_node_split(n3, .Vertical, 0.9999, 2, alloc)
-	testing.expect_value(t, n3.ratio, f32(0.95))
+	split_node_split(n3, .Vertical, 0.99, 2, alloc)
+	testing.expect_value(t, n3.ratio, f32(0.9))
 	split_tree_destroy(n3, alloc)
 
-	// Large ratio clamps to 0.95
+	// Large ratio clamps to 0.9
 	n4 := split_node_create_leaf(1, alloc)
 	split_node_split(n4, .Vertical, 5.0, 2, alloc)
-	testing.expect_value(t, n4.ratio, f32(0.95))
+	testing.expect_value(t, n4.ratio, f32(0.9))
 	split_tree_destroy(n4, alloc)
 
 	// Normal valid ratio preserved
@@ -83,7 +84,48 @@ test_splits_ratio_clamping :: proc(t: ^testing.T) {
 	testing.expect_value(t, n5.ratio, f32(0.70))
 	split_tree_destroy(n5, alloc)
 
+	// Non-finite ratios map to 0.5
+	n_nan := split_node_create_leaf(1, alloc)
+	split_node_split(n_nan, .Horizontal, math.nan_f32(), 2, alloc)
+	testing.expect_value(t, n_nan.ratio, f32(0.5))
+	split_tree_destroy(n_nan, alloc)
+
+	n_pinf := split_node_create_leaf(1, alloc)
+	split_node_split(n_pinf, .Horizontal, math.inf_f32(1), 2, alloc)
+	testing.expect_value(t, n_pinf.ratio, f32(0.5))
+	split_tree_destroy(n_pinf, alloc)
+
+	n_ninf := split_node_create_leaf(1, alloc)
+	split_node_split(n_ninf, .Horizontal, math.inf_f32(-1), 2, alloc)
+	testing.expect_value(t, n_ninf.ratio, f32(0.5))
+	split_tree_destroy(n_ninf, alloc)
+
 	testing.expect_value(t, track.current_memory_allocated, 0)
+}
+
+@test
+test_splits_effective_ratio :: proc(t: ^testing.T) {
+	node := split_node_create_leaf(1)
+	defer split_tree_destroy(node)
+
+	// Direct-write 0.01 -> clamps to 0.05
+	node.ratio = 0.01
+	testing.expect_value(t, split_effective_ratio(node), f32(0.05))
+
+	// Direct-write 0.99 -> clamps to 0.95
+	node.ratio = 0.99
+	testing.expect_value(t, split_effective_ratio(node), f32(0.95))
+
+	// Direct-write NaN -> 0.5
+	node.ratio = math.nan_f32()
+	testing.expect_value(t, split_effective_ratio(node), f32(0.5))
+
+	// Direct-write 0.3 -> preserves 0.3
+	node.ratio = 0.3
+	testing.expect_value(t, split_effective_ratio(node), f32(0.3))
+
+	// Nil node returns 0.5
+	testing.expect_value(t, split_effective_ratio(nil), f32(0.5))
 }
 
 @test

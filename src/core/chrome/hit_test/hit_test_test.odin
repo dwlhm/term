@@ -4,6 +4,7 @@ package hit_test
 // Verifies point-in-rect edge cases, tab header vs close button classification,
 // split divider +/-4.0px tolerance, leaf pane resolution, and extreme out-of-bounds coordinates.
 
+import "core:math"
 import "core:testing"
 import "../draw_list"
 import "../splits"
@@ -192,4 +193,111 @@ test_extreme_conditions_and_boundaries :: proc(t: ^testing.T) {
 	// 5. Nil arguments
 	res_nil := chrome_hit_test(nil, nil, {500.0, 400.0})
 	testing.expect_value(t, res_nil.kind, Hit_Kind.None)
+}
+
+@test
+test_hit_test_non_finite_points :: proc(t: ^testing.T) {
+	root := splits.split_node_create_leaf(1)
+	defer splits.split_tree_destroy(root)
+	splits.split_node_split(root, .Horizontal, 0.5, 2)
+	splits.split_tree_layout(root, {0.0, 0.0, 1000.0, 800.0})
+
+	m: tabs.Chrome_Tabs_Model
+	tabs.tabs_model_init(&m, {0.0, 0.0, 1000.0, 32.0})
+	defer tabs.tabs_model_destroy(&m)
+
+	tabs.tabs_add(&m, 1, "zsh")
+	tabs.tabs_add(&m, 2, "nvim")
+	tabs.tabs_add(&m, 3, "make")
+
+	dl: draw_list.Ui_Draw_List
+	draw_list.ui_draw_list_init(&dl)
+	defer draw_list.ui_draw_list_destroy(&dl)
+
+	// Layout tabs to populate physical rects
+	tabs.tabs_emit_draw_list(&m, &dl)
+
+	nan := math.nan_f32()
+	pos_inf := math.inf_f32(1)
+	neg_inf := math.inf_f32(-1)
+
+	points := [?][2]f32{
+		{nan, 400.0},
+		{500.0, nan},
+		{nan, nan},
+		{pos_inf, 400.0},
+		{neg_inf, 400.0},
+		{500.0, pos_inf},
+		{500.0, neg_inf},
+		{pos_inf, pos_inf},
+	}
+	for pt in points {
+		res := chrome_hit_test(&m, root, pt)
+		testing.expectf(t, res.kind == .None, "point %v: expected .None, got %v", pt, res.kind)
+	}
+
+	// Control: the same setup is live, a finite close-button point still hits
+	close_pt := [2]f32{
+		m.tabs[0].close_rect[0] + m.tabs[0].close_rect[2] * 0.5,
+		m.tabs[0].close_rect[1] + m.tabs[0].close_rect[3] * 0.5,
+	}
+	res_close := chrome_hit_test(&m, root, close_pt)
+	testing.expect_value(t, res_close.kind, Hit_Kind.Tab_Close)
+	testing.expect_value(t, res_close.index, 0)
+}
+
+@test
+test_hit_test_non_finite_layout :: proc(t: ^testing.T) {
+	root := splits.split_node_create_leaf(1)
+	defer splits.split_tree_destroy(root)
+	left, right := splits.split_node_split(root, .Horizontal, 0.5, 2)
+
+	// Direct field write bypasses split_node_split clamping
+	root.ratio = math.nan_f32()
+	splits.split_tree_layout(root, {0.0, 0.0, 1000.0, 800.0})
+
+	res_div := chrome_hit_test(nil, root, {500.0, 400.0})
+	testing.expect_value(t, res_div.kind, Hit_Kind.Split_Divider)
+
+	res_left := chrome_hit_test(nil, root, {250.0, 400.0})
+	testing.expect_value(t, res_left.kind, Hit_Kind.Pane)
+	testing.expect_value(t, res_left.pane_id, left.pane_id)
+
+	res_right := chrome_hit_test(nil, root, {750.0, 400.0})
+	testing.expect_value(t, res_right.kind, Hit_Kind.Pane)
+	testing.expect_value(t, res_right.pane_id, right.pane_id)
+}
+
+@test
+test_hit_test_divider_matches_emitted_divider :: proc(t: ^testing.T) {
+	test_ratios := [?]f32{0.01, 0.99}
+	for r in test_ratios {
+		root := splits.split_node_create_leaf(1)
+		splits.split_node_split(root, .Horizontal, 0.5, 2)
+		root.ratio = r
+
+		bounds: [4]f32 = {0.0, 0.0, 1000.0, 800.0}
+		splits.split_tree_layout(root, bounds)
+
+		dl: draw_list.Ui_Draw_List
+		draw_list.ui_draw_list_init(&dl)
+
+		splits.split_tree_emit_dividers(root, &dl)
+		testing.expect(t, len(dl.commands) > 0)
+		divider_rect := dl.commands[0].rect
+		center_x := divider_rect[0] + divider_rect[2] * 0.5
+		center_y: f32 = 400.0
+
+		hit_center := chrome_hit_test(nil, root, {center_x, center_y})
+		testing.expect_value(t, hit_center.kind, Hit_Kind.Split_Divider)
+
+		hit_minus := chrome_hit_test(nil, root, {center_x - 5.0, center_y})
+		testing.expect(t, hit_minus.kind != .Split_Divider)
+
+		hit_plus := chrome_hit_test(nil, root, {center_x + 5.0, center_y})
+		testing.expect(t, hit_plus.kind != .Split_Divider)
+
+		draw_list.ui_draw_list_destroy(&dl)
+		splits.split_tree_destroy(root)
+	}
 }

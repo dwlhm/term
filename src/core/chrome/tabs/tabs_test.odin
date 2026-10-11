@@ -4,8 +4,11 @@ package tabs
 // Verifies tab model lifecycle, active tracking, close button geometry,
 // empty state, overflow clamping, rapid churn, and zero memory leaks.
 
+import "core:fmt"
 import "core:mem"
+import "core:strings"
 import "core:testing"
+import "core:unicode/utf8"
 import "../draw_list"
 
 @test
@@ -219,4 +222,71 @@ test_tabs_preview_fixtures :: proc(t: ^testing.T) {
 
 	draw_list.ui_draw_list_destroy(&dl)
 	testing.expect_value(t, track.current_memory_allocated, 0)
+}
+
+@test
+test_tabs_extreme_title_roundtrip_and_zero_alloc_emit :: proc(t: ^testing.T) {
+	TAB_COUNT :: 128
+	ITERATIONS :: 1_000
+
+	title := preview_tabs_extreme_title()
+	testing.expect_value(t, utf8.rune_count_in_string(title), PREVIEW_TABS_EXTREME_TITLE_RUNES)
+	testing.expect(t, strings.contains(title, "\u200d"))
+	testing.expect(t, strings.contains(title, "\u0301"))
+
+	// Build tab-N titles once, before any measured loop
+	extra_titles := make([]string, TAB_COUNT - 1, context.temp_allocator)
+	for i in 0..<len(extra_titles) {
+		extra_titles[i] = fmt.tprintf("tab-%d", i + 1)
+	}
+
+	m: Chrome_Tabs_Model
+	tabs_model_init(&m, {0.0, 0.0, 1200.0, 36.0})
+	defer tabs_model_destroy(&m)
+
+	tabs_add(&m, 1, title)
+	for s, i in extra_titles {
+		tabs_add(&m, u32(i + 2), s)
+	}
+	testing.expect_value(t, len(m.tabs), TAB_COUNT)
+
+	dl: draw_list.Ui_Draw_List
+	draw_list.ui_draw_list_init(&dl)
+	defer draw_list.ui_draw_list_destroy(&dl)
+
+	// Warmup grows command capacity to steady state
+	tabs_emit_draw_list(&m, &dl)
+	draw_list.ui_draw_list_clear(&dl)
+
+	heap_track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&heap_track, context.allocator)
+	defer mem.tracking_allocator_destroy(&heap_track)
+
+	temp_track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&temp_track, context.temp_allocator)
+	defer mem.tracking_allocator_destroy(&temp_track)
+
+	{
+		context.allocator = mem.tracking_allocator(&heap_track)
+		context.temp_allocator = mem.tracking_allocator(&temp_track)
+
+		for _ in 0..<ITERATIONS {
+			draw_list.ui_draw_list_clear(&dl)
+			tabs_emit_draw_list(&m, &dl)
+		}
+	}
+
+	testing.expect_value(t, heap_track.total_allocation_count, 0)
+	testing.expect_value(t, temp_track.total_allocation_count, 0)
+
+	// First Text_Run belongs to tab 0
+	found := false
+	for cmd in dl.commands {
+		if cmd.kind == .Text_Run {
+			testing.expect(t, cmd.text == title)
+			found = true
+			break
+		}
+	}
+	testing.expect(t, found)
 }

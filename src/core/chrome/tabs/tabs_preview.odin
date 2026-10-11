@@ -28,6 +28,29 @@ preview_tabs_normal :: proc(dl: ^draw_list.Ui_Draw_List, bar_rect: [4]f32) {
 	tabs_emit_draw_list(&m, dl)
 }
 
+// PREVIEW_TABS_EXTREME_TITLE_RUNES is the exact rune length of the extreme preview title.
+PREVIEW_TABS_EXTREME_TITLE_RUNES :: 1024
+
+// preview_tabs_extreme_title builds a title of exactly PREVIEW_TABS_EXTREME_TITLE_RUNES runes by cycling
+// a ZWJ family sequence, stacked combining marks, CJK wide runes, a regional-indicator flag pair, and ASCII.
+// The final repetition is truncated at rune granularity to hit the exact length.
+preview_tabs_extreme_title :: proc(allocator := context.temp_allocator) -> string {
+	sample_runes := [?]rune{
+		0x1F468, 0x200D, 0x1F469, 0x200D, 0x1F467, // ZWJ family
+		'e', 0x0301,                               // e + combining acute
+		'a', 0x0308, 0x0304,                       // a + stacked diaeresis + macron
+		'漢', '字',                                 // CJK wide
+		0x1F1EE, 0x1F1E9,                          // flag pair
+		'a', 'b', 'c',                             // ASCII
+	}
+
+	b := strings.builder_make(allocator)
+	for i in 0..<PREVIEW_TABS_EXTREME_TITLE_RUNES {
+		strings.write_rune(&b, sample_runes[i % len(sample_runes)])
+	}
+	return strings.to_string(b)
+}
+
 // preview_tabs_extreme emits overflowed tabs (default 128) and a 1024-rune long Unicode title.
 preview_tabs_extreme :: proc(dl: ^draw_list.Ui_Draw_List, bar_rect: [4]f32, count: int = 128) {
 	if dl == nil do return
@@ -38,15 +61,7 @@ preview_tabs_extreme :: proc(dl: ^draw_list.Ui_Draw_List, bar_rect: [4]f32, coun
 
 	if count <= 0 do return
 
-	// Construct 1024-rune Unicode title with emojis and accents (16 runes * 64 repetitions = 1024 runes)
-	b := strings.builder_make(context.temp_allocator)
-	sample_runes := []rune{'🚀', '⚡', 'ñ', 'á', 'é', 'í', 'ó', 'ú', '漢', '字', '🔥', '✨', 'ä', 'ö', 'ü', 'ß'}
-	for _ in 0..<64 {
-		for r in sample_runes {
-			strings.write_rune(&b, r)
-		}
-	}
-	long_title := strings.to_string(b)
+	long_title := preview_tabs_extreme_title()
 
 	tabs_add(&m, 1, long_title)
 

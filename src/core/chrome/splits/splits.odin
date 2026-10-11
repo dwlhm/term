@@ -7,6 +7,7 @@ package splits
 // Represents arbitrary recursive multi-pane terminal partitioning.
 
 import "base:runtime"
+import "core:math"
 import "../draw_list"
 
 // Split_Kind classifies binary partition orientation.
@@ -50,12 +51,26 @@ split_node_split :: proc(node: ^Split_Node, kind: Split_Kind, ratio: f32, new_pa
 	right.ratio = 0.5
 
 	node.kind = kind
-	node.ratio = clamp(ratio, 0.05, 0.95)
+	node.ratio = clamp(_finite_ratio_or_half(ratio), 0.1, 0.9)
 	node.pane_id = 0
 	node.left = left
 	node.right = right
 
 	return left, right
+}
+
+// _finite_ratio_or_half maps non-finite ratios (NaN / +-Inf) to 0.5.
+_finite_ratio_or_half :: proc(ratio: f32) -> f32 {
+	if math.is_nan(ratio) || math.is_inf(ratio) do return 0.5
+	return ratio
+}
+
+// split_effective_ratio is the single source of truth for the ratio used by
+// layout, divider emission, and hit-testing: 0.5 for non-finite values,
+// otherwise clamped to [0.05 .. 0.95].
+split_effective_ratio :: proc(node: ^Split_Node) -> f32 {
+	if node == nil do return 0.5
+	return clamp(_finite_ratio_or_half(node.ratio), 0.05, 0.95)
 }
 
 // split_tree_destroy recursively frees all child nodes.
@@ -83,7 +98,7 @@ split_tree_layout :: proc(node: ^Split_Node, target_rect: [4]f32) {
 	y := target_rect[1]
 	w := target_rect[2]
 	h := target_rect[3]
-	ratio := clamp(node.ratio, 0.05, 0.95)
+	ratio := split_effective_ratio(node)
 
 	if node.kind == .Horizontal {
 		split_w := w * ratio
@@ -117,7 +132,7 @@ split_tree_emit_dividers :: proc(
 	y := node.rect[1]
 	w := node.rect[2]
 	h := node.rect[3]
-	ratio := clamp(node.ratio, 0.05, 0.95)
+	ratio := split_effective_ratio(node)
 
 	if node.kind == .Horizontal {
 		split_x := x + w * ratio - divider_thickness * 0.5

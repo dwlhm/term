@@ -11,11 +11,15 @@ import "../draw_list"
 
 // Chrome_Modal holds state and bounds for search dialogs or command palettes.
 Chrome_Modal :: struct {
-	title:       string,
-	query:       string,
-	match_count: int,
-	rect:        [4]f32,
-	visible:     bool,
+	title:          string,
+	query:          string,
+	match_count:    int,
+	rect:           [4]f32,
+	visible:        bool,
+	// match_text_buf is the backing storage for the match-count Text_Run.
+	// The emitted Text_Run string references it and is valid until the next
+	// emit on the same modal, or until the modal is destroyed/moved.
+	match_text_buf: [32]u8,
 }
 
 // modal_emit_draw_list emits the modal dialog hierarchy into dl.
@@ -49,7 +53,7 @@ modal_emit_draw_list :: proc(m: ^Chrome_Modal, dl: ^draw_list.Ui_Draw_List) {
 
 	// Match count indicator
 	if m.match_count > 0 {
-		info := fmt.tprintf("%d matches", m.match_count)
+		info := fmt.bprintf(m.match_text_buf[:], "%d matches", m.match_count)
 		info_rect: [4]f32 = {m.rect[0] + 16.0, m.rect[1] + m.rect[3] - 24.0, m.rect[2] - 32.0, 16.0}
 		draw_list.ui_draw_text(dl, info_rect, info, {0.55, 0.60, 0.65, 1.0})
 	}

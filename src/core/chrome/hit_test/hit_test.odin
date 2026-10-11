@@ -48,8 +48,9 @@ _hit_test_splits :: proc(node: ^splits.Split_Node, pt: [2]f32, divider_tolerance
 	}
 
 	// Check if cursor is on split boundary
+	ratio := splits.split_effective_ratio(node)
 	if node.kind == .Horizontal {
-		split_x := node.rect[0] + node.rect[2] * node.ratio
+		split_x := node.rect[0] + node.rect[2] * ratio
 		if pt.x >= (split_x - divider_tolerance) && pt.x <= (split_x + divider_tolerance) {
 			return Hit_Result{
 				kind = .Split_Divider,
@@ -57,7 +58,7 @@ _hit_test_splits :: proc(node: ^splits.Split_Node, pt: [2]f32, divider_tolerance
 			}
 		}
 	} else if node.kind == .Vertical {
-		split_y := node.rect[1] + node.rect[3] * node.ratio
+		split_y := node.rect[1] + node.rect[3] * ratio
 		if pt.y >= (split_y - divider_tolerance) && pt.y <= (split_y + divider_tolerance) {
 			return Hit_Result{
 				kind = .Split_Divider,

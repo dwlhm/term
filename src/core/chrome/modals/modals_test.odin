@@ -154,3 +154,54 @@ test_modal_previews_and_zero_leaks :: proc(t: ^testing.T) {
 	draw_list.ui_draw_list_destroy(&dl)
 	testing.expect_value(t, track.current_memory_allocated, 0)
 }
+
+@test
+test_modal_emit_zero_alloc :: proc(t: ^testing.T) {
+	dl: draw_list.Ui_Draw_List
+	draw_list.ui_draw_list_init(&dl)
+	defer draw_list.ui_draw_list_destroy(&dl)
+
+	m := Chrome_Modal{
+		title       = "Search",
+		query       = "find_proc",
+		match_count = 1234,
+		rect        = {100.0, 100.0, 500.0, 300.0},
+		visible     = true,
+	}
+
+	// Warm up one emit + ui_draw_list_clear to pre-allocate draw list storage
+	modal_emit_draw_list(&m, &dl)
+	draw_list.ui_draw_list_clear(&dl)
+
+	heap_track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&heap_track, context.allocator)
+	defer mem.tracking_allocator_destroy(&heap_track)
+
+	temp_track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&temp_track, context.temp_allocator)
+	defer mem.tracking_allocator_destroy(&temp_track)
+
+	{
+		context.allocator = mem.tracking_allocator(&heap_track)
+		context.temp_allocator = mem.tracking_allocator(&temp_track)
+
+		for _ in 0..<1000 {
+			draw_list.ui_draw_list_clear(&dl)
+			modal_emit_draw_list(&m, &dl)
+		}
+	}
+
+	testing.expect_value(t, heap_track.total_allocation_count, 0)
+	testing.expect_value(t, temp_track.total_allocation_count, 0)
+
+	// Assert Text_Run text == "1234 matches"
+	found := false
+	for cmd in dl.commands {
+		if cmd.kind == .Text_Run && cmd.text == "1234 matches" {
+			found = true
+			break
+		}
+	}
+	testing.expect(t, found)
+	testing.expect_value(t, dl.commands[7].text, "1234 matches")
+}
