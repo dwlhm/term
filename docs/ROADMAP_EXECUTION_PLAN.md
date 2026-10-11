@@ -442,7 +442,7 @@ The rewrite is structured into five sequential, milestone-driven phases. Each ph
 +---------------------------------------------------------------------------------------------------+
 | PHASE 2: core_composer (Layer Compositor Engine & Standalone Harness)                             |
 | Deliverables: Backing surface allocator, zero-redraw multi-pane blit pipeline, scissor clips.     |
-| Standalone App: bin/harness_composer (4-split interactive test, 0 redraw on idle panes).          |
+| Standalone App: bin/harness_render_composer (alias: harness_composer) (4-split test, 0 redraw).   |
 +---------------------------------------------------------------------------------------------------+
 | PHASE 3: core_chrome & core_render/chrome (UI Shapes & Chrome Renderer)                           |
 | Deliverables: Binary Split Tree, Tabs model, Hit-test, Ui_Draw_List, SDF vector & surface cache. |
@@ -507,12 +507,12 @@ Build the OS-Style Layer Compositor engine that manages off-screen backing textu
 3. **Compositing Quad Blit Pipeline (`src/core/composer/blit/`):**
    - Create specialized textured blit shader supporting scissor clipping, corner rounding, and opacity blending.
    - Assemble composite frames: Clear background $\to$ Blit active/cached pane surfaces $\to$ Blit chrome surface.
-4. **Construct Standalone Harness App (`src/cmd/harness_composer/`):**
-   - Build runnable native GUI app (`bin/harness_composer`) displaying a 4-pane split layout.
+4. **Construct Standalone Harness App (`src/cmd/harness_render_composer/`, alias `harness_composer`):**
+   - Build runnable native GUI app (`bin/harness_render_composer`, alias `bin/harness_composer`) displaying a 4-pane split layout.
    - Allow user to trigger synthetic damage in one pane while verifying that the other 3 panes cost zero GPU rasterization passes.
 
 #### Exit Criteria (Phase 2 Gate)
-- `bin/harness_composer` successfully blits a 4-split layout with scissor clipping.
+- `bin/harness_render_composer` (alias `bin/harness_composer`) successfully blits a 4-split layout with scissor clipping.
 - Performance telemetry verifies that updating 1 pane in a 4-split layout takes $\le 25\%$ of the render time required to redraw all 4 panes.
 - Idle panes retain pixel-perfect visual fidelity across frames.
 
@@ -604,7 +604,7 @@ In accordance with ADR-004, architectural components must never be verified excl
 | Harness Application | Target Binary | Location | Primary Verification Responsibility |
 |---|---|---|---|
 | **Renderer Harness** | `bin/harness_renderer` | `src/cmd/harness_renderer/` | Visual glyph fidelity, UV shader accuracy, 3-strategy switching, font atlas performance. |
-| **Composer Harness** | `bin/harness_composer` | `src/cmd/harness_composer/` | Multi-pane layer compositing, zero-redraw idle pane caching, quad blits, scissor clipping. |
+| **Composer Harness** | `bin/harness_render_composer` (alias: `harness_composer`) | `src/cmd/harness_render_composer/` | Multi-pane layer compositing, zero-redraw idle pane caching, quad blits, scissor clipping. |
 | **Chrome Harness** | `bin/harness_chrome` | `src/cmd/harness_chrome/` | Tab management, split divider dragging, hit-testing, `Ui_Draw_List` generation, SDF vector rendering. |
 | **Features Harness** | `bin/harness_features` | `src/cmd/harness_features/` | PTY worker drain, interactive shell execution, full keyboard/mouse routing. |
 
