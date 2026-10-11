@@ -43,7 +43,6 @@ Fullscreen_Params :: struct {
 
 // Fullscreen_Renderer holds the fullscreen direct pass GPU state.
 Fullscreen_Renderer :: struct {
-	backend:       ^contract.Gpu_Backend_VTable,
 	device:        contract.Gpu_Device,
 	queue:         contract.Gpu_Queue,
 	rows:          u32,
@@ -71,7 +70,6 @@ Fullscreen_Renderer :: struct {
 
 fullscreen_init :: proc(
 	r: ^Fullscreen_Renderer,
-	backend: ^contract.Gpu_Backend_VTable,
 	device: contract.Gpu_Device,
 	queue: contract.Gpu_Queue,
 	rows: u32,
@@ -82,8 +80,7 @@ fullscreen_init :: proc(
 	format: contract.Gpu_Format,
 	allocator: runtime.Allocator = context.allocator,
 ) -> bool {
-	if r == nil || backend == nil || rawptr(device) == nil || rawptr(queue) == nil do return false
-	r.backend = backend
+	if r == nil || rawptr(device) == nil || rawptr(queue) == nil do return false
 	r.device = device
 	r.queue = queue
 	r.rows = rows
@@ -97,13 +94,13 @@ fullscreen_init :: proc(
 
 	// Uniform parameters buffer (64 bytes)
 	p_usage := contract.Gpu_Buffer_Usage.Uniform | contract.Gpu_Buffer_Usage.Copy_Dst
-	r.params_buffer = backend.create_buffer(device, FULLSCREEN_PARAMS_SIZE, p_usage, false)
+	r.params_buffer = contract.create_buffer(device, FULLSCREEN_PARAMS_SIZE, p_usage, false)
 	if rawptr(r.params_buffer) == nil do return false
 
 	// Cell storage buffer (u64 per cell)
 	total_cells := u64(max(rows * cols, 1))
 	c_usage := contract.Gpu_Buffer_Usage.Storage | contract.Gpu_Buffer_Usage.Copy_Dst
-	r.cell_buffer = backend.create_buffer(device, total_cells * FULLSCREEN_CELL_BYTES, c_usage, false)
+	r.cell_buffer = contract.create_buffer(device, total_cells * FULLSCREEN_CELL_BYTES, c_usage, false)
 	if rawptr(r.cell_buffer) == nil {
 		fullscreen_destroy(r)
 		return false
@@ -111,48 +108,48 @@ fullscreen_init :: proc(
 
 	// LUT storage buffer (1025 u32 words)
 	l_usage := contract.Gpu_Buffer_Usage.Storage | contract.Gpu_Buffer_Usage.Copy_Dst
-	r.lut_buffer = backend.create_buffer(device, FULLSCREEN_LUT_BYTES, l_usage, false)
+	r.lut_buffer = contract.create_buffer(device, FULLSCREEN_LUT_BYTES, l_usage, false)
 	if rawptr(r.lut_buffer) == nil {
 		fullscreen_destroy(r)
 		return false
 	}
 
-	r.sampler = backend.create_sampler(device)
+	r.sampler = contract.create_sampler(device)
 	r.available = true
 	return true
 }
 
 fullscreen_destroy :: proc(r: ^Fullscreen_Renderer) {
-	if r == nil || r.backend == nil do return
+	if r == nil do return
 
-	if r.backend.destroy_buffer != nil {
+	if contract.destroy_buffer != nil {
 		if rawptr(r.params_buffer) != nil {
-			r.backend.destroy_buffer(r.params_buffer)
+			contract.destroy_buffer(r.params_buffer)
 			r.params_buffer = contract.Gpu_Buffer(nil)
 		}
 		if rawptr(r.cell_buffer) != nil {
-			r.backend.destroy_buffer(r.cell_buffer)
+			contract.destroy_buffer(r.cell_buffer)
 			r.cell_buffer = contract.Gpu_Buffer(nil)
 		}
 		if rawptr(r.lut_buffer) != nil {
-			r.backend.destroy_buffer(r.lut_buffer)
+			contract.destroy_buffer(r.lut_buffer)
 			r.lut_buffer = contract.Gpu_Buffer(nil)
 		}
 	}
-	if r.backend.destroy_sampler != nil && rawptr(r.sampler) != nil {
-		r.backend.destroy_sampler(r.sampler)
+	if contract.destroy_sampler != nil && rawptr(r.sampler) != nil {
+		contract.destroy_sampler(r.sampler)
 		r.sampler = contract.Gpu_Sampler(nil)
 	}
-	if r.backend.destroy_bind_group != nil && rawptr(r.bind_group) != nil {
-		r.backend.destroy_bind_group(r.bind_group)
+	if contract.destroy_bind_group != nil && rawptr(r.bind_group) != nil {
+		contract.destroy_bind_group(r.bind_group)
 		r.bind_group = contract.Gpu_BindGroup(nil)
 	}
-	if r.backend.destroy_bind_group_layout != nil && rawptr(r.layout) != nil {
-		r.backend.destroy_bind_group_layout(r.layout)
+	if contract.destroy_bind_group_layout != nil && rawptr(r.layout) != nil {
+		contract.destroy_bind_group_layout(r.layout)
 		r.layout = contract.Gpu_BindGroupLayout(nil)
 	}
-	if r.backend.destroy_render_pipeline != nil && rawptr(r.pipeline) != nil {
-		r.backend.destroy_render_pipeline(r.pipeline)
+	if contract.destroy_render_pipeline != nil && rawptr(r.pipeline) != nil {
+		contract.destroy_render_pipeline(r.pipeline)
 		r.pipeline = contract.Gpu_RenderPipeline(nil)
 	}
 	r.available = false
@@ -163,8 +160,8 @@ fullscreen_draw :: proc(r: ^Fullscreen_Renderer, pass: contract.Gpu_RenderPassEn
 	if r == nil || !r.available || rawptr(pass) == nil do return
 	if rawptr(r.pipeline) == nil || rawptr(r.bind_group) == nil do return
 
-	r.backend.render_set_pipeline(pass, r.pipeline)
-	r.backend.render_set_bind_group(pass, 0, r.bind_group)
+	contract.render_set_pipeline(pass, r.pipeline)
+	contract.render_set_bind_group(pass, 0, r.bind_group)
 	// 3 vertices form a single oversized triangle covering [-1, 1] NDC
-	r.backend.render_draw(pass, 3, 1)
+	contract.render_draw(pass, 3, 1)
 }

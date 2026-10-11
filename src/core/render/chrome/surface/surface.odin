@@ -21,12 +21,11 @@ Chrome_Surface :: struct {
 // chrome_surface_init allocates an off-screen texture and view as a render target.
 chrome_surface_init :: proc(
 	s: ^Chrome_Surface,
-	backend: ^contract.Gpu_Backend_VTable,
 	device: contract.Gpu_Device,
 	width, height: u32,
 	format: contract.Gpu_Format,
 ) -> bool {
-	if s == nil || backend == nil || rawptr(device) == nil do return false
+	if s == nil || rawptr(device) == nil do return false
 
 	s.width = max(width, 1)
 	s.height = max(height, 1)
@@ -37,12 +36,12 @@ chrome_surface_init :: proc(
 	         contract.Gpu_Texture_Usage.Copy_Src |
 	         contract.Gpu_Texture_Usage.Copy_Dst
 
-	s.texture = backend.create_texture(device, s.width, s.height, format, usage)
+	s.texture = contract.create_texture(device, s.width, s.height, format, usage)
 	if rawptr(s.texture) == nil do return false
 
-	s.view = backend.create_texture_view(s.texture)
+	s.view = contract.create_texture_view(s.texture)
 	if rawptr(s.view) == nil {
-		backend.destroy_texture(s.texture)
+		contract.destroy_texture(s.texture)
 		s.texture = contract.Gpu_Texture(nil)
 		return false
 	}
@@ -51,14 +50,14 @@ chrome_surface_init :: proc(
 }
 
 // chrome_surface_destroy releases GPU resources.
-chrome_surface_destroy :: proc(s: ^Chrome_Surface, backend: ^contract.Gpu_Backend_VTable) {
-	if s == nil || backend == nil do return
+chrome_surface_destroy :: proc(s: ^Chrome_Surface) {
+	if s == nil do return
 	if rawptr(s.view) != nil {
-		backend.destroy_texture_view(s.view)
+		contract.destroy_texture_view(s.view)
 		s.view = contract.Gpu_TextureView(nil)
 	}
 	if rawptr(s.texture) != nil {
-		backend.destroy_texture(s.texture)
+		contract.destroy_texture(s.texture)
 		s.texture = contract.Gpu_Texture(nil)
 	}
 	s.width = 0
@@ -69,16 +68,15 @@ chrome_surface_destroy :: proc(s: ^Chrome_Surface, backend: ^contract.Gpu_Backen
 // chrome_surface_resize reallocates the texture if dimensions changed.
 chrome_surface_resize :: proc(
 	s: ^Chrome_Surface,
-	backend: ^contract.Gpu_Backend_VTable,
 	device: contract.Gpu_Device,
 	width, height: u32,
 	format: contract.Gpu_Format,
 ) -> bool {
-	if s == nil || backend == nil do return false
+	if s == nil do return false
 	if s.width == width && s.height == height && rawptr(s.texture) != nil do return true
 
-	chrome_surface_destroy(s, backend)
-	return chrome_surface_init(s, backend, device, width, height, format)
+	chrome_surface_destroy(s)
+	return chrome_surface_init(s, device, width, height, format)
 }
 
 // chrome_surface_mark_dirty flags that the cached surface requires redraw.

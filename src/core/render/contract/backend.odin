@@ -96,6 +96,13 @@ Gpu_Texture_Usage :: enum u32 {
 	Render_Attach    = 1 << 4,
 }
 
+// Gpu_Present_Mode represents swapchain presentation synchronization behavior.
+Gpu_Present_Mode :: enum {
+	Fifo,
+	Immediate,
+	Mailbox,
+}
+
 // Gpu_Load_Op specifies how render target pixels are treated at pass begin.
 Gpu_Load_Op :: enum int {
 	Undefined,
@@ -127,7 +134,6 @@ Gpu_Blend_Mode :: enum int {
 
 // Gpu_Shader_Language defines the target shader language.
 Gpu_Shader_Language :: enum {
-	MSL,
 	WGSL,
 }
 
@@ -248,123 +254,130 @@ Instance_Record :: struct {
 #assert(size_of(Instance_Record) == 64)
 
 // ============================================================================
-// VTable & Completion Callback Contract
+// Direct Hardware Driver Interface (Zero-VTable Architecture)
+// Concrete drivers (Metal, WGPU) bind these procedures in core_platform/gpu/.
 // ============================================================================
 
 // Asynchronous GPU timing callback (nanoseconds execution duration).
 Gpu_Frame_Complete_Proc :: proc(gpu_ns: u64, valid: bool)
 
-// Gpu_Backend_VTable: Pure hardware interface.
-// Concrete drivers (Metal, WGPU) implement this table in core_platform/gpu/.
-Gpu_Backend_VTable :: struct {
-	// Lifecycle
-	create_instance:          proc() -> rawptr,
-	destroy_instance:         proc(instance: rawptr),
-	request_device:           proc(instance: rawptr, surface: rawptr) -> (device: Gpu_Device, queue: Gpu_Queue),
-	destroy_device:           proc(device: Gpu_Device),
-	poll_device:              proc(device: Gpu_Device, wait: bool) -> bool,
+// Lifecycle
+create_instance:          proc() -> rawptr
+destroy_instance:         proc(instance: rawptr)
+request_device:           proc(instance: rawptr, surface: rawptr) -> (device: Gpu_Device, queue: Gpu_Queue)
+destroy_device:           proc(device: Gpu_Device)
+poll_device:              proc(device: Gpu_Device, wait: bool) -> bool
 
-	// Surface & Presentation
-	configure_surface:        proc(surface: rawptr, device: Gpu_Device, format: Gpu_Format, width, height: u32),
-	get_surface_texture:      proc(surface: rawptr) -> (texture: Gpu_Texture, view: Gpu_TextureView, format: Gpu_Format),
-	present_surface:          proc(surface: rawptr) -> bool,
-	get_preferred_format:     proc(surface: rawptr, device: Gpu_Device) -> Gpu_Format,
+// Surface & Presentation
+configure_surface:        proc(surface: rawptr, device: Gpu_Device, format: Gpu_Format, width, height: u32)
+get_surface_texture:      proc(surface: rawptr) -> (texture: Gpu_Texture, view: Gpu_TextureView, format: Gpu_Format)
+present_surface:          proc(surface: rawptr) -> bool
+get_preferred_format:     proc(surface: rawptr, device: Gpu_Device) -> Gpu_Format
+set_present_mode:         proc(surface: rawptr, mode: Gpu_Present_Mode)
 
-	// Buffer Allocation & Transfers
-	create_buffer:            proc(device: Gpu_Device, size: u64, usage: Gpu_Buffer_Usage, mapped_at_creation: bool) -> Gpu_Buffer,
-	destroy_buffer:           proc(buffer: Gpu_Buffer),
-	write_buffer:             proc(queue: Gpu_Queue, buffer: Gpu_Buffer, offset: u64, data: rawptr, size: u64),
-	get_buffer_mapped_range:  proc(buffer: Gpu_Buffer, offset: u64, size: u64) -> []u8,
-	unmap_buffer:             proc(buffer: Gpu_Buffer),
+// Buffer Allocation & Transfers
+create_buffer:            proc(device: Gpu_Device, size: u64, usage: Gpu_Buffer_Usage, mapped_at_creation: bool) -> Gpu_Buffer
+destroy_buffer:           proc(buffer: Gpu_Buffer)
+write_buffer:             proc(queue: Gpu_Queue, buffer: Gpu_Buffer, offset: u64, data: rawptr, size: u64)
+get_buffer_mapped_range:  proc(buffer: Gpu_Buffer, offset: u64, size: u64) -> []u8
+unmap_buffer:             proc(buffer: Gpu_Buffer)
 
-	// Textures & Views
-	create_texture:           proc(device: Gpu_Device, width, height: u32, format: Gpu_Format, usage: Gpu_Texture_Usage) -> Gpu_Texture,
-	destroy_texture:          proc(texture: Gpu_Texture),
-	create_texture_view:      proc(texture: Gpu_Texture) -> Gpu_TextureView,
-	destroy_texture_view:     proc(view: Gpu_TextureView),
-	write_texture:            proc(queue: Gpu_Queue, texture: Gpu_Texture, data: []u8, width, height: u32),
+// Textures & Views
+create_texture:           proc(device: Gpu_Device, width, height: u32, format: Gpu_Format, usage: Gpu_Texture_Usage) -> Gpu_Texture
+destroy_texture:          proc(texture: Gpu_Texture)
+create_texture_view:      proc(texture: Gpu_Texture) -> Gpu_TextureView
+destroy_texture_view:     proc(view: Gpu_TextureView)
+write_texture:            proc(queue: Gpu_Queue, texture: Gpu_Texture, data: []u8, width, height: u32)
 
-	// Shaders
-	shader_language:          Gpu_Shader_Language,
-	create_shader_module:     proc(device: Gpu_Device, source: string) -> Gpu_ShaderModule,
-	destroy_shader_module:    proc(module: Gpu_ShaderModule),
+// Shaders
+shader_language:          Gpu_Shader_Language
+create_shader_module:     proc(device: Gpu_Device, source: string) -> Gpu_ShaderModule
+destroy_shader_module:    proc(module: Gpu_ShaderModule)
 
-	// Render Pipelines
-	create_render_pipeline:   proc(
-		device: Gpu_Device,
-		vertex_shader: Gpu_ShaderModule,
-		vertex_entry: string,
-		fragment_shader: Gpu_ShaderModule,
-		fragment_entry: string,
-		vertex_layouts: []Gpu_Vertex_Layout,
-		format: Gpu_Format,
-		blend: Gpu_Blend_Mode,
-		topology: Gpu_Primitive_Topology,
-	) -> Gpu_RenderPipeline,
-	create_render_pipeline_with_depth: proc(
-		device: Gpu_Device,
-		vertex_shader: Gpu_ShaderModule,
-		vertex_entry: string,
-		fragment_shader: Gpu_ShaderModule,
-		fragment_entry: string,
-		vertex_layouts: []Gpu_Vertex_Layout,
-		format: Gpu_Format,
-		depth_format: Gpu_Format,
-		blend: Gpu_Blend_Mode,
-		topology: Gpu_Primitive_Topology,
-	) -> Gpu_RenderPipeline,
-	destroy_render_pipeline:  proc(pipeline: Gpu_RenderPipeline),
+// Render Pipelines
+create_render_pipeline:   proc(
+	device: Gpu_Device,
+	vertex_shader: Gpu_ShaderModule,
+	vertex_entry: string,
+	fragment_shader: Gpu_ShaderModule,
+	fragment_entry: string,
+	vertex_layouts: []Gpu_Vertex_Layout,
+	format: Gpu_Format,
+	blend: Gpu_Blend_Mode,
+	topology: Gpu_Primitive_Topology,
+) -> Gpu_RenderPipeline
+create_render_pipeline_with_depth: proc(
+	device: Gpu_Device,
+	vertex_shader: Gpu_ShaderModule,
+	vertex_entry: string,
+	fragment_shader: Gpu_ShaderModule,
+	fragment_entry: string,
+	vertex_layouts: []Gpu_Vertex_Layout,
+	format: Gpu_Format,
+	depth_format: Gpu_Format,
+	blend: Gpu_Blend_Mode,
+	topology: Gpu_Primitive_Topology,
+) -> Gpu_RenderPipeline
+destroy_render_pipeline:  proc(pipeline: Gpu_RenderPipeline)
 
-	// Resource Binding
-	create_bind_group_layout: proc(device: Gpu_Device, entries: []Gpu_Bind_Layout_Entry) -> Gpu_BindGroupLayout,
-	destroy_bind_group_layout: proc(layout: Gpu_BindGroupLayout),
-	create_bind_group:        proc(device: Gpu_Device, layout: Gpu_BindGroupLayout, entries: []Gpu_Bind_Entry) -> Gpu_BindGroup,
-	destroy_bind_group:       proc(group: Gpu_BindGroup),
+// Resource Binding
+create_bind_group_layout: proc(device: Gpu_Device, entries: []Gpu_Bind_Layout_Entry) -> Gpu_BindGroupLayout
+destroy_bind_group_layout: proc(layout: Gpu_BindGroupLayout)
+create_bind_group:        proc(device: Gpu_Device, layout: Gpu_BindGroupLayout, entries: []Gpu_Bind_Entry) -> Gpu_BindGroup
+destroy_bind_group:       proc(group: Gpu_BindGroup)
 
-	// Samplers
-	create_sampler:           proc(device: Gpu_Device) -> Gpu_Sampler,
-	destroy_sampler:          proc(sampler: Gpu_Sampler),
+// Samplers
+create_sampler:           proc(device: Gpu_Device) -> Gpu_Sampler
+destroy_sampler:          proc(sampler: Gpu_Sampler)
 
-	// Command Encoding & Submission
-	create_command_encoder:   proc(device: Gpu_Device) -> Gpu_CommandEncoder,
-	release_command_encoder:  proc(encoder: Gpu_CommandEncoder),
-	begin_render_pass:        proc(encoder: Gpu_CommandEncoder, color_view: Gpu_TextureView, clear_color: [4]f64, load_op: Gpu_Load_Op) -> Gpu_RenderPassEncoder,
-	begin_render_pass_with_depth: proc(
-		encoder: Gpu_CommandEncoder,
-		color_view: Gpu_TextureView,
-		clear_color: [4]f64,
-		load_op: Gpu_Load_Op,
-		depth_view: Gpu_TextureView,
-		depth_clear: f32,
-		depth_load_op: Gpu_Load_Op,
-	) -> Gpu_RenderPassEncoder,
-	end_render_pass:          proc(pass: Gpu_RenderPassEncoder),
-	finish_command_buffer:    proc(encoder: Gpu_CommandEncoder) -> rawptr,
-	release_command_buffer:   proc(command_buffer: rawptr),
-	submit:                   proc(queue: Gpu_Queue, command_buffer: rawptr) -> bool,
-	wait_for_idle:            proc(device: Gpu_Device) -> bool,
-	gpu_frame_complete:       Gpu_Frame_Complete_Proc,
+// Command Encoding & Submission
+create_command_encoder:   proc(device: Gpu_Device) -> Gpu_CommandEncoder
+release_command_encoder:  proc(encoder: Gpu_CommandEncoder)
+copy_texture_to_texture:  proc(
+	encoder: Gpu_CommandEncoder,
+	src: Gpu_Texture,
+	src_x, src_y: u32,
+	dst: Gpu_Texture,
+	dst_x, dst_y: u32,
+	width, height: u32,
+)
+begin_render_pass:        proc(encoder: Gpu_CommandEncoder, color_view: Gpu_TextureView, clear_color: [4]f64, load_op: Gpu_Load_Op) -> Gpu_RenderPassEncoder
+begin_render_pass_with_depth: proc(
+	encoder: Gpu_CommandEncoder,
+	color_view: Gpu_TextureView,
+	clear_color: [4]f64,
+	load_op: Gpu_Load_Op,
+	depth_view: Gpu_TextureView,
+	depth_clear: f32,
+	depth_load_op: Gpu_Load_Op,
+) -> Gpu_RenderPassEncoder
+end_render_pass:          proc(pass: Gpu_RenderPassEncoder)
+finish_command_buffer:    proc(encoder: Gpu_CommandEncoder) -> rawptr
+release_command_buffer:   proc(command_buffer: rawptr)
+submit:                   proc(queue: Gpu_Queue, command_buffer: rawptr) -> bool
+wait_for_idle:            proc(device: Gpu_Device) -> bool
+gpu_frame_complete:       Gpu_Frame_Complete_Proc
 
-	// Render Pass Encoding Commands
-	render_set_pipeline:      proc(pass: Gpu_RenderPassEncoder, pipeline: Gpu_RenderPipeline),
-	render_set_bind_group:    proc(pass: Gpu_RenderPassEncoder, index: u32, group: Gpu_BindGroup),
-	render_set_vertex_buffer: proc(pass: Gpu_RenderPassEncoder, slot: u32, buffer: Gpu_Buffer, offset: u64),
-	render_set_index_buffer:  proc(pass: Gpu_RenderPassEncoder, buffer: Gpu_Buffer, offset: u64, size: u64),
-	render_set_viewport:      proc(pass: Gpu_RenderPassEncoder, x, y, width, height, min_depth, max_depth: f32),
-	render_draw:              proc(pass: Gpu_RenderPassEncoder, vertex_count: u32, instance_count: u32),
-	render_draw_indexed:      proc(pass: Gpu_RenderPassEncoder, index_count: u32, instance_count: u32),
+// Render Pass Encoding Commands
+render_set_pipeline:      proc(pass: Gpu_RenderPassEncoder, pipeline: Gpu_RenderPipeline)
+render_set_bind_group:    proc(pass: Gpu_RenderPassEncoder, index: u32, group: Gpu_BindGroup)
+render_set_vertex_buffer: proc(pass: Gpu_RenderPassEncoder, slot: u32, buffer: Gpu_Buffer, offset: u64)
+render_set_index_buffer:  proc(pass: Gpu_RenderPassEncoder, buffer: Gpu_Buffer, offset: u64, size: u64)
+render_set_viewport:      proc(pass: Gpu_RenderPassEncoder, x, y, width, height, min_depth, max_depth: f32)
+render_set_scissor_rect:  proc(pass: Gpu_RenderPassEncoder, x, y, width, height: u32)
+render_draw:              proc(pass: Gpu_RenderPassEncoder, vertex_count: u32, instance_count: u32)
+render_draw_indexed:      proc(pass: Gpu_RenderPassEncoder, index_count: u32, instance_count: u32)
 
-	// Surface Attachment Release
-	release_surface_texture:  proc(texture: Gpu_Texture, view: Gpu_TextureView),
-	pipeline_get_bind_group_layout: proc(pipeline: Gpu_RenderPipeline, index: u32) -> Gpu_BindGroupLayout,
+// Surface Attachment Release
+release_surface_texture:  proc(texture: Gpu_Texture, view: Gpu_TextureView)
+pipeline_get_bind_group_layout: proc(pipeline: Gpu_RenderPipeline, index: u32) -> Gpu_BindGroupLayout
 
-	// Compute Pipelines
-	create_compute_pipeline:  proc(device: Gpu_Device, shader: Gpu_ShaderModule, entry: string) -> Gpu_ComputePipeline,
-	destroy_compute_pipeline: proc(pipeline: Gpu_ComputePipeline),
-	begin_compute_pass:       proc(encoder: Gpu_CommandEncoder) -> Gpu_ComputePassEncoder,
-	end_compute_pass:         proc(pass: Gpu_ComputePassEncoder),
-	compute_set_pipeline:     proc(pass: Gpu_ComputePassEncoder, pipeline: Gpu_ComputePipeline),
-	compute_set_bind_group:   proc(pass: Gpu_ComputePassEncoder, index: u32, group: Gpu_BindGroup),
-	compute_dispatch:         proc(pass: Gpu_ComputePassEncoder, x: u32, y: u32, z: u32),
-	compute_get_bind_group_layout: proc(pipeline: Gpu_ComputePipeline, index: u32) -> Gpu_BindGroupLayout,
-}
+// Compute Pipelines
+create_compute_pipeline:  proc(device: Gpu_Device, shader: Gpu_ShaderModule, entry: string) -> Gpu_ComputePipeline
+destroy_compute_pipeline: proc(pipeline: Gpu_ComputePipeline)
+begin_compute_pass:       proc(encoder: Gpu_CommandEncoder) -> Gpu_ComputePassEncoder
+end_compute_pass:         proc(pass: Gpu_ComputePassEncoder)
+compute_set_pipeline:     proc(pass: Gpu_ComputePassEncoder, pipeline: Gpu_ComputePipeline)
+compute_set_bind_group:   proc(pass: Gpu_ComputePassEncoder, index: u32, group: Gpu_BindGroup)
+compute_dispatch:         proc(pass: Gpu_ComputePassEncoder, x: u32, y: u32, z: u32)
+compute_get_bind_group_layout: proc(pipeline: Gpu_ComputePipeline, index: u32) -> Gpu_BindGroupLayout

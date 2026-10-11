@@ -1,4 +1,4 @@
-package wgpu_backend
+package core_wgpu
 
 import "base:runtime"
 import "core:fmt"
@@ -9,109 +9,110 @@ import contract "../../../render/contract"
 
 // Wgpu_Surface wraps the native WGPU surface handle and state.
 Wgpu_Surface :: struct {
-	handle:     wgpu.Surface,
-	adapter:    wgpu.Adapter,
-	format:     wgpu.TextureFormat,
-	width:      u32,
-	height:     u32,
-	configured: bool,
+	handle:       wgpu.Surface,
+	adapter:      wgpu.Adapter,
+	device:       wgpu.Device,
+	format:       wgpu.TextureFormat,
+	width:        u32,
+	height:       u32,
+	present_mode: wgpu.PresentMode,
+	configured:   bool,
 }
 
-// Global vtable instance implementing all procedures of contract.Gpu_Backend_VTable
-_wgpu_vtable: contract.Gpu_Backend_VTable = contract.Gpu_Backend_VTable{
+// init_wgpu_driver binds all direct driver procedures to contract package.
+init_wgpu_driver :: proc() -> bool {
 	// Lifecycle
-	create_instance         = _wgpu_create_instance,
-	destroy_instance        = _wgpu_destroy_instance,
-	request_device          = _wgpu_request_device,
-	destroy_device          = _wgpu_destroy_device,
-	poll_device             = _wgpu_poll_device,
+	contract.create_instance          = _wgpu_create_instance
+	contract.destroy_instance         = _wgpu_destroy_instance
+	contract.request_device           = _wgpu_request_device
+	contract.destroy_device           = _wgpu_destroy_device
+	contract.poll_device              = _wgpu_poll_device
 
 	// Surface
-	configure_surface       = _wgpu_configure_surface,
-	get_surface_texture     = _wgpu_get_surface_texture,
-	present_surface         = _wgpu_present_surface,
-	get_preferred_format    = _wgpu_get_preferred_format,
+	contract.configure_surface        = _wgpu_configure_surface
+	contract.get_surface_texture      = _wgpu_get_surface_texture
+	contract.present_surface          = _wgpu_present_surface
+	contract.get_preferred_format     = _wgpu_get_preferred_format
+	contract.set_present_mode         = _wgpu_set_present_mode
 
 	// Buffers
-	create_buffer           = _wgpu_create_buffer,
-	destroy_buffer          = _wgpu_destroy_buffer,
-	write_buffer            = _wgpu_write_buffer,
-	get_buffer_mapped_range = _wgpu_get_buffer_mapped_range,
-	unmap_buffer            = _wgpu_unmap_buffer,
+	contract.create_buffer            = _wgpu_create_buffer
+	contract.destroy_buffer           = _wgpu_destroy_buffer
+	contract.write_buffer             = _wgpu_write_buffer
+	contract.get_buffer_mapped_range  = _wgpu_get_buffer_mapped_range
+	contract.unmap_buffer             = _wgpu_unmap_buffer
 
 	// Textures
-	create_texture          = _wgpu_create_texture,
-	destroy_texture         = _wgpu_destroy_texture,
-	create_texture_view     = _wgpu_create_texture_view,
-	destroy_texture_view    = _wgpu_destroy_texture_view,
-	write_texture           = _wgpu_write_texture,
+	contract.create_texture           = _wgpu_create_texture
+	contract.destroy_texture          = _wgpu_destroy_texture
+	contract.create_texture_view      = _wgpu_create_texture_view
+	contract.destroy_texture_view     = _wgpu_destroy_texture_view
+	contract.write_texture            = _wgpu_write_texture
 
 	// Shaders
-	shader_language         = .WGSL,
-	create_shader_module    = _wgpu_create_shader_module,
-	destroy_shader_module   = _wgpu_destroy_shader_module,
+	contract.shader_language          = .WGSL
+	contract.create_shader_module     = _wgpu_create_shader_module
+	contract.destroy_shader_module    = _wgpu_destroy_shader_module
 
 	// Pipelines
-	create_render_pipeline            = _wgpu_create_render_pipeline,
-	create_render_pipeline_with_depth = _wgpu_create_render_pipeline_with_depth,
-	destroy_render_pipeline           = _wgpu_destroy_render_pipeline,
+	contract.create_render_pipeline            = _wgpu_create_render_pipeline
+	contract.create_render_pipeline_with_depth = _wgpu_create_render_pipeline_with_depth
+	contract.destroy_render_pipeline           = _wgpu_destroy_render_pipeline
 
 	// Bind groups
-	create_bind_group_layout  = _wgpu_create_bind_group_layout,
-	destroy_bind_group_layout = _wgpu_destroy_bind_group_layout,
-	create_bind_group         = _wgpu_create_bind_group,
-	destroy_bind_group        = _wgpu_destroy_bind_group,
+	contract.create_bind_group_layout  = _wgpu_create_bind_group_layout
+	contract.destroy_bind_group_layout = _wgpu_destroy_bind_group_layout
+	contract.create_bind_group         = _wgpu_create_bind_group
+	contract.destroy_bind_group        = _wgpu_destroy_bind_group
 
 	// Sampler
-	create_sampler          = _wgpu_create_sampler,
-	destroy_sampler         = _wgpu_destroy_sampler,
+	contract.create_sampler          = _wgpu_create_sampler
+	contract.destroy_sampler         = _wgpu_destroy_sampler
 
 	// Command encoding
-	create_command_encoder       = _wgpu_create_command_encoder,
-	release_command_encoder      = _wgpu_release_command_encoder,
-	begin_render_pass            = _wgpu_begin_render_pass,
-	begin_render_pass_with_depth = _wgpu_begin_render_pass_with_depth,
-	end_render_pass              = _wgpu_end_render_pass,
-	finish_command_buffer   = _wgpu_finish_command_buffer,
-	release_command_buffer  = _wgpu_release_command_buffer,
-	submit                  = _wgpu_submit,
-	wait_for_idle           = _wgpu_wait_for_idle,
+	contract.create_command_encoder       = _wgpu_create_command_encoder
+	contract.release_command_encoder      = _wgpu_release_command_encoder
+	contract.copy_texture_to_texture      = _wgpu_copy_texture_to_texture
+	contract.begin_render_pass            = _wgpu_begin_render_pass
+	contract.begin_render_pass_with_depth = _wgpu_begin_render_pass_with_depth
+	contract.end_render_pass              = _wgpu_end_render_pass
+	contract.finish_command_buffer   = _wgpu_finish_command_buffer
+	contract.release_command_buffer  = _wgpu_release_command_buffer
+	contract.submit                  = _wgpu_submit
+	contract.wait_for_idle           = _wgpu_wait_for_idle
 
 	// Render pass commands
-	render_set_pipeline       = _wgpu_render_set_pipeline,
-	render_set_bind_group     = _wgpu_render_set_bind_group,
-	render_set_vertex_buffer  = _wgpu_render_set_vertex_buffer,
-	render_set_index_buffer   = _wgpu_render_set_index_buffer,
-	render_set_viewport       = _wgpu_render_set_viewport,
-	render_draw               = _wgpu_render_draw,
-	render_draw_indexed       = _wgpu_render_draw_indexed,
+	contract.render_set_pipeline       = _wgpu_render_set_pipeline
+	contract.render_set_bind_group     = _wgpu_render_set_bind_group
+	contract.render_set_vertex_buffer  = _wgpu_render_set_vertex_buffer
+	contract.render_set_index_buffer   = _wgpu_render_set_index_buffer
+	contract.render_set_viewport       = _wgpu_render_set_viewport
+	contract.render_set_scissor_rect   = _wgpu_render_set_scissor_rect
+	contract.render_draw               = _wgpu_render_draw
+	contract.render_draw_indexed       = _wgpu_render_draw_indexed
 
 	// Surface texture release
-	release_surface_texture   = _wgpu_release_surface_texture,
+	contract.release_surface_texture   = _wgpu_release_surface_texture
 
 	// Pipeline layout query
-	pipeline_get_bind_group_layout = _wgpu_pipeline_get_bind_group_layout,
+	contract.pipeline_get_bind_group_layout = _wgpu_pipeline_get_bind_group_layout
 
 	// Compute pipelines
-	create_compute_pipeline   = _wgpu_create_compute_pipeline,
-	destroy_compute_pipeline  = _wgpu_destroy_compute_pipeline,
+	contract.create_compute_pipeline   = _wgpu_create_compute_pipeline
+	contract.destroy_compute_pipeline  = _wgpu_destroy_compute_pipeline
 
 	// Compute command encoding
-	begin_compute_pass            = _wgpu_begin_compute_pass,
-	end_compute_pass              = _wgpu_end_compute_pass,
-	compute_set_pipeline          = _wgpu_compute_set_pipeline,
-	compute_set_bind_group        = _wgpu_compute_set_bind_group,
-	compute_dispatch              = _wgpu_compute_dispatch,
-	compute_get_bind_group_layout = _wgpu_compute_get_bind_group_layout,
+	contract.begin_compute_pass            = _wgpu_begin_compute_pass
+	contract.end_compute_pass              = _wgpu_end_compute_pass
+	contract.compute_set_pipeline          = _wgpu_compute_set_pipeline
+	contract.compute_set_bind_group        = _wgpu_compute_set_bind_group
+	contract.compute_dispatch              = _wgpu_compute_dispatch
+	contract.compute_get_bind_group_layout = _wgpu_compute_get_bind_group_layout
+
+	return true
 }
 
-create_wgpu_backend :: proc() -> ^contract.Gpu_Backend_VTable {
-	return &_wgpu_vtable
-}
-
-wgpu_backend_vtable :: proc() -> ^contract.Gpu_Backend_VTable {
-	return &_wgpu_vtable
-}
+init_driver :: init_wgpu_driver
 
 create_surface :: proc(instance: rawptr, window: ^sdl3.Window) -> rawptr {
 	inst := wgpu.Instance(instance)
@@ -197,6 +198,25 @@ _on_device :: proc "c" (
 	}
 }
 
+// Global tracking for uncaptured GPU errors
+g_uncaptured_error_count: int = 0
+g_last_error_buf: [512]u8
+g_last_error_len: int = 0
+
+get_uncaptured_error_count :: proc() -> int {
+	return g_uncaptured_error_count
+}
+
+get_last_error_string :: proc() -> string {
+	if g_last_error_len == 0 do return ""
+	return string(g_last_error_buf[:g_last_error_len])
+}
+
+clear_uncaptured_errors :: proc() {
+	g_uncaptured_error_count = 0
+	g_last_error_len = 0
+}
+
 _on_uncaptured_error :: proc "c" (
 	device: ^wgpu.Device,
 	type: wgpu.ErrorType,
@@ -205,6 +225,11 @@ _on_uncaptured_error :: proc "c" (
 	userdata2: rawptr,
 ) {
 	context = runtime.default_context()
+	g_uncaptured_error_count += 1
+	msg_str := string(message)
+	msg_len := min(len(msg_str), 512)
+	copy(g_last_error_buf[:msg_len], msg_str[:msg_len])
+	g_last_error_len = msg_len
 	fmt.eprintfln("[wgpu] uncaptured error (%v): %s", type, message)
 }
 
@@ -253,7 +278,20 @@ _wgpu_request_device :: proc(instance: rawptr, surface: rawptr) -> (device: cont
 	adapter := adapter_res.adapter
 	defer wgpu.AdapterRelease(adapter)
 
+	features: [2]wgpu.FeatureName
+	feature_count: uint = 0
+	if wgpu.AdapterHasFeature(adapter, .TimestampQuery) {
+		features[feature_count] = .TimestampQuery
+		feature_count += 1
+	}
+	if wgpu.AdapterHasFeature(adapter, .TimestampQueryInsideEncoders) {
+		features[feature_count] = .TimestampQueryInsideEncoders
+		feature_count += 1
+	}
+
 	dev_desc := wgpu.DeviceDescriptor{
+		requiredFeatureCount = feature_count,
+		requiredFeatures     = raw_data(features[:feature_count]) if feature_count > 0 else nil,
 		uncapturedErrorCallbackInfo = {
 			callback = _on_uncaptured_error,
 		},
@@ -358,6 +396,11 @@ _wgpu_configure_surface :: proc(surface: rawptr, device: contract.Gpu_Device, fo
 	w := max(u32(1), width)
 	h := max(u32(1), height)
 
+	surf.device = dev
+	if surf.present_mode == .Undefined {
+		surf.present_mode = .Fifo
+	}
+
 	config := wgpu.SurfaceConfiguration{
 		device      = dev,
 		format      = wgpu_fmt,
@@ -365,7 +408,7 @@ _wgpu_configure_surface :: proc(surface: rawptr, device: contract.Gpu_Device, fo
 		width       = w,
 		height      = h,
 		alphaMode   = .Opaque,
-		presentMode = .Fifo,
+		presentMode = surf.present_mode,
 	}
 	wgpu.SurfaceConfigure(surf.handle, &config)
 	surf.format = wgpu_fmt
@@ -374,12 +417,74 @@ _wgpu_configure_surface :: proc(surface: rawptr, device: contract.Gpu_Device, fo
 	surf.configured = true
 }
 
+_wgpu_set_present_mode :: proc(surface: rawptr, mode: contract.Gpu_Present_Mode) {
+	surf := (^Wgpu_Surface)(surface)
+	if surf == nil || surf.handle == nil do return
+
+	target := wgpu.PresentMode.Fifo
+	switch mode {
+	case .Fifo:
+		target = .Fifo
+	case .Immediate:
+		target = .Immediate
+		if surf.adapter != nil {
+			caps, status := wgpu.SurfaceGetCapabilities(surf.handle, surf.adapter)
+			if status == .Success {
+				defer wgpu.SurfaceCapabilitiesFreeMembers(caps)
+				modes := caps.presentModes[:caps.presentModeCount]
+				has_immediate := false
+				has_mailbox := false
+				for m in modes {
+					if m == .Immediate do has_immediate = true
+					if m == .Mailbox   do has_mailbox = true
+				}
+				if !has_immediate {
+					if has_mailbox {
+						target = .Mailbox
+					} else {
+						target = .Fifo
+					}
+				}
+			}
+		}
+	case .Mailbox:
+		target = .Mailbox
+		if surf.adapter != nil {
+			caps, status := wgpu.SurfaceGetCapabilities(surf.handle, surf.adapter)
+			if status == .Success {
+				defer wgpu.SurfaceCapabilitiesFreeMembers(caps)
+				modes := caps.presentModes[:caps.presentModeCount]
+				has_mailbox := false
+				for m in modes {
+					if m == .Mailbox do has_mailbox = true
+				}
+				if !has_mailbox do target = .Fifo
+			}
+		}
+	}
+
+	surf.present_mode = target
+
+	if surf.configured && surf.device != nil {
+		config := wgpu.SurfaceConfiguration{
+			device      = surf.device,
+			format      = surf.format,
+			usage       = { .RenderAttachment },
+			width       = surf.width,
+			height      = surf.height,
+			alphaMode   = .Opaque,
+			presentMode = target,
+		}
+		wgpu.SurfaceConfigure(surf.handle, &config)
+	}
+}
+
 _wgpu_get_surface_texture :: proc(surface: rawptr) -> (texture: contract.Gpu_Texture, view: contract.Gpu_TextureView, format: contract.Gpu_Format) {
 	surf := (^Wgpu_Surface)(surface)
 	if surf == nil || surf.handle == nil do return contract.Gpu_Texture(nil), contract.Gpu_TextureView(nil), .Undefined
 
 	st := wgpu.SurfaceGetCurrentTexture(surf.handle)
-	if st.status != .SuccessOptimal && st.status != .SuccessSuboptimal {
+	if st.status != .SuccessOptimal && st.status != .SuccessSuboptimal && st.status != .Occluded {
 		return contract.Gpu_Texture(nil), contract.Gpu_TextureView(nil), .Undefined
 	}
 
@@ -812,8 +917,12 @@ _wgpu_create_bind_group_layout :: proc(device: contract.Gpu_Device, entries: []c
 				minBindingSize   = 0,
 			}
 		case .Storage_Buffer:
+			buf_type: wgpu.BufferBindingType = .Storage
+			if .Compute not_in vis {
+				buf_type = .ReadOnlyStorage
+			}
 			w_entries[i].buffer = wgpu.BufferBindingLayout{
-				type             = .Storage,
+				type             = buf_type,
 				hasDynamicOffset = false,
 				minBindingSize   = 0,
 			}
@@ -937,6 +1046,39 @@ _wgpu_release_command_encoder :: proc(encoder: contract.Gpu_CommandEncoder) {
 	if enc != nil {
 		wgpu.CommandEncoderRelease(enc)
 	}
+}
+
+_wgpu_copy_texture_to_texture :: proc(
+	encoder: contract.Gpu_CommandEncoder,
+	src: contract.Gpu_Texture,
+	src_x, src_y: u32,
+	dst: contract.Gpu_Texture,
+	dst_x, dst_y: u32,
+	width, height: u32,
+) {
+	enc := wgpu.CommandEncoder(rawptr(encoder))
+	s := wgpu.Texture(rawptr(src))
+	d := wgpu.Texture(rawptr(dst))
+	if enc == nil || s == nil || d == nil do return
+
+	src_info := wgpu.TexelCopyTextureInfo{
+		texture  = s,
+		mipLevel = 0,
+		origin   = {x = src_x, y = src_y, z = 0},
+		aspect   = .All,
+	}
+	dst_info := wgpu.TexelCopyTextureInfo{
+		texture  = d,
+		mipLevel = 0,
+		origin   = {x = dst_x, y = dst_y, z = 0},
+		aspect   = .All,
+	}
+	extent := wgpu.Extent3D{
+		width              = width,
+		height             = height,
+		depthOrArrayLayers = 1,
+	}
+	wgpu.CommandEncoderCopyTextureToTexture(enc, &src_info, &dst_info, &extent)
 }
 
 _wgpu_begin_render_pass :: proc(
@@ -1110,6 +1252,13 @@ _wgpu_render_set_viewport :: proc(pass: contract.Gpu_RenderPassEncoder, x, y, wi
 	p := wgpu.RenderPassEncoder(rawptr(pass))
 	if p != nil {
 		wgpu.RenderPassEncoderSetViewport(p, x, y, width, height, min_depth, max_depth)
+	}
+}
+
+_wgpu_render_set_scissor_rect :: proc(pass: contract.Gpu_RenderPassEncoder, x, y, width, height: u32) {
+	p := wgpu.RenderPassEncoder(rawptr(pass))
+	if p != nil {
+		wgpu.RenderPassEncoderSetScissorRect(p, x, y, width, height)
 	}
 }
 

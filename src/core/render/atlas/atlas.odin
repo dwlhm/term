@@ -126,44 +126,41 @@ atlas_init :: proc(a: ^Atlas, allocator: runtime.Allocator = context.allocator) 
 	return true
 }
 
-atlas_destroy :: proc(a: ^Atlas, vtable: ^contract.Gpu_Backend_VTable = nil) {
+atlas_destroy :: proc(a: ^Atlas) {
 	if a == nil do return
 	if len(a.pixels) > 0 {
 		delete(a.pixels, a.allocator)
 		a.pixels = nil
 	}
-	if vtable != nil {
-		if rawptr(a.gpu_view) != nil && vtable.destroy_texture_view != nil {
-			vtable.destroy_texture_view(a.gpu_view)
-			a.gpu_view = contract.Gpu_TextureView(nil)
-		}
-		if rawptr(a.gpu_texture) != nil && vtable.destroy_texture != nil {
-			vtable.destroy_texture(a.gpu_texture)
-			a.gpu_texture = contract.Gpu_Texture(nil)
-		}
+	if rawptr(a.gpu_view) != nil && contract.destroy_texture_view != nil {
+		contract.destroy_texture_view(a.gpu_view)
+		a.gpu_view = contract.Gpu_TextureView(nil)
+	}
+	if rawptr(a.gpu_texture) != nil && contract.destroy_texture != nil {
+		contract.destroy_texture(a.gpu_texture)
+		a.gpu_texture = contract.Gpu_Texture(nil)
 	}
 }
 
-// atlas_upload_gpu synchronizes CPU pixel buffer to GPU texture via VTable.
+// atlas_upload_gpu synchronizes CPU pixel buffer to GPU texture.
 atlas_upload_gpu :: proc(
 	a: ^Atlas,
-	vtable: ^contract.Gpu_Backend_VTable,
 	device: contract.Gpu_Device,
 	queue: contract.Gpu_Queue,
 ) -> bool {
-	if a == nil || vtable == nil do return false
+	if a == nil do return false
 	if !a.gpu_dirty && rawptr(a.gpu_texture) != nil do return true
 
 	if rawptr(a.gpu_texture) == nil {
 		usage := contract.Gpu_Texture_Usage.Copy_Dst | contract.Gpu_Texture_Usage.Texture_Binding
-		a.gpu_texture = vtable.create_texture(device, ATLAS_WIDTH, ATLAS_HEIGHT, .R8_Unorm, usage)
+		a.gpu_texture = contract.create_texture(device, ATLAS_WIDTH, ATLAS_HEIGHT, .R8_Unorm, usage)
 		if rawptr(a.gpu_texture) == nil do return false
-		a.gpu_view = vtable.create_texture_view(a.gpu_texture)
+		a.gpu_view = contract.create_texture_view(a.gpu_texture)
 		if rawptr(a.gpu_view) == nil do return false
 	}
 
-	if vtable.write_texture != nil && len(a.pixels) > 0 {
-		vtable.write_texture(queue, a.gpu_texture, a.pixels, ATLAS_WIDTH, ATLAS_HEIGHT)
+	if contract.write_texture != nil && len(a.pixels) > 0 {
+		contract.write_texture(queue, a.gpu_texture, a.pixels, ATLAS_WIDTH, ATLAS_HEIGHT)
 		a.gpu_dirty = false
 		return true
 	}

@@ -10,7 +10,6 @@ package sdf
 
 import contract "../../contract"
 
-CHROME_SDF_MSL  :: #load("../../shaders/chrome_sdf.msl")
 CHROME_SDF_WGSL :: #load("../../shaders/chrome_sdf.wgsl")
 
 // Sdf_Params: 64-byte aligned uniform record matching MSL/WGSL shader.
@@ -25,54 +24,48 @@ Sdf_Params :: struct {
 }
 #assert(size_of(Sdf_Params) == 64)
 
+MAX_SDF_INSTANCES :: 4096
+
 Chrome_Sdf_Pipeline :: struct {
-	backend:        ^contract.Gpu_Backend_VTable,
 	device:         contract.Gpu_Device,
 	queue:          contract.Gpu_Queue,
 	pipeline:       contract.Gpu_RenderPipeline,
-	uniform_buffer: contract.Gpu_Buffer,
-	bind_group:     contract.Gpu_BindGroup,
 	bind_layout:    contract.Gpu_BindGroupLayout,
 	shader_module:  contract.Gpu_ShaderModule,
+	instance_buf:   contract.Gpu_Buffer,
+	bind_group:     contract.Gpu_BindGroup,
+	instances:      [MAX_SDF_INSTANCES]Sdf_Params,
+	instance_count: int,
 	available:      bool,
 }
 
 chrome_sdf_pipeline_init :: proc(
 	p: ^Chrome_Sdf_Pipeline,
-	backend: ^contract.Gpu_Backend_VTable,
 	device: contract.Gpu_Device,
 	queue: contract.Gpu_Queue,
 	format: contract.Gpu_Format,
 ) -> bool {
-	if p == nil || backend == nil || rawptr(device) == nil || rawptr(queue) == nil do return false
+	if p == nil || rawptr(device) == nil || rawptr(queue) == nil do return false
 
-	p.backend = backend
+	p^ = {}
 	p.device = device
 	p.queue = queue
 
-	// Create uniform buffer (64 bytes)
-	usage := contract.Gpu_Buffer_Usage.Uniform | contract.Gpu_Buffer_Usage.Copy_Dst
-	p.uniform_buffer = backend.create_buffer(device, size_of(Sdf_Params), usage, false)
-	if rawptr(p.uniform_buffer) == nil do return false
-
 	// Create shader module
-	source := string(CHROME_SDF_MSL) if backend.shader_language == .MSL else string(CHROME_SDF_WGSL)
-	p.shader_module = backend.create_shader_module(device, source)
+	source := string(CHROME_SDF_WGSL)
+	p.shader_module = contract.create_shader_module(device, source)
 	if rawptr(p.shader_module) == nil {
 		chrome_sdf_pipeline_destroy(p)
 		return false
 	}
 
 	// Create graphics pipeline
-	vs_entry := "chrome_sdf_vs_main" if backend.shader_language == .MSL else "vs_main"
-	fs_entry := "chrome_sdf_fs_main" if backend.shader_language == .MSL else "fs_main"
-
-	p.pipeline = backend.create_render_pipeline(
+	p.pipeline = contract.create_render_pipeline(
 		device,
 		p.shader_module,
-		vs_entry,
+		"vs_main",
 		p.shader_module,
-		fs_entry,
+		"fs_main",
 		nil, // Procedural vertex generation from vid (no vertex buffer required)
 		format,
 		.Alpha_Blend,
@@ -84,78 +77,128 @@ chrome_sdf_pipeline_init :: proc(
 	}
 
 	// Create bind group layout (from pipeline for WebGPU exclusive layout compatibility)
-	if backend.pipeline_get_bind_group_layout != nil {
-		p.bind_layout = backend.pipeline_get_bind_group_layout(p.pipeline, 0)
+	if contract.pipeline_get_bind_group_layout != nil {
+		p.bind_layout = contract.pipeline_get_bind_group_layout(p.pipeline, 0)
 	}
 	if rawptr(p.bind_layout) == nil {
 		layout_entries := []contract.Gpu_Bind_Layout_Entry{
 			{
 				binding      = 0,
 				visibility   = 1 | 2, // Vertex | Fragment
-				binding_type = .Uniform_Buffer,
+				binding_type = .Storage_Buffer,
 			},
 		}
-		p.bind_layout = backend.create_bind_group_layout(device, layout_entries)
+		p.bind_layout = contract.create_bind_group_layout(device, layout_entries)
 	}
 	if rawptr(p.bind_layout) == nil {
 		chrome_sdf_pipeline_destroy(p)
 		return false
 	}
 
-	// Create bind group
+	// Preallocate storage buffer and bind group for instanced batching
+	buf_size := u64(MAX_SDF_INSTANCES * size_of(Sdf_Params))
+	usage := contract.Gpu_Buffer_Usage.Storage | contract.Gpu_Buffer_Usage.Copy_Dst
+	p.instance_buf = contract.create_buffer(device, buf_size, usage, false)
+	if rawptr(p.instance_buf) == nil {
+		chrome_sdf_pipeline_destroy(p)
+		return false
+	}
+
 	bind_entries := []contract.Gpu_Bind_Entry{
 		{
 			binding    = 0,
-			buffer     = p.uniform_buffer,
-			size       = size_of(Sdf_Params),
+			buffer     = p.instance_buf,
+			size       = buf_size,
 			entry_type = .Buffer,
 		},
 	}
-	p.bind_group = backend.create_bind_group(device, p.bind_layout, bind_entries)
+	p.bind_group = contract.create_bind_group(device, p.bind_layout, bind_entries)
 	if rawptr(p.bind_group) == nil {
 		chrome_sdf_pipeline_destroy(p)
 		return false
 	}
 
+	p.instance_count = 0
 	p.available = true
 	return true
 }
 
 chrome_sdf_pipeline_destroy :: proc(p: ^Chrome_Sdf_Pipeline) {
-	if p == nil || p.backend == nil do return
+	if p == nil do return
 
-	if rawptr(p.pipeline) != nil {
-		p.backend.destroy_render_pipeline(p.pipeline)
-		p.pipeline = contract.Gpu_RenderPipeline(nil)
-	}
 	if rawptr(p.bind_group) != nil {
-		p.backend.destroy_bind_group(p.bind_group)
+		contract.destroy_bind_group(p.bind_group)
 		p.bind_group = contract.Gpu_BindGroup(nil)
 	}
+	if rawptr(p.instance_buf) != nil {
+		contract.destroy_buffer(p.instance_buf)
+		p.instance_buf = contract.Gpu_Buffer(nil)
+	}
+
+	if rawptr(p.pipeline) != nil {
+		contract.destroy_render_pipeline(p.pipeline)
+		p.pipeline = contract.Gpu_RenderPipeline(nil)
+	}
 	if rawptr(p.bind_layout) != nil {
-		p.backend.destroy_bind_group_layout(p.bind_layout)
+		contract.destroy_bind_group_layout(p.bind_layout)
 		p.bind_layout = contract.Gpu_BindGroupLayout(nil)
 	}
 	if rawptr(p.shader_module) != nil {
-		p.backend.destroy_shader_module(p.shader_module)
+		contract.destroy_shader_module(p.shader_module)
 		p.shader_module = contract.Gpu_ShaderModule(nil)
 	}
-	if rawptr(p.uniform_buffer) != nil {
-		p.backend.destroy_buffer(p.uniform_buffer)
-		p.uniform_buffer = contract.Gpu_Buffer(nil)
-	}
+
 	p.available = false
+	p^ = {}
 }
 
-chrome_sdf_draw :: proc(
+chrome_sdf_pipeline_reset :: proc(p: ^Chrome_Sdf_Pipeline) {
+	if p != nil do p.instance_count = 0
+}
+
+chrome_sdf_push :: proc(p: ^Chrome_Sdf_Pipeline, params: ^Sdf_Params) -> bool {
+	if p == nil || params == nil do return false
+	if p.instance_count >= MAX_SDF_INSTANCES do return false
+
+	p.instances[p.instance_count] = params^
+	p.instance_count += 1
+	return true
+}
+
+chrome_sdf_draw_with_pass :: proc(
 	p: ^Chrome_Sdf_Pipeline,
 	pass: contract.Gpu_RenderPassEncoder,
 	params: ^Sdf_Params,
 ) {
-	if p == nil || !p.available || rawptr(pass) == nil || params == nil do return
+	_ = pass
+	chrome_sdf_push(p, params)
+}
 
-	p.backend.write_buffer(p.queue, p.uniform_buffer, 0, params, size_of(Sdf_Params))
-	p.backend.render_set_pipeline(pass, p.pipeline)
-	p.backend.render_set_bind_group(pass, 0, p.bind_group)
-	p.backend.render_draw(pass, 6, 1) // 6 vertices for procedural quad
+chrome_sdf_draw_no_pass :: proc(
+	p: ^Chrome_Sdf_Pipeline,
+	params: ^Sdf_Params,
+) {
+	chrome_sdf_push(p, params)
+}
+
+chrome_sdf_draw :: proc{chrome_sdf_draw_with_pass, chrome_sdf_draw_no_pass}
+
+chrome_sdf_flush_and_draw :: proc(
+	p: ^Chrome_Sdf_Pipeline,
+	pass: contract.Gpu_RenderPassEncoder,
+) {
+	if p == nil || !p.available || rawptr(pass) == nil do return
+	if p.instance_count <= 0 do return
+
+	contract.write_buffer(
+		p.queue,
+		p.instance_buf,
+		0,
+		raw_data(p.instances[:]),
+		u64(p.instance_count * size_of(Sdf_Params)),
+	)
+	contract.render_set_pipeline(pass, p.pipeline)
+	contract.render_set_bind_group(pass, 0, p.bind_group)
+	contract.render_draw(pass, 6, u32(p.instance_count))
+	p.instance_count = 0
 }

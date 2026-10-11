@@ -47,7 +47,6 @@ Tile_Params :: struct {
 
 // Compute_Tile_Renderer holds the tiled compute path GPU state.
 Compute_Tile_Renderer :: struct {
-	backend:            ^contract.Gpu_Backend_VTable,
 	device:             contract.Gpu_Device,
 	queue:              contract.Gpu_Queue,
 	tile_w:             u32,
@@ -86,7 +85,6 @@ Compute_Tile_Renderer :: struct {
 
 compute_tile_init :: proc(
 	r: ^Compute_Tile_Renderer,
-	backend: ^contract.Gpu_Backend_VTable,
 	device: contract.Gpu_Device,
 	queue: contract.Gpu_Queue,
 	rows: u32,
@@ -97,8 +95,7 @@ compute_tile_init :: proc(
 	format: contract.Gpu_Format,
 	allocator: runtime.Allocator = context.allocator,
 ) -> bool {
-	if r == nil || backend == nil || rawptr(device) == nil || rawptr(queue) == nil do return false
-	r.backend = backend
+	if r == nil || rawptr(device) == nil || rawptr(queue) == nil do return false
 	r.device = device
 	r.queue = queue
 	r.rows = rows
@@ -114,13 +111,13 @@ compute_tile_init :: proc(
 
 	// Uniform parameters buffer (64 bytes)
 	p_usage := contract.Gpu_Buffer_Usage.Uniform | contract.Gpu_Buffer_Usage.Copy_Dst
-	r.params_buffer = backend.create_buffer(device, TILE_PARAMS_SIZE, p_usage, false)
+	r.params_buffer = contract.create_buffer(device, TILE_PARAMS_SIZE, p_usage, false)
 	if rawptr(r.params_buffer) == nil do return false
 
 	// Cell storage buffer (u64 per cell)
 	total_cells := u64(max(rows * cols, 1))
 	c_usage := contract.Gpu_Buffer_Usage.Storage | contract.Gpu_Buffer_Usage.Copy_Dst
-	r.cell_buffer = backend.create_buffer(device, total_cells * TILE_CELL_BYTES, c_usage, false)
+	r.cell_buffer = contract.create_buffer(device, total_cells * TILE_CELL_BYTES, c_usage, false)
 	if rawptr(r.cell_buffer) == nil {
 		compute_tile_destroy(r)
 		return false
@@ -128,7 +125,7 @@ compute_tile_init :: proc(
 
 	// LUT storage buffer (1025 u32 words)
 	l_usage := contract.Gpu_Buffer_Usage.Storage | contract.Gpu_Buffer_Usage.Copy_Dst
-	r.lut_buffer = backend.create_buffer(device, TILE_LUT_BYTES, l_usage, false)
+	r.lut_buffer = contract.create_buffer(device, TILE_LUT_BYTES, l_usage, false)
 	if rawptr(r.lut_buffer) == nil {
 		compute_tile_destroy(r)
 		return false
@@ -139,66 +136,66 @@ compute_tile_init :: proc(
 	r.tiles_y = max((u32(f32(rows) * cell_h) + r.tile_h - 1) / r.tile_h, 1)
 	r.tile_count = r.tiles_x * r.tiles_y
 	t_usage := contract.Gpu_Buffer_Usage.Storage | contract.Gpu_Buffer_Usage.Copy_Dst
-	r.tile_list_buffer = backend.create_buffer(device, u64(r.tile_count) * size_of(u32), t_usage, false)
+	r.tile_list_buffer = contract.create_buffer(device, u64(r.tile_count) * size_of(u32), t_usage, false)
 	if rawptr(r.tile_list_buffer) == nil {
 		compute_tile_destroy(r)
 		return false
 	}
 
-	r.sampler = backend.create_sampler(device)
+	r.sampler = contract.create_sampler(device)
 	r.available = true
 	return true
 }
 
 compute_tile_destroy :: proc(r: ^Compute_Tile_Renderer) {
-	if r == nil || r.backend == nil do return
+	if r == nil do return
 
-	if r.backend.destroy_buffer != nil {
+	if contract.destroy_buffer != nil {
 		if rawptr(r.params_buffer) != nil {
-			r.backend.destroy_buffer(r.params_buffer)
+			contract.destroy_buffer(r.params_buffer)
 			r.params_buffer = contract.Gpu_Buffer(nil)
 		}
 		if rawptr(r.cell_buffer) != nil {
-			r.backend.destroy_buffer(r.cell_buffer)
+			contract.destroy_buffer(r.cell_buffer)
 			r.cell_buffer = contract.Gpu_Buffer(nil)
 		}
 		if rawptr(r.lut_buffer) != nil {
-			r.backend.destroy_buffer(r.lut_buffer)
+			contract.destroy_buffer(r.lut_buffer)
 			r.lut_buffer = contract.Gpu_Buffer(nil)
 		}
 		if rawptr(r.tile_list_buffer) != nil {
-			r.backend.destroy_buffer(r.tile_list_buffer)
+			contract.destroy_buffer(r.tile_list_buffer)
 			r.tile_list_buffer = contract.Gpu_Buffer(nil)
 		}
 	}
-	if r.backend.destroy_texture != nil && rawptr(r.framebuffer) != nil {
-		r.backend.destroy_texture(r.framebuffer)
+	if contract.destroy_texture != nil && rawptr(r.framebuffer) != nil {
+		contract.destroy_texture(r.framebuffer)
 		r.framebuffer = contract.Gpu_Texture(nil)
 	}
-	if r.backend.destroy_texture_view != nil && rawptr(r.fb_view) != nil {
-		r.backend.destroy_texture_view(r.fb_view)
+	if contract.destroy_texture_view != nil && rawptr(r.fb_view) != nil {
+		contract.destroy_texture_view(r.fb_view)
 		r.fb_view = contract.Gpu_TextureView(nil)
 	}
-	if r.backend.destroy_sampler != nil && rawptr(r.sampler) != nil {
-		r.backend.destroy_sampler(r.sampler)
+	if contract.destroy_sampler != nil && rawptr(r.sampler) != nil {
+		contract.destroy_sampler(r.sampler)
 		r.sampler = contract.Gpu_Sampler(nil)
 	}
-	if r.backend.destroy_bind_group != nil {
+	if contract.destroy_bind_group != nil {
 		if rawptr(r.compute_bind_group) != nil {
-			r.backend.destroy_bind_group(r.compute_bind_group)
+			contract.destroy_bind_group(r.compute_bind_group)
 			r.compute_bind_group = contract.Gpu_BindGroup(nil)
 		}
 		if rawptr(r.blit_bind_group) != nil {
-			r.backend.destroy_bind_group(r.blit_bind_group)
+			contract.destroy_bind_group(r.blit_bind_group)
 			r.blit_bind_group = contract.Gpu_BindGroup(nil)
 		}
 	}
-	if r.backend.destroy_compute_pipeline != nil && rawptr(r.compute_pipeline) != nil {
-		r.backend.destroy_compute_pipeline(r.compute_pipeline)
+	if contract.destroy_compute_pipeline != nil && rawptr(r.compute_pipeline) != nil {
+		contract.destroy_compute_pipeline(r.compute_pipeline)
 		r.compute_pipeline = contract.Gpu_ComputePipeline(nil)
 	}
-	if r.backend.destroy_render_pipeline != nil && rawptr(r.blit_pipeline) != nil {
-		r.backend.destroy_render_pipeline(r.blit_pipeline)
+	if contract.destroy_render_pipeline != nil && rawptr(r.blit_pipeline) != nil {
+		contract.destroy_render_pipeline(r.blit_pipeline)
 		r.blit_pipeline = contract.Gpu_RenderPipeline(nil)
 	}
 	r.available = false
@@ -209,12 +206,12 @@ compute_tile_dispatch :: proc(r: ^Compute_Tile_Renderer, enc: contract.Gpu_Comma
 	if r == nil || !r.available || rawptr(enc) == nil || dirty_tile_count == 0 do return
 	if rawptr(r.compute_pipeline) == nil || rawptr(r.compute_bind_group) == nil do return
 
-	cpass := r.backend.begin_compute_pass(enc)
+	cpass := contract.begin_compute_pass(enc)
 	if rawptr(cpass) == nil do return
-	defer r.backend.end_compute_pass(cpass)
+	defer contract.end_compute_pass(cpass)
 
-	r.backend.compute_set_pipeline(cpass, r.compute_pipeline)
-	r.backend.compute_set_bind_group(cpass, 0, r.compute_bind_group)
+	contract.compute_set_pipeline(cpass, r.compute_pipeline)
+	contract.compute_set_bind_group(cpass, 0, r.compute_bind_group)
 	// Dispatch 1 threadgroup per dirty tile (16x16 threads per group)
-	r.backend.compute_dispatch(cpass, dirty_tile_count, 1, 1)
+	contract.compute_dispatch(cpass, dirty_tile_count, 1, 1)
 }

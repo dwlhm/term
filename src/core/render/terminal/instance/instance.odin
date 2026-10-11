@@ -21,7 +21,6 @@ QUAD_VERTEX_COUNT: u32 : 6
 
 // Instance_Renderer manages instanced cell rasterization.
 Instance_Renderer :: struct {
-	backend:         ^contract.Gpu_Backend_VTable,
 	device:          contract.Gpu_Device,
 	queue:           contract.Gpu_Queue,
 	pipeline:        contract.Gpu_RenderPipeline,
@@ -41,7 +40,6 @@ Instance_Renderer :: struct {
 // instance_renderer_init creates the instance batch pipeline and GPU buffers.
 instance_renderer_init :: proc(
 	r: ^Instance_Renderer,
-	backend: ^contract.Gpu_Backend_VTable,
 	device: contract.Gpu_Device,
 	queue: contract.Gpu_Queue,
 	max_instances: u32,
@@ -49,8 +47,7 @@ instance_renderer_init :: proc(
 	format: contract.Gpu_Format,
 	allocator: runtime.Allocator = context.allocator,
 ) -> bool {
-	if r == nil || backend == nil || rawptr(device) == nil || rawptr(queue) == nil do return false
-	r.backend = backend
+	if r == nil || rawptr(device) == nil || rawptr(queue) == nil do return false
 	r.device = device
 	r.queue = queue
 	r.max_instances = max(max_instances, 1024)
@@ -64,7 +61,7 @@ instance_renderer_init :: proc(
 	// GPU instance buffer (Storage / Vertex / Copy_Dst)
 	buffer_bytes := u64(r.max_instances) * u64(INSTANCE_STRIDE)
 	usage := contract.Gpu_Buffer_Usage.Vertex | contract.Gpu_Buffer_Usage.Copy_Dst | contract.Gpu_Buffer_Usage.Storage
-	r.instance_buffer = backend.create_buffer(device, buffer_bytes, usage, false)
+	r.instance_buffer = contract.create_buffer(device, buffer_bytes, usage, false)
 	if rawptr(r.instance_buffer) == nil {
 		instance_renderer_destroy(r)
 		return false
@@ -72,14 +69,14 @@ instance_renderer_init :: proc(
 
 	// Uniform buffer (64 bytes)
 	u_usage := contract.Gpu_Buffer_Usage.Uniform | contract.Gpu_Buffer_Usage.Copy_Dst
-	r.uniform_buffer = backend.create_buffer(device, size_of(contract.Terminal_Uniforms), u_usage, false)
+	r.uniform_buffer = contract.create_buffer(device, size_of(contract.Terminal_Uniforms), u_usage, false)
 	if rawptr(r.uniform_buffer) == nil {
 		instance_renderer_destroy(r)
 		return false
 	}
 
 	// Texture Sampler
-	r.sampler = backend.create_sampler(device)
+	r.sampler = contract.create_sampler(device)
 
 	r.available = true
 	return true
@@ -87,32 +84,32 @@ instance_renderer_init :: proc(
 
 // instance_renderer_destroy tears down all resources.
 instance_renderer_destroy :: proc(r: ^Instance_Renderer) {
-	if r == nil || r.backend == nil do return
+	if r == nil do return
 
-	if r.backend.destroy_buffer != nil {
+	if contract.destroy_buffer != nil {
 		if rawptr(r.instance_buffer) != nil {
-			r.backend.destroy_buffer(r.instance_buffer)
+			contract.destroy_buffer(r.instance_buffer)
 			r.instance_buffer = contract.Gpu_Buffer(nil)
 		}
 		if rawptr(r.uniform_buffer) != nil {
-			r.backend.destroy_buffer(r.uniform_buffer)
+			contract.destroy_buffer(r.uniform_buffer)
 			r.uniform_buffer = contract.Gpu_Buffer(nil)
 		}
 	}
-	if r.backend.destroy_sampler != nil && rawptr(r.sampler) != nil {
-		r.backend.destroy_sampler(r.sampler)
+	if contract.destroy_sampler != nil && rawptr(r.sampler) != nil {
+		contract.destroy_sampler(r.sampler)
 		r.sampler = contract.Gpu_Sampler(nil)
 	}
-	if r.backend.destroy_bind_group != nil && rawptr(r.bind_group) != nil {
-		r.backend.destroy_bind_group(r.bind_group)
+	if contract.destroy_bind_group != nil && rawptr(r.bind_group) != nil {
+		contract.destroy_bind_group(r.bind_group)
 		r.bind_group = contract.Gpu_BindGroup(nil)
 	}
-	if r.backend.destroy_bind_group_layout != nil && rawptr(r.layout) != nil {
-		r.backend.destroy_bind_group_layout(r.layout)
+	if contract.destroy_bind_group_layout != nil && rawptr(r.layout) != nil {
+		contract.destroy_bind_group_layout(r.layout)
 		r.layout = contract.Gpu_BindGroupLayout(nil)
 	}
-	if r.backend.destroy_render_pipeline != nil && rawptr(r.pipeline) != nil {
-		r.backend.destroy_render_pipeline(r.pipeline)
+	if contract.destroy_render_pipeline != nil && rawptr(r.pipeline) != nil {
+		contract.destroy_render_pipeline(r.pipeline)
 		r.pipeline = contract.Gpu_RenderPipeline(nil)
 	}
 
@@ -141,7 +138,7 @@ instance_renderer_push :: #force_inline proc(r: ^Instance_Renderer, rec: contrac
 instance_renderer_flush :: proc(r: ^Instance_Renderer) -> bool {
 	if r == nil || !r.available || r.active_count == 0 do return false
 	upload_bytes := u64(r.active_count) * u64(INSTANCE_STRIDE)
-	r.backend.write_buffer(r.queue, r.instance_buffer, 0, raw_data(r.records), upload_bytes)
+	contract.write_buffer(r.queue, r.instance_buffer, 0, raw_data(r.records), upload_bytes)
 	return true
 }
 
@@ -149,11 +146,11 @@ instance_renderer_flush :: proc(r: ^Instance_Renderer) -> bool {
 instance_renderer_draw :: proc(r: ^Instance_Renderer, pass: contract.Gpu_RenderPassEncoder) {
 	if r == nil || !r.available || r.active_count == 0 || rawptr(pass) == nil do return
 	if rawptr(r.pipeline) != nil {
-		r.backend.render_set_pipeline(pass, r.pipeline)
+		contract.render_set_pipeline(pass, r.pipeline)
 	}
 	if rawptr(r.bind_group) != nil {
-		r.backend.render_set_bind_group(pass, 0, r.bind_group)
+		contract.render_set_bind_group(pass, 0, r.bind_group)
 	}
-	r.backend.render_set_vertex_buffer(pass, 0, r.instance_buffer, 0)
-	r.backend.render_draw(pass, QUAD_VERTEX_COUNT, r.active_count)
+	contract.render_set_vertex_buffer(pass, 0, r.instance_buffer, 0)
+	contract.render_draw(pass, QUAD_VERTEX_COUNT, r.active_count)
 }

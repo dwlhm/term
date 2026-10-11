@@ -17,7 +17,6 @@ import "batch"
 import "sdf"
 
 Chrome_Renderer :: struct {
-	backend:       ^contract.Gpu_Backend_VTable,
 	device:        contract.Gpu_Device,
 	queue:         contract.Gpu_Queue,
 	format:        contract.Gpu_Format,
@@ -34,15 +33,13 @@ Chrome_Renderer :: struct {
 
 chrome_renderer_init :: proc(
 	r: ^Chrome_Renderer,
-	backend: ^contract.Gpu_Backend_VTable,
 	device: contract.Gpu_Device,
 	queue: contract.Gpu_Queue,
 	width, height: u32,
 	format: contract.Gpu_Format,
 ) -> bool {
-	if r == nil || backend == nil || rawptr(device) == nil || rawptr(queue) == nil do return false
+	if r == nil || rawptr(device) == nil || rawptr(queue) == nil do return false
 
-	r.backend = backend
 	r.device = device
 	r.queue = queue
 	r.format = format
@@ -50,20 +47,20 @@ chrome_renderer_init :: proc(
 	r.height = max(height, 1)
 
 	// Strategy 1: Initialize Cached Surface
-	if !surface.chrome_surface_init(&r.surface, backend, device, r.width, r.height, format) {
+	if !surface.chrome_surface_init(&r.surface, device, r.width, r.height, format) {
 		return false
 	}
 
 	// Strategy 2: Initialize Dynamic Primitive Batch
-	if !batch.chrome_batch_init(&r.batch, backend, device, queue) {
-		surface.chrome_surface_destroy(&r.surface, backend)
+	if !batch.chrome_batch_init(&r.batch, device, queue) {
+		surface.chrome_surface_destroy(&r.surface)
 		return false
 	}
 
 	// Strategy 3: Initialize SDF Vector Pipeline
-	if !sdf.chrome_sdf_pipeline_init(&r.sdf, backend, device, queue, format) {
+	if !sdf.chrome_sdf_pipeline_init(&r.sdf, device, queue, format) {
 		batch.chrome_batch_destroy(&r.batch)
-		surface.chrome_surface_destroy(&r.surface, backend)
+		surface.chrome_surface_destroy(&r.surface)
 		return false
 	}
 
@@ -77,7 +74,7 @@ chrome_renderer_destroy :: proc(r: ^Chrome_Renderer) {
 
 	sdf.chrome_sdf_pipeline_destroy(&r.sdf)
 	batch.chrome_batch_destroy(&r.batch)
-	surface.chrome_surface_destroy(&r.surface, r.backend)
+	surface.chrome_surface_destroy(&r.surface)
 
 	r.available = false
 }
@@ -86,7 +83,7 @@ chrome_renderer_resize :: proc(r: ^Chrome_Renderer, width, height: u32) -> bool 
 	if r == nil || !r.available do return false
 	r.width = max(width, 1)
 	r.height = max(height, 1)
-	return surface.chrome_surface_resize(&r.surface, r.backend, r.device, r.width, r.height, r.format)
+	return surface.chrome_surface_resize(&r.surface, r.device, r.width, r.height, r.format)
 }
 
 chrome_renderer_mark_dirty :: proc(r: ^Chrome_Renderer, dirty: bool = true) {
@@ -128,15 +125,16 @@ chrome_renderer_render :: proc(
 	r.redraw_count += 1
 	r.active_strat = 3 // SDF Vector shader active for geometric elements
 
-	encoder := r.backend.create_command_encoder(r.device)
+	encoder := contract.create_command_encoder(r.device)
 	if rawptr(encoder) == nil do return false
-	defer r.backend.release_command_encoder(encoder)
+	defer contract.release_command_encoder(encoder)
 
 	clear_col: [4]f64 = {0.0, 0.0, 0.0, 0.0}
-	pass := r.backend.begin_render_pass(encoder, target_view, clear_col, .Load)
+	pass := contract.begin_render_pass(encoder, target_view, clear_col, .Load)
 	if rawptr(pass) == nil do return false
 
 	screen_sz := [2]f32{f32(r.width), f32(r.height)}
+	sdf.chrome_sdf_pipeline_reset(&r.sdf)
 
 	for cmd in dl.commands {
 		#partial switch cmd.kind {
@@ -193,11 +191,13 @@ chrome_renderer_render :: proc(
 		}
 	}
 
-	r.backend.end_render_pass(pass)
-	cmd_buf := r.backend.finish_command_buffer(encoder)
+	sdf.chrome_sdf_flush_and_draw(&r.sdf, pass)
+
+	contract.end_render_pass(pass)
+	cmd_buf := contract.finish_command_buffer(encoder)
 	if cmd_buf != nil {
-		r.backend.submit(r.queue, cmd_buf)
-		r.backend.release_command_buffer(cmd_buf)
+		contract.submit(r.queue, cmd_buf)
+		contract.release_command_buffer(cmd_buf)
 	}
 
 	// Surface is now clean

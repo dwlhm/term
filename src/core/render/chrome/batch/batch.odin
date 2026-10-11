@@ -22,7 +22,6 @@ Chrome_Vertex :: struct {
 CHROME_BATCH_DEFAULT_CAPACITY :: 2048
 
 Chrome_Batch :: struct {
-	backend:       ^contract.Gpu_Backend_VTable,
 	device:        contract.Gpu_Device,
 	queue:         contract.Gpu_Queue,
 	vertex_buffer: contract.Gpu_Buffer,
@@ -36,15 +35,13 @@ Chrome_Batch :: struct {
 
 chrome_batch_init :: proc(
 	b: ^Chrome_Batch,
-	backend: ^contract.Gpu_Backend_VTable,
 	device: contract.Gpu_Device,
 	queue: contract.Gpu_Queue,
 	capacity: u32 = CHROME_BATCH_DEFAULT_CAPACITY,
 	allocator := context.allocator,
 ) -> bool {
-	if b == nil || backend == nil || rawptr(device) == nil || rawptr(queue) == nil do return false
+	if b == nil || rawptr(device) == nil || rawptr(queue) == nil do return false
 
-	b.backend = backend
 	b.device = device
 	b.queue = queue
 	b.allocator = allocator
@@ -53,7 +50,7 @@ chrome_batch_init :: proc(
 
 	buf_size := u64(b.max_vertices) * size_of(Chrome_Vertex)
 	usage := contract.Gpu_Buffer_Usage.Vertex | contract.Gpu_Buffer_Usage.Copy_Dst
-	b.vertex_buffer = backend.create_buffer(device, buf_size, usage, false)
+	b.vertex_buffer = contract.create_buffer(device, buf_size, usage, false)
 	if rawptr(b.vertex_buffer) == nil {
 		chrome_batch_destroy(b)
 		return false
@@ -64,14 +61,14 @@ chrome_batch_init :: proc(
 }
 
 chrome_batch_destroy :: proc(b: ^Chrome_Batch) {
-	if b == nil || b.backend == nil do return
+	if b == nil do return
 
 	if rawptr(b.vertex_buffer) != nil {
-		b.backend.destroy_buffer(b.vertex_buffer)
+		contract.destroy_buffer(b.vertex_buffer)
 		b.vertex_buffer = contract.Gpu_Buffer(nil)
 	}
 	if rawptr(b.pipeline) != nil {
-		b.backend.destroy_render_pipeline(b.pipeline)
+		contract.destroy_render_pipeline(b.pipeline)
 		b.pipeline = contract.Gpu_RenderPipeline(nil)
 	}
 	delete(b.vertices)
@@ -111,15 +108,15 @@ chrome_batch_push_quad :: proc(b: ^Chrome_Batch, rect: [4]f32, color: [4]f32) ->
 chrome_batch_flush :: proc(b: ^Chrome_Batch) -> bool {
 	if b == nil || !b.available || len(b.vertices) == 0 do return false
 	bytes := u64(len(b.vertices)) * size_of(Chrome_Vertex)
-	b.backend.write_buffer(b.queue, b.vertex_buffer, 0, raw_data(b.vertices), bytes)
+	contract.write_buffer(b.queue, b.vertex_buffer, 0, raw_data(b.vertices), bytes)
 	return true
 }
 
 chrome_batch_draw :: proc(b: ^Chrome_Batch, pass: contract.Gpu_RenderPassEncoder) {
 	if b == nil || !b.available || len(b.vertices) == 0 || rawptr(pass) == nil do return
 	if rawptr(b.pipeline) != nil {
-		b.backend.render_set_pipeline(pass, b.pipeline)
+		contract.render_set_pipeline(pass, b.pipeline)
 	}
-	b.backend.render_set_vertex_buffer(pass, 0, b.vertex_buffer, 0)
-	b.backend.render_draw(pass, u32(len(b.vertices)), 1)
+	contract.render_set_vertex_buffer(pass, 0, b.vertex_buffer, 0)
+	contract.render_draw(pass, u32(len(b.vertices)), 1)
 }
