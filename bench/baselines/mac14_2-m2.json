@@ -1,0 +1,271 @@
+{
+  "commit": "012e0e0-dirty",
+  "odin_version": "dev-2026-08",
+  "wgpu_version": "0x1d000101",
+  "macos_version": "27.0.1",
+  "timestamp": "2026-10-11T12:50:10.309568Z",
+  "environment": {
+    "cpu_model": "Apple M2",
+    "logical_cores": 8,
+    "physical_cores": 8,
+    "memory_bytes": 17179869184,
+    "power_source": "Battery Power",
+    "low_power_mode": false,
+    "thermal_state": "Nominal (0)",
+    "thread_qos": "User Interactive",
+    "swapchain_resolution": "2940x1782",
+    "surface_format": "BGRA8_Unorm",
+    "refresh_rate_hz": 60.0,
+    "prng_seed": "0x853c49e6748fea9b"
+  },
+  "locked_evaluations": {
+    "normal_1pane_1080p": {
+      "metric": "Normal 1-Pane CPU Time per Frame",
+      "unit": "us",
+      "threshold": 80.0,
+      "mean": 190.137,
+      "ci_low_95": 100.821,
+      "ci_high_95": 279.453,
+      "verdict": "FAIL"
+    },
+    "base_jump_0_to_1": {
+      "metric": "0->1 Base Jump",
+      "unit": "us",
+      "threshold": 60.0,
+      "mean": 38.937,
+      "ci_low_95": 8.467,
+      "ci_high_95": 69.406,
+      "verdict": "INCONCLUSIVE"
+    },
+    "marginal_slope_1_to_n": {
+      "metric": "1->N Marginal Slope",
+      "unit": "us/layer",
+      "threshold": 15.0,
+      "slope": 5.211,
+      "intercept": 307.631,
+      "r_squared": 0.5875,
+      "se_slope": 0.7602,
+      "ci_low_95": 3.664,
+      "ci_high_95": 6.758,
+      "verdict": "PASS"
+    }
+  },
+  "scenarios": [
+    {
+      "name": "Scale 0 Layers (Empty Pass)",
+      "unit": "us",
+      "runs": [254.793, 246.745, 229.007, 238.448, 274.689],
+      "mean": 248.736,
+      "ci_low_95": 227.150,
+      "ci_high_95": 270.322,
+      "verdict": "-"
+    },
+    {
+      "name": "Scale 1 Layer (Fullscreen)",
+      "unit": "us",
+      "runs": [298.368, 302.385, 291.082, 272.234, 274.293],
+      "mean": 287.673,
+      "ci_low_95": 270.562,
+      "ci_high_95": 304.783,
+      "verdict": "-"
+    },
+    {
+      "name": "Scale 2 Layers (Fullscreen)",
+      "unit": "us",
+      "runs": [320.991, 316.076, 325.918, 325.216, 337.996],
+      "mean": 325.239,
+      "ci_low_95": 315.130,
+      "ci_high_95": 335.348,
+      "verdict": "-"
+    },
+    {
+      "name": "Scale 4 Layers (Fullscreen)",
+      "unit": "us",
+      "runs": [317.349, 333.713, 313.174, 308.494, 331.986],
+      "mean": 320.943,
+      "ci_low_95": 306.880,
+      "ci_high_95": 335.006,
+      "verdict": "-"
+    },
+    {
+      "name": "Scale 6 Layers (Fullscreen)",
+      "unit": "us",
+      "runs": [339.691, 368.933, 355.580, 370.525, 396.805],
+      "mean": 366.307,
+      "ci_low_95": 340.131,
+      "ci_high_95": 392.483,
+      "verdict": "-"
+    },
+    {
+      "name": "Scale 8 Layers (Fullscreen)",
+      "unit": "us",
+      "runs": [352.527, 340.991, 347.718, 347.798, 405.131],
+      "mean": 358.833,
+      "ci_low_95": 326.300,
+      "ci_high_95": 391.366,
+      "verdict": "-"
+    },
+    {
+      "name": "Scale 12 Layers (Fullscreen)",
+      "unit": "us",
+      "runs": [392.986, 371.966, 380.093, 384.998, 342.244],
+      "mean": 374.457,
+      "ci_low_95": 350.177,
+      "ci_high_95": 398.738,
+      "verdict": "-"
+    },
+    {
+      "name": "Scale 16 Layers (Fullscreen)",
+      "unit": "us",
+      "runs": [366.075, 373.331, 377.284, 379.915, 379.974],
+      "mean": 375.316,
+      "ci_low_95": 368.075,
+      "ci_high_95": 382.556,
+      "verdict": "-"
+    },
+    {
+      "name": "Normal 1-Pane 1080p Target",
+      "unit": "us",
+      "runs": [317.914, 167.837, 144.335, 159.503, 161.096],
+      "mean": 190.137,
+      "ci_low_95": 100.821,
+      "ci_high_95": 279.453,
+      "verdict": "FAIL"
+    },
+    {
+      "name": "Normal 2x2 Grid (4 Panes)",
+      "unit": "us",
+      "runs": [311.827, 329.582, 317.887, 303.557, 331.317],
+      "mean": 318.834,
+      "ci_low_95": 304.214,
+      "ci_high_95": 333.454,
+      "verdict": "-"
+    },
+    {
+      "name": "Extreme: 16-Layer 4K Checkerboard Overdraw",
+      "unit": "us",
+      "runs": [294.116, 74.107, 67.407, 151.462, 75.316],
+      "mean": 132.481,
+      "ci_low_95": 12.444,
+      "ci_high_95": 252.519,
+      "verdict": "-"
+    },
+    {
+      "name": "Extreme: Pathological Scissors",
+      "unit": "us",
+      "runs": [327.044, 325.763, 362.130, 328.140, 342.604],
+      "mean": 337.136,
+      "ci_low_95": 317.836,
+      "ci_high_95": 356.436,
+      "verdict": "-"
+    },
+    {
+      "name": "Extreme: 16 Moving Layers 120 FPS (CPU-Only)",
+      "unit": "us",
+      "runs": [524.839, 431.811, 397.936, 413.916, 435.441],
+      "mean": 440.789,
+      "ci_low_95": 379.553,
+      "ci_high_95": 502.025,
+      "verdict": "-"
+    },
+    {
+      "name": "Size: Popup (400x300, 4 layers)",
+      "unit": "us",
+      "runs": [286.493, 280.711, 302.190, 286.623, 331.445],
+      "mean": 297.492,
+      "ci_low_95": 271.932,
+      "ci_high_95": 323.052,
+      "verdict": "-"
+    },
+    {
+      "name": "Size: Cursor (24x36, 4 layers)",
+      "unit": "us",
+      "runs": [299.894, 289.887, 313.700, 279.295, 288.945],
+      "mean": 294.344,
+      "ci_low_95": 278.146,
+      "ci_high_95": 310.542,
+      "verdict": "-"
+    },
+    {
+      "name": "Dirty: 0 Dirty (Idle Baseline)",
+      "unit": "us",
+      "runs": [286.310, 334.177, 325.125, 320.845, 374.689],
+      "mean": 328.229,
+      "ci_low_95": 288.896,
+      "ci_high_95": 367.563,
+      "verdict": "-"
+    },
+    {
+      "name": "Dirty: 1 Dirty Layer",
+      "unit": "us",
+      "runs": [319.948, 360.375, 334.438, 325.811, 330.879],
+      "mean": 334.290,
+      "ci_low_95": 314.960,
+      "ci_high_95": 353.620,
+      "verdict": "-"
+    },
+    {
+      "name": "Dirty: All 4 Dirty Layers",
+      "unit": "us",
+      "runs": [312.906, 322.948, 324.846, 317.093, 331.444],
+      "mean": 321.847,
+      "ci_low_95": 312.963,
+      "ci_high_95": 330.732,
+      "verdict": "-"
+    },
+    {
+      "name": "Clear Mode: LoadOp = .Clear",
+      "unit": "us",
+      "runs": [337.498, 325.549, 317.226, 332.542, 348.730],
+      "mean": 332.309,
+      "ci_low_95": 317.492,
+      "ci_high_95": 347.126,
+      "verdict": "-"
+    },
+    {
+      "name": "Clear Mode: LoadOp = .Load",
+      "unit": "us",
+      "runs": [350.305, 338.793, 359.790, 300.345, 400.416],
+      "mean": 349.930,
+      "ci_low_95": 305.044,
+      "ci_high_95": 394.815,
+      "verdict": "-"
+    },
+    {
+      "name": "Anim: Slide Popup (1 moving, 1 static)",
+      "unit": "us",
+      "runs": [449.217, 423.548, 447.979, 417.336, 481.826],
+      "mean": 443.981,
+      "ci_low_95": 412.311,
+      "ci_high_95": 475.651,
+      "verdict": "-"
+    },
+    {
+      "name": "Anim: Fade In/Out (1 fading, 1 static)",
+      "unit": "us",
+      "runs": [505.987, 429.361, 503.525, 491.070, 523.388],
+      "mean": 490.666,
+      "ci_low_95": 445.779,
+      "ci_high_95": 535.553,
+      "verdict": "-"
+    },
+    {
+      "name": "Anim: Crossfade Tab (2 crossfading)",
+      "unit": "us",
+      "runs": [513.739, 513.461, 521.395, 497.581, 523.853],
+      "mean": 514.006,
+      "ci_low_95": 501.259,
+      "ci_high_95": 526.753,
+      "verdict": "-"
+    },
+    {
+      "name": "Anim: Scroll Offset (1 layer moving offset)",
+      "unit": "us",
+      "runs": [383.639, 415.661, 425.522, 419.704, 426.807],
+      "mean": 414.267,
+      "ci_low_95": 392.290,
+      "ci_high_95": 436.244,
+      "verdict": "-"
+    }
+  ]
+}

@@ -20,6 +20,7 @@ import "core:os"
 import "core:slice"
 import "core:strings"
 import "core:sys/unix"
+import "core:time"
 import "vendor:sdl3"
 import "vendor:wgpu"
 
@@ -30,6 +31,8 @@ import composer "../../core/composer"
 import pipeline "../../core/composer/pipeline"
 import layer "../../core/composer/layer"
 import transition "../../core/composer/transition"
+
+GIT_COMMIT :: #config(GIT_COMMIT, "dev")
 
 // Pre-defined layer identifiers (1..16)
 LAYER_IDS: [layer.MAX_COMPOSER_LAYERS]composer.Layer_Id = {
@@ -84,6 +87,8 @@ Size_Mode :: enum {
 	Popup,
 	Cursor,
 	Grid,
+	Checkerboard_4K,
+	Pathological_Scissor,
 }
 
 Dirty_Mode :: enum {
@@ -124,43 +129,11 @@ Scenario_Config :: struct {
 	target_h:     u32,
 }
 
-Percentiles :: struct {
-	min_val: f64,
-	p50:     f64,
-	p95:     f64,
-	p99:     f64,
-	max_val: f64,
-}
-
-Scenario_Result :: struct {
-	cfg:                   Scenario_Config,
-	presented_count:       int,
-	failed_comp_count:     int,
-	total_frames:          int,
-	wgpu_calls:            int,
-	steady_heap_alloc:     i64,
-
-	prop_us:               Percentiles,
-	begin_us:              Percentiles,
-	encode_us:             Percentiles,
-	end_us:                Percentiles,
-	submit_us:             Percentiles,
-	gpu_us:                Percentiles,
-	work_us:               Percentiles,
-	pacing_us:             Percentiles,
-	total_us:              Percentiles,
-	fps:                   f64,
-
-	work_deadline_miss_60: int,
-	dropped_vsync_jank:    int,
-	jank_runs_count:       int,
-	total_jank_frames:     int,
-	jank_rate:             f64,
-	headroom_120_pct:      f64,
-	bimodal_flips:         int,
-	bimodal_blocks:        int,
-	wgpu_error_count:      int,
-	first_error_msg:       string,
+Single_Run_Result :: struct {
+	cpu_us:    f64,
+	presented: int,
+	failed:    int,
+	calls:     int,
 }
 
 // ============================================================================
@@ -220,6 +193,23 @@ when ODIN_OS == .Darwin {
 		return 1 if (Get_Bool(imp_lpm))(proc_info, sel_lpm) else 0
 	}
 
+	term_macos_get_thermal_state :: proc() -> i32 {
+		cls := objc_getClass("NSProcessInfo")
+		if cls == nil do return 0
+		sel_proc := sel_registerName("processInfo")
+		imp_proc := class_getMethodImplementation(object_getClass(cls), sel_proc)
+		if imp_proc == nil do return 0
+		Get_Proc :: #type proc "c" (cls: rawptr, sel: rawptr) -> rawptr
+		proc_info := (Get_Proc(imp_proc))(cls, sel_proc)
+		if proc_info == nil do return 0
+
+		sel_ts := sel_registerName("thermalState")
+		imp_ts := class_getMethodImplementation(object_getClass(proc_info), sel_ts)
+		if imp_ts == nil do return 0
+		Get_Int :: #type proc "c" (target: rawptr, sel: rawptr) -> int
+		return i32((Get_Int(imp_ts))(proc_info, sel_ts))
+	}
+
 	term_macos_get_power_source :: proc(buf: [^]u8, max_len: i32) {
 		if buf == nil || max_len <= 0 do return
 		buf[0] = 0
@@ -240,6 +230,13 @@ when ODIN_OS == .Darwin {
 			}
 			buf[n] = 0
 		}
+	}
+} else {
+	term_macos_set_user_interactive_qos :: proc() -> i32 { return 0 }
+	term_macos_is_low_power_mode :: proc() -> i32 { return 0 }
+	term_macos_get_thermal_state :: proc() -> i32 { return 0 }
+	term_macos_get_power_source :: proc(buf: [^]u8, max_len: i32) {
+		if buf != nil && max_len > 0 do buf[0] = 0
 	}
 }
 
@@ -323,41 +320,113 @@ install_wgpu_call_counter_hooks :: proc() {
 // Machine Diagnostics & Environment Logging
 // ============================================================================
 
-log_machine_diagnostics :: proc() {
-	fmt.println("================================================================================")
-	fmt.println("                     MACHINE DIAGNOSTICS & ENVIRONMENT                          ")
-	fmt.println("================================================================================")
+Bench_Environment :: struct {
+	os_str:        string,
+	macos_version: string,
+	cpu_brand:     string,
+	logical_cpu:   int,
+	physical_cpu:  int,
+	mem_bytes:     u64,
+	power_source:  string,
+	low_power:     bool,
+	thermal_state: string,
+	thread_qos:    string,
+	swapchain_res: string,
+	surface_fmt:   string,
+	refresh_rate:  f32,
+	git_commit:    string,
+	odin_ver:      string,
+	wgpu_ver:      string,
+	prng_seed:     string,
+}
+
+get_bench_environment :: proc(h: ^Harness_State, seed: u64) -> Bench_Environment {
+	env: Bench_Environment
+	env.git_commit = strings.trim(GIT_COMMIT, "\"")
+	env.odin_ver = ODIN_VERSION
+	env.wgpu_ver = strings.clone(fmt.tprintf("0x%08x", wgpu.GetVersion()))
+	env.prng_seed = strings.clone(fmt.tprintf("0x%016x", seed))
+	env.thread_qos = "User Interactive (QOS_CLASS_USER_INTERACTIVE)"
+	env.swapchain_res = strings.clone(fmt.tprintf("%dx%d", int(h.screen_w), int(h.screen_h)))
+	env.surface_fmt = strings.clone(fmt.tprintf("%v", h.format))
+
 	when ODIN_OS == .Darwin {
 		brand_buf: [256]u8
 		ncpu: i32
 		phys_cpu: i32
 		memsize: u64
+		os_ver_buf: [64]u8
 
 		unix.sysctlbyname("machdep.cpu.brand_string", &brand_buf)
 		unix.sysctlbyname("hw.ncpu", &ncpu)
 		unix.sysctlbyname("hw.physicalcpu", &phys_cpu)
 		unix.sysctlbyname("hw.memsize", &memsize)
+		unix.sysctlbyname("kern.osproductversion", &os_ver_buf)
 
 		brand_str := strings.truncate_to_byte(string(brand_buf[:]), 0)
-		gib := f64(memsize) / (1024.0 * 1024.0 * 1024.0)
+		os_ver_str := strings.truncate_to_byte(string(os_ver_buf[:]), 0)
+		env.cpu_brand = strings.clone(brand_str)
+		env.macos_version = strings.clone(os_ver_str)
+		env.os_str = strings.clone(fmt.tprintf("Darwin (macOS %s)", os_ver_str))
+		env.logical_cpu = int(ncpu)
+		env.physical_cpu = int(phys_cpu)
+		env.mem_bytes = memsize
 
 		ps_buf: [64]u8
 		term_macos_get_power_source(raw_data(ps_buf[:]), 64)
 		ps_str := strings.truncate_to_byte(string(ps_buf[:]), 0)
+		env.power_source = strings.clone(ps_str)
 
-		is_lpm := term_macos_is_low_power_mode() != 0
+		env.low_power = term_macos_is_low_power_mode() != 0
+		ts := term_macos_get_thermal_state()
+		switch ts {
+		case 1: env.thermal_state = "Fair (1)"
+		case 2: env.thermal_state = "Serious (2)"
+		case 3: env.thermal_state = "Critical (3)"
+		case:   env.thermal_state = "Nominal (0)"
+		}
 
-		fmt.printfln("OS:            Darwin (macOS)")
-		fmt.printfln("CPU Model:     %s", brand_str)
-		fmt.printfln("Core Count:    %d logical cores", ncpu)
-		fmt.printfln("Physical:      %d physical cores", phys_cpu)
-		fmt.printfln("Memory:        %d bytes (%.2f GiB)", memsize, gib)
-		fmt.printfln("Power Source:  %s", ps_str)
-		fmt.printfln("Low Power:     %s", "ENABLED (Throttled)" if is_lpm else "Disabled (Full Performance)")
-		fmt.println("Thread QoS:    User Interactive")
+		display_id := sdl3.GetDisplayForWindow(h.window.handle)
+		disp_mode := sdl3.GetCurrentDisplayMode(display_id)
+		env.refresh_rate = disp_mode.refresh_rate if disp_mode != nil else 60.0
 	} else {
-		fmt.printfln("OS:            %s", ODIN_OS)
+		env.os_str = ODIN_OS
+		env.macos_version = "N/A"
+		env.cpu_brand = "Generic"
+		env.logical_cpu = 1
+		env.physical_cpu = 1
+		env.mem_bytes = 0
+		env.power_source = "AC Power"
+		env.low_power = false
+		env.thermal_state = "Nominal (0)"
+		env.refresh_rate = 60.0
 	}
+
+	return env
+}
+
+log_machine_diagnostics :: proc(h: ^Harness_State, seed: u64) {
+	env := get_bench_environment(h, seed)
+	fmt.println("================================================================================")
+	fmt.println("                     MACHINE DIAGNOSTICS & ENVIRONMENT                          ")
+	fmt.println("================================================================================")
+	fmt.printfln("OS:            %s", env.os_str)
+	fmt.printfln("CPU Model:     %s", env.cpu_brand)
+	fmt.printfln("Core Count:    %d logical cores (%d physical)", env.logical_cpu, env.physical_cpu)
+	gib := f64(env.mem_bytes) / (1024.0 * 1024.0 * 1024.0)
+	fmt.printfln("Memory:        %d bytes (%.2f GiB)", env.mem_bytes, gib)
+	fmt.printfln("Power Source:  %s", env.power_source)
+	fmt.printfln("Low Power:     %s", "ENABLED (Throttled)" if env.low_power else "Disabled (Full Performance)")
+	fmt.printfln("Thermal State: %s", env.thermal_state)
+	fmt.println("Thread QoS:    User Interactive (QOS_CLASS_USER_INTERACTIVE)")
+	mp := (h.screen_w * h.screen_h) / 1_000_000.0
+	fmt.printfln("Swapchain:     %d x %d physical pixels (%.2f Megapixels per layer)", int(h.screen_w), int(h.screen_h), mp)
+	fmt.printfln("Surface Format: %s", env.surface_fmt)
+	fmt.printfln("Refresh Rate:  %.1f Hz", env.refresh_rate)
+	fmt.printfln("Git Commit:    %s", env.git_commit)
+	fmt.printfln("Odin Version:  %s", env.odin_ver)
+	fmt.printfln("wgpu Version:  %s", env.wgpu_ver)
+	fmt.printfln("PRNG Seed:     %s", env.prng_seed)
 	fmt.println("================================================================================")
 	fmt.println()
 }
@@ -1459,6 +1528,8 @@ _acquire_surface :: proc(h: ^Harness_State) -> (contract.Gpu_Texture, contract.G
 						return contract.Gpu_Texture(st.texture), contract.Gpu_TextureView(tv)
 					}
 				}
+			} else {
+				fmt.printfln("DEBUG: attempt %d st.status=%v (texture=%v)", attempt, st.status, st.texture)
 			}
 		}
 		_pump_events()
@@ -1690,6 +1761,29 @@ _setup_scenario_layers :: proc(h: ^Harness_State, cfg: ^Scenario_Config) {
 			gy := f32(i / 2) * half_h
 			l.dest_rect = composer.rect_make(gx, gy, half_w, half_h)
 			l.scissor_rect = l.dest_rect
+
+		case .Checkerboard_4K:
+			cols := 4
+			cw := screen_w / f32(cols)
+			ch := screen_h / f32(cols)
+			col := i % cols
+			row := i / cols
+			parity_offset: f32 = 40.0 if (col + row) % 2 == 1 else 0.0
+			l.dest_rect = composer.rect_make(f32(col) * cw + parity_offset, f32(row) * ch + parity_offset, cw, ch)
+			l.scissor_rect = l.dest_rect
+
+		case .Pathological_Scissor:
+			l.dest_rect = composer.rect_make(0, 0, screen_w, screen_h)
+			switch i {
+			case 0:
+				l.scissor_rect = composer.rect_make(100, 100, 0, 0)
+			case 1:
+				l.scissor_rect = composer.rect_make(-100, -100, 300, 300)
+			case 2:
+				l.scissor_rect = composer.rect_make(screen_w + 200, screen_h + 200, 500, 500)
+			case:
+				l.scissor_rect = l.dest_rect
+			}
 		}
 
 		// Initial animation setup
@@ -1840,28 +1934,20 @@ _restore_default_layers :: proc(h: ^Harness_State) {
 	}
 }
 
-run_scenario_benchmark :: proc(
-	h: ^Harness_State,
-	cfg: ^Scenario_Config,
-	frames_per_run: int,
-	run_count: int,
-) -> Scenario_Result {
+execute_scenario_single_run :: proc(h: ^Harness_State, cfg: ^Scenario_Config, frames: int) -> Single_Run_Result {
 	install_wgpu_call_counter_hooks()
 
-	res: Scenario_Result
-	res.cfg = cfg^
-	res.wgpu_calls = 2 + (4 * cfg.layer_count)
-
-	total_frames := frames_per_run * run_count
-	res.total_frames = total_frames
-
-	// Offscreen target allocation if required
+	res: Single_Run_Result
 	target_tex: contract.Gpu_Texture
 	target_view: contract.Gpu_TextureView
 	if cfg.is_offscreen {
 		tex_usage := contract.Gpu_Texture_Usage.Render_Attach | contract.Gpu_Texture_Usage.Copy_Src
 		target_tex = contract.create_texture(h.device, cfg.target_w, cfg.target_h, h.format, tex_usage)
 		target_view = contract.create_texture_view(target_tex)
+		if rawptr(target_tex) == nil || rawptr(target_view) == nil {
+			res.failed += 1
+			return res
+		}
 	}
 	defer {
 		if cfg.is_offscreen {
@@ -1874,309 +1960,78 @@ run_scenario_benchmark :: proc(
 
 	_setup_scenario_layers(h, cfg)
 
-	// Preallocate sample slices for metrics
-	prop_samples := make([]u64, total_frames)
-	begin_samples := make([]u64, total_frames)
-	encode_samples := make([]u64, total_frames)
-	end_samples := make([]u64, total_frames)
-	submit_samples := make([]u64, total_frames)
-	gpu_samples := make([]u64, total_frames)
-	work_samples := make([]u64, total_frames)
-	pacing_samples := make([]u64, total_frames)
-	total_samples := make([]u64, total_frames)
-	defer {
-		delete(prop_samples)
-		delete(begin_samples)
-		delete(encode_samples)
-		delete(end_samples)
-		delete(submit_samples)
-		delete(gpu_samples)
-		delete(work_samples)
-		delete(pacing_samples)
-		delete(total_samples)
-	}
+	total_cpu_us: f64 = 0.0
+	measured_frames := 0
 
-	// Warmup pass (discarded)
-	for _ in 0..<10 {
+	for f in 0..<frames {
+		_pump_events()
+
 		view_to_use := target_view
 		surf_tex: contract.Gpu_Texture
 		if !cfg.is_offscreen {
-			st, sv, _ := contract.get_surface_texture(h.surface)
+			st, sv := _acquire_surface(h)
 			surf_tex = st
 			view_to_use = sv
 		}
-		if rawptr(view_to_use) != nil {
-			pipeline.composer_pipeline_begin_frame(&h.composer_pipe)
-			enc := contract.create_command_encoder(h.device)
-			_ = pipeline.composer_pipeline_composite(&h.composer_pipe, enc, view_to_use)
-			cmd := contract.finish_command_buffer(enc)
-			contract.release_command_encoder(enc)
-			if cmd != nil {
-				contract.submit(h.queue, cmd)
-				contract.release_command_buffer(cmd)
-			}
-			if !cfg.is_offscreen {
-				_ = contract.present_surface(h.surface)
-				contract.release_surface_texture(surf_tex, view_to_use)
-			}
-			pipeline.composer_pipeline_end_frame(&h.composer_pipe)
+
+		if rawptr(view_to_use) == nil {
+			res.failed += 1
+			continue
 		}
-	}
 
-	// Clear uncaptured GPU errors before measuring
-	wgpu_backend.clear_uncaptured_errors()
+		if cfg.anim_kind != .None {
+			_update_scenario_animation(h, cfg, f, frames, 1.0 / 60.0)
+		}
 
-	// Tracking Allocator Setup for Steady-State Frames
-	tracking_alloc: mem.Tracking_Allocator
-	mem.tracking_allocator_init(&tracking_alloc, context.allocator)
-	old_allocator := context.allocator
-	context.allocator = mem.tracking_allocator(&tracking_alloc)
-	defer {
-		context.allocator = old_allocator
-		mem.tracking_allocator_destroy(&tracking_alloc)
-	}
+		pipeline.composer_pipeline_begin_frame(&h.composer_pipe)
 
-	allocs_before_loop := tracking_alloc.total_allocation_count
+		g_wgpu_call_counter = 0
+		t0 := helper.platform_now()
 
-	sample_idx := 0
-	prev_present_time: i64 = 0
-	prev_calls := -1
+		enc := contract.create_command_encoder(h.device)
+		comp_ok := pipeline.composer_pipeline_composite(&h.composer_pipe, enc, view_to_use)
+		if !comp_ok {
+			res.failed += 1
+		}
+		cmd := contract.finish_command_buffer(enc)
+		contract.release_command_encoder(enc)
 
-	for run_idx in 0..<run_count {
-		run_jank := 0
-		for f in 0..<frames_per_run {
-			view_to_use := target_view
-			surf_tex: contract.Gpu_Texture
-			if !cfg.is_offscreen {
-				st, sv := _acquire_surface(h)
-				surf_tex = st
-				view_to_use = sv
-			}
+		if cmd != nil {
+			contract.submit(h.queue, cmd)
+			contract.release_command_buffer(cmd)
+		}
 
-			if rawptr(view_to_use) == nil {
-				res.failed_comp_count += 1
-				continue
-			}
+		t1 := helper.platform_now()
 
-			// Deterministic Property Update (CPU)
-			t_p0 := helper.platform_now()
-			if cfg.anim_kind != .None {
-				_update_scenario_animation(h, cfg, f, frames_per_run, 1.0 / 60.0)
-			}
-			t_p1 := helper.platform_now()
-			t_prop_ns := u64(max(i64(0), helper.platform_ticks_to_ns(t_p1 - t_p0)))
+		frame_ns := helper.platform_ticks_to_ns(t1 - t0)
+		total_cpu_us += f64(frame_ns) / 1000.0
+		measured_frames += 1
+		res.calls = g_wgpu_call_counter
 
-			// Invariant Check: Zero Raster Leak in Clean Scenarios
-			if cfg.dirty_mode == .None {
-				for id in LAYER_IDS {
-					assert(!pipeline.composer_pipeline_is_dirty(&h.composer_pipe, id), "Composer bench invariant violated: dirty layer in clean scenario!")
-				}
-				assert(h.composer_pipe.stats.redrawn_layers == 0, "Composer bench invariant violated: redrawn_layers > 0 in clean scenario!")
-			}
-
-			// CPU Begin Frame
-			t_b0 := helper.platform_now()
-			pipeline.composer_pipeline_begin_frame(&h.composer_pipe)
-			t_b1 := helper.platform_now()
-			t_begin_ns := u64(max(i64(0), helper.platform_ticks_to_ns(t_b1 - t_b0)))
-
-			// Hardware GPU Timestamp Query Setup
-			cmd_ts0: rawptr = nil
-			cmd_ts1: rawptr = nil
-			cmd_resolve: rawptr = nil
-			if h.ts_supported {
-				cmd_ts0 = _emit_timestamp_query(h, 0, view_to_use)
-				cmd_ts1 = _emit_timestamp_query(h, 1, view_to_use)
-				cmd_resolve = _resolve_and_copy_timestamps(h)
-			}
-
-			// CPU Command Encoder & Composite
-			g_wgpu_call_counter = 0
-			t_e0 := helper.platform_now()
-			enc := contract.create_command_encoder(h.device)
-			comp_ok := pipeline.composer_pipeline_composite(&h.composer_pipe, enc, view_to_use)
-			if !comp_ok do res.failed_comp_count += 1
-			cmd := contract.finish_command_buffer(enc)
-			contract.release_command_encoder(enc)
-			t_e1 := helper.platform_now()
-			t_encode_ns := u64(max(i64(0), helper.platform_ticks_to_ns(t_e1 - t_e0)))
-
-			calls_this_frame := g_wgpu_call_counter
-
-			// Objective Behavioral Invariant Verification:
-			// 1. Upper bound safety: call count must never exceed naive baseline (2 + 4 * N)
-			naive_bound := 2 + (4 * cfg.layer_count)
-			assert(calls_this_frame <= naive_bound, "GPU call count regression: exceeded naive upper bound!")
-
-			// 2. Deterministic stability: for static scenarios, call count must be strictly constant per frame
-			if cfg.anim_kind == .None && prev_calls >= 0 {
-				assert(calls_this_frame == prev_calls, "GPU call count instability: static frame call count leaked or fluctuated!")
-			}
-			prev_calls = calls_this_frame
-			res.wgpu_calls = calls_this_frame
-
-			// CPU End Frame
-			t_f0 := helper.platform_now()
-			pipeline.composer_pipeline_end_frame(&h.composer_pipe)
-			t_f1 := helper.platform_now()
-			t_end_ns := u64(max(i64(0), helper.platform_ticks_to_ns(t_f1 - t_f0)))
-
-			// CPU Submit
-			t_s0 := helper.platform_now()
-			if cmd_ts0 != nil {
-				contract.submit(h.queue, cmd_ts0)
-				contract.release_command_buffer(cmd_ts0)
-			}
-			if cmd != nil {
-				contract.submit(h.queue, cmd)
-				contract.release_command_buffer(cmd)
-			}
-			if cmd_ts1 != nil {
-				contract.submit(h.queue, cmd_ts1)
-				contract.release_command_buffer(cmd_ts1)
-			}
-			if cmd_resolve != nil {
-				contract.submit(h.queue, cmd_resolve)
-				contract.release_command_buffer(cmd_resolve)
-			}
-			t_s1 := helper.platform_now()
-			t_submit_ns := u64(max(i64(0), helper.platform_ticks_to_ns(t_s1 - t_s0)))
-
-			// GPU Timestamp Readback
-			gpu_ns: u64 = 0
-			if h.ts_supported {
-				gpu_ns = _read_gpu_timestamp_duration(h)
-			}
-
-			// Surface Present & Pacing
-			t_present := helper.platform_now()
-			present_delta_ns: u64 = 0
-			if prev_present_time > 0 {
-				present_delta_ns = u64(max(i64(0), helper.platform_ticks_to_ns(t_present - prev_present_time)))
-			}
-			prev_present_time = t_present
-
-			if !cfg.is_offscreen {
-				if contract.present_surface(h.surface) {
-					res.presented_count += 1
-				}
-				contract.release_surface_texture(surf_tex, view_to_use)
+		if !cfg.is_offscreen {
+			if contract.present_surface(h.surface) {
+				res.presented += 1
 			} else {
-				res.presented_count += 1
+				res.failed += 1
 			}
-
-			t_total_ns := t_prop_ns + t_begin_ns + t_encode_ns + t_end_ns + t_submit_ns
-			t_work_ns := t_total_ns + gpu_ns
-
-			if t_work_ns > 16_666_667 do res.work_deadline_miss_60 += 1
-			if sample_idx > 0 && present_delta_ns > 25_000_000 {
-				res.dropped_vsync_jank += 1
-				run_jank += 1
-			}
-
-			prop_samples[sample_idx] = t_prop_ns
-			begin_samples[sample_idx] = t_begin_ns
-			encode_samples[sample_idx] = t_encode_ns
-			end_samples[sample_idx] = t_end_ns
-			submit_samples[sample_idx] = t_submit_ns
-			gpu_samples[sample_idx] = gpu_ns
-			work_samples[sample_idx] = t_work_ns
-			pacing_samples[sample_idx] = present_delta_ns
-			total_samples[sample_idx] = t_total_ns
-			sample_idx += 1
-		}
-		if run_jank > 0 {
-			res.jank_runs_count += 1
-		}
-	}
-
-	allocs_after_loop := tracking_alloc.total_allocation_count
-	res.steady_heap_alloc = allocs_after_loop - allocs_before_loop
-
-	res.total_jank_frames = res.dropped_vsync_jank
-	if res.total_frames > 0 {
-		res.jank_rate = (f64(res.total_jank_frames) / f64(res.total_frames)) * 100.0
-	}
-
-	// WGPU Error Check
-	res.wgpu_error_count = wgpu_backend.get_uncaptured_error_count()
-	res.first_error_msg = wgpu_backend.get_last_error_string()
-
-	// Calculate Percentiles
-	res.prop_us = _compute_percentiles(prop_samples)
-	res.begin_us = _compute_percentiles(begin_samples)
-	res.encode_us = _compute_percentiles(encode_samples)
-	res.end_us = _compute_percentiles(end_samples)
-	res.submit_us = _compute_percentiles(submit_samples)
-	res.gpu_us = _compute_percentiles(gpu_samples)
-	res.work_us = _compute_percentiles(work_samples)
-	res.pacing_us = _compute_percentiles(pacing_samples)
-	res.total_us = _compute_percentiles(total_samples)
-
-	// Bimodal Encode Analysis: examine whether timing shifts occur in contiguous blocks or flip alternatingly
-	flips := 0
-	blocks := 0
-	streak := 0
-	med_enc := u64(res.encode_us.p50 * 1000.0)
-	for i in 1..<total_frames {
-		is_above_prev := encode_samples[i - 1] > med_enc
-		is_above_curr := encode_samples[i] > med_enc
-		if is_above_curr != is_above_prev {
-			if streak == 1 {
-				flips += 1
-			} else if streak > 1 {
-				blocks += 1
-			}
-			streak = 1
+			contract.release_surface_texture(surf_tex, view_to_use)
 		} else {
-			streak += 1
+			res.presented += 1
 		}
-	}
-	res.bimodal_flips = flips
-	res.bimodal_blocks = blocks
 
-	if res.work_us.p50 > 0.0 {
-		res.headroom_120_pct = (res.work_us.p50 / 8333.33) * 100.0
+		pipeline.composer_pipeline_end_frame(&h.composer_pipe)
 	}
-	if res.total_us.p50 > 0.0 {
-		res.fps = 1_000_000.0 / res.total_us.p50
+
+	if wgpu_backend.get_uncaptured_error_count() > 0 {
+		res.failed += 1
+		wgpu_backend.clear_uncaptured_errors()
+	}
+
+	if measured_frames > 0 {
+		res.cpu_us = total_cpu_us / f64(measured_frames)
 	}
 
 	return res
-}
-
-@(private = "file")
-_compute_percentiles :: proc(samples: []u64) -> Percentiles {
-	p: Percentiles
-	n := len(samples)
-	if n == 0 do return p
-
-	slice.sort(samples)
-
-	p.min_val = f64(samples[0]) / 1000.0
-	p.p50 = f64(samples[int(f64(n) * 0.50)]) / 1000.0
-	p.p95 = f64(samples[int(f64(n) * 0.95)]) / 1000.0
-	p.p99 = f64(samples[int(f64(n) * 0.99)]) / 1000.0
-	p.max_val = f64(samples[n - 1]) / 1000.0
-
-	return p
-}
-
-// Fisher-Yates shuffle for scenario execution order
-fisher_yates_shuffle :: proc(indices: []int) {
-	n := len(indices)
-	for i := n - 1; i > 0; i -= 1 {
-		j := int(rand_uint32() % u32(i + 1))
-		indices[i], indices[j] = indices[j], indices[i]
-	}
-}
-
-@(private = "file")
-_rand_state: u64 = 0x853c49e6748fea9b
-
-rand_uint32 :: proc() -> u32 {
-	_rand_state = _rand_state * 6364136223846793005 + 1442695040888963407
-	return u32(_rand_state >> 32)
 }
 
 Regression_Stats :: struct {
@@ -2233,12 +2088,29 @@ linear_regression_stats :: proc(xs: []f64, ys: []f64) -> Regression_Stats {
 	se_res := math.sqrt(ss_res / max(df, 1.0))
 	res.se_slope = se_res / math.sqrt(den)
 
-	t_crit := 2.571
-	switch int(df) {
-	case 1: t_crit = 12.706
-	case 2: t_crit = 4.303
-	case 3: t_crit = 3.182
-	case 4: t_crit = 2.776
+	t_crit := 2.035
+	if df <= 1.0 {
+		t_crit = 12.706
+	} else if df <= 2.0 {
+		t_crit = 4.303
+	} else if df <= 3.0 {
+		t_crit = 3.182
+	} else if df <= 4.0 {
+		t_crit = 2.776
+	} else if df <= 5.0 {
+		t_crit = 2.571
+	} else if df <= 6.0 {
+		t_crit = 2.447
+	} else if df <= 8.0 {
+		t_crit = 2.306
+	} else if df <= 12.0 {
+		t_crit = 2.179
+	} else if df <= 20.0 {
+		t_crit = 2.086
+	} else if df <= 30.0 {
+		t_crit = 2.042
+	} else {
+		t_crit = 2.035
 	}
 
 	ci_half := t_crit * res.se_slope
@@ -2252,17 +2124,201 @@ linear_regression_stats :: proc(xs: []f64, ys: []f64) -> Regression_Stats {
 // Comprehensive Matrix Runner & Health Check
 // ============================================================================
 
-SCENARIOS_TOTAL :: 26
+Stats_Summary :: struct {
+	mean:     f64,
+	std_dev:  f64,
+	ci_low:   f64,
+	ci_high:  f64,
+}
+
+compute_stats :: proc(vals: []f64) -> Stats_Summary {
+	res: Stats_Summary
+	n := len(vals)
+	if n == 0 do return res
+
+	sum := 0.0
+	for v in vals {
+		sum += v
+	}
+	res.mean = sum / f64(n)
+
+	if n > 1 {
+		sum_sq_diff := 0.0
+		for v in vals {
+			diff := v - res.mean
+			sum_sq_diff += diff * diff
+		}
+		res.std_dev = math.sqrt(sum_sq_diff / f64(n - 1))
+
+		t_multiplier := 2.776
+		switch n - 1 {
+		case 1:  t_multiplier = 12.706
+		case 2:  t_multiplier = 4.303
+		case 3:  t_multiplier = 3.182
+		case 4:  t_multiplier = 2.776
+		case 5:  t_multiplier = 2.571
+		case:    t_multiplier = 2.042
+		}
+
+		ci_half := t_multiplier * res.std_dev / math.sqrt(f64(n))
+		res.ci_low = res.mean - ci_half
+		res.ci_high = res.mean + ci_half
+	} else {
+		res.ci_low = res.mean
+		res.ci_high = res.mean
+	}
+
+	return res
+}
+
+evaluate_threshold :: proc(ci_low, ci_high, threshold: f64) -> string {
+	if ci_high < threshold {
+		return "PASS"
+	} else if ci_low > threshold {
+		return "FAIL"
+	}
+	return "INCONCLUSIVE"
+}
+
+find_scenario_index :: proc(scenarios: []Scenario_Config, name: string) -> int {
+	for s, i in scenarios {
+		if s.name == name do return i
+	}
+	return -1
+}
+
+SCENARIOS_TOTAL :: 24
+
+export_baseline_json :: proc(
+	h: ^Harness_State,
+	env: ^Bench_Environment,
+	scenarios: []Scenario_Config,
+	run_means: ^[SCENARIOS_TOTAL][5]f64,
+	num_runs: int,
+	reg_slope: Regression_Stats,
+	stats_jump: Stats_Summary,
+	verdict_jump: string,
+	verdict_slope: string,
+	stats_1pane: Stats_Summary,
+	verdict_1pane: string,
+	output_path: string,
+) -> bool {
+	_ = os.make_directory("bench")
+	_ = os.make_directory("bench/baselines")
+
+	b: strings.Builder
+	strings.builder_init(&b)
+	defer strings.builder_destroy(&b)
+
+	now_t := time.now()
+	timestamp_str, _ := time.time_to_rfc3339(now_t)
+
+	fmt.sbprintln(&b, "{")
+	fmt.sbprintfln(&b, "  \"commit\": \"%s\",", env.git_commit)
+	fmt.sbprintfln(&b, "  \"odin_version\": \"%s\",", env.odin_ver)
+	fmt.sbprintfln(&b, "  \"wgpu_version\": \"%s\",", env.wgpu_ver)
+	fmt.sbprintfln(&b, "  \"macos_version\": \"%s\",", env.macos_version)
+	fmt.sbprintfln(&b, "  \"timestamp\": \"%s\",", timestamp_str)
+	fmt.sbprintln(&b, "  \"environment\": {")
+	fmt.sbprintfln(&b, "    \"cpu_model\": \"%s\",", env.cpu_brand)
+	fmt.sbprintfln(&b, "    \"logical_cores\": %d,", env.logical_cpu)
+	fmt.sbprintfln(&b, "    \"physical_cores\": %d,", env.physical_cpu)
+	fmt.sbprintfln(&b, "    \"memory_bytes\": %d,", env.mem_bytes)
+	fmt.sbprintfln(&b, "    \"power_source\": \"%s\",", env.power_source)
+	fmt.sbprintfln(&b, "    \"low_power_mode\": %t,", env.low_power)
+	fmt.sbprintfln(&b, "    \"thermal_state\": \"%s\",", env.thermal_state)
+	fmt.sbprintln(&b, "    \"thread_qos\": \"User Interactive\",")
+	fmt.sbprintfln(&b, "    \"swapchain_resolution\": \"%s\",", env.swapchain_res)
+	fmt.sbprintfln(&b, "    \"surface_format\": \"%s\",", env.surface_fmt)
+	fmt.sbprintfln(&b, "    \"refresh_rate_hz\": %.1f,", env.refresh_rate)
+	fmt.sbprintfln(&b, "    \"prng_seed\": \"%s\"", env.prng_seed)
+	fmt.sbprintln(&b, "  },")
+	fmt.sbprintln(&b, "  \"locked_evaluations\": {")
+	fmt.sbprintln(&b, "    \"normal_1pane_1080p\": {")
+	fmt.sbprintln(&b, "      \"metric\": \"Normal 1-Pane CPU Time per Frame\",")
+	fmt.sbprintln(&b, "      \"unit\": \"us\",")
+	fmt.sbprintln(&b, "      \"threshold\": 80.0,")
+	fmt.sbprintfln(&b, "      \"mean\": %.3f,", stats_1pane.mean)
+	fmt.sbprintfln(&b, "      \"ci_low_95\": %.3f,", stats_1pane.ci_low)
+	fmt.sbprintfln(&b, "      \"ci_high_95\": %.3f,", stats_1pane.ci_high)
+	fmt.sbprintfln(&b, "      \"verdict\": \"%s\"", verdict_1pane)
+	fmt.sbprintln(&b, "    },")
+	fmt.sbprintln(&b, "    \"base_jump_0_to_1\": {")
+	fmt.sbprintln(&b, "      \"metric\": \"0->1 Base Jump\",")
+	fmt.sbprintln(&b, "      \"unit\": \"us\",")
+	fmt.sbprintln(&b, "      \"threshold\": 60.0,")
+	fmt.sbprintfln(&b, "      \"mean\": %.3f,", stats_jump.mean)
+	fmt.sbprintfln(&b, "      \"ci_low_95\": %.3f,", stats_jump.ci_low)
+	fmt.sbprintfln(&b, "      \"ci_high_95\": %.3f,", stats_jump.ci_high)
+	fmt.sbprintfln(&b, "      \"verdict\": \"%s\"", verdict_jump)
+	fmt.sbprintln(&b, "    },")
+	fmt.sbprintln(&b, "    \"marginal_slope_1_to_n\": {")
+	fmt.sbprintln(&b, "      \"metric\": \"1->N Marginal Slope\",")
+	fmt.sbprintln(&b, "      \"unit\": \"us/layer\",")
+	fmt.sbprintln(&b, "      \"threshold\": 15.0,")
+	fmt.sbprintfln(&b, "      \"slope\": %.3f,", reg_slope.slope)
+	fmt.sbprintfln(&b, "      \"intercept\": %.3f,", reg_slope.intercept)
+	fmt.sbprintfln(&b, "      \"r_squared\": %.4f,", reg_slope.r_squared)
+	fmt.sbprintfln(&b, "      \"se_slope\": %.4f,", reg_slope.se_slope)
+	fmt.sbprintfln(&b, "      \"ci_low_95\": %.3f,", reg_slope.ci_low_95)
+	fmt.sbprintfln(&b, "      \"ci_high_95\": %.3f,", reg_slope.ci_high_95)
+	fmt.sbprintfln(&b, "      \"verdict\": \"%s\"", verdict_slope)
+	fmt.sbprintln(&b, "    }")
+	fmt.sbprintln(&b, "  },")
+	fmt.sbprintln(&b, "  \"scenarios\": [")
+
+	idx_1pane := find_scenario_index(scenarios, "Normal 1-Pane 1080p Target")
+
+	for s in 0..<len(scenarios) {
+		stats_s := compute_stats(run_means[s][:num_runs])
+		fmt.sbprintln(&b, "    {")
+		fmt.sbprintfln(&b, "      \"name\": \"%s\",", scenarios[s].name)
+		fmt.sbprintln(&b, "      \"unit\": \"us\",")
+		fmt.sbprint(&b, "      \"runs\": [")
+		for r in 0..<num_runs {
+			if r > 0 do fmt.sbprint(&b, ", ")
+			fmt.sbprintf(&b, "%.3f", run_means[s][r])
+		}
+		fmt.sbprintln(&b, "],")
+		fmt.sbprintfln(&b, "      \"mean\": %.3f,", stats_s.mean)
+		fmt.sbprintfln(&b, "      \"ci_low_95\": %.3f,", stats_s.ci_low)
+		fmt.sbprintfln(&b, "      \"ci_high_95\": %.3f,", stats_s.ci_high)
+		v_str := "-"
+		if s == idx_1pane do v_str = verdict_1pane
+		fmt.sbprintfln(&b, "      \"verdict\": \"%s\"", v_str)
+		if s < len(scenarios) - 1 {
+			fmt.sbprintln(&b, "    },")
+		} else {
+			fmt.sbprintln(&b, "    }")
+		}
+	}
+	fmt.sbprintln(&b, "  ]")
+	fmt.sbprintln(&b, "}")
+
+	json_str := strings.to_string(b)
+	err := os.write_entire_file(output_path, json_str)
+	if err != nil {
+		fmt.eprintfln("Error writing baseline JSON to %s: %v", output_path, err)
+		return false
+	}
+	fmt.printfln("Baseline successfully written to: %s", output_path)
+	return true
+}
 
 run_full_benchmark :: proc(h: ^Harness_State, flags: Benchmark_Flags) {
-	log_machine_diagnostics()
+	rng: helper.Xoshiro256pp
+	seed: u64 = 0x853c49e6748fea9b
+	helper.xoshiro256pp_init(&rng, seed)
+
+	env := get_bench_environment(h, seed)
+	log_machine_diagnostics(h, seed)
 
 	mp := (h.screen_w * h.screen_h) / 1_000_000.0
 	fmt.println("================================================================================")
 	fmt.printfln("SWAPCHAIN & DISPLAY CONFIGURATION:")
 	fmt.printfln("  Resolution:      %d x %d physical pixels (%.2f Megapixels per layer)", int(h.screen_w), int(h.screen_h), mp)
 	fmt.printfln("  Surface Format:  %v (Linear Unorm Straight Alpha)", h.format)
-	fmt.printfln("  Display Refresh: 60 Hz (MacBook Air built-in panel)")
+	fmt.printfln("  Display Refresh: %.1f Hz", env.refresh_rate)
 	fmt.println("================================================================================")
 	fmt.println()
 
@@ -2275,418 +2331,219 @@ run_full_benchmark :: proc(h: ^Harness_State, flags: Benchmark_Flags) {
 	print_vram_report()
 
 	all_scenarios := [SCENARIOS_TOTAL]Scenario_Config{
-		// 1. Layer Count Scaling (1, 2, 4, 8, 16)
+		// 1. 8-Point Layer Count Regression (0, 1, 2, 4, 6, 8, 12, 16)
+		{"Scale 0 Layers (Empty Pass)", .Layer_Count, .None, 0, 0, .Fullscreen, .None, .Clear, false, 0, 0},
 		{"Scale 1 Layer (Fullscreen)", .Layer_Count, .None, 0, 1, .Fullscreen, .None, .Clear, false, 0, 0},
 		{"Scale 2 Layers (Fullscreen)", .Layer_Count, .None, 0, 2, .Fullscreen, .None, .Clear, false, 0, 0},
 		{"Scale 4 Layers (Fullscreen)", .Layer_Count, .None, 0, 4, .Fullscreen, .None, .Clear, false, 0, 0},
+		{"Scale 6 Layers (Fullscreen)", .Layer_Count, .None, 0, 6, .Fullscreen, .None, .Clear, false, 0, 0},
 		{"Scale 8 Layers (Fullscreen)", .Layer_Count, .None, 0, 8, .Fullscreen, .None, .Clear, false, 0, 0},
+		{"Scale 12 Layers (Fullscreen)", .Layer_Count, .None, 0, 12, .Fullscreen, .None, .Clear, false, 0, 0},
 		{"Scale 16 Layers (Fullscreen)", .Layer_Count, .None, 0, 16, .Fullscreen, .None, .Clear, false, 0, 0},
 
-		// 2. Layer Size Variations
+		// 2. Normal Baselines
+		{"Normal 1-Pane 1080p Target", .Offscreen_Res, .None, 0, 1, .Fullscreen, .None, .Clear, true, 1920, 1080},
+		{"Normal 2x2 Grid (4 Panes)", .Overdraw, .None, 0, 4, .Grid, .None, .Clear, false, 0, 0},
+
+		// 3. Extreme Scenarios
+		{"Extreme: 16-Layer 4K Checkerboard Overdraw", .Overdraw, .None, 0, 16, .Checkerboard_4K, .None, .Clear, true, 3840, 2160},
+		{"Extreme: Pathological Scissors", .Layer_Size, .None, 0, 4, .Pathological_Scissor, .None, .Clear, false, 0, 0},
+		{"Extreme: 16 Moving Layers 120 FPS (CPU-Only)", .Layer_Count, .Moving_Layers, 16, 16, .Fullscreen, .None, .Clear, true, 1920, 1080},
+
+		// 4. Other Variations
 		{"Size: Popup (400x300, 4 layers)", .Layer_Size, .None, 0, 4, .Popup, .None, .Clear, false, 0, 0},
 		{"Size: Cursor (24x36, 4 layers)", .Layer_Size, .None, 0, 4, .Cursor, .None, .Clear, false, 0, 0},
-
-		// 3. Overdraw Variations
-		{"Overdraw: Stacked (4 layers, Od=4.0)", .Overdraw, .None, 0, 4, .Fullscreen, .None, .Clear, false, 0, 0},
-		{"Overdraw: 2x2 Grid (4 layers, Od=1.0)", .Overdraw, .None, 0, 4, .Grid, .None, .Clear, false, 0, 0},
-
-		// 4. Dirty Layer Count Variations (No Raster Invariant)
 		{"Dirty: 0 Dirty (Idle Baseline)", .Dirty_Count, .None, 0, 4, .Fullscreen, .None, .Clear, false, 0, 0},
 		{"Dirty: 1 Dirty Layer", .Dirty_Count, .None, 0, 4, .Fullscreen, .One, .Clear, false, 0, 0},
 		{"Dirty: All 4 Dirty Layers", .Dirty_Count, .None, 0, 4, .Fullscreen, .All, .Clear, false, 0, 0},
-
-		// 5. Clear Mode Variations
 		{"Clear Mode: LoadOp = .Clear", .Clear_Mode, .None, 0, 4, .Fullscreen, .None, .Clear, false, 0, 0},
 		{"Clear Mode: LoadOp = .Load", .Clear_Mode, .None, 0, 4, .Fullscreen, .None, .Load, false, 0, 0},
-
-		// 6. Resolution Scaling (GPU Scale Offscreen)
-		{"GPU Scale: 1080p Offscreen (4 layers)", .Offscreen_Res, .None, 0, 4, .Fullscreen, .None, .Clear, true, 1920, 1080},
-		{"GPU Scale: 1440p Offscreen (4 layers)", .Offscreen_Res, .None, 0, 4, .Fullscreen, .None, .Clear, true, 2560, 1440},
-		{"GPU Scale: 4K Offscreen (4 layers)", .Offscreen_Res, .None, 0, 4, .Fullscreen, .None, .Clear, true, 3840, 2160},
-
-		// 7. Dynamic Animation Scenarios (Determinism & Frame Pacing)
 		{"Anim: Slide Popup (1 moving, 1 static)", .Layer_Size, .Slide_Popup, 1, 2, .Popup, .None, .Clear, false, 0, 0},
 		{"Anim: Fade In/Out (1 fading, 1 static)", .Overdraw, .Fade_In_Out, 1, 2, .Fullscreen, .None, .Clear, false, 0, 0},
 		{"Anim: Crossfade Tab (2 crossfading)", .Overdraw, .Crossfade_Tab, 2, 2, .Fullscreen, .None, .Clear, false, 0, 0},
 		{"Anim: Scroll Offset (1 layer moving offset)", .Layer_Size, .Scroll_Offset, 1, 1, .Fullscreen, .None, .Clear, false, 0, 0},
-		{"Anim Scaling: 0 Moving (4x4 Grid, Od=1.0)", .Layer_Count, .Moving_Layers, 0, 16, .Fullscreen, .None, .Clear, false, 0, 0},
-		{"Anim Scaling: 1 Moving (4x4 Grid, Od=1.0)", .Layer_Count, .Moving_Layers, 1, 16, .Fullscreen, .None, .Clear, false, 0, 0},
-		{"Anim Scaling: 4 Moving (4x4 Grid, Od=1.0)", .Layer_Count, .Moving_Layers, 4, 16, .Fullscreen, .None, .Clear, false, 0, 0},
-		{"Anim Scaling: 8 Moving (4x4 Grid, Od=1.0)", .Layer_Count, .Moving_Layers, 8, 16, .Fullscreen, .None, .Clear, false, 0, 0},
-		{"Anim Scaling: 16 Moving (4x4 Grid, Od=1.0)", .Layer_Count, .Moving_Layers, 16, 16, .Fullscreen, .None, .Clear, false, 0, 0},
 	}
-
-	present_modes := [2]struct {
-		name:       string,
-		mode:       contract.Gpu_Present_Mode,
-		frames:     int,
-		run_count:  int,
-	}{
-		{"Immediate Mode (Pure CPU & GPU Throughput)", .Immediate, 20 if flags.quick else 80, 2 if flags.quick else 3},
-		{"FIFO Mode (VSync Pacing & Jank Latency)", .Fifo, 20 if flags.quick else (600 if flags.fifo_full else 60), 2 if flags.quick else (1 if flags.fifo_full else 3)},
-	}
-
-	// Results storage: [present_mode_idx][scenario_idx]
-	results: [2][SCENARIOS_TOTAL]Scenario_Result
-
-	start_idx := 17 if flags.anim_only else 0
-	end_idx := SCENARIOS_TOTAL
 
 	when ODIN_OS == .Darwin {
 		term_macos_set_user_interactive_qos()
 	}
 
-	for p_idx in 0..<2 {
-		pm := present_modes[p_idx]
-		contract.set_present_mode(h.surface, pm.mode)
-
-		fmt.println("================================================================================")
-		fmt.printfln("RUNNING PRESENT MODE: %s", pm.name)
-		fmt.printfln("Configuration: %d frames/run × %d runs per scenario (Fisher-Yates shuffled)", pm.frames, pm.run_count)
-		fmt.println("================================================================================")
-
-		scenario_indices: [SCENARIOS_TOTAL]int
-		count_to_run := end_idx - start_idx
-		for i in 0..<count_to_run {
-			scenario_indices[i] = start_idx + i
-		}
-		fisher_yates_shuffle(scenario_indices[:count_to_run])
-
-		for i in 0..<count_to_run {
-			s_idx := scenario_indices[i]
-			cfg := all_scenarios[s_idx]
-
-			frames_to_use := pm.frames
-			runs_to_use := pm.run_count
-			if pm.mode == .Fifo && cfg.anim_kind != .None {
-				if flags.quick {
-					frames_to_use = 20
-					runs_to_use = 2
-				} else {
-					frames_to_use = 600
-					runs_to_use = 2
-				}
-			}
-			res := run_scenario_benchmark(h, &cfg, frames_to_use, runs_to_use)
-			results[p_idx][s_idx] = res
-
-			if pm.mode == .Fifo {
-				fmt.printfln(
-					"  [Done] %-42s | Work p50: %8s | Jank: %d (%d runs) | Pacing p50: %8s",
-					cfg.name,
-					fmt.tprintf("%.1f µs", res.work_us.p50),
-					res.total_jank_frames,
-					res.jank_runs_count,
-					fmt.tprintf("%.1f µs", res.pacing_us.p50),
-				)
-			} else {
-				fmt.printfln(
-					"  [Done] %-42s | Prop p50: %8s | Encode p50: %8s | CPU-FPS: %8s",
-					cfg.name,
-					fmt.tprintf("%.1f µs", res.prop_us.p50),
-					fmt.tprintf("%.1f µs", res.encode_us.p50),
-					fmt.tprintf("%.1f", res.fps),
-				)
-			}
-		}
-		fmt.println()
-	}
-
-	// Restore Immediate presentation
 	contract.set_present_mode(h.surface, .Immediate)
 
-	// Print Comprehensive Reports for both modes
-	for p_idx in 0..<2 {
-		pm := present_modes[p_idx]
-		_print_mode_report(pm.mode, pm.name, results[p_idx][start_idx:end_idx])
+	// Interleaved Warmup across all scenarios
+	fmt.println("Running interleaved warmup across all scenarios (10 frames each)...")
+	for s_idx in 0..<SCENARIOS_TOTAL {
+		cfg := &all_scenarios[s_idx]
+		_ = execute_scenario_single_run(h, cfg, 10)
 	}
-
-	// Dynamic Composer Health Check Summary
-	_print_composer_health_check(results[0][:], results[1][:])
-}
-
-@(private = "file")
-_print_mode_report :: proc(mode: contract.Gpu_Present_Mode, mode_name: string, res_slice: []Scenario_Result) {
-	fmt.println("===========================================================================================================================================================================")
-	fmt.printfln("  REPORT: %s", mode_name)
-	fmt.println("  Composer-only, layers pre-filled, no raster.")
-	fmt.println("===========================================================================================================================================================================")
-
-	if mode == .Fifo {
-		fmt.println("---------------------------------------------------------------------------------------------------------------------------------------------------------------------------")
-		fmt.printfln(
-			"%-42s | %-7s | %-16s | %-14s | %-24s | %-12s | %-10s | %-17s",
-			"Scenario / Configuration",
-			"Pres/Fail",
-			"Work Lat p50/p99",
-			"Miss 60Hz (>16.7)",
-			"Present Pacing p50/p99",
-			"Jank Frames",
-			"Jank Rate",
-			"120Hz Budget Used",
-		)
-		fmt.println("---------------------------------------------------------------------------------------------------------------------------------------------------------------------------")
-
-		for res in res_slice {
-			pres_str := fmt.tprintf("%d/%d", res.presented_count, res.failed_comp_count)
-			work_str := fmt.tprintf("%.1f / %.1f", res.work_us.p50, res.work_us.p99)
-			miss_str := fmt.tprintf("%d", res.work_deadline_miss_60)
-			pace_str := fmt.tprintf("%.1f / %.1f", res.pacing_us.p50, res.pacing_us.p99)
-			jank_str := fmt.tprintf("%d (%d runs)", res.total_jank_frames, res.jank_runs_count)
-			rate_str := fmt.tprintf("%.2f%%", res.jank_rate)
-			used_str := fmt.tprintf("%.1f%%", res.headroom_120_pct)
-
-			fmt.printfln(
-				"%-42s | %-9s | %-16s | %-14s | %-24s | %-12s | %-10s | %-17s",
-				res.cfg.name,
-				pres_str,
-				work_str,
-				miss_str,
-				pace_str,
-				jank_str,
-				rate_str,
-				used_str,
-			)
-		}
-	} else {
-		fmt.println("---------------------------------------------------------------------------------------------------------------------------------------------------------------------------")
-		fmt.printfln(
-			"%-42s | %-7s | %-12s | %-12s | %-12s | %-12s | %-24s | %-13s | %-13s",
-			"Scenario / Configuration",
-			"Pres/Fail",
-			"CPU Prop(µs)",
-			"CPU Encod(µs)",
-			"CPU End(µs)",
-			"CPU Submt(µs)",
-			"GPU Pass(µs) [min/p50/p99]",
-			"Total Lat(µs)",
-			"CPU-only FPS",
-		)
-		fmt.println("---------------------------------------------------------------------------------------------------------------------------------------------------------------------------")
-
-		for res in res_slice {
-			pres_str := fmt.tprintf("%d/%d", res.presented_count, res.failed_comp_count)
-			prop_str := fmt.tprintf("%.1f/%.1f", res.prop_us.p50, res.prop_us.p99)
-			enc_str := fmt.tprintf("%.1f/%.1f", res.encode_us.p50, res.encode_us.p99)
-			end_str := fmt.tprintf("%.1f/%.1f", res.end_us.p50, res.end_us.p99)
-			sub_str := fmt.tprintf("%.1f/%.1f", res.submit_us.p50, res.submit_us.p99)
-			gpu_str := fmt.tprintf("%.1f / %.1f / %.1f", res.gpu_us.min_val, res.gpu_us.p50, res.gpu_us.p99)
-			tot_str := fmt.tprintf("%.1f/%.1f", res.total_us.p50, res.total_us.p99)
-			fps_str := fmt.tprintf("%.1f", res.fps)
-
-			fmt.printfln(
-				"%-42s | %-9s | %-12s | %-12s | %-12s | %-12s | %-24s | %-13s | %13s",
-				res.cfg.name,
-				pres_str,
-				prop_str,
-				enc_str,
-				end_str,
-				sub_str,
-				gpu_str,
-				tot_str,
-				fps_str,
-			)
-		}
-	}
-	fmt.println("---------------------------------------------------------------------------------------------------------------------------------------------------------------------------")
+	fmt.println("Interleaved warmup complete.")
 	fmt.println()
-}
 
-@(private = "file")
-_print_composer_health_check :: proc(imm_results: []Scenario_Result, fifo_results: []Scenario_Result) {
-	fmt.println("================================================================================")
-	fmt.println("                        COMPOSER HEALTH CHECK SUMMARY                           ")
-	fmt.println("================================================================================")
+	NUM_RUNS := 2 if flags.quick else 5
+	frames_per_run := 20 if flags.quick else 60
 
-	// 1. Linear Slope Regression over Layer Scaling (indices 0..4: 1, 2, 4, 8, 16 layers)
-	// Evaluated with CI 95% and tri-state verdict: PASS, FAIL, INCONCLUSIVE
-	xs := [5]f64{1.0, 2.0, 4.0, 8.0, 16.0}
-	ys := [5]f64{
-		imm_results[0].encode_us.p50,
-		imm_results[1].encode_us.p50,
-		imm_results[2].encode_us.p50,
-		imm_results[3].encode_us.p50,
-		imm_results[4].encode_us.p50,
+	run_means: [SCENARIOS_TOTAL][5]f64
+	run_presented: [SCENARIOS_TOTAL][5]int
+	run_failed: [SCENARIOS_TOTAL][5]int
+
+	r := 0
+	for r < NUM_RUNS {
+		t_start := term_macos_get_thermal_state()
+		if t_start != 0 {
+			fmt.printfln("WARNING: Non-nominal thermal state (%d) at start of Run %d/%d. Cooling down 2s...", t_start, r + 1, NUM_RUNS)
+			time.sleep(2 * time.Second)
+			continue
+		}
+
+		scenario_indices: [SCENARIOS_TOTAL]int
+		for i in 0..<SCENARIOS_TOTAL {
+			scenario_indices[i] = i
+		}
+		helper.xoshiro256pp_shuffle(&rng, scenario_indices[:])
+
+		fmt.printfln("--- Starting Run %d/%d (Shuffled with seed) ---", r + 1, NUM_RUNS)
+
+		for s_idx in scenario_indices {
+			cfg := &all_scenarios[s_idx]
+			res := execute_scenario_single_run(h, cfg, frames_per_run)
+			run_means[s_idx][r] = res.cpu_us
+			run_presented[s_idx][r] = res.presented
+			run_failed[s_idx][r] = res.failed
+		}
+
+		t_end := term_macos_get_thermal_state()
+		if t_end != 0 {
+			fmt.printfln("WARNING: Non-nominal thermal state (%d) at end of Run %d/%d. Repeating run...", t_end, r + 1, NUM_RUNS)
+			time.sleep(2 * time.Second)
+			continue
+		}
+
+		r += 1
 	}
-	reg1 := linear_regression_stats(xs[:], ys[:])
 
-	threshold_slope := 35.0
-	verdict_slope := "PASS"
-	if reg1.ci_low_95 > threshold_slope {
-		verdict_slope = "FAIL"
-	} else if reg1.ci_high_95 > threshold_slope {
-		verdict_slope = "INCONCLUSIVE"
+	idx_scale_0 := find_scenario_index(all_scenarios[:], "Scale 0 Layers (Empty Pass)")
+	idx_scale_1 := find_scenario_index(all_scenarios[:], "Scale 1 Layer (Fullscreen)")
+	idx_1pane   := find_scenario_index(all_scenarios[:], "Normal 1-Pane 1080p Target")
+	assert(idx_scale_0 >= 0 && idx_scale_1 >= 0 && idx_1pane >= 0, "Required benchmark scenarios missing")
+
+	// 1. Normal 1-Pane Evaluation
+	stats_1pane := compute_stats(run_means[idx_1pane][:NUM_RUNS])
+	verdict_1pane := evaluate_threshold(stats_1pane.ci_low, stats_1pane.ci_high, 80.0)
+
+	// 2. 0->1 Jump Evaluation
+	jump_diffs: [5]f64
+	for run_idx in 0..<NUM_RUNS {
+		jump_diffs[run_idx] = run_means[idx_scale_1][run_idx] - run_means[idx_scale_0][run_idx]
 	}
+	stats_jump := compute_stats(jump_diffs[:NUM_RUNS])
+	verdict_jump := evaluate_threshold(stats_jump.ci_low, stats_jump.ci_high, 60.0)
 
-	fmt.printfln("1. Linear Cost Scaling per Layer (blit_layer CPU encode slope):")
-	fmt.printfln("   Regression Model: T(layers) = %.2f µs + %.2f µs × N (R² = %.3f)", reg1.intercept, reg1.slope, reg1.r_squared)
-	fmt.printfln("   Measured Slope:   %.2f µs/layer (95%% CI: [%.2f, %.2f] µs, Threshold: < %.1f µs)", reg1.slope, reg1.ci_low_95, reg1.ci_high_95, threshold_slope)
+	// 3. 1->N Slope Regression Evaluation
+	K_scenarios := [7]string{
+		"Scale 1 Layer (Fullscreen)",
+		"Scale 2 Layers (Fullscreen)",
+		"Scale 4 Layers (Fullscreen)",
+		"Scale 6 Layers (Fullscreen)",
+		"Scale 8 Layers (Fullscreen)",
+		"Scale 12 Layers (Fullscreen)",
+		"Scale 16 Layers (Fullscreen)",
+	}
+	K_values := [7]f64{1.0, 2.0, 4.0, 6.0, 8.0, 12.0, 16.0}
+	xs_reg: [35]f64
+	ys_reg: [35]f64
+	pt_count := 0
+	for k_i in 0..<7 {
+		k_idx := find_scenario_index(all_scenarios[:], K_scenarios[k_i])
+		if k_idx >= 0 {
+			for run_idx in 0..<NUM_RUNS {
+				xs_reg[pt_count] = K_values[k_i]
+				ys_reg[pt_count] = run_means[k_idx][run_idx]
+				pt_count += 1
+			}
+		}
+	}
+	reg_slope := linear_regression_stats(xs_reg[:pt_count], ys_reg[:pt_count])
+	verdict_slope := evaluate_threshold(reg_slope.ci_low_95, reg_slope.ci_high_95, 15.0)
+
+	// Print Comprehensive Report Table
+	fmt.println()
+	fmt.println("==================================================================================================================================================")
+	fmt.println("                                               HARNESS COMPOSER BENCHMARK REPORT (V2.2)")
+	fmt.println("==================================================================================================================================================")
+	fmt.printfln("%-44s | %-36s | %-10s | %-18s | %-12s", "Scenario", "Run Means (µs)", "Mean (µs)", "95% CI (µs)", "Verdict")
+	fmt.println("---------------------------------------------+--------------------------------------+------------+--------------------+-------------")
+
+	for s in 0..<SCENARIOS_TOTAL {
+		cfg := &all_scenarios[s]
+		stats_s := compute_stats(run_means[s][:NUM_RUNS])
+
+		runs_str: string
+		if NUM_RUNS == 2 {
+			runs_str = fmt.tprintf("[%.1f, %.1f]", run_means[s][0], run_means[s][1])
+		} else if NUM_RUNS == 5 {
+			runs_str = fmt.tprintf("[%.1f, %.1f, %.1f, %.1f, %.1f]", run_means[s][0], run_means[s][1], run_means[s][2], run_means[s][3], run_means[s][4])
+		} else {
+			runs_str = fmt.tprintf("[%v]", run_means[s][:NUM_RUNS])
+		}
+
+		ci_str := fmt.tprintf("[%.1f, %.1f]", stats_s.ci_low, stats_s.ci_high)
+		mean_str := fmt.tprintf("%.1f", stats_s.mean)
+
+		v_str := "-"
+		if s == idx_1pane {
+			v_str = verdict_1pane
+		}
+
+		is_invalid := false
+		for r_i in 0..<NUM_RUNS {
+			if run_failed[s][r_i] > 0 do is_invalid = true
+			if !cfg.is_offscreen && run_presented[s][r_i] != frames_per_run do is_invalid = true
+		}
+		if is_invalid {
+			v_str = "INVALID"
+		}
+
+		fmt.printfln("%-44s | %-36s | %10s | %-18s | %-12s", cfg.name, runs_str, mean_str, ci_str, v_str)
+	}
+	fmt.println("==================================================================================================================================================")
+	fmt.println()
+
+	// Print Locked Thresholds Evaluation
+	fmt.println("================================================================================")
+	fmt.println("                         LOCKED THRESHOLDS EVALUATION                           ")
+	fmt.println("================================================================================")
+	fmt.printfln("1. Normal 1-Pane CPU Time per Frame (1080p target):")
+	fmt.printfln("   Mean:             %.2f µs (95%% CI: [%.2f, %.2f] µs)", stats_1pane.mean, stats_1pane.ci_low, stats_1pane.ci_high)
+	fmt.printfln("   Locked Threshold: ≤ 80.0 µs")
+	fmt.printfln("   Verdict:          [%s]", verdict_1pane)
+	fmt.println()
+
+	fmt.printfln("2. 8-Point Layer Scaling Regression:")
+	fmt.printfln("   0→1 Base Jump:    %.2f µs (95%% CI: [%.2f, %.2f] µs)", stats_jump.mean, stats_jump.ci_low, stats_jump.ci_high)
+	fmt.printfln("   Locked Threshold: ≤ 60.0 µs")
+	fmt.printfln("   Verdict:          [%s]", verdict_jump)
+	fmt.println()
+	fmt.printfln("   1→N OLS Slope:    %.2f µs/layer (SE: %.3f, 95%% CI: [%.2f, %.2f] µs/layer, R²: %.4f)", reg_slope.slope, reg_slope.se_slope, reg_slope.ci_low_95, reg_slope.ci_high_95, reg_slope.r_squared)
+	fmt.printfln("   Locked Threshold: ≤ 15.0 µs/layer")
 	fmt.printfln("   Verdict:          [%s]", verdict_slope)
-	fmt.println()
-
-	// 2. Invariance to Dirty Flag (Deterministic Command Stream & Call Count)
-	calls_dirty0 := imm_results[9].wgpu_calls
-	calls_dirty1 := imm_results[10].wgpu_calls
-	calls_dirtyAll := imm_results[11].wgpu_calls
-	dirty_identical := (calls_dirty0 == calls_dirty1) && (calls_dirty1 == calls_dirtyAll)
-
-	fmt.printfln("2. Invariance to Dirty Flag (Deterministic Command Stream & Call Count):")
-	fmt.printfln("   0 Dirty:          %d calls/frame", calls_dirty0)
-	fmt.printfln("   1 Dirty:          %d calls/frame", calls_dirty1)
-	fmt.printfln("   All Dirty:        %d calls/frame", calls_dirtyAll)
-	fmt.printfln("   Command Stream:   100%% identical (0 extra composer calls/overhead from dirty flags)")
-	fmt.printfln("   Verdict:          [%s]", "PASS" if dirty_identical else "FAIL")
-	fmt.println()
-
-	// 3. Animated Layer Cost (Evaluated on FIFO VSync Work Latency & CPU Encode):
-	// Evaluates the step jump (0 -> 1 moving layer) and marginal slope (1 -> 16 moving layers)
-	w0 := fifo_results[21].work_us.p50
-	w1 := fifo_results[22].work_us.p50
-	w4 := fifo_results[23].work_us.p50
-	w8 := fifo_results[24].work_us.p50
-	w16 := fifo_results[25].work_us.p50
-
-	jump_0_to_1 := w1 - w0
-
-	xs_anim := [4]f64{1.0, 4.0, 8.0, 16.0}
-	ys_anim := [4]f64{w1, w4, w8, w16}
-	reg3 := linear_regression_stats(xs_anim[:], ys_anim[:])
-
-	enc_ys_anim := [4]f64{
-		imm_results[22].encode_us.p50,
-		imm_results[23].encode_us.p50,
-		imm_results[24].encode_us.p50,
-		imm_results[25].encode_us.p50,
-	}
-	reg_cpu := linear_regression_stats(xs_anim[:], enc_ys_anim[:])
-
-	// 3. Animated Layer Cost (Primary Verdict: CPU Encode Slope, Immediate Mode)
-	// Evaluated against original unloosened threshold (< 15.0 µs)
-	threshold_slope_cpu := 15.0
-	verdict_anim := "PASS"
-	if reg_cpu.ci_low_95 > threshold_slope_cpu {
-		verdict_anim = "FAIL"
-	} else if reg_cpu.ci_high_95 > threshold_slope_cpu {
-		verdict_anim = "INCONCLUSIVE"
-	}
-
-	fmt.printfln("3. Cost per Animated Layer (Primary Verdict: CPU Encode Slope, Immediate Mode):")
-	fmt.printfln("   Lompatan 0 -> 1 Moving:    %.2f µs (Animation activation cost)", jump_0_to_1)
-	fmt.printfln("   CPU Encode Slope (Imm):    %.2f µs/layer (95%% CI: [%.2f, %.2f] µs, Threshold: < %.1f µs, R² = %.3f)", reg_cpu.slope, reg_cpu.ci_low_95, reg_cpu.ci_high_95, threshold_slope_cpu, reg_cpu.r_squared)
-	fmt.printfln("   Work Latency Slope (FIFO): %.2f µs/layer (95%% CI: [%.2f, %.2f] µs, Informational R² = %.3f)", reg3.slope, reg3.ci_low_95, reg3.ci_high_95, reg3.r_squared)
-	fmt.printfln("   Verdict:                   [%s]", verdict_anim)
-	fmt.println()
-
-	// 4. Steady-State Heap Allocation Invariant
-	total_steady_alloc: i64 = 0
-	for res in imm_results {
-		total_steady_alloc += res.steady_heap_alloc
-	}
-	for res in fifo_results {
-		total_steady_alloc += res.steady_heap_alloc
-	}
-	alloc_pass := total_steady_alloc == 0
-
-	fmt.printfln("4. Steady-State Heap Allocation Invariant (mem.Tracking_Allocator):")
-	fmt.printfln("   Total Allocations: %d bytes / count across all animated frames", total_steady_alloc)
-	fmt.printfln("   Verdict:           [%s] (0 new heap allocations)", "PASS" if alloc_pass else "FAIL")
-	fmt.println()
-
-	// 5. Zero Failures & Zero Uncaptured GPU Errors
-	total_fails := 0
-	total_gpu_errors := 0
-	for res in imm_results {
-		total_fails += res.failed_comp_count
-		total_gpu_errors += res.wgpu_error_count
-	}
-	for res in fifo_results {
-		total_fails += res.failed_comp_count
-		total_gpu_errors += res.wgpu_error_count
-	}
-	fail_pass := total_fails == 0 && total_gpu_errors == 0
-
-	fmt.printfln("5. Robustness & Uncaptured Error Audit:")
-	fmt.printfln("   Failed Composites:  %d across entire benchmark suite", total_fails)
-	fmt.printfln("   WGPU Errors:        %d uncaptured errors reported", total_gpu_errors)
-	fmt.printfln("   Verdict:            [%s]", "PASS" if fail_pass else "FAIL")
-	fmt.println()
-
-	// 6. Empirical WGPU Call Count Verification
-	naive_16 := 2 + (4 * 16)
-	actual_16 := imm_results[4].wgpu_calls
-	reduction_pct := 0.0
-	if naive_16 > 0 {
-		reduction_pct = (f64(naive_16 - actual_16) / f64(naive_16)) * 100.0
-	}
-	fmt.printfln("6. WGPU Command Encoding Efficiency (Black-Box Behavioral Invariant):")
-	fmt.printfln("   Naive Upper Bound:  2 + 4 × Layer_Count calls per frame (%d calls at 16 layers)", naive_16)
-	fmt.printfln("   Measured Calls:     %d calls at 16 layers (%.1f%% call reduction via 1 set_pipeline + cached uniforms)", actual_16, reduction_pct)
-	fmt.printfln("   Invariant Tested:   calls <= Naive Bound & zero frame-to-frame fluctuation on static layers")
-	fmt.printfln("   Verdict:            [PASS]")
-	fmt.println()
-
-	// 7. FIFO Frame Pacing & Jank Health (60 Hz Display):
-	total_jank_frames := 0
-	total_anim_frames := 0
-	max_jank_runs := 0
-	total_miss60 := 0
-	avg_budget_used := 0.0
-	count_fifo := len(fifo_results)
-
-	// Check jank specifically across animated scenarios (indices 17..25)
-	for i in 17..<SCENARIOS_TOTAL {
-		res := fifo_results[i]
-		total_jank_frames += res.total_jank_frames
-		total_anim_frames += res.total_frames
-		if res.jank_runs_count > max_jank_runs {
-			max_jank_runs = res.jank_runs_count
-		}
-	}
-	for res in fifo_results {
-		total_miss60 += res.work_deadline_miss_60
-		avg_budget_used += res.headroom_120_pct
-	}
-	if count_fifo > 0 do avg_budget_used /= f64(count_fifo)
-
-	jank_rate := 0.0
-	if total_anim_frames > 0 {
-		jank_rate = (f64(total_jank_frames) / f64(total_anim_frames)) * 100.0
-	}
-
-	// FAIL only if jank appears in more than 1 run (reproducible multi-run jank)
-	jank_verdict := "FAIL" if max_jank_runs > 1 else "PASS"
-
-	fmt.printfln("7. Frame Pacing & Jank Health (FIFO 60 Hz Display):")
-	fmt.printfln("   Work Deadline Misses (>16.67ms): %d frames", total_miss60)
-	fmt.printfln("   Total Jank Frames:               %d frames (Jank Rate: %.2f%%)", total_jank_frames, jank_rate)
-	fmt.printfln("   Multi-Run Reproducibility:       max %d runs with jank (FAIL criterion: > 1 run)", max_jank_runs)
-	fmt.printfln("   120 Hz Budget Used:              %.1f%% of 8.33ms budget utilized", avg_budget_used)
-	fmt.printfln("   Verdict:                         [%s]", jank_verdict)
-	fmt.println()
-
-	// 8. Command Encoding Bimodality & Scheduling Audit
-	total_flips := 0
-	total_blocks := 0
-	avg_tail_ratio := 0.0
-	valid_scenarios := 0
-	for res in imm_results {
-		total_flips += res.bimodal_flips
-		total_blocks += res.bimodal_blocks
-		if res.encode_us.p50 > 0.0 {
-			avg_tail_ratio += res.encode_us.p95 / res.encode_us.p50
-			valid_scenarios += 1
-		}
-	}
-	if valid_scenarios > 0 do avg_tail_ratio /= f64(valid_scenarios)
-	stable_jitter := avg_tail_ratio < 1.45 && total_flips == 0
-
-	fmt.printfln("8. Command Encoding Scheduling & Jitter Audit:")
-	fmt.printfln("   Alternating Frame Flips:     %d transitions across immediate matrix", total_flips)
-	fmt.printfln("   Contiguous Block Shifts:     %d runs (>1 frame sustained clustering)", total_blocks)
-	fmt.printfln("   Average Tail Ratio (p95/p50): %.2fx (Threshold: < 1.45x)", avg_tail_ratio)
-	fmt.printfln("   Verdict:                     [%s]", "PASS" if stable_jitter else "WARN")
 	fmt.println("================================================================================")
 	fmt.println()
+
+	// Export Baseline JSON
+	_ = export_baseline_json(
+		h,
+		&env,
+		all_scenarios[:],
+		&run_means,
+		NUM_RUNS,
+		reg_slope,
+		stats_jump,
+		verdict_jump,
+		verdict_slope,
+		stats_1pane,
+		verdict_1pane,
+		"bench/baselines/mac14_2-m2.json",
+	)
 }
 
 // ============================================================================

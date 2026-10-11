@@ -3,14 +3,17 @@ OUT_DIR ?= bin
 PREFIX ?= /usr/local
 UNAME_S := $(shell uname -s)
 
+GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+GIT_DIRTY ?= $(shell git diff --quiet 2>/dev/null || echo "-dirty")
+
 ifeq ($(UNAME_S),Darwin)
 HOMEBREW_PREFIX ?= $(shell brew --prefix 2>/dev/null || echo /opt/homebrew)
 MIN_OS_VERSION ?= 14.0
 LINK_FLAGS ?= -L/opt/homebrew/lib -L/usr/local/lib -framework Metal -framework MetalKit -framework QuartzCore -framework Cocoa -framework IOKit
-COMMON_FLAGS ?= -minimum-os-version:$(MIN_OS_VERSION) -strict-style -extra-linker-flags:"$(LINK_FLAGS)"
+COMMON_FLAGS ?= -define:GIT_COMMIT=\"$(GIT_COMMIT)$(GIT_DIRTY)\" -minimum-os-version:$(MIN_OS_VERSION) -strict-style -extra-linker-flags:"$(LINK_FLAGS)"
 else
 LINK_FLAGS ?= -L/usr/local/lib -L/usr/lib -lSDL3 -lfreetype -lharfbuzz
-COMMON_FLAGS ?= -strict-style -extra-linker-flags:"$(LINK_FLAGS)"
+COMMON_FLAGS ?= -define:GIT_COMMIT=\"$(GIT_COMMIT)$(GIT_DIRTY)\" -strict-style -extra-linker-flags:"$(LINK_FLAGS)"
 endif
 
 CHECK_FLAGS ?= -strict-style
@@ -18,7 +21,7 @@ TEST_FLAGS ?= -define:ODIN_TEST_THREADS=1
 DEBUG_FLAGS ?= -debug
 RELEASE_FLAGS ?= -o:speed -no-bounds-check
 
-.PHONY: all harness-render-composer run-harness-render-composer harness-composer run-harness-composer test test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract check check-linux clean help
+.PHONY: all harness-render-composer run-harness-render-composer harness-composer run-harness-composer test test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract check check-linux clean help bench bench-quick
 
 all: harness-render-composer harness-composer
 
@@ -35,6 +38,12 @@ harness-composer:
 
 run-harness-composer: harness-composer
 	./$(OUT_DIR)/harness_composer
+
+bench: harness-composer
+	./$(OUT_DIR)/harness_composer --bench
+
+bench-quick: harness-composer
+	./$(OUT_DIR)/harness_composer --bench --quick
 
 test: test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract
 
@@ -129,4 +138,6 @@ help:
 	@echo "  check                       Type check all active core modules and harnesses"
 	@echo "  check-linux                 Type check core modules targeting Linux ARM64"
 	@echo "  clean                       Remove build artifacts and binaries"
+	@echo "  bench                       Run harness_composer full benchmark suite"
+	@echo "  bench-quick                 Run harness_composer quick benchmark suite"
 	@echo "  help                        Show this help message"
