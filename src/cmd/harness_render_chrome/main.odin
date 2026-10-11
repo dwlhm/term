@@ -5,6 +5,7 @@ package main
 // Consumes core/chrome preview fixtures, extreme chrome scenarios (1000 SDF, radius > half size, divider drag, 128 tabs),
 // and migrates frame loop to core/composer/frame.frame_tick.
 
+import "core:c"
 import "core:fmt"
 import "core:math"
 import "core:os"
@@ -12,6 +13,17 @@ import "core:slice"
 import "core:strconv"
 import "vendor:sdl3"
 import "vendor:wgpu"
+
+when ODIN_OS == .Darwin {
+	foreign import stb_image_write "vendor:stb/lib/darwin/stb_image_write.a"
+	foreign stb_image_write {
+		stbi_write_png :: proc(filename: cstring, w, h, comp: c.int, data: rawptr, stride_in_bytes: c.int) -> c.int ---
+	}
+} else {
+	stbi_write_png :: proc(filename: cstring, w, h, comp: c.int, data: rawptr, stride_in_bytes: c.int) -> c.int {
+		return 0
+	}
+}
 
 import helper "../harness_helper"
 
@@ -88,7 +100,6 @@ Harness_State :: struct {
 	extreme_radius_mode: bool,
 	divider_drag_active: bool,
 	divider_ratio:       f32,
-	test_mode:           bool,
 
 	// Live Telemetry Cache
 	last_p1_redrawn:     bool,
@@ -1955,6 +1966,11 @@ _run_honest_benchmark :: proc(h: ^Harness_State) {
 	fmt.println("Present Mode: Uncapped Immediate Presentation")
 	fmt.println("==========================================================================================================================================================================================")
 
+	if !run_correctness_suite(h) {
+		fmt.eprintln("Error: Correctness suite failed! Visual readback rejected. Benchmark aborted.")
+		return
+	}
+
 	ts_period := f64(wgpu.QueueGetTimestampPeriod(wgpu.Queue(rawptr(h.queue))))
 	if ts_period <= 0.0 {
 		ts_period = 1.0
@@ -2248,21 +2264,171 @@ _run_honest_benchmark :: proc(h: ^Harness_State) {
 	pipeline.composer_pipeline_mark_dirty(&h.composer_pipe, CHROME_LAYER_ID)
 }
 
-// _run_chrome_verification_test executes automated headless/GPU verification of all chrome rendering strategies and exits cleanly.
-_run_chrome_verification_test :: proc(h: ^Harness_State) {
+// _readback_verify_and_dump_png copies the offscreen texture to a staging buffer, verifies anti-blank pixel data, and writes a PNG artifact.
+_readback_verify_and_dump_png :: proc(
+	h: ^Harness_State,
+	offscreen_tex: contract.Gpu_Texture,
+	readback_buf: wgpu.Buffer,
+	width, height, bytes_per_row: u32,
+	filename: cstring,
+) -> bool {
+	if h == nil || offscreen_tex == nil || readback_buf == nil do return false
+
+	wgpu_inst := wgpu.Instance(h.instance)
+	wgpu_dev := wgpu.Device(rawptr(h.device))
+	if wgpu_dev == nil do return false
+
+	enc := contract.create_command_encoder(h.device)
+	if rawptr(enc) == nil do return false
+
+	src_info := wgpu.TexelCopyTextureInfo{
+		texture  = wgpu.Texture(rawptr(offscreen_tex)),
+		mipLevel = 0,
+		origin   = { x = 0, y = 0, z = 0 },
+		aspect   = .All,
+	}
+	dst_info := wgpu.TexelCopyBufferInfo{
+		layout = {
+			offset       = 0,
+			bytesPerRow  = bytes_per_row,
+			rowsPerImage = height,
+		},
+		buffer = readback_buf,
+	}
+	copy_size := wgpu.Extent3D{
+		width              = width,
+		height             = height,
+		depthOrArrayLayers = 1,
+	}
+	wgpu.CommandEncoderCopyTextureToBuffer(wgpu.CommandEncoder(rawptr(enc)), &src_info, &dst_info, &copy_size)
+
+	copy_cmd := contract.finish_command_buffer(enc)
+	contract.release_command_encoder(enc)
+	if copy_cmd == nil do return false
+
+	contract.submit(h.queue, copy_cmd)
+	contract.release_command_buffer(copy_cmd)
+
+	contract.wait_for_idle(h.device)
+
+	readback_size := uint(bytes_per_row * height)
+	map_done := false
+	_on_mapped :: proc "c" (status: wgpu.MapAsyncStatus, message: wgpu.StringView, userdata1: rawptr, userdata2: rawptr) {
+		if userdata1 != nil do (^bool)(userdata1)^ = true
+		if userdata2 != nil do (^bool)(userdata2)^ = true
+	}
+
+	_ = wgpu.BufferMapAsync(
+		readback_buf,
+		{ .Read },
+		0,
+		readback_size,
+		wgpu.BufferMapCallbackInfo{
+			mode      = .AllowProcessEvents,
+			callback  = _on_mapped,
+			userdata1 = &map_done,
+			userdata2 = &map_done,
+		},
+	)
+
+	for !map_done {
+		wgpu.InstanceProcessEvents(wgpu_inst)
+		wgpu.DevicePoll(wgpu_dev, true, nil)
+	}
+
+	ptr := ([^]u8)(wgpu.RawBufferGetConstMappedRange(readback_buf, 0, readback_size))
+	if ptr == nil {
+		wgpu.BufferUnmap(readback_buf)
+		return false
+	}
+
+	first_pixel := [4]u8{ptr[0], ptr[1], ptr[2], ptr[3]}
+	has_non_zero_alpha := false
+	has_difference := false
+
+	w_int := int(width)
+	h_int := int(height)
+	bpr_int := int(bytes_per_row)
+
+	for y in 0..<h_int {
+		if has_non_zero_alpha && has_difference do break
+		row_offset := y * bpr_int
+		for x in 0..<w_int {
+			p := row_offset + x * 4
+			b := ptr[p + 0]
+			g := ptr[p + 1]
+			r := ptr[p + 2]
+			a := ptr[p + 3]
+
+			if a > 0 {
+				has_non_zero_alpha = true
+			}
+			if b != first_pixel[0] || g != first_pixel[1] || r != first_pixel[2] || a != first_pixel[3] {
+				has_difference = true
+			}
+			if has_non_zero_alpha && has_difference {
+				break
+			}
+		}
+	}
+
+	is_valid := has_non_zero_alpha && has_difference
+
+	stbi_write_png(filename, c.int(width), c.int(height), 4, ptr, c.int(bytes_per_row))
+
+	wgpu.BufferUnmap(readback_buf)
+	return is_valid
+}
+
+// run_correctness_suite executes automated headless/GPU verification of all chrome rendering strategies,
+// verifies GPU pixel readback for extreme fixtures, dumps PNG artifacts to artifacts/, and returns true on success.
+run_correctness_suite :: proc(h: ^Harness_State) -> bool {
 	fmt.println("=================================================================")
 	fmt.println("HARNESS RENDER CHROME — AUTOMATED VERIFICATION SUITE")
 	fmt.println("=================================================================")
+
+	_ = os.make_directory("artifacts")
 
 	all_ok := true
 	dl: chrome_dl.Ui_Draw_List
 	chrome_dl.ui_draw_list_init(&dl)
 	defer chrome_dl.ui_draw_list_destroy(&dl)
 
-	lc := pipeline.composer_pipeline_get_layer(&h.composer_pipe, CHROME_LAYER_ID)
-	target_view := lc.view if (lc != nil && lc.in_use) else contract.Gpu_TextureView(nil)
 	w := f32(h.window.pixel_w)
 	h_win := f32(h.window.pixel_h)
+	target_w := u32(w) if u32(w) > 0 else 1600
+	target_h := u32(h_win) if u32(h_win) > 0 else 1000
+	w = f32(target_w)
+	h_win = f32(target_h)
+
+	bytes_per_row := ((target_w * 4 + 255) / 256) * 256
+	readback_size := u64(bytes_per_row * target_h)
+
+	tex_usage := contract.Gpu_Texture_Usage.Render_Attach | contract.Gpu_Texture_Usage.Copy_Src
+	offscreen_tex := contract.create_texture(h.device, target_w, target_h, .BGRA8_Unorm, tex_usage)
+	if offscreen_tex == nil {
+		fmt.eprintln("run_correctness_suite error: failed to create offscreen texture")
+		return false
+	}
+	defer contract.destroy_texture(offscreen_tex)
+
+	offscreen_view := contract.create_texture_view(offscreen_tex)
+	if offscreen_view == nil {
+		fmt.eprintln("run_correctness_suite error: failed to create offscreen texture view")
+		return false
+	}
+	defer contract.destroy_texture_view(offscreen_view)
+
+	wgpu_dev := wgpu.Device(rawptr(h.device))
+	readback_buf := wgpu.DeviceCreateBuffer(wgpu_dev, &wgpu.BufferDescriptor{
+		usage = { .CopyDst, .MapRead },
+		size  = readback_size,
+	})
+	if readback_buf == nil {
+		fmt.eprintln("run_correctness_suite error: failed to create readback buffer")
+		return false
+	}
+	defer wgpu.BufferRelease(readback_buf)
 
 	// Test 1: Normal Tabs & Split Dividers Fixtures
 	{
@@ -2275,7 +2441,7 @@ _run_chrome_verification_test :: proc(h: ^Harness_State) {
 		chrome_splits.preview_splits_normal(&dl, split_bounds)
 		total_count := len(dl.commands)
 
-		cmd := render_ui_draw_list_encode(h.device, &h.chrome_renderer.sdf, &dl, target_view, w, h_win, {0, 0, 0, 0})
+		cmd := render_ui_draw_list_encode(h.device, &h.chrome_renderer.sdf, &dl, offscreen_view, w, h_win, {0, 0, 0, 0})
 		gpu_ok := false
 		if cmd != nil {
 			contract.submit(h.queue, cmd)
@@ -2285,7 +2451,7 @@ _run_chrome_verification_test :: proc(h: ^Harness_State) {
 
 		passed := tabs_count > 0 && total_count > tabs_count && gpu_ok
 		if !passed do all_ok = false
-		status := "PASS" if passed else "FAIL"
+		status := "[PASS]" if passed else "[FAIL]"
 		fmt.printfln("[TEST 1] Normal Tabs & Split Dividers Fixtures ............ %s (tabs=%d, total_cmds=%d)", status, tabs_count, total_count)
 	}
 
@@ -2295,7 +2461,7 @@ _run_chrome_verification_test :: proc(h: ^Harness_State) {
 		_generate_1000_sdf_elements(&dl, {0, 0, w, h_win})
 		cmd_count := len(dl.commands)
 
-		cmd := render_ui_draw_list_encode(h.device, &h.chrome_renderer.sdf, &dl, target_view, w, h_win, {0, 0, 0, 0})
+		cmd := render_ui_draw_list_encode(h.device, &h.chrome_renderer.sdf, &dl, offscreen_view, w, h_win, {0, 0, 0, 0})
 		gpu_ok := false
 		if cmd != nil {
 			contract.submit(h.queue, cmd)
@@ -2303,9 +2469,14 @@ _run_chrome_verification_test :: proc(h: ^Harness_State) {
 			gpu_ok = true
 		}
 
-		passed := (cmd_count == 1000) && gpu_ok
+		readback_ok := false
+		if gpu_ok {
+			readback_ok = _readback_verify_and_dump_png(h, offscreen_tex, readback_buf, target_w, target_h, bytes_per_row, "artifacts/chrome_test2.png")
+		}
+
+		passed := (cmd_count == 1000) && gpu_ok && readback_ok
 		if !passed do all_ok = false
-		status := "PASS" if passed else "FAIL"
+		status := "[PASS]" if passed else "[FAIL]"
 		fmt.printfln("[TEST 2] 1000 SDF Elements Batching & Render .............. %s (elements=%d)", status, cmd_count)
 	}
 
@@ -2315,7 +2486,7 @@ _run_chrome_verification_test :: proc(h: ^Harness_State) {
 		_generate_extreme_radius_elements(&dl, {0, 0, w, h_win})
 		cmd_count := len(dl.commands)
 
-		cmd := render_ui_draw_list_encode(h.device, &h.chrome_renderer.sdf, &dl, target_view, w, h_win, {0, 0, 0, 0})
+		cmd := render_ui_draw_list_encode(h.device, &h.chrome_renderer.sdf, &dl, offscreen_view, w, h_win, {0, 0, 0, 0})
 		gpu_ok := false
 		if cmd != nil {
 			contract.submit(h.queue, cmd)
@@ -2323,9 +2494,14 @@ _run_chrome_verification_test :: proc(h: ^Harness_State) {
 			gpu_ok = true
 		}
 
-		passed := cmd_count > 0 && gpu_ok
+		readback_ok := false
+		if gpu_ok {
+			readback_ok = _readback_verify_and_dump_png(h, offscreen_tex, readback_buf, target_w, target_h, bytes_per_row, "artifacts/chrome_test3.png")
+		}
+
+		passed := cmd_count > 0 && gpu_ok && readback_ok
 		if !passed do all_ok = false
-		status := "PASS" if passed else "FAIL"
+		status := "[PASS]" if passed else "[FAIL]"
 		fmt.printfln("[TEST 3] Radius > Half-Size Clamping & Stability .......... %s (cmds=%d)", status, cmd_count)
 	}
 
@@ -2336,7 +2512,7 @@ _run_chrome_verification_test :: proc(h: ^Harness_State) {
 		_emit_dynamic_dividers(&dl, split_bounds, 0.85)
 		cmd_count := len(dl.commands)
 
-		cmd := render_ui_draw_list_encode(h.device, &h.chrome_renderer.sdf, &dl, target_view, w, h_win, {0, 0, 0, 0})
+		cmd := render_ui_draw_list_encode(h.device, &h.chrome_renderer.sdf, &dl, offscreen_view, w, h_win, {0, 0, 0, 0})
 		gpu_ok := false
 		if cmd != nil {
 			contract.submit(h.queue, cmd)
@@ -2346,7 +2522,7 @@ _run_chrome_verification_test :: proc(h: ^Harness_State) {
 
 		passed := cmd_count > 0 && gpu_ok
 		if !passed do all_ok = false
-		status := "PASS" if passed else "FAIL"
+		status := "[PASS]" if passed else "[FAIL]"
 		fmt.printfln("[TEST 4] Dynamic Divider Drag Oscillation ................. %s (cmds=%d)", status, cmd_count)
 	}
 
@@ -2357,7 +2533,7 @@ _run_chrome_verification_test :: proc(h: ^Harness_State) {
 		chrome_tabs.preview_tabs_extreme(&dl, bar_rect, 128)
 		cmd_count := len(dl.commands)
 
-		cmd := render_ui_draw_list_encode(h.device, &h.chrome_renderer.sdf, &dl, target_view, w, h_win, {0, 0, 0, 0})
+		cmd := render_ui_draw_list_encode(h.device, &h.chrome_renderer.sdf, &dl, offscreen_view, w, h_win, {0, 0, 0, 0})
 		gpu_ok := false
 		if cmd != nil {
 			contract.submit(h.queue, cmd)
@@ -2365,9 +2541,14 @@ _run_chrome_verification_test :: proc(h: ^Harness_State) {
 			gpu_ok = true
 		}
 
-		passed := cmd_count >= 128 && gpu_ok
+		readback_ok := false
+		if gpu_ok {
+			readback_ok = _readback_verify_and_dump_png(h, offscreen_tex, readback_buf, target_w, target_h, bytes_per_row, "artifacts/chrome_test5.png")
+		}
+
+		passed := cmd_count >= 128 && gpu_ok && readback_ok
 		if !passed do all_ok = false
-		status := "PASS" if passed else "FAIL"
+		status := "[PASS]" if passed else "[FAIL]"
 		fmt.printfln("[TEST 5] Extreme 128 Tabs (1024-Rune Unicode Title) ....... %s (cmds=%d)", status, cmd_count)
 	}
 
@@ -2382,7 +2563,7 @@ _run_chrome_verification_test :: proc(h: ^Harness_State) {
 		chrome_modals.preview_modal_extreme(&dl, viewport)
 		extreme_count := len(dl.commands)
 
-		cmd := render_ui_draw_list_encode(h.device, &h.chrome_renderer.sdf, &dl, target_view, w, h_win, {0, 0, 0, 0})
+		cmd := render_ui_draw_list_encode(h.device, &h.chrome_renderer.sdf, &dl, offscreen_view, w, h_win, {0, 0, 0, 0})
 		gpu_ok := false
 		if cmd != nil {
 			contract.submit(h.queue, cmd)
@@ -2390,9 +2571,14 @@ _run_chrome_verification_test :: proc(h: ^Harness_State) {
 			gpu_ok = true
 		}
 
-		passed := normal_count > 0 && extreme_count > 0 && gpu_ok
+		readback_ok := false
+		if gpu_ok {
+			readback_ok = _readback_verify_and_dump_png(h, offscreen_tex, readback_buf, target_w, target_h, bytes_per_row, "artifacts/chrome_test6.png")
+		}
+
+		passed := normal_count > 0 && extreme_count > 0 && gpu_ok && readback_ok
 		if !passed do all_ok = false
-		status := "PASS" if passed else "FAIL"
+		status := "[PASS]" if passed else "[FAIL]"
 		fmt.printfln("[TEST 6] Modal Normal & Extreme Fixtures .................. %s (normal=%d, extreme=%d)", status, normal_count, extreme_count)
 	}
 
@@ -2417,7 +2603,7 @@ _run_chrome_verification_test :: proc(h: ^Harness_State) {
 		passed := outcome1.fail == .None && outcome1.ticked && outcome1.raster_calls > 0 &&
 		          !outcome2.ticked && outcome2.raster_calls == 0
 		if !passed do all_ok = false
-		status := "PASS" if passed else "FAIL"
+		status := "[PASS]" if passed else "[FAIL]"
 		fmt.printfln("[TEST 7] Composer Frame Loop Migration (frame_tick) ....... %s (tick1_raster=%d, tick2_raster=%d)",
 			status, outcome1.raster_calls, outcome2.raster_calls)
 	}
@@ -2430,9 +2616,7 @@ _run_chrome_verification_test :: proc(h: ^Harness_State) {
 	}
 	fmt.println("=================================================================")
 
-	if !all_ok {
-		os.exit(1)
-	}
+	return all_ok
 }
 
 _handle_sdl_event :: proc(h: ^Harness_State, event: ^sdl3.Event) {
@@ -2891,9 +3075,7 @@ main :: proc() {
 
 	for i := 1; i < len(os.args); i += 1 {
 		arg := os.args[i]
-		if arg == "--test" {
-			h.test_mode = true
-		} else if arg == "--bench" {
+		if arg == "--bench" {
 			_run_honest_benchmark(h)
 			h.running = false
 			return
@@ -2920,12 +3102,6 @@ main :: proc() {
 		} else if arg == "--blink" {
 			h.blink_enabled = true
 		}
-	}
-
-	if h.test_mode {
-		_run_chrome_verification_test(h)
-		h.running = false
-		return
 	}
 
 	if h.idle_test_mode {
