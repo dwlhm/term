@@ -21,9 +21,9 @@ TEST_FLAGS ?= -define:ODIN_TEST_THREADS=1
 DEBUG_FLAGS ?= -debug
 RELEASE_FLAGS ?= -o:speed -no-bounds-check
 
-.PHONY: all harness-render-chrome run-harness-render-chrome harness-render-composer run-harness-render-composer harness-composer run-harness-composer test test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract check check-linux clean help bench bench-quick
+.PHONY: all harness-render-chrome run-harness-render-chrome harness-render-terminal run-harness-render-terminal harness-render-composer run-harness-render-composer harness-composer run-harness-composer test test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract check check-linux clean help bench bench-quick
 
-all: harness-render-chrome harness-composer
+all: harness-render-chrome harness-render-terminal harness-composer
 
 harness-render-chrome:
 	@mkdir -p $(OUT_DIR)
@@ -31,6 +31,13 @@ harness-render-chrome:
 
 run-harness-render-chrome: harness-render-chrome
 	./$(OUT_DIR)/harness_render_chrome
+
+harness-render-terminal:
+	@mkdir -p $(OUT_DIR)
+	$(ODIN) build src/cmd/harness_render_terminal -out:$(OUT_DIR)/harness_render_terminal $(DEBUG_FLAGS) $(COMMON_FLAGS)
+
+run-harness-render-terminal: harness-render-terminal
+	./$(OUT_DIR)/harness_render_terminal
 
 harness-render-composer: harness-render-chrome
 
@@ -76,6 +83,7 @@ test-render-contract:
 check:
 	$(ODIN) check src/cmd/harness_helper $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/cmd/harness_render_chrome $(CHECK_FLAGS)
+	$(ODIN) check src/cmd/harness_render_terminal $(CHECK_FLAGS)
 	$(ODIN) check src/cmd/harness_composer $(CHECK_FLAGS)
 	$(ODIN) check src/core/composer $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/core/composer/layer $(CHECK_FLAGS) -no-entry-point
@@ -135,6 +143,7 @@ help:
 	@echo "Targets:"
 	@echo "  all                         Build both active GUI harnesses (default)"
 	@echo "  harness-render-chrome       Build standalone GUI harness & chrome preview benchmark"
+	@echo "  harness-render-terminal     Build standalone terminal render harness"
 	@echo "  harness-render-composer     Alias for harness-render-chrome"
 	@echo "  harness-composer            Build standalone GUI harness & pure compositor benchmark"
 	@echo "  test                        Run all active core unit tests"
