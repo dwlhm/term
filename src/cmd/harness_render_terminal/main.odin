@@ -10,11 +10,24 @@ package main
 // Invariant: ZERO Horizontal Dependencies across cores, zero dynamic allocations in frame loop.
 
 import "base:runtime"
+import "core:c"
 import "core:fmt"
 import "core:math"
 import "core:os"
 import "core:time"
 import "vendor:sdl3"
+import "vendor:wgpu"
+
+when ODIN_OS == .Darwin {
+	foreign import stb_image_write "vendor:stb/lib/darwin/stb_image_write.a"
+	foreign stb_image_write {
+		stbi_write_png :: proc(filename: cstring, w, h, comp: c.int, data: rawptr, stride_in_bytes: c.int) -> c.int ---
+	}
+} else {
+	stbi_write_png :: proc(filename: cstring, w, h, comp: c.int, data: rawptr, stride_in_bytes: c.int) -> c.int {
+		return 0
+	}
+}
 
 import helper "../harness_helper"
 import contract "../../core/render/contract"
@@ -28,6 +41,7 @@ import tile "../../core/render/terminal/tile"
 import fullscreen "../../core/render/terminal/fullscreen"
 
 // Embedded WGSL shader sources matching backend pipeline contracts
+BG_WGSL           :: #load("../../core/render/shaders/bg.wgsl", string)
 GLYPH_WGSL        :: #load("../../core/render/shaders/glyph.wgsl", string)
 TILE_COMPUTE_WGSL :: #load("../../core/render/shaders/tile_compute.wgsl", string)
 TILE_BLIT_WGSL    :: #load("../../core/render/shaders/tile_blit.wgsl", string)
@@ -254,29 +268,42 @@ init_style_lut :: proc(lut: ^[1025]u32) {
 	lut[1024] = u32(sel_fg) | (u32(sel_bg) << 16)
 }
 
+unpack_r5g6b5 :: #force_inline proc "contextless" (packed: u16) -> [4]f32 {
+	r := math.round(f32((packed >> 11) & 0x1F) / 31.0 * 255.0) / 255.0
+	g := math.round(f32((packed >> 5) & 0x3F) / 63.0 * 255.0) / 255.0
+	b := math.round(f32(packed & 0x1F) / 31.0 * 255.0) / 255.0
+	return {r, g, b, 1.0}
+}
+
 palette_srgb_float :: proc(style: u32, is_fg: bool) -> [4]f32 {
-	s := style % 16
+	colors := [16][3]u8{
+		{20, 22, 26},    // 0: Default dark bg
+		{224, 108, 117}, // 1: Red
+		{152, 195, 121}, // 2: Green
+		{229, 192, 123}, // 3: Yellow
+		{97, 175, 239},  // 4: Blue
+		{198, 120, 221}, // 5: Magenta
+		{86, 182, 194},  // 6: Cyan
+		{171, 178, 191}, // 7: Light Gray
+		{92, 99, 112},   // 8: Dark Gray
+		{255, 120, 130}, // 9: Bright Red
+		{170, 220, 130}, // 10: Bright Green
+		{255, 210, 130}, // 11: Bright Yellow
+		{110, 190, 255}, // 12: Bright Blue
+		{220, 140, 240}, // 13: Bright Magenta
+		{100, 200, 220}, // 14: Bright Cyan
+		{240, 240, 245}, // 15: Bright White
+	}
+	s := style % 1024
+	fg_idx := s % 16
+	bg_idx := (s / 16) % 16
 	if s == 0 {
-		if is_fg do return {0.95, 0.95, 0.98, 1.0}
-		return {0.08, 0.09, 0.11, 1.0}
+		fg_idx = 15
+		bg_idx = 0
 	}
-	switch s {
-	case 1:  return {0.88, 0.42, 0.46, 1.0} // Red
-	case 2:  return {0.60, 0.76, 0.47, 1.0} // Green
-	case 3:  return {0.90, 0.75, 0.48, 1.0} // Yellow
-	case 4:  return {0.38, 0.69, 0.94, 1.0} // Blue
-	case 5:  return {0.78, 0.47, 0.87, 1.0} // Magenta
-	case 6:  return {0.34, 0.71, 0.76, 1.0} // Cyan
-	case 7:  return {0.85, 0.85, 0.85, 1.0} // White
-	case 8:  return {0.45, 0.45, 0.50, 1.0} // Dark Gray
-	case 9:  return {1.00, 0.50, 0.55, 1.0} // Bright Red
-	case 10: return {0.70, 0.90, 0.55, 1.0} // Bright Green
-	case 11: return {1.00, 0.85, 0.55, 1.0} // Bright Yellow
-	case 12: return {0.50, 0.80, 1.00, 1.0} // Bright Blue
-	case 13: return {0.90, 0.60, 0.95, 1.0} // Bright Magenta
-	case 14: return {0.45, 0.85, 0.90, 1.0} // Bright Cyan
-	case:    return {0.95, 0.95, 1.00, 1.0} // Bright White
-	}
+	c := colors[fg_idx if is_fg else bg_idx]
+	packed := rgb_to_r5g6b5(c[0], c[1], c[2])
+	return unpack_r5g6b5(packed)
 }
 
 // ============================================================================
@@ -304,6 +331,8 @@ Harness_State :: struct {
 	// Shared GPU Pipeline Objects
 	glyph_pipeline:   contract.Gpu_RenderPipeline,
 	glyph_layout:     contract.Gpu_BindGroupLayout,
+	bg_pipeline:      contract.Gpu_RenderPipeline,
+	bg_layout:        contract.Gpu_BindGroupLayout,
 	compute_pipeline: contract.Gpu_ComputePipeline,
 	compute_layout:   contract.Gpu_BindGroupLayout,
 	blit_pipeline:    contract.Gpu_RenderPipeline,
@@ -422,7 +451,40 @@ _create_shared_pipelines :: proc(h: ^Harness_State) -> bool {
 	if rawptr(h.glyph_pipeline) == nil do return false
 	h.glyph_layout = contract.pipeline_get_bind_group_layout(h.glyph_pipeline, 0)
 
-	// 2. Compute Tile Pipelines (Compute + Blit)
+	// 2. Instance Background Render Pipeline (same layout, location 3 is bg_color at offset 48)
+	bg_mod := contract.create_shader_module(h.device, BG_WGSL)
+	if rawptr(bg_mod) == nil do return false
+	defer contract.destroy_shader_module(bg_mod)
+
+	bg_attrs := []contract.Gpu_Vertex_Attribute{
+		{format = .Float32x2, offset = 0, shader_location = 0},
+		{format = .Float32x2, offset = 8, shader_location = 1},
+		{format = .Float32x4, offset = 16, shader_location = 2},
+		{format = .Float32x4, offset = 48, shader_location = 3},
+	}
+	bg_layouts := []contract.Gpu_Vertex_Layout{
+		{
+			array_stride = size_of(contract.Instance_Record),
+			step_mode    = .Instance,
+			attributes   = bg_attrs,
+		},
+	}
+
+	h.bg_pipeline = contract.create_render_pipeline(
+		h.device,
+		bg_mod,
+		"vs_main",
+		bg_mod,
+		"fs_main",
+		bg_layouts,
+		h.format,
+		.Alpha_Blend,
+		.Triangle_List,
+	)
+	if rawptr(h.bg_pipeline) == nil do return false
+	h.bg_layout = contract.pipeline_get_bind_group_layout(h.bg_pipeline, 0)
+
+	// 3. Compute Tile Pipelines (Compute + Blit)
 	compute_mod := contract.create_shader_module(h.device, TILE_COMPUTE_WGSL)
 	if rawptr(compute_mod) == nil do return false
 	defer contract.destroy_shader_module(compute_mod)
@@ -449,7 +511,7 @@ _create_shared_pipelines :: proc(h: ^Harness_State) -> bool {
 	if rawptr(h.blit_pipeline) == nil do return false
 	h.blit_layout = contract.pipeline_get_bind_group_layout(h.blit_pipeline, 0)
 
-	// 3. Fullscreen Quad Direct Render Pipeline
+	// 4. Fullscreen Quad Direct Render Pipeline
 	fs_mod := contract.create_shader_module(h.device, FULLSCREEN_WGSL)
 	if rawptr(fs_mod) == nil do return false
 	defer contract.destroy_shader_module(fs_mod)
@@ -479,8 +541,8 @@ _rebuild_tile_resources :: proc(
 ) -> bool {
 	cell_w := pane_w / f32(cols)
 	cell_h := pane_h / f32(rows)
-	fb_w := u32(pane_w)
-	fb_h := u32(pane_h)
+	exact_w := max(u32(f32(cols) * cell_w), 1)
+	exact_h := max(u32(f32(rows) * cell_h), 1)
 
 	r.cols = cols
 	r.rows = rows
@@ -493,16 +555,16 @@ _rebuild_tile_resources :: proc(
 	r.tile_count = max(r.tiles_x * r.tiles_y, 1)
 
 	// Recreate Framebuffer if dimension changed
-	if rawptr(r.framebuffer) == nil || r.fb_w_px != fb_w || r.fb_h_px != fb_h {
+	if rawptr(r.framebuffer) == nil || r.fb_w_px != exact_w || r.fb_h_px != exact_h {
 		if rawptr(r.fb_view) != nil do contract.destroy_texture_view(r.fb_view)
 		if rawptr(r.framebuffer) != nil do contract.destroy_texture(r.framebuffer)
 
-		r.fb_w_px = fb_w
-		r.fb_h_px = fb_h
+		r.fb_w_px = exact_w
+		r.fb_h_px = exact_h
 		usage := contract.Gpu_Texture_Usage.Storage_Binding |
 		         contract.Gpu_Texture_Usage.Texture_Binding |
 		         contract.Gpu_Texture_Usage.Copy_Src
-		r.framebuffer = contract.create_texture(h.device, fb_w, fb_h, .RGBA8_Unorm, usage)
+		r.framebuffer = contract.create_texture(h.device, exact_w, exact_h, .RGBA8_Unorm, usage)
 		r.fb_view = contract.create_texture_view(r.framebuffer)
 	}
 
@@ -551,6 +613,10 @@ _rebuild_fullscreen_resources :: proc(
 ) -> bool {
 	cell_w := pane_w / f32(cols)
 	cell_h := pane_h / f32(rows)
+	exact_w := max(u32(f32(cols) * cell_w), 1)
+	exact_h := max(u32(f32(rows) * cell_h), 1)
+	_ = exact_w
+	_ = exact_h
 
 	r.cols = cols
 	r.rows = rows
@@ -583,9 +649,18 @@ _rebuild_fullscreen_resources :: proc(
 _rebuild_instance_resources :: proc(
 	h: ^Harness_State,
 	r: ^terminal_instance.Instance_Renderer,
-	max_instances: u32,
+	cols, rows: u32,
+	pane_w, pane_h: f32,
 ) -> bool {
-	if r.max_instances >= max_instances && rawptr(r.instance_buffer) != nil do return true
+	cell_w := pane_w / f32(cols)
+	cell_h := pane_h / f32(rows)
+	exact_w := max(u32(f32(cols) * cell_w), 1)
+	exact_h := max(u32(f32(rows) * cell_h), 1)
+	_ = exact_w
+	_ = exact_h
+
+	max_instances := cols * rows
+	if r.max_instances >= max_instances && rawptr(r.instance_buffer) != nil && rawptr(r.bind_group) != nil do return true
 
 	r.max_instances = max(max_instances, 1024)
 	if len(r.records) > 0 do delete(r.records)
@@ -605,16 +680,38 @@ _rebuild_instance_resources :: proc(
 		{binding = 2, sampler = r.sampler, entry_type = .Sampler},
 	}
 	r.bind_group = contract.create_bind_group(h.device, h.glyph_layout, entries)
+
+	if rawptr(r.bg_bind_group) != nil do contract.destroy_bind_group(r.bg_bind_group)
+	if rawptr(h.bg_layout) != nil {
+		bg_entries := []contract.Gpu_Bind_Entry{
+			{binding = 0, buffer = r.uniform_buffer, offset = 0, size = 0, entry_type = .Buffer},
+		}
+		r.bg_bind_group = contract.create_bind_group(h.device, h.bg_layout, bg_entries)
+	}
+
 	r.pipeline = h.glyph_pipeline
 	r.available = true
 	return rawptr(r.bind_group) != nil
 }
 
 _update_renderer_limits :: proc(h: ^Harness_State, cols, rows: u32) {
-	max_cells := cols * rows
+	cell_w := h.pane_w / f32(cols)
+	cell_h := h.pane_h / f32(rows)
+	exact_w := max(u32(f32(cols) * cell_w), 1)
+	exact_h := max(u32(f32(rows) * cell_h), 1)
+
+	// Update layer textures to exact pixel size to prevent squashing
+	l1, _ := pipeline.composer_pipeline_acquire_layer(&h.composer_pipe, 1, .Terminal, exact_w, exact_h, false)
+	l2, _ := pipeline.composer_pipeline_acquire_layer(&h.composer_pipe, 2, .Terminal, exact_w, exact_h, false)
+	l3, _ := pipeline.composer_pipeline_acquire_layer(&h.composer_pipe, 3, .Terminal, exact_w, exact_h, false)
+	l4, _ := pipeline.composer_pipeline_acquire_layer(&h.composer_pipe, 4, .Terminal, exact_w, exact_h, false)
+	if l1 != nil { l1.dest_rect = composer.rect_make(0, 0, h.pane_w, h.pane_h); l1.scissor_rect = l1.dest_rect; l1.opacity = 1.0 }
+	if l2 != nil { l2.dest_rect = composer.rect_make(h.pane_w, 0, h.pane_w, h.pane_h); l2.scissor_rect = l2.dest_rect; l2.opacity = 1.0 }
+	if l3 != nil { l3.dest_rect = composer.rect_make(0, h.pane_h, h.pane_w, h.pane_h); l3.scissor_rect = l3.dest_rect; l3.opacity = 1.0 }
+	if l4 != nil { l4.dest_rect = composer.rect_make(h.pane_w, h.pane_h, h.pane_w, h.pane_h); l4.scissor_rect = l4.dest_rect; l4.opacity = 1.0 }
 
 	// Pane 1
-	_rebuild_instance_resources(h, &h.inst1, max_cells)
+	_rebuild_instance_resources(h, &h.inst1, cols, rows, h.pane_w, h.pane_h)
 
 	// Pane 2
 	_rebuild_tile_resources(h, &h.tile2, cols, rows, h.pane_w, h.pane_h)
@@ -625,7 +722,7 @@ _update_renderer_limits :: proc(h: ^Harness_State, cols, rows: u32) {
 	contract.write_buffer(h.queue, h.fs3.lut_buffer, 0, &h.lut_words, size_of(h.lut_words))
 
 	// Pane 4
-	_rebuild_instance_resources(h, &h.inst4, max_cells)
+	_rebuild_instance_resources(h, &h.inst4, cols, rows, h.pane_w, h.pane_h)
 	_rebuild_tile_resources(h, &h.tile4, cols, rows, h.pane_w, h.pane_h)
 	contract.write_buffer(h.queue, h.tile4.lut_buffer, 0, &h.lut_words, size_of(h.lut_words))
 	_rebuild_fullscreen_resources(h, &h.fs4, &h.fs4_color_buf, cols, rows, h.pane_w, h.pane_h)
@@ -866,9 +963,9 @@ _render_frame :: proc(h: ^Harness_State) {
 				content, style, _, _, slot := unpack_cell(packed)
 				if content == ' ' && style == 0 do continue
 
-				u0, v0, u1, v1 := atlas.atlas_slot_uv(slot, f32(atlas.ATLAS_GLYPH_SIZE), f32(atlas.ATLAS_GLYPH_SIZE))
+				u0, v0, u1, v1 := atlas.atlas_slot_uv(slot, cell_w, cell_h)
 				if slot == UNRESOLVED_SLOT && content >= 32 && content <= 126 {
-					u0, v0, u1, v1 = atlas.atlas_slot_uv(content - 32, f32(atlas.ATLAS_GLYPH_SIZE), f32(atlas.ATLAS_GLYPH_SIZE))
+					u0, v0, u1, v1 = atlas.atlas_slot_uv(content - 32, cell_w, cell_h)
 				}
 
 				rec := contract.Instance_Record{
@@ -884,6 +981,11 @@ _render_frame :: proc(h: ^Harness_State) {
 
 		pass1 := contract.begin_render_pass(enc, l1.view, {0.07, 0.08, 0.10, 1.0}, .Clear)
 		if rawptr(pass1) != nil {
+			contract.render_set_pipeline(pass1, h.bg_pipeline)
+			bg_bg1 := h.inst1.bg_bind_group if rawptr(h.inst1.bg_bind_group) != nil else h.inst1.bind_group
+			contract.render_set_bind_group(pass1, 0, bg_bg1)
+			contract.render_set_vertex_buffer(pass1, 0, h.inst1.instance_buffer, 0)
+			contract.render_draw(pass1, 6, h.inst1.active_count)
 			terminal_instance.instance_renderer_draw(&h.inst1, pass1)
 			contract.end_render_pass(pass1)
 		}
@@ -940,9 +1042,9 @@ _render_frame :: proc(h: ^Harness_State) {
 						content, style, _, _, slot := unpack_cell(packed)
 						if content == ' ' && style == 0 do continue
 
-						u0, v0, u1, v1 := atlas.atlas_slot_uv(slot, f32(atlas.ATLAS_GLYPH_SIZE), f32(atlas.ATLAS_GLYPH_SIZE))
+						u0, v0, u1, v1 := atlas.atlas_slot_uv(slot, cell_w, cell_h)
 						if slot == UNRESOLVED_SLOT && content >= 32 && content <= 126 {
-							u0, v0, u1, v1 = atlas.atlas_slot_uv(content - 32, f32(atlas.ATLAS_GLYPH_SIZE), f32(atlas.ATLAS_GLYPH_SIZE))
+							u0, v0, u1, v1 = atlas.atlas_slot_uv(content - 32, cell_w, cell_h)
 						}
 
 						rec := contract.Instance_Record{
@@ -955,6 +1057,12 @@ _render_frame :: proc(h: ^Harness_State) {
 					}
 				}
 				terminal_instance.instance_renderer_flush(&h.inst4)
+
+				contract.render_set_pipeline(pass4, h.bg_pipeline)
+				bg_bg4 := h.inst4.bg_bind_group if rawptr(h.inst4.bg_bind_group) != nil else h.inst4.bind_group
+				contract.render_set_bind_group(pass4, 0, bg_bg4)
+				contract.render_set_vertex_buffer(pass4, 0, h.inst4.instance_buffer, 0)
+				contract.render_draw(pass4, 6, h.inst4.active_count)
 				terminal_instance.instance_renderer_draw(&h.inst4, pass4)
 
 			case .Compute_Tiles:
@@ -1009,7 +1117,686 @@ _render_frame :: proc(h: ^Harness_State) {
 }
 
 // ============================================================================
-// 5. Entry Point & Lifecycle
+// 5. Automated BGRA8 Truth Fuzzer & Negative Tests (docs/HARNESS_BENCHMARK_PLAN.md §6)
+// ============================================================================
+
+_Fuzz_Defects :: struct {
+	neg1_disable_dilation:       bool,
+	neg2_disable_space_bg:        bool,
+	neg3_reverse_pass_order:     bool,
+	neg4_reduced_row_damage:     bool,
+	neg5_skip_attr_damage:       bool,
+	neg6_inject_comparator_byte:  bool,
+}
+
+_apply_fuzz_mutation :: proc(
+	term_a, term_b: ^Synthetic_Terminal,
+	rng: ^helper.Xoshiro256pp,
+	class: int,
+) -> (kind: int, r, c: u32, is_attr_only: bool, is_erase: bool) {
+	kind = class % 8
+	cols := term_a.cols
+	rows := term_a.rows
+
+	switch kind {
+	case 0: // Plain ASCII edit
+		r = u32(helper.xoshiro256pp_next(rng) % u64(rows))
+		c = u32(helper.xoshiro256pp_next(rng) % u64(cols))
+		ch := rune(33 + (helper.xoshiro256pp_next(rng) % 94))
+		style := u32(1 + (helper.xoshiro256pp_next(rng) % 15))
+		term_a.cells[r * cols + c] = pack_cell(u32(ch), style, 1, 0, u32(ch) - 32)
+		term_b.cells[r * cols + c] = term_a.cells[r * cols + c]
+		term_a.damage = contract.damage_rect_make(c, r, 1, 1)
+		term_b.damage = term_a.damage
+
+	case 1: // Attribute-only change (style changed, same codepoint)
+		r = u32(helper.xoshiro256pp_next(rng) % u64(rows))
+		c = u32(helper.xoshiro256pp_next(rng) % u64(cols))
+		packed := term_a.cells[r * cols + c]
+		content, old_style, width, cflags, slot := unpack_cell(packed)
+		if content == 0 || content == ' ' {
+			content = 'A'
+			slot = u32('A') - 32
+		}
+		new_style := u32((old_style + 1 + u32(helper.xoshiro256pp_next(rng) % 14)) % 16)
+		if new_style == 0 do new_style = 1
+		term_a.cells[r * cols + c] = pack_cell(content, new_style, width, cflags, slot)
+		term_b.cells[r * cols + c] = term_a.cells[r * cols + c]
+		term_a.damage = contract.damage_rect_make(c, r, 1, 1)
+		term_b.damage = term_a.damage
+		is_attr_only = true
+
+	case 2: // Wide CJK at the last column
+		r = u32(helper.xoshiro256pp_next(rng) % u64(rows))
+		c = cols - 1
+		ch := rune('W')
+		style := u32(2 + (helper.xoshiro256pp_next(rng) % 14))
+		term_a.cells[r * cols + c] = pack_cell(u32(ch), style, 1, 0, u32(ch) - 32)
+		term_b.cells[r * cols + c] = term_a.cells[r * cols + c]
+		term_a.damage = contract.damage_rect_make(c, r, 1, 1)
+		term_b.damage = term_a.damage
+
+	case 3: // Combining and ZWJ clusters / symbols
+		r = u32(helper.xoshiro256pp_next(rng) % u64(rows))
+		c = u32(helper.xoshiro256pp_next(rng) % u64(cols))
+		symbols := []rune{'@', '#', '$', '%', '&', '*', '+', '=', '<', '>', '~', '^', '?', '!', '/'}
+		ch := symbols[helper.xoshiro256pp_next(rng) % u64(len(symbols))]
+		style := u32(3 + (helper.xoshiro256pp_next(rng) % 13))
+		term_a.cells[r * cols + c] = pack_cell(u32(ch), style, 1, 0, u32(ch) - 32)
+		term_b.cells[r * cols + c] = term_a.cells[r * cols + c]
+		term_a.damage = contract.damage_rect_make(c, r, 1, 1)
+		term_b.damage = term_a.damage
+
+	case 4: // Descenders (g y p q j _)
+		r = u32(helper.xoshiro256pp_next(rng) % u64(rows))
+		c = u32(helper.xoshiro256pp_next(rng) % u64(cols))
+		descenders := []rune{'g', 'y', 'p', 'q', 'j', '_'}
+		ch := descenders[helper.xoshiro256pp_next(rng) % u64(len(descenders))]
+		style := u32(1 + (helper.xoshiro256pp_next(rng) % 15))
+		term_a.cells[r * cols + c] = pack_cell(u32(ch), style, 1, 0, u32(ch) - 32)
+		term_b.cells[r * cols + c] = term_a.cells[r * cols + c]
+		term_a.damage = contract.damage_rect_make(c, r, 1, 1)
+		term_b.damage = term_a.damage
+
+	case 5: // Italic overhang next to box drawing
+		r = u32(helper.xoshiro256pp_next(rng) % u64(rows))
+		c = u32(helper.xoshiro256pp_next(rng) % u64(max(cols - 2, 1)))
+		ch1 := rune('|')
+		ch2 := rune('/')
+		term_a.cells[r * cols + c] = pack_cell(u32(ch1), 4, 1, 0, u32(ch1) - 32)
+		term_a.cells[r * cols + c + 1] = pack_cell(u32(ch2), 5, 1, 0, u32(ch2) - 32)
+		term_b.cells[r * cols + c] = term_a.cells[r * cols + c]
+		term_b.cells[r * cols + c + 1] = term_a.cells[r * cols + c + 1]
+		term_a.damage = contract.damage_rect_make(c, r, 2, 1)
+		term_b.damage = term_a.damage
+
+	case 6: // Cursor and selection overlay
+		r = u32(helper.xoshiro256pp_next(rng) % u64(rows))
+		c = u32(helper.xoshiro256pp_next(rng) % u64(cols))
+		ch := rune('X')
+		term_a.cells[r * cols + c] = pack_cell(u32(ch), 6, 1, 2, u32(ch) - 32)
+		term_b.cells[r * cols + c] = term_a.cells[r * cols + c]
+		term_a.damage = contract.damage_rect_make(c, r, 1, 1)
+		term_b.damage = term_a.damage
+
+	case 7: // Scroll or Erase
+		if helper.xoshiro256pp_next(rng) % 2 == 0 {
+			r = u32(helper.xoshiro256pp_next(rng) % u64(rows))
+			c = u32(helper.xoshiro256pp_next(rng) % u64(cols))
+			term_a.cells[r * cols + c] = pack_cell(' ', 0, 1, 0, 0)
+			term_b.cells[r * cols + c] = term_a.cells[r * cols + c]
+			term_a.damage = contract.damage_rect_make(c, r, 1, 1)
+			term_b.damage = term_a.damage
+			is_erase = true
+		} else {
+			for row in 0..<int(rows - 1) {
+				for col in 0..<int(cols) {
+					term_a.cells[row * int(cols) + col] = term_a.cells[(row + 1) * int(cols) + col]
+					term_b.cells[row * int(cols) + col] = term_a.cells[row * int(cols) + col]
+				}
+			}
+			for col in 0..<int(cols) {
+				term_a.cells[int(rows - 1) * int(cols) + col] = pack_cell(' ', 0, 1, 0, 0)
+				term_b.cells[int(rows - 1) * int(cols) + col] = pack_cell(' ', 0, 1, 0, 0)
+			}
+			term_a.damage = contract.damage_rect_make(0, 0, cols, rows)
+			term_b.damage = term_a.damage
+		}
+	}
+	return
+}
+
+_dump_fuzz_pngs :: proc(
+	fuzz_w, fuzz_h: u32,
+	pixels_a, pixels_b, pixels_diff: []u8,
+) {
+	os.make_directory("artifacts")
+	stbi_write_png("artifacts/fuzz_fail_partial.png", c.int(fuzz_w), c.int(fuzz_h), 4, raw_data(pixels_a), c.int(fuzz_w * 4))
+	stbi_write_png("artifacts/fuzz_fail_full.png", c.int(fuzz_w), c.int(fuzz_h), 4, raw_data(pixels_b), c.int(fuzz_w * 4))
+	stbi_write_png("artifacts/fuzz_fail_diff.png", c.int(fuzz_w), c.int(fuzz_h), 4, raw_data(pixels_diff), c.int(fuzz_w * 4))
+}
+
+_fuzz_render_and_compare :: proc(
+	h: ^Harness_State,
+	inst: ^terminal_instance.Instance_Renderer,
+	fs: ^fullscreen.Fullscreen_Renderer,
+	fs_color_buf: ^contract.Gpu_Buffer,
+	term_a, term_b: ^Synthetic_Terminal,
+	tex_a, tex_b: contract.Gpu_Texture,
+	view_a, view_b: contract.Gpu_TextureView,
+	buf_a, buf_b: contract.Gpu_Buffer,
+	fuzz_w, fuzz_h: u32,
+	cell_w, cell_h: f32,
+	bytes_per_row: u32,
+	buf_size: u64,
+	is_full_redraw: bool,
+	is_attr_only: bool,
+	is_erase: bool,
+	defects: _Fuzz_Defects,
+) -> (diff_pixels: int, first_x: int, first_y: int, ra, ga, ba, aa, rb, gb, bb, ab: u8) {
+	cols := term_a.cols
+	rows := term_a.rows
+
+	// 1. Prepare Instance Renderer (Target A)
+	terminal_instance.instance_renderer_begin(inst)
+	u_data := [4]f32{f32(fuzz_w), f32(fuzz_h), cell_w, cell_h}
+	contract.write_buffer(h.queue, inst.uniform_buffer, 0, &u_data, size_of([4]f32))
+
+	x0: u32 = 0
+	x1: u32 = cols
+	y0: u32 = 0
+	y1: u32 = rows
+
+	if !is_full_redraw {
+		d := term_a.damage
+		if defects.neg1_disable_dilation {
+			x0 = d.x
+			x1 = min(d.x + d.w, cols)
+		} else {
+			x0 = u32(max(int(d.x) - 1, 0))
+			x1 = min(d.x + d.w + 1, cols)
+		}
+
+		if defects.neg4_reduced_row_damage {
+			y0 = d.y
+			y1 = min(d.y + max(d.h, 1) - 1, rows)
+		} else {
+			y0 = d.y
+			y1 = min(d.y + d.h, rows)
+		}
+	}
+
+	for r in y0..<y1 {
+		for c in x0..<x1 {
+			packed := term_a.cells[r * cols + c]
+			content, style, _, cflags, slot := unpack_cell(packed)
+
+			if defects.neg5_skip_attr_damage && is_attr_only {
+				continue
+			}
+			if defects.neg2_disable_space_bg && is_erase && !is_full_redraw {
+				continue
+			}
+
+			u0, v0, u1, v1 := atlas.atlas_slot_uv(slot, cell_w, cell_h)
+			if slot == UNRESOLVED_SLOT && content >= 32 && content <= 126 {
+				u0, v0, u1, v1 = atlas.atlas_slot_uv(content - 32, cell_w, cell_h)
+			}
+
+			is_selected := (cflags & 2) != 0
+			fg := unpack_r5g6b5(rgb_to_r5g6b5(255, 255, 255)) if is_selected else palette_srgb_float(style, true)
+			bg := unpack_r5g6b5(rgb_to_r5g6b5(60, 100, 180)) if is_selected else palette_srgb_float(style, false)
+
+			rec := contract.Instance_Record{
+				pos_size = {f32(c) * cell_w, f32(r) * cell_h, cell_w, cell_h},
+				uv_rect  = {u0, v0, u1, v1},
+				fg_color = fg,
+				bg_color = bg,
+			}
+			terminal_instance.instance_renderer_push(inst, rec)
+		}
+	}
+	terminal_instance.instance_renderer_flush(inst)
+
+	// 2. Prepare Fullscreen Renderer (Target B)
+	contract.write_buffer(h.queue, fs.cell_buffer, 0, raw_data(term_b.cells), u64(len(term_b.cells) * size_of(u64)))
+	contract.write_buffer(h.queue, fs.lut_buffer, 0, &h.lut_words, size_of(h.lut_words))
+	zeros := make([]u8, len(term_b.cells) * int(FULLSCREEN_CELL_BYTES), context.temp_allocator)
+	contract.write_buffer(h.queue, fs_color_buf^, 0, raw_data(zeros), u64(len(zeros)))
+	fs_p := fullscreen.Fullscreen_Params{
+		screen_w     = f32(fuzz_w),
+		screen_h     = f32(fuzz_h),
+		cols         = cols,
+		rows         = rows,
+		cell_w       = cell_w,
+		cell_h       = cell_h,
+		pad_x        = 0.0,
+		pad_y        = 0.0,
+		atlas_w      = atlas.ATLAS_WIDTH,
+		atlas_h      = atlas.ATLAS_HEIGHT,
+		bg_opacity   = 1.0,
+		cell_opacity = 1.0,
+	}
+	contract.write_buffer(h.queue, fs.params_buffer, 0, &fs_p, size_of(fullscreen.Fullscreen_Params))
+
+	// 3. Render Passes
+	enc := contract.create_command_encoder(h.device)
+	if rawptr(enc) == nil do return
+
+	clear_col := [4]f64{f64(2.0/31.0), f64(5.0/63.0), f64(3.0/31.0), 1.0}
+	load_op_a := contract.Gpu_Load_Op.Clear if is_full_redraw else contract.Gpu_Load_Op.Load
+
+	pass_a := contract.begin_render_pass(enc, view_a, clear_col, load_op_a)
+	if rawptr(pass_a) != nil {
+		bg_bg := inst.bg_bind_group if rawptr(inst.bg_bind_group) != nil else inst.bind_group
+		if defects.neg3_reverse_pass_order {
+			terminal_instance.instance_renderer_draw(inst, pass_a)
+			contract.render_set_pipeline(pass_a, h.bg_pipeline)
+			contract.render_set_bind_group(pass_a, 0, bg_bg)
+			contract.render_set_vertex_buffer(pass_a, 0, inst.instance_buffer, 0)
+			contract.render_draw(pass_a, 6, inst.active_count)
+		} else {
+			contract.render_set_pipeline(pass_a, h.bg_pipeline)
+			contract.render_set_bind_group(pass_a, 0, bg_bg)
+			contract.render_set_vertex_buffer(pass_a, 0, inst.instance_buffer, 0)
+			contract.render_draw(pass_a, 6, inst.active_count)
+			terminal_instance.instance_renderer_draw(inst, pass_a)
+		}
+		contract.end_render_pass(pass_a)
+	}
+
+	pass_b := contract.begin_render_pass(enc, view_b, clear_col, .Clear)
+	if rawptr(pass_b) != nil {
+		fullscreen.fullscreen_draw(fs, pass_b)
+		contract.end_render_pass(pass_b)
+	}
+
+	// 4. Copy Textures to Readback Buffers
+	wgpu_enc := wgpu.CommandEncoder(rawptr(enc))
+	src_a := wgpu.TexelCopyTextureInfo{
+		texture  = wgpu.Texture(rawptr(tex_a)),
+		mipLevel = 0,
+		origin   = {0, 0, 0},
+		aspect   = .All,
+	}
+	dst_a := wgpu.TexelCopyBufferInfo{
+		layout = {offset = 0, bytesPerRow = bytes_per_row, rowsPerImage = fuzz_h},
+		buffer = wgpu.Buffer(rawptr(buf_a)),
+	}
+	copy_size := wgpu.Extent3D{width = fuzz_w, height = fuzz_h, depthOrArrayLayers = 1}
+	wgpu.CommandEncoderCopyTextureToBuffer(wgpu_enc, &src_a, &dst_a, &copy_size)
+
+	src_b := wgpu.TexelCopyTextureInfo{
+		texture  = wgpu.Texture(rawptr(tex_b)),
+		mipLevel = 0,
+		origin   = {0, 0, 0},
+		aspect   = .All,
+	}
+	dst_b := wgpu.TexelCopyBufferInfo{
+		layout = {offset = 0, bytesPerRow = bytes_per_row, rowsPerImage = fuzz_h},
+		buffer = wgpu.Buffer(rawptr(buf_b)),
+	}
+	wgpu.CommandEncoderCopyTextureToBuffer(wgpu_enc, &src_b, &dst_b, &copy_size)
+
+	cmd := contract.finish_command_buffer(enc)
+	contract.release_command_encoder(enc)
+	if cmd != nil {
+		contract.submit(h.queue, cmd)
+		contract.release_command_buffer(cmd)
+	}
+	contract.wait_for_idle(h.device)
+
+	// 5. Readback Mapping & Comparison
+	map_a_done := false
+	map_b_done := false
+	_on_map_a :: proc "c" (status: wgpu.MapAsyncStatus, message: wgpu.StringView, userdata1: rawptr, userdata2: rawptr) {
+		if userdata1 != nil do (^bool)(userdata1)^ = true
+	}
+
+	_ = wgpu.BufferMapAsync(
+		wgpu.Buffer(rawptr(buf_a)),
+		{.Read},
+		0,
+		uint(buf_size),
+		wgpu.BufferMapCallbackInfo{
+			mode      = .AllowProcessEvents,
+			callback  = _on_map_a,
+			userdata1 = &map_a_done,
+		},
+	)
+	_ = wgpu.BufferMapAsync(
+		wgpu.Buffer(rawptr(buf_b)),
+		{.Read},
+		0,
+		uint(buf_size),
+		wgpu.BufferMapCallbackInfo{
+			mode      = .AllowProcessEvents,
+			callback  = _on_map_a,
+			userdata1 = &map_b_done,
+		},
+	)
+
+	wgpu_inst := wgpu.Instance(h.instance)
+	wgpu_dev := wgpu.Device(rawptr(h.device))
+	for !map_a_done || !map_b_done {
+		wgpu.InstanceProcessEvents(wgpu_inst)
+		wgpu.DevicePoll(wgpu_dev, true, nil)
+	}
+
+	ptr_a := ([^]u8)(wgpu.RawBufferGetConstMappedRange(wgpu.Buffer(rawptr(buf_a)), 0, uint(buf_size)))
+	ptr_b := ([^]u8)(wgpu.RawBufferGetConstMappedRange(wgpu.Buffer(rawptr(buf_b)), 0, uint(buf_size)))
+
+	diff_pixels = 0
+	first_x = -1
+	first_y = -1
+
+	pixels_a := make([]u8, int(fuzz_w * fuzz_h * 4), context.temp_allocator)
+	pixels_b := make([]u8, int(fuzz_w * fuzz_h * 4), context.temp_allocator)
+	pixels_diff := make([]u8, int(fuzz_w * fuzz_h * 4), context.temp_allocator)
+
+	if ptr_a != nil && ptr_b != nil {
+		for y in 0..<int(fuzz_h) {
+			row_off := y * int(bytes_per_row)
+			dst_row := y * int(fuzz_w) * 4
+			for x in 0..<int(fuzz_w) {
+				p_src := row_off + x * 4
+				p_dst := dst_row + x * 4
+
+				cur_ba := ptr_a[p_src + 0]
+				cur_ga := ptr_a[p_src + 1]
+				cur_ra := ptr_a[p_src + 2]
+				cur_aa := ptr_a[p_src + 3]
+
+				cur_bb := ptr_b[p_src + 0]
+				cur_gb := ptr_b[p_src + 1]
+				cur_rb := ptr_b[p_src + 2]
+				cur_ab := ptr_b[p_src + 3]
+
+				if defects.neg6_inject_comparator_byte && x == 0 && y == 0 {
+					cur_bb ~= 0xFF
+				}
+
+				pixels_a[p_dst + 0] = cur_ra
+				pixels_a[p_dst + 1] = cur_ga
+				pixels_a[p_dst + 2] = cur_ba
+				pixels_a[p_dst + 3] = cur_aa
+
+				pixels_b[p_dst + 0] = cur_rb
+				pixels_b[p_dst + 1] = cur_gb
+				pixels_b[p_dst + 2] = cur_bb
+				pixels_b[p_dst + 3] = cur_ab
+
+				is_mismatch := (cur_ba != cur_bb || cur_ga != cur_gb || cur_ra != cur_rb || cur_aa != cur_ab)
+				if is_mismatch {
+					diff_pixels += 1
+					if first_x == -1 {
+						first_x = x
+						first_y = y
+						ba = cur_ba
+						ga = cur_ga
+						ra = cur_ra
+						aa = cur_aa
+						bb = cur_bb
+						gb = cur_gb
+						rb = cur_rb
+						ab = cur_ab
+					}
+					pixels_diff[p_dst + 0] = 255
+					pixels_diff[p_dst + 1] = 0
+					pixels_diff[p_dst + 2] = 255
+					pixels_diff[p_dst + 3] = 255
+				} else {
+					gray := u8((u32(cur_ra) + u32(cur_ga) + u32(cur_ba)) / 6)
+					pixels_diff[p_dst + 0] = gray
+					pixels_diff[p_dst + 1] = gray
+					pixels_diff[p_dst + 2] = gray
+					pixels_diff[p_dst + 3] = 255
+				}
+			}
+		}
+	}
+
+	wgpu.BufferUnmap(wgpu.Buffer(rawptr(buf_a)))
+	wgpu.BufferUnmap(wgpu.Buffer(rawptr(buf_b)))
+
+	if diff_pixels > 0 && !defects.neg1_disable_dilation && !defects.neg2_disable_space_bg && !defects.neg3_reverse_pass_order && !defects.neg4_reduced_row_damage && !defects.neg5_skip_attr_damage && !defects.neg6_inject_comparator_byte {
+		_dump_fuzz_pngs(fuzz_w, fuzz_h, pixels_a, pixels_b, pixels_diff)
+	}
+
+	return
+}
+
+_run_truth_fuzzer_and_negative_tests :: proc(h: ^Harness_State) -> bool {
+	fuzz_cols: u32 = 80
+	fuzz_rows: u32 = 24
+	cell_w: f32 = 10.0
+	cell_h: f32 = 20.0
+	fuzz_w: u32 = fuzz_cols * u32(cell_w)
+	fuzz_h: u32 = fuzz_rows * u32(cell_h)
+	bytes_per_row: u32 = ((fuzz_w * 4) + 255) & ~u32(255)
+	buf_size: u64 = u64(bytes_per_row) * u64(fuzz_h)
+
+	// Create dedicated offscreen targets A and B
+	tex_usage := contract.Gpu_Texture_Usage.Render_Attach | contract.Gpu_Texture_Usage.Copy_Src
+	tex_a := contract.create_texture(h.device, fuzz_w, fuzz_h, h.format, tex_usage)
+	view_a := contract.create_texture_view(tex_a)
+	defer {
+		if rawptr(view_a) != nil do contract.destroy_texture_view(view_a)
+		if rawptr(tex_a) != nil do contract.destroy_texture(tex_a)
+	}
+
+	tex_b := contract.create_texture(h.device, fuzz_w, fuzz_h, h.format, tex_usage)
+	view_b := contract.create_texture_view(tex_b)
+	defer {
+		if rawptr(view_b) != nil do contract.destroy_texture_view(view_b)
+		if rawptr(tex_b) != nil do contract.destroy_texture(tex_b)
+	}
+
+	buf_usage := contract.Gpu_Buffer_Usage.Map_Read | contract.Gpu_Buffer_Usage.Copy_Dst
+	buf_a := contract.create_buffer(h.device, buf_size, buf_usage, false)
+	defer if rawptr(buf_a) != nil do contract.destroy_buffer(buf_a)
+	buf_b := contract.create_buffer(h.device, buf_size, buf_usage, false)
+	defer if rawptr(buf_b) != nil do contract.destroy_buffer(buf_b)
+
+	nearest_desc := wgpu.SamplerDescriptor{
+		addressModeU  = .ClampToEdge,
+		addressModeV  = .ClampToEdge,
+		addressModeW  = .ClampToEdge,
+		magFilter     = .Nearest,
+		minFilter     = .Nearest,
+		mipmapFilter  = .Nearest,
+		lodMinClamp   = 0.0,
+		lodMaxClamp   = 32.0,
+		maxAnisotropy = 1,
+	}
+	nearest_sampler := contract.Gpu_Sampler(wgpu.DeviceCreateSampler(wgpu.Device(rawptr(h.device)), &nearest_desc))
+	defer if rawptr(nearest_sampler) != nil do contract.destroy_sampler(nearest_sampler)
+
+	// Dedicated renderers
+	fuzz_inst: terminal_instance.Instance_Renderer
+	terminal_instance.instance_renderer_init(&fuzz_inst, h.device, h.queue, fuzz_cols * fuzz_rows, h.atlas.gpu_view, h.format)
+	if rawptr(fuzz_inst.sampler) != nil do contract.destroy_sampler(fuzz_inst.sampler)
+	fuzz_inst.sampler = nearest_sampler
+	defer {
+		fuzz_inst.sampler = contract.Gpu_Sampler(nil)
+		fuzz_inst.pipeline = contract.Gpu_RenderPipeline(nil)
+		terminal_instance.instance_renderer_destroy(&fuzz_inst)
+	}
+	_rebuild_instance_resources(h, &fuzz_inst, fuzz_cols, fuzz_rows, f32(fuzz_w), f32(fuzz_h))
+
+	fuzz_fs: fullscreen.Fullscreen_Renderer
+	fullscreen.fullscreen_init(&fuzz_fs, h.device, h.queue, fuzz_rows, fuzz_cols, cell_w, cell_h, h.atlas.gpu_view, h.format)
+	if rawptr(fuzz_fs.sampler) != nil do contract.destroy_sampler(fuzz_fs.sampler)
+	fuzz_fs.sampler = nearest_sampler
+	defer {
+		fuzz_fs.sampler = contract.Gpu_Sampler(nil)
+		fuzz_fs.pipeline = contract.Gpu_RenderPipeline(nil)
+		fullscreen.fullscreen_destroy(&fuzz_fs)
+	}
+	fuzz_fs_color_buf: contract.Gpu_Buffer
+	defer if rawptr(fuzz_fs_color_buf) != nil do contract.destroy_buffer(fuzz_fs_color_buf)
+	_rebuild_fullscreen_resources(h, &fuzz_fs, &fuzz_fs_color_buf, fuzz_cols, fuzz_rows, f32(fuzz_w), f32(fuzz_h))
+
+	term_a: Synthetic_Terminal
+	synthetic_terminal_init(&term_a, fuzz_cols, fuzz_rows)
+	defer synthetic_terminal_destroy(&term_a)
+
+	term_b: Synthetic_Terminal
+	synthetic_terminal_init(&term_b, fuzz_cols, fuzz_rows)
+	defer synthetic_terminal_destroy(&term_b)
+
+	fmt.println("================================================================================")
+	fmt.println("     RUNNING 6 NEGATIVE MUTATION TESTS (docs/HARNESS_BENCHMARK_PLAN.md §6.4)    ")
+	fmt.println("================================================================================")
+
+	// Neg-1: ±1 column dilation disabled
+	fmt.println("  [Negative 1] ±1 column dilation disabled:")
+	synthetic_terminal_clear(&term_a)
+	synthetic_terminal_clear(&term_b)
+	_fuzz_render_and_compare(h, &fuzz_inst, &fuzz_fs, &fuzz_fs_color_buf, &term_a, &term_b, tex_a, tex_b, view_a, view_b, buf_a, buf_b, fuzz_w, fuzz_h, cell_w, cell_h, bytes_per_row, buf_size, true, false, false, {})
+
+	// Neighbor edit: column 10 and 11 are modified, but damage is marked only at column 11
+	term_a.cells[5 * fuzz_cols + 10] = pack_cell(u32('X'), 2, 1, 0, u32('X') - 32)
+	term_a.cells[5 * fuzz_cols + 11] = pack_cell(u32('Y'), 3, 1, 0, u32('Y') - 32)
+	term_b.cells[5 * fuzz_cols + 10] = term_a.cells[5 * fuzz_cols + 10]
+	term_b.cells[5 * fuzz_cols + 11] = term_a.cells[5 * fuzz_cols + 11]
+	term_a.damage = contract.damage_rect_make(11, 5, 1, 1)
+	term_b.damage = term_a.damage
+
+	diff1, _, _, _, _, _, _, _, _, _, _ := _fuzz_render_and_compare(h, &fuzz_inst, &fuzz_fs, &fuzz_fs_color_buf, &term_a, &term_b, tex_a, tex_b, view_a, view_b, buf_a, buf_b, fuzz_w, fuzz_h, cell_w, cell_h, bytes_per_row, buf_size, false, false, false, {neg1_disable_dilation = true})
+	if diff1 > 0 {
+		fmt.printfln("  [PASS] Neg-1: Dilate ±1 disabled caught at seed 0, mutation 0 (%d diff pixels)", diff1)
+	} else {
+		fmt.println("  [FAIL] Neg-1: Dilate ±1 disabled was NOT caught!")
+		return false
+	}
+
+	// Neg-2: Space background emission disabled on partial render
+	fmt.println("  [Negative 2] Space background emission disabled on partial render:")
+	synthetic_terminal_clear(&term_a)
+	synthetic_terminal_clear(&term_b)
+	term_a.cells[10 * fuzz_cols + 10] = pack_cell(u32('M'), 3, 1, 0, u32('M') - 32)
+	term_b.cells[10 * fuzz_cols + 10] = term_a.cells[10 * fuzz_cols + 10]
+	_fuzz_render_and_compare(h, &fuzz_inst, &fuzz_fs, &fuzz_fs_color_buf, &term_a, &term_b, tex_a, tex_b, view_a, view_b, buf_a, buf_b, fuzz_w, fuzz_h, cell_w, cell_h, bytes_per_row, buf_size, true, false, false, {})
+
+	term_a.cells[10 * fuzz_cols + 10] = pack_cell(' ', 0, 1, 0, 0)
+	term_b.cells[10 * fuzz_cols + 10] = term_a.cells[10 * fuzz_cols + 10]
+	term_a.damage = contract.damage_rect_make(10, 10, 1, 1)
+	term_b.damage = term_a.damage
+
+	diff2, _, _, _, _, _, _, _, _, _, _ := _fuzz_render_and_compare(h, &fuzz_inst, &fuzz_fs, &fuzz_fs_color_buf, &term_a, &term_b, tex_a, tex_b, view_a, view_b, buf_a, buf_b, fuzz_w, fuzz_h, cell_w, cell_h, bytes_per_row, buf_size, false, false, true, {neg2_disable_space_bg = true})
+	if diff2 > 0 {
+		fmt.printfln("  [PASS] Neg-2: Space background emission disabled caught at seed 0, mutation 0 (%d diff pixels)", diff2)
+	} else {
+		fmt.println("  [FAIL] Neg-2: Space background emission disabled was NOT caught!")
+		return false
+	}
+
+	// Neg-3: Background and glyph pass order reversed
+	fmt.println("  [Negative 3] Background and glyph pass order reversed:")
+	synthetic_terminal_clear(&term_a)
+	synthetic_terminal_clear(&term_b)
+	term_a.cells[10 * fuzz_cols + 10] = pack_cell(u32('A'), 1, 1, 0, u32('A') - 32)
+	term_b.cells[10 * fuzz_cols + 10] = term_a.cells[10 * fuzz_cols + 10]
+	term_a.damage = contract.damage_rect_make(10, 10, 1, 1)
+	term_b.damage = term_a.damage
+
+	diff3, _, _, _, _, _, _, _, _, _, _ := _fuzz_render_and_compare(h, &fuzz_inst, &fuzz_fs, &fuzz_fs_color_buf, &term_a, &term_b, tex_a, tex_b, view_a, view_b, buf_a, buf_b, fuzz_w, fuzz_h, cell_w, cell_h, bytes_per_row, buf_size, false, false, false, {neg3_reverse_pass_order = true})
+	if diff3 > 0 {
+		fmt.printfln("  [PASS] Neg-3: Background and glyph pass order reversed caught at seed 0, mutation 0 (%d diff pixels)", diff3)
+	} else {
+		fmt.println("  [FAIL] Neg-3: Background and glyph pass order reversed was NOT caught!")
+		return false
+	}
+
+	// Neg-4: Vertical damage reduced by 1 row
+	fmt.println("  [Negative 4] Vertical damage reduced by 1 row:")
+	synthetic_terminal_clear(&term_a)
+	synthetic_terminal_clear(&term_b)
+	term_a.cells[10 * fuzz_cols + 10] = pack_cell(u32('g'), 4, 1, 0, u32('g') - 32)
+	term_b.cells[10 * fuzz_cols + 10] = term_a.cells[10 * fuzz_cols + 10]
+	term_a.damage = contract.damage_rect_make(10, 10, 1, 1)
+	term_b.damage = term_a.damage
+
+	diff4, _, _, _, _, _, _, _, _, _, _ := _fuzz_render_and_compare(h, &fuzz_inst, &fuzz_fs, &fuzz_fs_color_buf, &term_a, &term_b, tex_a, tex_b, view_a, view_b, buf_a, buf_b, fuzz_w, fuzz_h, cell_w, cell_h, bytes_per_row, buf_size, false, false, false, {neg4_reduced_row_damage = true})
+	if diff4 > 0 {
+		fmt.printfln("  [PASS] Neg-4: Vertical damage reduced by 1 row caught at seed 0, mutation 0 (%d diff pixels)", diff4)
+	} else {
+		fmt.println("  [FAIL] Neg-4: Vertical damage reduced by 1 row was NOT caught!")
+		return false
+	}
+
+	// Neg-5: Damage skipped for attribute-only changes
+	fmt.println("  [Negative 5] Damage skipped for attribute-only changes:")
+	synthetic_terminal_clear(&term_a)
+	synthetic_terminal_clear(&term_b)
+	term_a.cells[10 * fuzz_cols + 10] = pack_cell(u32('K'), 1, 1, 0, u32('K') - 32)
+	term_b.cells[10 * fuzz_cols + 10] = term_a.cells[10 * fuzz_cols + 10]
+	_fuzz_render_and_compare(h, &fuzz_inst, &fuzz_fs, &fuzz_fs_color_buf, &term_a, &term_b, tex_a, tex_b, view_a, view_b, buf_a, buf_b, fuzz_w, fuzz_h, cell_w, cell_h, bytes_per_row, buf_size, true, false, false, {})
+
+	term_a.cells[10 * fuzz_cols + 10] = pack_cell(u32('K'), 2, 1, 0, u32('K') - 32)
+	term_b.cells[10 * fuzz_cols + 10] = term_a.cells[10 * fuzz_cols + 10]
+	term_a.damage = contract.damage_rect_make(10, 10, 1, 1)
+	term_b.damage = term_a.damage
+
+	diff5, _, _, _, _, _, _, _, _, _, _ := _fuzz_render_and_compare(h, &fuzz_inst, &fuzz_fs, &fuzz_fs_color_buf, &term_a, &term_b, tex_a, tex_b, view_a, view_b, buf_a, buf_b, fuzz_w, fuzz_h, cell_w, cell_h, bytes_per_row, buf_size, false, true, false, {neg5_skip_attr_damage = true})
+	if diff5 > 0 {
+		fmt.printfln("  [PASS] Neg-5: Damage skipped for attribute-only changes caught at seed 0, mutation 0 (%d diff pixels)", diff5)
+	} else {
+		fmt.println("  [FAIL] Neg-5: Damage skipped for attribute-only changes was NOT caught!")
+		return false
+	}
+
+	// Neg-6: 1-byte change injected into ground-truth copy
+	fmt.println("  [Negative 6] 1-byte change injected into ground-truth copy:")
+	synthetic_terminal_clear(&term_a)
+	synthetic_terminal_clear(&term_b)
+	term_a.cells[10 * fuzz_cols + 10] = pack_cell(u32('Z'), 5, 1, 0, u32('Z') - 32)
+	term_b.cells[10 * fuzz_cols + 10] = term_a.cells[10 * fuzz_cols + 10]
+	term_a.damage = contract.damage_rect_make(10, 10, 1, 1)
+	term_b.damage = term_a.damage
+
+	diff6, _, _, _, _, _, _, _, _, _, _ := _fuzz_render_and_compare(h, &fuzz_inst, &fuzz_fs, &fuzz_fs_color_buf, &term_a, &term_b, tex_a, tex_b, view_a, view_b, buf_a, buf_b, fuzz_w, fuzz_h, cell_w, cell_h, bytes_per_row, buf_size, false, false, false, {neg6_inject_comparator_byte = true})
+	if diff6 > 0 {
+		fmt.printfln("  [PASS] Neg-6: Ground-truth 1-byte injection caught at seed 0, mutation 0 (%d diff pixels)", diff6)
+	} else {
+		fmt.println("  [FAIL] Neg-6: Ground-truth 1-byte injection was NOT caught!")
+		return false
+	}
+
+	fmt.println("\nAll 6/6 Negative Tests detected by comparator.")
+	fmt.println("\n--- Running Truth Fuzzer (20 seeds × 100 edits) ---")
+
+	rng: helper.Xoshiro256pp
+	total_edits := 0
+
+	for seed_idx in 0..<20 {
+		seed_val := u64(seed_idx * 7919 + 42)
+		helper.xoshiro256pp_init(&rng, seed_val)
+
+		synthetic_terminal_clear(&term_a)
+		synthetic_terminal_clear(&term_b)
+
+		// Initial baseline frame
+		diff0, _, _, _, _, _, _, _, _, _, _ := _fuzz_render_and_compare(h, &fuzz_inst, &fuzz_fs, &fuzz_fs_color_buf, &term_a, &term_b, tex_a, tex_b, view_a, view_b, buf_a, buf_b, fuzz_w, fuzz_h, cell_w, cell_h, bytes_per_row, buf_size, true, false, false, {})
+		if diff0 > 0 {
+			fmt.printfln("[FAIL] Seed %02d baseline frame failed: %d mismatching pixels", seed_idx, diff0)
+			return false
+		}
+
+		class_counts: [8]int
+
+		for edit_idx in 0..<100 {
+			total_edits += 1
+			class := int(edit_idx % 8)
+			kind, r, c, is_attr_only, is_erase := _apply_fuzz_mutation(&term_a, &term_b, &rng, class)
+			class_counts[kind] += 1
+
+			diff, fx, fy, ra, ga, ba, aa, rb, gb, bb, ab := _fuzz_render_and_compare(h, &fuzz_inst, &fuzz_fs, &fuzz_fs_color_buf, &term_a, &term_b, tex_a, tex_b, view_a, view_b, buf_a, buf_b, fuzz_w, fuzz_h, cell_w, cell_h, bytes_per_row, buf_size, false, is_attr_only, is_erase, {})
+			if diff > 0 {
+				fmt.printfln("[FAIL] Seed: %d, Mutation: %d, Kind: %d, Cell: (%d, %d), First Mismatch Pixel: (%d, %d): A=[%d,%d,%d,%d] vs B=[%d,%d,%d,%d]",
+					seed_idx, edit_idx, kind, r, c, fx, fy, ra, ga, ba, aa, rb, gb, bb, ab)
+				return false
+			}
+		}
+
+		for k in 0..<8 {
+			if class_counts[k] == 0 {
+				fmt.printfln("[FAIL] Seed %d failed generator self-audit: missing mutation class %d", seed_idx, k)
+				return false
+			}
+		}
+
+		fmt.printfln("  [PASS] Seed %02d/20: 100 edits verified (0 pixel differences)", seed_idx + 1)
+	}
+
+	fmt.println("[PASS] Truth Fuzzer: 20 seeds × 100 edits verified (0 pixel differences)")
+	fmt.println("================================================================================")
+	return true
+}
+
+// ============================================================================
+// 6. Entry Point & Lifecycle
 // ============================================================================
 
 main :: proc() {
@@ -1071,6 +1858,19 @@ main :: proc() {
 	if !_create_shared_pipelines(h) {
 		fmt.eprintln("harness error: _create_shared_pipelines failed")
 		os.exit(1)
+	}
+
+	for arg in os.args {
+		if arg == "--test" || arg == "--bench" {
+			ok := _run_truth_fuzzer_and_negative_tests(h)
+			if rawptr(h.glyph_pipeline) != nil do contract.destroy_render_pipeline(h.glyph_pipeline)
+			if rawptr(h.bg_pipeline) != nil do contract.destroy_render_pipeline(h.bg_pipeline)
+			if rawptr(h.compute_pipeline) != nil do contract.destroy_compute_pipeline(h.compute_pipeline)
+			if rawptr(h.blit_pipeline) != nil do contract.destroy_render_pipeline(h.blit_pipeline)
+			if rawptr(h.fs_pipeline) != nil do contract.destroy_render_pipeline(h.fs_pipeline)
+			if !ok do os.exit(1)
+			os.exit(0)
+		}
 	}
 
 	// Initialize 4 Terminals
@@ -1208,6 +2008,7 @@ main :: proc() {
 	fullscreen.fullscreen_destroy(&h.fs4)
 
 	if rawptr(h.glyph_pipeline) != nil do contract.destroy_render_pipeline(h.glyph_pipeline)
+	if rawptr(h.bg_pipeline) != nil do contract.destroy_render_pipeline(h.bg_pipeline)
 	if rawptr(h.compute_pipeline) != nil do contract.destroy_compute_pipeline(h.compute_pipeline)
 	if rawptr(h.blit_pipeline) != nil do contract.destroy_render_pipeline(h.blit_pipeline)
 	if rawptr(h.fs_pipeline) != nil do contract.destroy_render_pipeline(h.fs_pipeline)

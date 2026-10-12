@@ -89,7 +89,7 @@ fn vs_main(
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // Sample the atlas (R8 format: alpha is the glyph mask)
-    let alpha = textureSample(atlas_texture, atlas_sampler, input.tex_coord).r;
+    let alpha = textureSampleLevel(atlas_texture, atlas_sampler, input.tex_coord, 0.0).r;
 
     // Discard fully transparent fragments
     if (alpha < 0.01) {

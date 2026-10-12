@@ -27,6 +27,7 @@ Instance_Renderer :: struct {
 	instance_buffer: contract.Gpu_Buffer,
 	uniform_buffer:  contract.Gpu_Buffer,
 	bind_group:      contract.Gpu_BindGroup,
+	bg_bind_group:   contract.Gpu_BindGroup,
 	layout:          contract.Gpu_BindGroupLayout,
 	atlas_view:      contract.Gpu_TextureView,
 	sampler:         contract.Gpu_Sampler,
@@ -67,9 +68,10 @@ instance_renderer_init :: proc(
 		return false
 	}
 
-	// Uniform buffer (64 bytes)
+	// Uniform buffer (at least 1024 bytes for bg.wgsl Uniforms)
 	u_usage := contract.Gpu_Buffer_Usage.Uniform | contract.Gpu_Buffer_Usage.Copy_Dst
-	r.uniform_buffer = contract.create_buffer(device, size_of(contract.Terminal_Uniforms), u_usage, false)
+	u_size: u64 = max(u64(size_of(contract.Terminal_Uniforms)), u64(1024))
+	r.uniform_buffer = contract.create_buffer(device, u_size, u_usage, false)
 	if rawptr(r.uniform_buffer) == nil {
 		instance_renderer_destroy(r)
 		return false
@@ -100,9 +102,15 @@ instance_renderer_destroy :: proc(r: ^Instance_Renderer) {
 		contract.destroy_sampler(r.sampler)
 		r.sampler = contract.Gpu_Sampler(nil)
 	}
-	if contract.destroy_bind_group != nil && rawptr(r.bind_group) != nil {
-		contract.destroy_bind_group(r.bind_group)
-		r.bind_group = contract.Gpu_BindGroup(nil)
+	if contract.destroy_bind_group != nil {
+		if rawptr(r.bind_group) != nil {
+			contract.destroy_bind_group(r.bind_group)
+			r.bind_group = contract.Gpu_BindGroup(nil)
+		}
+		if rawptr(r.bg_bind_group) != nil {
+			contract.destroy_bind_group(r.bg_bind_group)
+			r.bg_bind_group = contract.Gpu_BindGroup(nil)
+		}
 	}
 	if contract.destroy_bind_group_layout != nil && rawptr(r.layout) != nil {
 		contract.destroy_bind_group_layout(r.layout)

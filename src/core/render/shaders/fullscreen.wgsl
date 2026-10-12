@@ -52,9 +52,9 @@ struct Fullscreen_Output {
 
 // r5g6b5_to_rgb mirrors instance.unpack_r5g6b5.
 fn r5g6b5_to_rgb(packed: u32) -> vec3<f32> {
-    let r = f32((packed >> 11u) & 0x1Fu) / 31.0;
-    let g = f32((packed >> 5u) & 0x3Fu) / 63.0;
-    let b = f32(packed & 0x1Fu) / 31.0;
+    let r = floor(f32((packed >> 11u) & 0x1Fu) / 31.0 * 255.0 + 0.5) / 255.0;
+    let g = floor(f32((packed >> 5u) & 0x3Fu) / 63.0 * 255.0 + 0.5) / 255.0;
+    let b = floor(f32(packed & 0x1Fu) / 31.0 * 255.0 + 0.5) / 255.0;
     return vec3<f32>(r, g, b);
 }
 
@@ -261,16 +261,18 @@ fn fullscreen_fs_main(input: Fullscreen_Output) -> @location(0) vec4<f32> {
                         let fg_rgb = r5g6b5_to_rgb(nfg_packed);
                         let gw = params.cell_w * 2.0;
                         let uvs = slot_uv(u32(su), gw);
-                        let fx = (f32(px) - (x0 - params.cell_w)) / gw;
-                        let fy = (f32(py) - y0) / params.cell_h;
+                        let fx = (input.clip_position.x - (x0 - params.cell_w)) / gw;
+                        let fy = (input.clip_position.y - y0) / params.cell_h;
                         if (fx >= 0.0 && fx < 1.0 && fy >= 0.0 && fy < 1.0) {
                             let u = uvs.x + fx * (uvs.z - uvs.x);
                             let v = uvs.y + fy * (uvs.w - uvs.y);
                             let alpha = textureSampleLevel(
                                 atlas_texture, atlas_sampler,
                                 vec2<f32>(u, v), 0.0).r;
-                            col = mix(col, fg_rgb, alpha);
-                            glyph_coverage = alpha;
+                            if (alpha >= 0.01) {
+                                col = mix(col, fg_rgb, alpha);
+                                glyph_coverage = alpha;
+                            }
                         }
                     }
                 }
@@ -295,16 +297,18 @@ fn fullscreen_fs_main(input: Fullscreen_Output) -> @location(0) vec4<f32> {
             gw = params.cell_w * 2.0;
         }
         let uvs = slot_uv(u32(su), gw);
-        let fx = (f32(px) - x0) / gw;
-        let fy = (f32(py) - y0) / params.cell_h;
+        let fx = (input.clip_position.x - x0) / gw;
+        let fy = (input.clip_position.y - y0) / params.cell_h;
         if (fx >= 0.0 && fx < 1.0 && fy >= 0.0 && fy < 1.0) {
             let u = uvs.x + fx * (uvs.z - uvs.x);
             let v = uvs.y + fy * (uvs.w - uvs.y);
             let alpha = textureSampleLevel(
                 atlas_texture, atlas_sampler,
                 vec2<f32>(u, v), 0.0).r;
-            col = mix(col, fg_rgb, alpha);
-            glyph_coverage = alpha;
+            if (alpha >= 0.01) {
+                col = mix(col, fg_rgb, alpha);
+                glyph_coverage = alpha;
+            }
         }
     }
     return vec4<f32>(col, composited_alpha(background_alpha, glyph_coverage));
