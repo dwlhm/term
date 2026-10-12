@@ -1635,68 +1635,90 @@ _update_layer_geometry :: proc(h: ^Harness_State) {
 
 	pipeline.composer_pipeline_resize(&h.composer_pipe, screen_w, screen_h)
 
+	// Build dynamic split tree topology matching oscillating divider ratio
+	clamped_ratio := clamp(h.divider_ratio, 0.05, 0.95)
+	root := chrome_splits.split_node_create_leaf(1)
+	top, btm := chrome_splits.split_node_split(root, .Vertical, clamped_ratio, 2)
+	p1_node, p3_node: ^chrome_splits.Split_Node
+	p2_node, p4_node: ^chrome_splits.Split_Node
+	if top != nil {
+		p1_node, p3_node = chrome_splits.split_node_split(top, .Horizontal, 1.0 - clamped_ratio, 3)
+	}
+	if btm != nil {
+		p2_node, p4_node = chrome_splits.split_node_split(btm, .Horizontal, clamped_ratio, 4)
+	}
+	chrome_splits.split_tree_layout(root, {0, content_y, screen_w, content_h})
+
 	// Inset for scissor clipping proof test
 	inset_x: f32 = 36.0 if h.scissor_test_active else 0.0
 	inset_y: f32 = 28.0 if h.scissor_test_active else 0.0
 
-	// Layer 1: Top-Left
-	l1 := pipeline.composer_pipeline_get_layer(&h.composer_pipe, PANE_1_ID)
-	if l1 != nil {
-		l1.dest_rect = composer.rect_make(0, content_y, pane_w, pane_h)
-		l1.scissor_rect = composer.rect_make(
-			l1.dest_rect.x + inset_x,
-			l1.dest_rect.y + inset_y,
-			max(l1.dest_rect.w - inset_x * 2.0, 10.0),
-			max(l1.dest_rect.h - inset_y * 2.0, 10.0),
-		)
-		l1.corner_radius = 0.0
-		l1.opacity = 1.0
+	// Layer 1: Pane 1
+	if p1_node != nil {
+		l1, _ := pipeline.composer_pipeline_acquire_layer(&h.composer_pipe, PANE_1_ID, .Terminal, u32(p1_node.rect[2]), u32(p1_node.rect[3]), false)
+		if l1 != nil {
+			l1.dest_rect = composer.rect_make(p1_node.rect[0], p1_node.rect[1], p1_node.rect[2], p1_node.rect[3])
+			l1.scissor_rect = composer.rect_make(
+				l1.dest_rect.x + inset_x,
+				l1.dest_rect.y + inset_y,
+				max(l1.dest_rect.w - inset_x * 2.0, 10.0),
+				max(l1.dest_rect.h - inset_y * 2.0, 10.0),
+			)
+			l1.corner_radius = 0.0
+			l1.opacity = 1.0
+		}
 	}
 
-	// Layer 2: Top-Right (3D)
-	l2 := pipeline.composer_pipeline_get_layer(&h.composer_pipe, PANE_2_ID)
-	if l2 != nil {
-		l2.dest_rect = composer.rect_make(pane_w, content_y, pane_w, pane_h)
-		l2.scissor_rect = composer.rect_make(
-			l2.dest_rect.x + inset_x,
-			l2.dest_rect.y + inset_y,
-			max(l2.dest_rect.w - inset_x * 2.0, 10.0),
-			max(l2.dest_rect.h - inset_y * 2.0, 10.0),
-		)
-		l2.corner_radius = 0.0
-		l2.opacity = 1.0
+	// Layer 2: Pane 2 (3D)
+	if p2_node != nil {
+		l2, _ := pipeline.composer_pipeline_acquire_layer(&h.composer_pipe, PANE_2_ID, .Three_D, u32(p2_node.rect[2]), u32(p2_node.rect[3]), true)
+		if l2 != nil {
+			l2.dest_rect = composer.rect_make(p2_node.rect[0], p2_node.rect[1], p2_node.rect[2], p2_node.rect[3])
+			l2.scissor_rect = composer.rect_make(
+				l2.dest_rect.x + inset_x,
+				l2.dest_rect.y + inset_y,
+				max(l2.dest_rect.w - inset_x * 2.0, 10.0),
+				max(l2.dest_rect.h - inset_y * 2.0, 10.0),
+			)
+			l2.corner_radius = 0.0
+			l2.opacity = 1.0
+		}
 	}
 
-	// Layer 3: Bottom-Left
-	l3 := pipeline.composer_pipeline_get_layer(&h.composer_pipe, PANE_3_ID)
-	if l3 != nil {
-		l3.dest_rect = composer.rect_make(0, content_y + pane_h, pane_w, pane_h)
-		l3.scissor_rect = composer.rect_make(
-			l3.dest_rect.x + inset_x,
-			l3.dest_rect.y + inset_y,
-			max(l3.dest_rect.w - inset_x * 2.0, 10.0),
-			max(l3.dest_rect.h - inset_y * 2.0, 10.0),
-		)
-		l3.corner_radius = 0.0
-		l3.opacity = 1.0
+	// Layer 3: Pane 3
+	if p3_node != nil {
+		l3, _ := pipeline.composer_pipeline_acquire_layer(&h.composer_pipe, PANE_3_ID, .Terminal, u32(p3_node.rect[2]), u32(p3_node.rect[3]), false)
+		if l3 != nil {
+			l3.dest_rect = composer.rect_make(p3_node.rect[0], p3_node.rect[1], p3_node.rect[2], p3_node.rect[3])
+			l3.scissor_rect = composer.rect_make(
+				l3.dest_rect.x + inset_x,
+				l3.dest_rect.y + inset_y,
+				max(l3.dest_rect.w - inset_x * 2.0, 10.0),
+				max(l3.dest_rect.h - inset_y * 2.0, 10.0),
+			)
+			l3.corner_radius = 0.0
+			l3.opacity = 1.0
+		}
 	}
 
-	// Layer 4: Bottom-Right
-	l4 := pipeline.composer_pipeline_get_layer(&h.composer_pipe, PANE_4_ID)
-	if l4 != nil {
-		l4.dest_rect = composer.rect_make(pane_w, content_y + pane_h, pane_w, pane_h)
-		l4.scissor_rect = composer.rect_make(
-			l4.dest_rect.x + inset_x,
-			l4.dest_rect.y + inset_y,
-			max(l4.dest_rect.w - inset_x * 2.0, 10.0),
-			max(l4.dest_rect.h - inset_y * 2.0, 10.0),
-		)
-		l4.corner_radius = 0.0
-		l4.opacity = 1.0
+	// Layer 4: Pane 4
+	if p4_node != nil {
+		l4, _ := pipeline.composer_pipeline_acquire_layer(&h.composer_pipe, PANE_4_ID, .Terminal, u32(p4_node.rect[2]), u32(p4_node.rect[3]), false)
+		if l4 != nil {
+			l4.dest_rect = composer.rect_make(p4_node.rect[0], p4_node.rect[1], p4_node.rect[2], p4_node.rect[3])
+			l4.scissor_rect = composer.rect_make(
+				l4.dest_rect.x + inset_x,
+				l4.dest_rect.y + inset_y,
+				max(l4.dest_rect.w - inset_x * 2.0, 10.0),
+				max(l4.dest_rect.h - inset_y * 2.0, 10.0),
+			)
+			l4.corner_radius = 0.0
+			l4.opacity = 1.0
+		}
 	}
 
 	// Chrome: Top + Dividers Overlay
-	lc := pipeline.composer_pipeline_get_layer(&h.composer_pipe, CHROME_LAYER_ID)
+	lc, _ := pipeline.composer_pipeline_acquire_layer(&h.composer_pipe, CHROME_LAYER_ID, .Chrome, u32(screen_w), u32(screen_h), false)
 	if lc != nil {
 		lc.dest_rect = composer.rect_make(0, 0, screen_w, screen_h)
 		lc.scissor_rect = lc.dest_rect
@@ -1705,10 +1727,10 @@ _update_layer_geometry :: proc(h: ^Harness_State) {
 	}
 
 	// Modal: Floating Center Overlay
-	l_mod := pipeline.composer_pipeline_get_layer(&h.composer_pipe, MODAL_LAYER_ID)
+	modal_w: f32 = 640.0
+	modal_h: f32 = 380.0
+	l_mod, _ := pipeline.composer_pipeline_acquire_layer(&h.composer_pipe, MODAL_LAYER_ID, .Overlay, u32(modal_w), u32(modal_h), false)
 	if l_mod != nil {
-		modal_w: f32 = 640.0
-		modal_h: f32 = 380.0
 		if h.modal_active {
 			l_mod.dest_rect = composer.rect_make((screen_w - modal_w) * 0.5, (screen_h - modal_h) * 0.42, modal_w, modal_h)
 			l_mod.scissor_rect = l_mod.dest_rect
@@ -1721,37 +1743,21 @@ _update_layer_geometry :: proc(h: ^Harness_State) {
 			l_mod.opacity = 0.0
 		}
 	}
+
+	order := [6]composer.Layer_Id{PANE_1_ID, PANE_2_ID, PANE_3_ID, PANE_4_ID, CHROME_LAYER_ID, MODAL_LAYER_ID}
+	pipeline.composer_pipeline_set_layer_order(&h.composer_pipe, order[:])
+
+	if p2_node != nil {
+		_ = three_d.three_d_resize(&h.three_d_renderer, u32(p2_node.rect[2]), u32(p2_node.rect[3]))
+	}
+
+	chrome_splits.split_tree_destroy(root)
 }
 
 // _mark_layer_dirty marks a layer dirty in both composer pipeline and frame scheduler.
 _mark_layer_dirty :: proc(h: ^Harness_State, id: composer.Layer_Id) {
 	pipeline.composer_pipeline_mark_dirty(&h.composer_pipe, id)
 	scheduler.scheduler_mark_damage(&h.scheduler, id)
-}
-
-// _acquire_all_layers sets up backing surface textures across all 6 layers.
-_acquire_all_layers :: proc(h: ^Harness_State) {
-	screen_w := f32(h.window.pixel_w)
-	screen_h := f32(h.window.pixel_h)
-	chrome_h := CHROME_BAR_HEIGHT
-	content_h := max(f32(10.0), screen_h - chrome_h)
-	pane_w := screen_w * 0.5
-	pane_h := content_h * 0.5
-
-	_, _ = pipeline.composer_pipeline_acquire_layer(&h.composer_pipe, PANE_1_ID, .Terminal, u32(pane_w), u32(pane_h), false)
-	_, _ = pipeline.composer_pipeline_acquire_layer(&h.composer_pipe, PANE_2_ID, .Three_D, u32(pane_w), u32(pane_h), true)
-	_, _ = pipeline.composer_pipeline_acquire_layer(&h.composer_pipe, PANE_3_ID, .Terminal, u32(pane_w), u32(pane_h), false)
-	_, _ = pipeline.composer_pipeline_acquire_layer(&h.composer_pipe, PANE_4_ID, .Terminal, u32(pane_w), u32(pane_h), false)
-	_, _ = pipeline.composer_pipeline_acquire_layer(&h.composer_pipe, CHROME_LAYER_ID, .Chrome, u32(screen_w), u32(screen_h), false)
-
-	modal_w: f32 = 640.0
-	modal_h: f32 = 380.0
-	_, _ = pipeline.composer_pipeline_acquire_layer(&h.composer_pipe, MODAL_LAYER_ID, .Overlay, u32(modal_w), u32(modal_h), false)
-
-	order := [6]composer.Layer_Id{PANE_1_ID, PANE_2_ID, PANE_3_ID, PANE_4_ID, CHROME_LAYER_ID, MODAL_LAYER_ID}
-	pipeline.composer_pipeline_set_layer_order(&h.composer_pipe, order[:])
-
-	_update_layer_geometry(h)
 }
 
 Percentile_Metrics :: struct {
@@ -1830,8 +1836,8 @@ _warmup_high_gpu_clock :: proc(h: ^Harness_State, frames: int = 200) {
 }
 
 // _shuffle_phases shuffles phase order using a Fisher-Yates shuffle to eliminate temporal ordering bias.
-_shuffle_phases :: proc(order: ^[5]int, rng_state: ^u64) {
-	for i := 4; i > 0; i -= 1 {
+_shuffle_phases :: proc(order: ^[6]int, rng_state: ^u64) {
+	for i := 5; i > 0; i -= 1 {
 		rng_state^ = rng_state^ * 6364136223846793005 + 1442695040888963407
 		j := int((rng_state^ >> 33) % u64(i + 1))
 		tmp := order[i]
@@ -1855,6 +1861,8 @@ _run_benchmark_phase :: proc(
 	out_redrawn: []int,
 ) -> (presented_count: int) {
 	h.modal_active = false
+	h.divider_drag_active = false
+	h.divider_ratio = 0.5
 	chrome_tabs.tabs_set_active(&h.tabs_model, 0)
 	_update_layer_geometry(h)
 	h.cursor_visible = true
@@ -1919,6 +1927,21 @@ _run_benchmark_phase :: proc(
 			pipeline.composer_pipeline_mark_dirty(&h.composer_pipe, PANE_3_ID)
 			pipeline.composer_pipeline_mark_dirty(&h.composer_pipe, PANE_4_ID)
 			pipeline.composer_pipeline_begin_frame(&h.composer_pipe)
+
+		case 5:
+			// Phase 5: Dynamic Divider Drag (Continuous Reflow)
+			t_sec := f32(f64(i) * (1.0 / 60.0))
+			h.divider_ratio = 0.5 + 0.35 * math.sin(t_sec * 2.0)
+			h.divider_drag_active = true
+			_update_layer_geometry(h)
+			h.active_line_idx = (i / 3) % 30
+			h.shell_typed_chars = (h.shell_typed_chars + 1) % 40
+			pipeline.composer_pipeline_mark_dirty(&h.composer_pipe, PANE_1_ID)
+			pipeline.composer_pipeline_mark_dirty(&h.composer_pipe, PANE_2_ID)
+			pipeline.composer_pipeline_mark_dirty(&h.composer_pipe, PANE_3_ID)
+			pipeline.composer_pipeline_mark_dirty(&h.composer_pipe, PANE_4_ID)
+			pipeline.composer_pipeline_mark_dirty(&h.composer_pipe, CHROME_LAYER_ID)
+			pipeline.composer_pipeline_begin_frame(&h.composer_pipe)
 		}
 
 		timing := _rasterize_dirty_panes_bench(h)
@@ -1948,20 +1971,23 @@ _run_benchmark_phase :: proc(
 
 	h.cursor_visible = true
 	h.modal_active = false
+	h.divider_drag_active = false
+	h.divider_ratio = 0.5
 	chrome_tabs.tabs_set_active(&h.tabs_model, 0)
 	_update_layer_geometry(h)
 	return presented_count
 }
 
-// _run_honest_benchmark runs 5 complete runs across 5 phases with 200-frame high-clock warmup and phase shuffling.
+// _run_honest_benchmark runs 5 complete runs across 6 phases with 200-frame high-clock warmup and phase shuffling.
 _run_honest_benchmark :: proc(h: ^Harness_State) {
 	fmt.println("\n==========================================================================================================================================================================================")
-	fmt.println(">>> RUNNING COMPREHENSIVE HARDWARE GPU BENCHMARK (5 RUNS x 5 PHASES, 200 FRAMES/PHASE, SHUFFLED ORDER) <<<")
+	fmt.println(">>> RUNNING COMPREHENSIVE HARDWARE GPU BENCHMARK (5 RUNS x 6 PHASES, 200 FRAMES/PHASE, SHUFFLED ORDER) <<<")
 	fmt.println("Covering: Phase 0: Tiny Damage (Quiescent Blinking Cursor)")
 	fmt.println("          Phase 1: Incremental Single-Line Update (1-Pane)")
 	fmt.println("          Phase 2: Tab & Session Content Switching")
 	fmt.println("          Phase 3: Floating Popup Modal Overlay Cycles + Typing")
 	fmt.println("          Phase 4: Full 4-Pane Heavy Stress Redraw")
+	fmt.println("          Phase 5: Dynamic Divider Drag (Continuous Reflow)")
 	fmt.println("Features: Randomized Phase Shuffling, 200-Frame DVFS High-Clock Warmup, Decomposed Blit Timings")
 	fmt.println("Present Mode: Uncapped Immediate Presentation")
 	fmt.println("==========================================================================================================================================================================================")
@@ -1985,7 +2011,7 @@ _run_honest_benchmark :: proc(h: ^Harness_State) {
 	defer contract.set_present_mode(h.surface, .Fifo)
 
 	BENCH_RUNS   :: 5
-	BENCH_PHASES :: 5
+	BENCH_PHASES :: 6
 	BENCH_FRAMES :: 200
 
 	run_total_p50:   [BENCH_PHASES][BENCH_RUNS]u64
@@ -2015,12 +2041,12 @@ _run_honest_benchmark :: proc(h: ^Harness_State) {
 	rng_state: u64 = u64(helper.platform_now()) ~ 0xCAFE_BABE_DEAD_BEEF
 
 	for run_idx in 0..<BENCH_RUNS {
-		phase_order := [BENCH_PHASES]int{0, 1, 2, 3, 4}
+		phase_order := [BENCH_PHASES]int{0, 1, 2, 3, 4, 5}
 		_shuffle_phases(&phase_order, &rng_state)
 
-		fmt.printf(">>> Executing Run %d/%d (Shuffled Phase Order: [%d, %d, %d, %d, %d])...\n",
+		fmt.printf(">>> Executing Run %d/%d (Shuffled Phase Order: [%d, %d, %d, %d, %d, %d])...\n",
 			run_idx + 1, BENCH_RUNS,
-			phase_order[0], phase_order[1], phase_order[2], phase_order[3], phase_order[4],
+			phase_order[0], phase_order[1], phase_order[2], phase_order[3], phase_order[4], phase_order[5],
 		)
 
 		for p_idx in 0..<BENCH_PHASES {
@@ -2107,6 +2133,7 @@ _run_honest_benchmark :: proc(h: ^Harness_State) {
 		"Phase 2 (Tab/Content Switching)",
 		"Phase 3 (Modal Cycles + Typing)",
 		"Phase 4 (Full 4-Pane Heavy Stress)",
+		"Phase 5 (Dynamic Divider Drag)",
 	}
 
 	for p in 0..<BENCH_PHASES {
@@ -2234,6 +2261,7 @@ _run_honest_benchmark :: proc(h: ^Harness_State) {
 	fmt.printf("  Phase 2 (Tab/Content Switching):     %d/%d layers redrawn (p50), %d quads (max: %d)\n", summaries[2].redrawn_layers, summaries[2].total_layers, summaries[2].quads_p50, summaries[2].quads_max)
 	fmt.printf("  Phase 3 (Modal Cycles + Typing):     %d/%d layers redrawn (p50), %d quads (max: %d)\n", summaries[3].redrawn_layers, summaries[3].total_layers, summaries[3].quads_p50, summaries[3].quads_max)
 	fmt.printf("  Phase 4 (Full 4-Pane Heavy Stress):  %d/%d layers redrawn (p50), %d quads (max: %d)\n", summaries[4].redrawn_layers, summaries[4].total_layers, summaries[4].quads_p50, summaries[4].quads_max)
+	fmt.printf("  Phase 5 (Dynamic Divider Drag):      %d/%d layers redrawn (p50), %d quads (max: %d)\n", summaries[5].redrawn_layers, summaries[5].total_layers, summaries[5].quads_p50, summaries[5].quads_max)
 	fmt.printf(
 		"\nCPU Encode Analysis: Phase 0 regenerates %d quads (equal to Phase 1 full pane) -> confirms dirty-tracking operates at Layer/Pane boundary (entire pane backing texture is regenerated), not sub-rect/cell level.\n",
 		summaries[0].quads_p50,
@@ -2248,6 +2276,8 @@ _run_honest_benchmark :: proc(h: ^Harness_State) {
 
 	// Cleanup & Reset to Clean State
 	h.modal_active = false
+	h.divider_drag_active = false
+	h.divider_ratio = 0.5
 	chrome_tabs.tabs_set_active(&h.tabs_model, 0)
 	_update_layer_geometry(h)
 
@@ -2849,8 +2879,7 @@ _handle_sdl_event :: proc(h: ^Harness_State, event: ^sdl3.Event) {
 		new_w := f32(h.window.pixel_w)
 		new_h := f32(h.window.pixel_h)
 		contract.configure_surface(h.surface, h.device, h.format, u32(new_w), u32(new_h))
-		_acquire_all_layers(h)
-		_ = three_d.three_d_resize(&h.three_d_renderer, u32(h.pane_w), u32(h.pane_h))
+		_update_layer_geometry(h)
 		_ = chrome.chrome_renderer_resize(&h.chrome_renderer, u32(new_w), u32(new_h))
 		_mark_layer_dirty(h, PANE_1_ID)
 		_mark_layer_dirty(h, PANE_2_ID)
@@ -3026,7 +3055,7 @@ main :: proc() {
 	h.blink_enabled = false // start with blink disabled by default for idle measurement, or toggleable with [C]
 
 	// Allocate all 5 layers and configure layout geometry
-	_acquire_all_layers(h)
+	_update_layer_geometry(h)
 
 	// Mark all layers dirty initially so frame 1 rasterizes everything
 	_mark_layer_dirty(h, PANE_1_ID)
@@ -3211,6 +3240,11 @@ main :: proc() {
 		if h.divider_drag_active {
 			t_sec := f32(f64(now_ns - u64(h.start_ticks)) / 1e9)
 			h.divider_ratio = 0.5 + 0.35 * math.sin(t_sec * 2.0)
+			_update_layer_geometry(h)
+			_mark_layer_dirty(h, PANE_1_ID)
+			_mark_layer_dirty(h, PANE_2_ID)
+			_mark_layer_dirty(h, PANE_3_ID)
+			_mark_layer_dirty(h, PANE_4_ID)
 			_mark_layer_dirty(h, CHROME_LAYER_ID)
 		}
 
