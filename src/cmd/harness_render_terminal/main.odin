@@ -369,18 +369,29 @@ Harness_State :: struct {
 	fs_pipeline:      contract.Gpu_RenderPipeline,
 	fs_layout:        contract.Gpu_BindGroupLayout,
 
-	// Pane 1: Instance Quad Batching
+	// Pane 1: Instance, Tile, Fullscreen
 	term1:            Synthetic_Terminal,
 	inst1:            terminal_instance.Instance_Renderer,
+	tile1:            tile.Compute_Tile_Renderer,
+	fs1:              fullscreen.Fullscreen_Renderer,
+	fs1_color_buf:    contract.Gpu_Buffer,
+	strat1_state:     terminal.Strategy_State,
 
-	// Pane 2: Compute Tile Binning
+	// Pane 2: Instance, Tile, Fullscreen
 	term2:            Synthetic_Terminal,
+	inst2:            terminal_instance.Instance_Renderer,
 	tile2:            tile.Compute_Tile_Renderer,
+	fs2:              fullscreen.Fullscreen_Renderer,
+	fs2_color_buf:    contract.Gpu_Buffer,
+	strat2_state:     terminal.Strategy_State,
 
-	// Pane 3: Fullscreen Quad Direct
+	// Pane 3: Instance, Tile, Fullscreen
 	term3:            Synthetic_Terminal,
+	inst3:            terminal_instance.Instance_Renderer,
+	tile3:            tile.Compute_Tile_Renderer,
 	fs3:              fullscreen.Fullscreen_Renderer,
 	fs3_color_buf:    contract.Gpu_Buffer,
+	strat3_state:     terminal.Strategy_State,
 
 	// Pane 4: Adaptive Online Selector
 	term4:            Synthetic_Terminal,
@@ -723,6 +734,30 @@ _rebuild_instance_resources :: proc(
 	return rawptr(r.bind_group) != nil
 }
 
+Pane_Context :: struct {
+	term:        ^Synthetic_Terminal,
+	inst:        ^terminal_instance.Instance_Renderer,
+	tile:        ^tile.Compute_Tile_Renderer,
+	fs:          ^fullscreen.Fullscreen_Renderer,
+	color_buf:   ^contract.Gpu_Buffer,
+	strat_state: ^terminal.Strategy_State,
+	layer_id:    composer.Layer_Id,
+}
+
+_get_pane_context :: proc(h: ^Harness_State, pane_idx: int) -> Pane_Context {
+	switch pane_idx {
+	case 0:
+		return {&h.term1, &h.inst1, &h.tile1, &h.fs1, &h.fs1_color_buf, &h.strat1_state, 1}
+	case 1:
+		return {&h.term2, &h.inst2, &h.tile2, &h.fs2, &h.fs2_color_buf, &h.strat2_state, 2}
+	case 2:
+		return {&h.term3, &h.inst3, &h.tile3, &h.fs3, &h.fs3_color_buf, &h.strat3_state, 3}
+	case 3:
+		return {&h.term4, &h.inst4, &h.tile4, &h.fs4, &h.fs4_color_buf, &h.strat4_state, 4}
+	}
+	return {}
+}
+
 _update_renderer_limits :: proc(h: ^Harness_State, cols, rows: u32) {
 	cell_w := h.pane_w / f32(cols)
 	cell_h := h.pane_h / f32(rows)
@@ -739,23 +774,14 @@ _update_renderer_limits :: proc(h: ^Harness_State, cols, rows: u32) {
 	if l3 != nil { l3.dest_rect = composer.rect_make(0, h.pane_h, h.pane_w, h.pane_h); l3.scissor_rect = l3.dest_rect; l3.opacity = 1.0 }
 	if l4 != nil { l4.dest_rect = composer.rect_make(h.pane_w, h.pane_h, h.pane_w, h.pane_h); l4.scissor_rect = l4.dest_rect; l4.opacity = 1.0 }
 
-	// Pane 1
-	_rebuild_instance_resources(h, &h.inst1, cols, rows, h.pane_w, h.pane_h)
-
-	// Pane 2
-	_rebuild_tile_resources(h, &h.tile2, cols, rows, h.pane_w, h.pane_h)
-	contract.write_buffer(h.queue, h.tile2.lut_buffer, 0, &h.lut_words, size_of(h.lut_words))
-
-	// Pane 3
-	_rebuild_fullscreen_resources(h, &h.fs3, &h.fs3_color_buf, cols, rows, h.pane_w, h.pane_h)
-	contract.write_buffer(h.queue, h.fs3.lut_buffer, 0, &h.lut_words, size_of(h.lut_words))
-
-	// Pane 4
-	_rebuild_instance_resources(h, &h.inst4, cols, rows, h.pane_w, h.pane_h)
-	_rebuild_tile_resources(h, &h.tile4, cols, rows, h.pane_w, h.pane_h)
-	contract.write_buffer(h.queue, h.tile4.lut_buffer, 0, &h.lut_words, size_of(h.lut_words))
-	_rebuild_fullscreen_resources(h, &h.fs4, &h.fs4_color_buf, cols, rows, h.pane_w, h.pane_h)
-	contract.write_buffer(h.queue, h.fs4.lut_buffer, 0, &h.lut_words, size_of(h.lut_words))
+	for p in 0..<4 {
+		ctx := _get_pane_context(h, p)
+		_rebuild_instance_resources(h, ctx.inst, cols, rows, h.pane_w, h.pane_h)
+		_rebuild_tile_resources(h, ctx.tile, cols, rows, h.pane_w, h.pane_h)
+		contract.write_buffer(h.queue, ctx.tile.lut_buffer, 0, &h.lut_words, size_of(h.lut_words))
+		_rebuild_fullscreen_resources(h, ctx.fs, ctx.color_buf, cols, rows, h.pane_w, h.pane_h)
+		contract.write_buffer(h.queue, ctx.fs.lut_buffer, 0, &h.lut_words, size_of(h.lut_words))
+	}
 }
 
 _handle_window_resize :: proc(h: ^Harness_State) {
@@ -1836,36 +1862,35 @@ Terminal_Scenario :: struct {
 	rows:        u32,
 	dirty_ratio: f32,
 	strategy:    terminal.Render_Strategy,
+	pane_count:  int,
 }
 
-all_scenarios := [17]Terminal_Scenario{
+base_scenarios := [17]Terminal_Scenario{
 	// Grid Scaling (Dirty 100%, Strategy C)
-	{"Grid Scaling: 80x24 (100% dirty, Strat C)", 80, 24, 1.0, .Fullscreen},
-	{"Grid Scaling: 120x40 (100% dirty, Strat C)", 120, 40, 1.0, .Fullscreen},
-	{"Grid Scaling: 160x50 (100% dirty, Strat C)", 160, 50, 1.0, .Fullscreen},
-	{"Grid Scaling: 500x200 (100% dirty, Strat C)", 500, 200, 1.0, .Fullscreen},
+	{"Grid Scaling: 80x24 (100% dirty, Strat C)", 80, 24, 1.0, .Fullscreen, 0},
+	{"Grid Scaling: 120x40 (100% dirty, Strat C)", 120, 40, 1.0, .Fullscreen, 0},
+	{"Grid Scaling: 160x50 (100% dirty, Strat C)", 160, 50, 1.0, .Fullscreen, 0},
+	{"Grid Scaling: 500x200 (100% dirty, Strat C)", 500, 200, 1.0, .Fullscreen, 0},
 
 	// Dirty Sweep (120x40, Auto Strategy)
-	{"Dirty Sweep: 0.0% (120x40, Auto)", 120, 40, 0.000, STRATEGY_AUTO},
-	{"Dirty Sweep: 0.1% (120x40, Auto)", 120, 40, 0.001, STRATEGY_AUTO},
-	{"Dirty Sweep: 1.0% (120x40, Auto)", 120, 40, 0.010, STRATEGY_AUTO},
-	{"Dirty Sweep: 5.0% (120x40, Auto)", 120, 40, 0.050, STRATEGY_AUTO},
-	{"Dirty Sweep: 25.0% (120x40, Auto)", 120, 40, 0.250, STRATEGY_AUTO},
-	{"Dirty Sweep: 100.0% (120x40, Auto)", 120, 40, 1.000, STRATEGY_AUTO},
+	{"Dirty Sweep: 0.0% (120x40, Auto)", 120, 40, 0.000, STRATEGY_AUTO, 0},
+	{"Dirty Sweep: 0.1% (120x40, Auto)", 120, 40, 0.001, STRATEGY_AUTO, 0},
+	{"Dirty Sweep: 1.0% (120x40, Auto)", 120, 40, 0.010, STRATEGY_AUTO, 0},
+	{"Dirty Sweep: 5.0% (120x40, Auto)", 120, 40, 0.050, STRATEGY_AUTO, 0},
+	{"Dirty Sweep: 25.0% (120x40, Auto)", 120, 40, 0.250, STRATEGY_AUTO, 0},
+	{"Dirty Sweep: 100.0% (120x40, Auto)", 120, 40, 1.000, STRATEGY_AUTO, 0},
 
 	// Crossover Validation (120x40, Auto Strategy)
-	{"Crossover: 2.9% (120x40, Auto -> A)", 120, 40, 0.029, STRATEGY_AUTO},
-	{"Crossover: 3.0% (120x40, Auto -> B)", 120, 40, 0.030, STRATEGY_AUTO},
-	{"Crossover: 64.9% (120x40, Auto -> B)", 120, 40, 0.649, STRATEGY_AUTO},
-	{"Crossover: 65.0% (120x40, Auto -> C)", 120, 40, 0.650, STRATEGY_AUTO},
+	{"Crossover: 2.9% (120x40, Auto -> A)", 120, 40, 0.029, STRATEGY_AUTO, 0},
+	{"Crossover: 3.0% (120x40, Auto -> B)", 120, 40, 0.030, STRATEGY_AUTO, 0},
+	{"Crossover: 64.9% (120x40, Auto -> B)", 120, 40, 0.649, STRATEGY_AUTO, 0},
+	{"Crossover: 65.0% (120x40, Auto -> C)", 120, 40, 0.650, STRATEGY_AUTO, 0},
 
 	// Strategy Stress (120x40, 5.0% dirty)
-	{"Strategy Stress: Force A (120x40, 5.0%)", 120, 40, 0.050, .Instance},
-	{"Strategy Stress: Force B (120x40, 5.0%)", 120, 40, 0.050, .Compute_Tiles},
-	{"Strategy Stress: Force C (120x40, 5.0%)", 120, 40, 0.050, .Fullscreen},
+	{"Strategy Stress: Force A (120x40, 5.0%)", 120, 40, 0.050, .Instance, 0},
+	{"Strategy Stress: Force B (120x40, 5.0%)", 120, 40, 0.050, .Compute_Tiles, 0},
+	{"Strategy Stress: Force C (120x40, 5.0%)", 120, 40, 0.050, .Fullscreen, 0},
 }
-
-SCENARIOS_TOTAL :: len(all_scenarios)
 
 Stats_Summary :: struct {
 	mean:    f64,
@@ -1942,24 +1967,168 @@ _calc_percentiles :: proc(samples: []u64) -> Percentile_Metrics {
 	}
 }
 
-_update_pane4_limits :: proc(h: ^Harness_State, cols, rows: u32) {
-	cell_w := h.pane_w / f32(cols)
-	cell_h := h.pane_h / f32(rows)
-	exact_w := max(u32(f32(cols) * cell_w), 1)
-	exact_h := max(u32(f32(rows) * cell_h), 1)
-
-	l4, _ := pipeline.composer_pipeline_acquire_layer(&h.composer_pipe, 4, .Terminal, exact_w, exact_h, false)
-	if l4 != nil {
-		l4.dest_rect = composer.rect_make(h.pane_w, h.pane_h, h.pane_w, h.pane_h)
-		l4.scissor_rect = l4.dest_rect
-		l4.opacity = 1.0
+_pump_events :: proc() {
+	event: sdl3.Event
+	for sdl3.PollEvent(&event) {
+		if event.type == .QUIT || event.type == .WINDOW_CLOSE_REQUESTED {
+			os.exit(0)
+		}
 	}
+}
 
-	_rebuild_instance_resources(h, &h.inst4, cols, rows, h.pane_w, h.pane_h)
-	_rebuild_tile_resources(h, &h.tile4, cols, rows, h.pane_w, h.pane_h)
-	contract.write_buffer(h.queue, h.tile4.lut_buffer, 0, &h.lut_words, size_of(h.lut_words))
-	_rebuild_fullscreen_resources(h, &h.fs4, &h.fs4_color_buf, cols, rows, h.pane_w, h.pane_h)
-	contract.write_buffer(h.queue, h.fs4.lut_buffer, 0, &h.lut_words, size_of(h.lut_words))
+_acquire_surface :: proc(h: ^Harness_State) -> (contract.Gpu_Texture, contract.Gpu_TextureView) {
+	for _ in 0..<10 {
+		surf := (^wgpu_backend.Wgpu_Surface)(h.surface)
+		if surf != nil && surf.handle != nil {
+			st := wgpu.SurfaceGetCurrentTexture(surf.handle)
+			if st.status == .SuccessOptimal || st.status == .SuccessSuboptimal || st.status == .Occluded {
+				if st.texture != nil {
+					tv := wgpu.TextureCreateView(st.texture, nil)
+					if tv != nil {
+						return contract.Gpu_Texture(st.texture), contract.Gpu_TextureView(tv)
+					}
+				}
+			}
+		}
+		_pump_events()
+		if h.window.handle != nil {
+			sdl3.RaiseWindow(h.window.handle)
+		}
+		helper.window_update_pixel_size(&h.window)
+		h.screen_w = f32(h.window.pixel_w)
+		h.screen_h = f32(h.window.pixel_h)
+		h.pane_w = h.screen_w * 0.5
+		h.pane_h = h.screen_h * 0.5
+		contract.configure_surface(h.surface, h.device, h.format, u32(h.screen_w), u32(h.screen_h))
+		contract.poll_device(h.device, true)
+	}
+	return contract.Gpu_Texture(nil), contract.Gpu_TextureView(nil)
+}
+
+_encode_pane_raster :: proc(
+	h: ^Harness_State,
+	enc: contract.Gpu_CommandEncoder,
+	ctx: ^Pane_Context,
+	strat: terminal.Render_Strategy,
+	cols, rows: u32,
+	cell_w, cell_h: f32,
+	dirty_tiles_buf: ^[2048]u32,
+) {
+	l := pipeline.composer_pipeline_get_layer(&h.composer_pipe, ctx.layer_id)
+	if l == nil || rawptr(l.view) == nil do return
+
+	switch strat {
+	case .Instance:
+		terminal_instance.instance_renderer_begin(ctx.inst)
+		u_data := [4]f32{h.pane_w, h.pane_h, cell_w, cell_h}
+		contract.write_buffer(h.queue, ctx.inst.uniform_buffer, 0, &u_data, size_of([4]f32))
+
+		for r in 0..<rows {
+			for c in 0..<cols {
+				packed := ctx.term.cells[r * cols + c]
+				content, style, _, _, slot := unpack_cell(packed)
+				if content == ' ' && style == 0 do continue
+
+				u0, v0, u1, v1 := atlas.atlas_slot_uv(slot, cell_w, cell_h)
+				if slot == UNRESOLVED_SLOT && content >= 32 && content <= 126 {
+					u0, v0, u1, v1 = atlas.atlas_slot_uv(content - 32, cell_w, cell_h)
+				}
+
+				rec := contract.Instance_Record{
+					pos_size = {f32(c) * cell_w, f32(r) * cell_h, cell_w, cell_h},
+					uv_rect  = {u0, v0, u1, v1},
+					fg_color = palette_srgb_float(style, true),
+					bg_color = palette_srgb_float(style, false),
+				}
+				terminal_instance.instance_renderer_push(ctx.inst, rec)
+			}
+		}
+		terminal_instance.instance_renderer_flush(ctx.inst)
+
+		pass := contract.begin_render_pass(enc, l.view, {0.07, 0.08, 0.10, 1.0}, .Clear)
+		if rawptr(pass) != nil {
+			if ctx.inst.active_count > 0 {
+				contract.render_set_pipeline(pass, h.bg_pipeline)
+				bg_bg := ctx.inst.bg_bind_group if rawptr(ctx.inst.bg_bind_group) != nil else ctx.inst.bind_group
+				contract.render_set_bind_group(pass, 0, bg_bg)
+				contract.render_set_vertex_buffer(pass, 0, ctx.inst.instance_buffer, 0)
+				contract.render_draw(pass, 6, ctx.inst.active_count)
+				terminal_instance.instance_renderer_draw(ctx.inst, pass)
+			}
+			contract.end_render_pass(pass)
+		}
+
+	case .Compute_Tiles:
+		contract.write_buffer(h.queue, ctx.tile.cell_buffer, 0, raw_data(ctx.term.cells), u64(len(ctx.term.cells) * size_of(u64)))
+		tx_s := ctx.term.damage.x / ctx.tile.tile_w
+		ty_s := ctx.term.damage.y / ctx.tile.tile_h
+		tx_e := min((ctx.term.damage.x + ctx.term.damage.w + ctx.tile.tile_w - 1) / ctx.tile.tile_w, ctx.tile.tiles_x)
+		ty_e := min((ctx.term.damage.y + ctx.term.damage.h + ctx.tile.tile_h - 1) / ctx.tile.tile_h, ctx.tile.tiles_y)
+		dirty_count := 0
+		for ty in ty_s..<ty_e {
+			for tx in tx_s..<tx_e {
+				if dirty_count < len(dirty_tiles_buf) {
+					dirty_tiles_buf[dirty_count] = ty * ctx.tile.tiles_x + tx
+					dirty_count += 1
+				}
+			}
+		}
+		if dirty_count > 0 {
+			params := tile.Tile_Params{
+				screen_w     = h.pane_w,
+				screen_h     = h.pane_h,
+				cols         = cols,
+				rows         = rows,
+				cell_w       = cell_w,
+				cell_h       = cell_h,
+				pad_x        = 0.0,
+				pad_y        = 0.0,
+				tile_w       = ctx.tile.tile_w,
+				tile_h       = ctx.tile.tile_h,
+				tiles_x      = ctx.tile.tiles_x,
+				tiles_y      = ctx.tile.tiles_y,
+				atlas_w      = atlas.ATLAS_WIDTH,
+				atlas_h      = atlas.ATLAS_HEIGHT,
+				bg_opacity   = 1.0,
+				cell_opacity = 1.0,
+			}
+			contract.write_buffer(h.queue, ctx.tile.params_buffer, 0, &params, size_of(tile.Tile_Params))
+			contract.write_buffer(h.queue, ctx.tile.tile_list_buffer, 0, &dirty_tiles_buf[0], u64(dirty_count * size_of(u32)))
+			tile.compute_tile_dispatch(ctx.tile, enc, u32(dirty_count))
+		}
+
+		pass := contract.begin_render_pass(enc, l.view, {0.07, 0.08, 0.10, 1.0}, .Clear)
+		if rawptr(pass) != nil {
+			contract.render_set_pipeline(pass, ctx.tile.blit_pipeline)
+			contract.render_set_bind_group(pass, 0, ctx.tile.blit_bind_group)
+			contract.render_draw(pass, 3, 1)
+			contract.end_render_pass(pass)
+		}
+
+	case .Fullscreen:
+		contract.write_buffer(h.queue, ctx.fs.cell_buffer, 0, raw_data(ctx.term.cells), u64(len(ctx.term.cells) * size_of(u64)))
+		fs_p := fullscreen.Fullscreen_Params{
+			screen_w     = h.pane_w,
+			screen_h     = h.pane_h,
+			cols         = cols,
+			rows         = rows,
+			cell_w       = cell_w,
+			cell_h       = cell_h,
+			pad_x        = 0.0,
+			pad_y        = 0.0,
+			atlas_w      = atlas.ATLAS_WIDTH,
+			atlas_h      = atlas.ATLAS_HEIGHT,
+			bg_opacity   = 1.0,
+			cell_opacity = 1.0,
+		}
+		contract.write_buffer(h.queue, ctx.fs.params_buffer, 0, &fs_p, size_of(fullscreen.Fullscreen_Params))
+
+		pass := contract.begin_render_pass(enc, l.view, {0.07, 0.08, 0.10, 1.0}, .Clear)
+		if rawptr(pass) != nil {
+			fullscreen.fullscreen_draw(ctx.fs, pass)
+			contract.end_render_pass(pass)
+		}
+	}
 }
 
 execute_scenario_single_run :: proc(
@@ -1967,12 +2136,17 @@ execute_scenario_single_run :: proc(
 	cfg: ^Terminal_Scenario,
 	frames: int,
 ) -> (cpu_us: f64, allocations: i64) {
-	// Resize h.term4 to cfg.cols, cfg.rows and update renderer limits for Pane 4
-	synthetic_terminal_resize(&h.term4, cfg.cols, cfg.rows)
-	_update_pane4_limits(h, cfg.cols, cfg.rows)
+	for p in 0..<cfg.pane_count {
+		ctx := _get_pane_context(h, p)
+		synthetic_terminal_resize(ctx.term, cfg.cols, cfg.rows)
+	}
+	_update_renderer_limits(h, cfg.cols, cfg.rows)
 
-	l4 := pipeline.composer_pipeline_get_layer(&h.composer_pipe, 4)
-	if l4 == nil || rawptr(l4.view) == nil do return 0.0, 0
+	order: [4]composer.Layer_Id
+	for p in 0..<cfg.pane_count {
+		order[p] = composer.Layer_Id(p + 1)
+	}
+	pipeline.composer_pipeline_set_layer_order(&h.composer_pipe, order[:cfg.pane_count])
 
 	cell_w := h.pane_w / f32(cfg.cols)
 	cell_h := h.pane_h / f32(cfg.rows)
@@ -1993,148 +2167,54 @@ execute_scenario_single_run :: proc(
 		context.allocator = mem.tracking_allocator(&track)
 
 		for _ in 0..<frames {
-			// 1. Clear damage, then randomize dirty cells
-			synthetic_terminal_clear(&h.term4)
-			h.term4.damage = {}
-			if dirty_cells > 0 {
-				synthetic_terminal_randomize(&h.term4, &h.rng, dirty_cells)
+			_pump_events()
+
+			tex, view := _acquire_surface(h)
+			if rawptr(view) == nil do continue
+
+			strats: [4]terminal.Render_Strategy
+			for p in 0..<cfg.pane_count {
+				ctx := _get_pane_context(h, p)
+				synthetic_terminal_resize(ctx.term, cfg.cols, cfg.rows)
+
+				synthetic_terminal_clear(ctx.term)
+				ctx.term.damage = {}
+				if dirty_cells > 0 {
+					synthetic_terminal_randomize(ctx.term, &h.rng, dirty_cells)
+				}
+
+				if cfg.strategy != STRATEGY_AUTO {
+					terminal.strategy_pin(ctx.strat_state, cfg.strategy)
+				} else {
+					terminal.strategy_unpin(ctx.strat_state)
+				}
+
+				inp := terminal.Strategy_Inputs{
+					dirty_cells = dirty_cells,
+					total_cells = total_cells,
+					ratio       = cfg.dirty_ratio,
+					full_rows   = int(ctx.term.damage.h) if ctx.term.damage.w == cfg.cols else 0,
+					span_count  = 1,
+					scroll      = (dirty_cells == total_cells),
+				}
+				strats[p] = terminal.strategy_select(inp, ctx.strat_state, true, true)
 			}
 
-			// 2. Pin / Unpin strategy
-			if cfg.strategy != STRATEGY_AUTO {
-				terminal.strategy_pin(&h.strat4_state, cfg.strategy)
-			} else {
-				terminal.strategy_unpin(&h.strat4_state)
-			}
-
-			// 3. Evaluate strategy_select
-			inp := terminal.Strategy_Inputs{
-				dirty_cells = dirty_cells,
-				total_cells = total_cells,
-				ratio       = cfg.dirty_ratio,
-				full_rows   = int(h.term4.damage.h) if h.term4.damage.w == cfg.cols else 0,
-				span_count  = 1,
-				scroll      = (dirty_cells == total_cells),
-			}
-			strat := terminal.strategy_select(inp, &h.strat4_state, true, true)
-
-			// 4. Measure CPU encode time
+			// Measure CPU encode time
 			t0 := helper.platform_now()
 
 			enc := contract.create_command_encoder(h.device)
-			if rawptr(enc) == nil do continue
-
-			switch strat {
-			case .Instance:
-				terminal_instance.instance_renderer_begin(&h.inst4)
-				u_data := [4]f32{h.pane_w, h.pane_h, cell_w, cell_h}
-				contract.write_buffer(h.queue, h.inst4.uniform_buffer, 0, &u_data, size_of([4]f32))
-				for r in 0..<cfg.rows {
-					for c in 0..<cfg.cols {
-						packed := h.term4.cells[r * cfg.cols + c]
-						content, style, _, _, slot := unpack_cell(packed)
-						if content == ' ' && style == 0 do continue
-
-						u0, v0, u1, v1 := atlas.atlas_slot_uv(slot, cell_w, cell_h)
-						if slot == UNRESOLVED_SLOT && content >= 32 && content <= 126 {
-							u0, v0, u1, v1 = atlas.atlas_slot_uv(content - 32, cell_w, cell_h)
-						}
-
-						rec := contract.Instance_Record{
-							pos_size = {f32(c) * cell_w, f32(r) * cell_h, cell_w, cell_h},
-							uv_rect  = {u0, v0, u1, v1},
-							fg_color = palette_srgb_float(style, true),
-							bg_color = palette_srgb_float(style, false),
-						}
-						terminal_instance.instance_renderer_push(&h.inst4, rec)
-					}
-				}
-				terminal_instance.instance_renderer_flush(&h.inst4)
-
-				pass := contract.begin_render_pass(enc, l4.view, {0.07, 0.08, 0.10, 1.0}, .Clear)
-				if rawptr(pass) != nil {
-					if h.inst4.active_count > 0 {
-						contract.render_set_pipeline(pass, h.bg_pipeline)
-						bg_bg4 := h.inst4.bg_bind_group if rawptr(h.inst4.bg_bind_group) != nil else h.inst4.bind_group
-						contract.render_set_bind_group(pass, 0, bg_bg4)
-						contract.render_set_vertex_buffer(pass, 0, h.inst4.instance_buffer, 0)
-						contract.render_draw(pass, 6, h.inst4.active_count)
-						terminal_instance.instance_renderer_draw(&h.inst4, pass)
-					}
-					contract.end_render_pass(pass)
-				}
-
-			case .Compute_Tiles:
-				contract.write_buffer(h.queue, h.tile4.cell_buffer, 0, raw_data(h.term4.cells), u64(len(h.term4.cells) * size_of(u64)))
-				tx_s4 := h.term4.damage.x / h.tile4.tile_w
-				ty_s4 := h.term4.damage.y / h.tile4.tile_h
-				tx_e4 := min((h.term4.damage.x + h.term4.damage.w + h.tile4.tile_w - 1) / h.tile4.tile_w, h.tile4.tiles_x)
-				ty_e4 := min((h.term4.damage.y + h.term4.damage.h + h.tile4.tile_h - 1) / h.tile4.tile_h, h.tile4.tiles_y)
-				dirty_count := 0
-				for ty in ty_s4..<ty_e4 {
-					for tx in tx_s4..<tx_e4 {
-						if dirty_count < len(dirty_tiles_buf) {
-							dirty_tiles_buf[dirty_count] = ty * h.tile4.tiles_x + tx
-							dirty_count += 1
-						}
-					}
-				}
-				if dirty_count > 0 {
-					params4 := tile.Tile_Params{
-						screen_w     = h.pane_w,
-						screen_h     = h.pane_h,
-						cols         = cfg.cols,
-						rows         = cfg.rows,
-						cell_w       = cell_w,
-						cell_h       = cell_h,
-						pad_x        = 0.0,
-						pad_y        = 0.0,
-						tile_w       = h.tile4.tile_w,
-						tile_h       = h.tile4.tile_h,
-						tiles_x      = h.tile4.tiles_x,
-						tiles_y      = h.tile4.tiles_y,
-						atlas_w      = atlas.ATLAS_WIDTH,
-						atlas_h      = atlas.ATLAS_HEIGHT,
-						bg_opacity   = 1.0,
-						cell_opacity = 1.0,
-					}
-					contract.write_buffer(h.queue, h.tile4.params_buffer, 0, &params4, size_of(tile.Tile_Params))
-					contract.write_buffer(h.queue, h.tile4.tile_list_buffer, 0, &dirty_tiles_buf[0], u64(dirty_count * size_of(u32)))
-					tile.compute_tile_dispatch(&h.tile4, enc, u32(dirty_count))
-				}
-
-				pass := contract.begin_render_pass(enc, l4.view, {0.07, 0.08, 0.10, 1.0}, .Clear)
-				if rawptr(pass) != nil {
-					contract.render_set_pipeline(pass, h.tile4.blit_pipeline)
-					contract.render_set_bind_group(pass, 0, h.tile4.blit_bind_group)
-					contract.render_draw(pass, 3, 1)
-					contract.end_render_pass(pass)
-				}
-
-			case .Fullscreen:
-				contract.write_buffer(h.queue, h.fs4.cell_buffer, 0, raw_data(h.term4.cells), u64(len(h.term4.cells) * size_of(u64)))
-				fs_p4 := fullscreen.Fullscreen_Params{
-					screen_w     = h.pane_w,
-					screen_h     = h.pane_h,
-					cols         = cfg.cols,
-					rows         = cfg.rows,
-					cell_w       = cell_w,
-					cell_h       = cell_h,
-					pad_x        = 0.0,
-					pad_y        = 0.0,
-					atlas_w      = atlas.ATLAS_WIDTH,
-					atlas_h      = atlas.ATLAS_HEIGHT,
-					bg_opacity   = 1.0,
-					cell_opacity = 1.0,
-				}
-				contract.write_buffer(h.queue, h.fs4.params_buffer, 0, &fs_p4, size_of(fullscreen.Fullscreen_Params))
-
-				pass := contract.begin_render_pass(enc, l4.view, {0.07, 0.08, 0.10, 1.0}, .Clear)
-				if rawptr(pass) != nil {
-					fullscreen.fullscreen_draw(&h.fs4, pass)
-					contract.end_render_pass(pass)
-				}
+			if rawptr(enc) == nil {
+				contract.release_surface_texture(tex, view)
+				continue
 			}
+
+			for p in 0..<cfg.pane_count {
+				ctx := _get_pane_context(h, p)
+				_encode_pane_raster(h, enc, &ctx, strats[p], cfg.cols, cfg.rows, cell_w, cell_h, &dirty_tiles_buf)
+			}
+
+			pipeline.composer_pipeline_composite(&h.composer_pipe, enc, view)
 
 			cmd := contract.finish_command_buffer(enc)
 			contract.release_command_encoder(enc)
@@ -2146,6 +2226,9 @@ execute_scenario_single_run :: proc(
 
 			t1 := helper.platform_now()
 			total_cpu_ticks += (t1 - t0)
+
+			contract.present_surface(h.surface)
+			contract.release_surface_texture(tex, view)
 		}
 	}
 
@@ -2162,7 +2245,32 @@ execute_scenario_single_run :: proc(
 
 _run_honest_benchmark :: proc(h: ^Harness_State) {
 	NUM_RUNS :: 5
-	FRAMES_PER_RUN :: 30
+	FRAMES_PER_RUN :: 60
+	SCENARIOS_TOTAL :: 68
+
+	contract.set_present_mode(h.surface, .Immediate)
+	contract.configure_surface(h.surface, h.device, h.format, u32(h.screen_w), u32(h.screen_h))
+
+	bench_scenarios: [SCENARIOS_TOTAL]Terminal_Scenario
+	idx := 0
+	for p in 1..=4 {
+		for base in base_scenarios {
+			bench_scenarios[idx] = {
+				name        = fmt.aprintf("[%d-Pane] %s", p, base.name),
+				cols        = base.cols,
+				rows        = base.rows,
+				dirty_ratio = base.dirty_ratio,
+				strategy    = base.strategy,
+				pane_count  = p,
+			}
+			idx += 1
+		}
+	}
+	defer {
+		for s in bench_scenarios {
+			delete(s.name)
+		}
+	}
 
 	run_means: [SCENARIOS_TOTAL][NUM_RUNS]f64
 	run_allocs: [SCENARIOS_TOTAL][NUM_RUNS]i64
@@ -2170,13 +2278,13 @@ _run_honest_benchmark :: proc(h: ^Harness_State) {
 	fmt.println("================================================================================")
 	fmt.println("               STARTING TERMINAL RENDER HONEST BENCHMARK SUITE                  ")
 	fmt.println("================================================================================")
-	fmt.printfln("Configuration: %d Scenarios, %d Runs, %d Frames/Run (df=4, t=2.776)", SCENARIOS_TOTAL, NUM_RUNS, FRAMES_PER_RUN)
+	fmt.printfln("Configuration: %d Scenarios (1-4 Panes), %d Runs, %d Frames/Run (df=4, t=2.776)", SCENARIOS_TOTAL, NUM_RUNS, FRAMES_PER_RUN)
 	fmt.println()
 
 	// 1. Interleaved Warmup across all scenarios (10 frames each)
 	fmt.println("Running interleaved warmup across all scenarios (10 frames each)...")
 	for s_idx in 0..<SCENARIOS_TOTAL {
-		cfg := &all_scenarios[s_idx]
+		cfg := &bench_scenarios[s_idx]
 		_, _ = execute_scenario_single_run(h, cfg, 10)
 	}
 	fmt.println("Interleaved warmup complete.")
@@ -2201,7 +2309,7 @@ _run_honest_benchmark :: proc(h: ^Harness_State) {
 		fmt.printfln("--- Starting Run %d/%d (Shuffled with seed) ---", r + 1, NUM_RUNS)
 
 		for s_idx in scenario_indices {
-			cfg := &all_scenarios[s_idx]
+			cfg := &bench_scenarios[s_idx]
 			cpu_us, allocs := execute_scenario_single_run(h, cfg, FRAMES_PER_RUN)
 			run_means[s_idx][r] = cpu_us
 			run_allocs[s_idx][r] = allocs
@@ -2219,26 +2327,33 @@ _run_honest_benchmark :: proc(h: ^Harness_State) {
 
 	// 3. Post-Run Statistical Aggregation & Reporting Table
 	fmt.println()
-	fmt.println("==================================================================================================================================================")
-	fmt.println("                                               HARNESS TERMINAL BENCHMARK REPORT (V2.2)")
-	fmt.println("==================================================================================================================================================")
-	fmt.printfln("%-44s | %-40s | %-10s | %-20s | %-8s", "Scenario", "Run Means (µs)", "Mean (µs)", "95% CI (µs)", "Allocs")
-	fmt.println("---------------------------------------------+------------------------------------------+------------+----------------------+---------")
+	fmt.println("==============================================================================================================================================================")
+	fmt.println("                                                            HARNESS TERMINAL BENCHMARK REPORT (V2.2)")
+	fmt.println("==============================================================================================================================================================")
+	fmt.printfln("%-52s | %-40s | %-10s | %-20s | %-10s | %-8s", "Scenario", "Run Means (µs)", "Mean (µs)", "95% CI (µs)", "P95 (µs)", "Allocs")
+	fmt.println("-----------------------------------------------------+------------------------------------------+------------+----------------------+------------+---------")
 
 	for s in 0..<SCENARIOS_TOTAL {
-		cfg := &all_scenarios[s]
+		cfg := &bench_scenarios[s]
 		stats_s := compute_stats(run_means[s][:NUM_RUNS])
+
+		samples_ns: [NUM_RUNS]u64
+		for r_idx in 0..<NUM_RUNS {
+			samples_ns[r_idx] = u64(max(run_means[s][r_idx] * 1000.0, 0))
+		}
+		p_stats := _calc_percentiles(samples_ns[:])
 
 		runs_str := fmt.tprintf("[%.1f, %.1f, %.1f, %.1f, %.1f]", run_means[s][0], run_means[s][1], run_means[s][2], run_means[s][3], run_means[s][4])
 		ci_str := fmt.tprintf("[%.1f, %.1f]", stats_s.ci_low, stats_s.ci_high)
 		mean_str := fmt.tprintf("%.1f", stats_s.mean)
+		p95_str := fmt.tprintf("%.1f", f64(p_stats.p95_ns) / 1000.0)
 		alloc_sum: i64 = 0
 		for r_idx in 0..<NUM_RUNS do alloc_sum += run_allocs[s][r_idx]
 		alloc_str := fmt.tprintf("%d", alloc_sum)
 
-		fmt.printfln("%-44s | %-40s | %10s | %-20s | %8s", cfg.name, runs_str, mean_str, ci_str, alloc_str)
+		fmt.printfln("%-52s | %-40s | %10s | %-20s | %10s | %8s", cfg.name, runs_str, mean_str, ci_str, p95_str, alloc_str)
 	}
-	fmt.println("==================================================================================================================================================")
+	fmt.println("==============================================================================================================================================================")
 	fmt.println()
 
 	// 4. Locked Thresholds Evaluation
@@ -2247,7 +2362,7 @@ _run_honest_benchmark :: proc(h: ^Harness_State) {
 	fmt.println("================================================================================")
 	strat_a_idx := -1
 	for s in 0..<SCENARIOS_TOTAL {
-		if all_scenarios[s].name == "Strategy Stress: Force A (120x40, 5.0%)" {
+		if bench_scenarios[s].name == "[1-Pane] Strategy Stress: Force A (120x40, 5.0%)" {
 			strat_a_idx = s
 			break
 		}
@@ -2255,7 +2370,7 @@ _run_honest_benchmark :: proc(h: ^Harness_State) {
 	if strat_a_idx >= 0 {
 		stats_a := compute_stats(run_means[strat_a_idx][:NUM_RUNS])
 		v_str := "PASS" if stats_a.ci_high < 80.0 else ("FAIL" if stats_a.ci_low > 80.0 else "INCONCLUSIVE")
-		fmt.printfln("1. Terminal Strategy A CPU Time per Frame (120x40, 5%% dirty):")
+		fmt.printfln("1. Terminal Strategy A CPU Time per Frame (120x40, 5%% dirty, 1-Pane):")
 		fmt.printfln("   Mean:             %.2f µs (95%% CI: [%.2f, %.2f] µs)", stats_a.mean, stats_a.ci_low, stats_a.ci_high)
 		fmt.printfln("   Locked Threshold: < 80.0 µs")
 		fmt.printfln("   Verdict:          [%s]", v_str)
@@ -2348,55 +2463,33 @@ main :: proc() {
 	synthetic_terminal_init(&h.term4, GRID_COLS_NORMAL, GRID_ROWS_NORMAL)
 	defer synthetic_terminal_destroy(&h.term4)
 
-	// Initialize Renderer Instances
-	terminal_instance.instance_renderer_init(&h.inst1, h.device, h.queue, 1024, h.atlas.gpu_view, h.format)
-	tile.compute_tile_init(
-		&h.tile2,
-		h.device,
-		h.queue,
-		GRID_ROWS_NORMAL,
-		GRID_COLS_NORMAL,
-		h.pane_w / f32(GRID_COLS_NORMAL),
-		h.pane_h / f32(GRID_ROWS_NORMAL),
-		h.atlas.gpu_view,
-		h.format,
-	)
-	fullscreen.fullscreen_init(
-		&h.fs3,
-		h.device,
-		h.queue,
-		GRID_ROWS_NORMAL,
-		GRID_COLS_NORMAL,
-		h.pane_w / f32(GRID_COLS_NORMAL),
-		h.pane_h / f32(GRID_ROWS_NORMAL),
-		h.atlas.gpu_view,
-		h.format,
-	)
-
-	// Pane 4 supports all three strategies
-	terminal_instance.instance_renderer_init(&h.inst4, h.device, h.queue, 1024, h.atlas.gpu_view, h.format)
-	tile.compute_tile_init(
-		&h.tile4,
-		h.device,
-		h.queue,
-		GRID_ROWS_NORMAL,
-		GRID_COLS_NORMAL,
-		h.pane_w / f32(GRID_COLS_NORMAL),
-		h.pane_h / f32(GRID_ROWS_NORMAL),
-		h.atlas.gpu_view,
-		h.format,
-	)
-	fullscreen.fullscreen_init(
-		&h.fs4,
-		h.device,
-		h.queue,
-		GRID_ROWS_NORMAL,
-		GRID_COLS_NORMAL,
-		h.pane_w / f32(GRID_COLS_NORMAL),
-		h.pane_h / f32(GRID_ROWS_NORMAL),
-		h.atlas.gpu_view,
-		h.format,
-	)
+	// Initialize Renderer Instances for All 4 Panes
+	for p in 0..<4 {
+		ctx := _get_pane_context(h, p)
+		terminal_instance.instance_renderer_init(ctx.inst, h.device, h.queue, 1024, h.atlas.gpu_view, h.format)
+		tile.compute_tile_init(
+			ctx.tile,
+			h.device,
+			h.queue,
+			GRID_ROWS_NORMAL,
+			GRID_COLS_NORMAL,
+			h.pane_w / f32(GRID_COLS_NORMAL),
+			h.pane_h / f32(GRID_ROWS_NORMAL),
+			h.atlas.gpu_view,
+			h.format,
+		)
+		fullscreen.fullscreen_init(
+			ctx.fs,
+			h.device,
+			h.queue,
+			GRID_ROWS_NORMAL,
+			GRID_COLS_NORMAL,
+			h.pane_w / f32(GRID_COLS_NORMAL),
+			h.pane_h / f32(GRID_ROWS_NORMAL),
+			h.atlas.gpu_view,
+			h.format,
+		)
+	}
 
 	// Allocate and wire resources for Normal 80x24 grid
 	_handle_window_resize(h)
@@ -2459,25 +2552,18 @@ main :: proc() {
 	}
 
 	// Resource Cleanup
-	if rawptr(h.fs3_color_buf) != nil do contract.destroy_buffer(h.fs3_color_buf)
-	if rawptr(h.fs4_color_buf) != nil do contract.destroy_buffer(h.fs4_color_buf)
+	for p in 0..<4 {
+		ctx := _get_pane_context(h, p)
+		if rawptr(ctx.color_buf^) != nil do contract.destroy_buffer(ctx.color_buf^)
+		ctx.inst.pipeline = contract.Gpu_RenderPipeline(nil)
+		ctx.tile.compute_pipeline = contract.Gpu_ComputePipeline(nil)
+		ctx.tile.blit_pipeline = contract.Gpu_RenderPipeline(nil)
+		ctx.fs.pipeline = contract.Gpu_RenderPipeline(nil)
 
-	// Clean up renderers (detach shared pipelines first so they are not double-freed)
-	h.inst1.pipeline = contract.Gpu_RenderPipeline(nil)
-	h.inst4.pipeline = contract.Gpu_RenderPipeline(nil)
-	h.tile2.compute_pipeline = contract.Gpu_ComputePipeline(nil)
-	h.tile2.blit_pipeline = contract.Gpu_RenderPipeline(nil)
-	h.tile4.compute_pipeline = contract.Gpu_ComputePipeline(nil)
-	h.tile4.blit_pipeline = contract.Gpu_RenderPipeline(nil)
-	h.fs3.pipeline = contract.Gpu_RenderPipeline(nil)
-	h.fs4.pipeline = contract.Gpu_RenderPipeline(nil)
-
-	terminal_instance.instance_renderer_destroy(&h.inst1)
-	tile.compute_tile_destroy(&h.tile2)
-	fullscreen.fullscreen_destroy(&h.fs3)
-	terminal_instance.instance_renderer_destroy(&h.inst4)
-	tile.compute_tile_destroy(&h.tile4)
-	fullscreen.fullscreen_destroy(&h.fs4)
+		terminal_instance.instance_renderer_destroy(ctx.inst)
+		tile.compute_tile_destroy(ctx.tile)
+		fullscreen.fullscreen_destroy(ctx.fs)
+	}
 
 	if rawptr(h.glyph_pipeline) != nil do contract.destroy_render_pipeline(h.glyph_pipeline)
 	if rawptr(h.bg_pipeline) != nil do contract.destroy_render_pipeline(h.bg_pipeline)
