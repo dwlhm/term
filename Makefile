@@ -21,7 +21,7 @@ TEST_FLAGS ?= -define:ODIN_TEST_THREADS=1
 DEBUG_FLAGS ?= -debug
 RELEASE_FLAGS ?= -o:speed -no-bounds-check
 
-.PHONY: all harness-render-chrome run-harness-render-chrome harness-render-terminal run-harness-render-terminal harness-render-composer run-harness-render-composer harness-composer run-harness-composer test test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract check check-linux clean help bench bench-quick
+.PHONY: all harness-render-chrome run-harness-render-chrome harness-render-terminal run-harness-render-terminal harness-render-composer run-harness-render-composer harness-composer run-harness-composer test test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-gpu check check-linux clean help bench bench-quick
 
 all: harness-render-chrome harness-render-terminal harness-composer
 
@@ -56,7 +56,7 @@ bench: harness-composer
 bench-quick: harness-composer
 	./$(OUT_DIR)/harness_composer --bench --quick
 
-test: test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract
+test: test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-gpu
 
 test-composer:
 	$(ODIN) test src/core/composer/tests $(CHECK_FLAGS) $(TEST_FLAGS)
@@ -76,6 +76,10 @@ test-chrome:
 	$(ODIN) test src/core/chrome/splits $(CHECK_FLAGS) $(TEST_FLAGS)
 	$(ODIN) test src/core/chrome/modals $(CHECK_FLAGS) $(TEST_FLAGS)
 	$(ODIN) test src/core/chrome/hit_test $(CHECK_FLAGS) $(TEST_FLAGS)
+
+test-gpu: harness-render-terminal
+	./$(OUT_DIR)/harness_render_terminal --test
+
 
 test-render-contract:
 	$(ODIN) test src/core/render/contract/tests $(CHECK_FLAGS) $(TEST_FLAGS)
