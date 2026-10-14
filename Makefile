@@ -21,9 +21,20 @@ TEST_FLAGS ?= -define:ODIN_TEST_THREADS=1
 DEBUG_FLAGS ?= -debug
 RELEASE_FLAGS ?= -o:speed -no-bounds-check
 
-.PHONY: all harness-render-chrome run-harness-render-chrome harness-render-terminal run-harness-render-terminal harness-render-composer run-harness-render-composer harness-composer run-harness-composer test test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-gpu check check-linux clean help bench bench-quick
+.PHONY: all term run term-debug harness-features run-harness-features harness-render-chrome run-harness-render-chrome harness-render-terminal run-harness-render-terminal harness-render-composer run-harness-composer test test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-gpu check check-linux clean help bench bench-quick
 
-all: harness-render-chrome harness-render-terminal harness-composer
+all: term harness-features harness-render-chrome harness-render-terminal harness-composer
+
+term:
+	@mkdir -p $(OUT_DIR)
+	$(ODIN) build src/app -out:$(OUT_DIR)/term $(RELEASE_FLAGS) $(COMMON_FLAGS)
+
+term-debug:
+	@mkdir -p $(OUT_DIR)
+	$(ODIN) build src/app -out:$(OUT_DIR)/term $(DEBUG_FLAGS) $(COMMON_FLAGS)
+
+run: term
+	./$(OUT_DIR)/term
 
 harness-render-chrome:
 	@mkdir -p $(OUT_DIR)
@@ -56,7 +67,50 @@ bench: harness-composer
 bench-quick: harness-composer
 	./$(OUT_DIR)/harness_composer --bench --quick
 
-test: test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-gpu
+bench-session:
+	@mkdir -p $(OUT_DIR)
+	$(ODIN) build src/cmd/bench_session -out:$(OUT_DIR)/bench_session $(RELEASE_FLAGS) $(COMMON_FLAGS)
+	./$(OUT_DIR)/bench_session
+
+test: test-terminal test-pty test-session test-tabs test-multiplexer test-interaction test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-gpu test-features test-e2e
+
+test-terminal:
+	$(ODIN) test src/core/terminal/tests $(TEST_FLAGS)
+
+test-pty:
+	$(ODIN) test src/core/platform/pty/tests $(TEST_FLAGS)
+
+test-session:
+	$(ODIN) test src/features/session/tests $(TEST_FLAGS)
+
+test-tabs:
+	$(ODIN) test src/features/tabs/tests $(TEST_FLAGS)
+
+test-multiplexer:
+	$(ODIN) test src/features/multiplexer/tests $(TEST_FLAGS)
+
+test-interaction:
+	$(ODIN) test src/features/interaction/tests $(TEST_FLAGS)
+
+test-features: harness-features
+	./$(OUT_DIR)/harness_features --test
+
+harness-features:
+	@mkdir -p $(OUT_DIR)
+	$(ODIN) build src/cmd/harness_features -out:$(OUT_DIR)/harness_features $(DEBUG_FLAGS) $(COMMON_FLAGS)
+
+run-harness-features: harness-features
+	./$(OUT_DIR)/harness_features
+
+test-e2e:
+	@mkdir -p $(OUT_DIR)
+	$(ODIN) build src/cmd/test_e2e_real -out:$(OUT_DIR)/test_e2e_real $(DEBUG_FLAGS) $(COMMON_FLAGS)
+	./$(OUT_DIR)/test_e2e_real
+
+demo:
+	@mkdir -p $(OUT_DIR)
+	$(ODIN) build src/cmd/demo_session -out:$(OUT_DIR)/demo_session $(DEBUG_FLAGS) $(COMMON_FLAGS)
+	./$(OUT_DIR)/demo_session
 
 test-composer:
 	$(ODIN) test src/core/composer/tests $(CHECK_FLAGS) $(TEST_FLAGS)
