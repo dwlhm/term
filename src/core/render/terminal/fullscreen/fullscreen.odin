@@ -65,6 +65,7 @@ Fullscreen_Renderer :: struct {
 	bg_opacity:    f32,
 	cell_opacity:  f32,
 	params:        Fullscreen_Params,
+	has_params:    bool,
 	allocator:     runtime.Allocator,
 }
 

@@ -34,6 +34,8 @@ Instance_Renderer :: struct {
 	records:         []contract.Instance_Record,
 	max_instances:   u32,
 	active_count:    u32,
+	last_uniforms:   [4]f32,
+	has_uniforms:    bool,
 	available:       bool,
 	allocator:       runtime.Allocator,
 }

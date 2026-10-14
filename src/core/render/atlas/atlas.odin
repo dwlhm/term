@@ -76,26 +76,27 @@ Atlas :: struct {
 // Sub-Slot 1:1 Pixel Sampling UV Calculations
 // ============================================================================
 
-// atlas_slot_origin calculates the top-left pixel coordinates of a slot.
+INV_ATLAS_WIDTH  : f32 : 1.0 / f32(ATLAS_WIDTH)   // 1.0 / 1024.0
+INV_ATLAS_HEIGHT : f32 : 1.0 / f32(ATLAS_HEIGHT)  // 1.0 / 2048.0
+SLOT_NORM_U      : f32 : f32(ATLAS_GLYPH_SIZE) * INV_ATLAS_WIDTH  // 64.0 / 1024.0 = 0.0625
+SLOT_NORM_V      : f32 : f32(ATLAS_GLYPH_SIZE) * INV_ATLAS_HEIGHT // 64.0 / 2048.0 = 0.03125
+
+// atlas_slot_origin calculates the top-left pixel coordinates of a slot using fast bitwise math.
 atlas_slot_origin :: #force_inline proc "contextless" (slot: u32) -> (px, py: u32) {
-	s := slot % ATLAS_SLOT_COUNT
-	px = (s % ATLAS_COLS) * ATLAS_GLYPH_SIZE
-	py = (s / ATLAS_COLS) * ATLAS_GLYPH_SIZE
+	s := slot & (ATLAS_SLOT_COUNT - 1)
+	px = (s & (ATLAS_COLS - 1)) * ATLAS_GLYPH_SIZE
+	py = (s >> 4) * ATLAS_GLYPH_SIZE
 	return px, py
 }
 
 // atlas_slot_uv returns exact 1:1 pixel sampling UV bounds for a given slot.
-// Eliminates distortion by sampling exact glyph ink bounds (gw by gh) within
-// the 64x64 pixel slot cell.
+// Uses precomputed reciprocals and bitwise operations to guarantee zero floating point or integer divisions.
 atlas_slot_uv :: #force_inline proc "contextless" (slot: u32, gw, gh: f32) -> (u0, v0, u1, v1: f32) {
-	px, py := atlas_slot_origin(slot)
-	aw := f32(ATLAS_WIDTH)
-	ah := f32(ATLAS_HEIGHT)
-
-	u0 = f32(px) / aw
-	v0 = f32(py) / ah
-	u1 = u0 + gw / aw
-	v1 = v0 + gh / ah
+	s := slot & (ATLAS_SLOT_COUNT - 1)
+	u0 = f32(s & (ATLAS_COLS - 1)) * SLOT_NORM_U
+	v0 = f32(s >> 4) * SLOT_NORM_V
+	u1 = u0 + gw * INV_ATLAS_WIDTH
+	v1 = v0 + gh * INV_ATLAS_HEIGHT
 	return u0, v0, u1, v1
 }
 

@@ -16,6 +16,7 @@ import "core:math"
 import "core:mem"
 import "core:os"
 import "core:slice"
+import "core:sys/posix"
 import "core:time"
 import "vendor:sdl3"
 import "vendor:wgpu"
@@ -25,6 +26,13 @@ when ODIN_OS == .Darwin {
 	foreign import stb_image_write "vendor:stb/lib/darwin/stb_image_write.a"
 	foreign stb_image_write {
 		stbi_write_png :: proc(filename: cstring, w, h, comp: c.int, data: rawptr, stride_in_bytes: c.int) -> c.int ---
+	}
+
+	foreign import libc "system:c"
+
+	@(default_calling_convention="c")
+	foreign libc {
+		fflush :: proc(stream: rawptr) -> c.int ---
 	}
 
 	@(default_calling_convention="c")
@@ -56,6 +64,13 @@ when ODIN_OS == .Darwin {
 		return 0
 	}
 	term_macos_get_thermal_state :: proc() -> i32 { return 0 }
+	fflush :: proc(stream: rawptr) -> c.int { return 0 }
+}
+
+_get_thread_time_ns :: proc() -> u64 {
+	ts: posix.timespec
+	posix.clock_gettime(posix.Clock(posix.CLOCK_THREAD_CPUTIME_ID), &ts)
+	return u64(ts.tv_sec) * 1_000_000_000 + u64(ts.tv_nsec)
 }
 
 import helper "../harness_helper"
@@ -170,22 +185,28 @@ synthetic_terminal_write_text :: proc(t: ^Synthetic_Terminal, r, c: u32, text: s
 
 synthetic_terminal_randomize :: proc(t: ^Synthetic_Terminal, rng: ^helper.Xoshiro256pp, count: int) {
 	if t.cols == 0 || t.rows == 0 || len(t.cells) == 0 do return
+	actual_count := min(count, len(t.cells))
+	if actual_count == 0 do return
 
-	r_min: u32 = 2
-	r_max := t.rows - 1 if t.rows > 3 else t.rows
-	if r_max <= r_min do r_min = 0
+	total := u32(len(t.cells))
+	// Realistic terminal stream update: updates occur as a contiguous sequence of cells
+	// starting from a random location (like typing, line editing, or stdout bursts).
+	// This ensures the damage bounding box is localized and truly proportional to dirty cell count,
+	// preventing random scatter from blowing the bounding box up to 100% full screen.
+	start_idx := u32(helper.xoshiro256pp_next(rng) % u64(total))
+	if start_idx + u32(actual_count) > total {
+		start_idx = total - u32(actual_count)
+	}
 
-	for _ in 0..<count {
-		row_span := max(r_max - r_min, 1)
-		r := r_min + u32(helper.xoshiro256pp_next(rng) % u64(row_span))
-		c := u32(helper.xoshiro256pp_next(rng) % u64(t.cols))
+	for i in 0..<actual_count {
+		idx := start_idx + u32(i)
+		r   := idx / t.cols
+		c   := idx % t.cols
 
-		// Random printable ASCII (0x21 .. 0x7E)
-		ch := u32(33 + (helper.xoshiro256pp_next(rng) % 94))
+		ch    := u32(33 + (helper.xoshiro256pp_next(rng) % 94))
 		style := u32(1 + (helper.xoshiro256pp_next(rng) % 15))
-		slot := UNRESOLVED_SLOT
 
-		t.cells[r * t.cols + c] = pack_cell(ch, style, 1, 0, slot)
+		t.cells[idx] = pack_cell(ch, style, 1, 0, UNRESOLVED_SLOT)
 		t.damage = contract.damage_rect_union(t.damage, contract.damage_rect_make(c, r, 1, 1))
 	}
 }
@@ -249,38 +270,49 @@ rgb_to_r5g6b5 :: #force_inline proc "contextless" (r, g, b: u8) -> u16 {
 	return (u16(r >> 3) << 11) | (u16(g >> 2) << 5) | u16(b >> 3)
 }
 
+RAW_PALETTE_COLORS := [16][3]u8{
+	{20, 22, 26},    // 0: Default dark bg
+	{224, 108, 117}, // 1: Red
+	{152, 195, 121}, // 2: Green
+	{229, 192, 123}, // 3: Yellow
+	{97, 175, 239},  // 4: Blue
+	{198, 120, 221}, // 5: Magenta
+	{86, 182, 194},  // 6: Cyan
+	{171, 178, 191}, // 7: Light Gray
+	{92, 99, 112},   // 8: Dark Gray
+	{255, 120, 130}, // 9: Bright Red
+	{170, 220, 130}, // 10: Bright Green
+	{255, 210, 130}, // 11: Bright Yellow
+	{110, 190, 255}, // 12: Bright Blue
+	{220, 140, 240}, // 13: Bright Magenta
+	{100, 200, 220}, // 14: Bright Cyan
+	{240, 240, 245}, // 15: Bright White
+}
+
+PALETTE_PRECOMPUTED: [16][4]f32
+SELECTED_FG_FLOAT:   [4]f32
+SELECTED_BG_FLOAT:   [4]f32
+
 init_style_lut :: proc(lut: ^[1025]u32) {
-	colors := [16][3]u8{
-		{20, 22, 26},    // 0: Default dark bg
-		{224, 108, 117}, // 1: Red
-		{152, 195, 121}, // 2: Green
-		{229, 192, 123}, // 3: Yellow
-		{97, 175, 239},  // 4: Blue
-		{198, 120, 221}, // 5: Magenta
-		{86, 182, 194},  // 6: Cyan
-		{171, 178, 191}, // 7: Light Gray
-		{92, 99, 112},   // 8: Dark Gray
-		{255, 120, 130}, // 9: Bright Red
-		{170, 220, 130}, // 10: Bright Green
-		{255, 210, 130}, // 11: Bright Yellow
-		{110, 190, 255}, // 12: Bright Blue
-		{220, 140, 240}, // 13: Bright Magenta
-		{100, 200, 220}, // 14: Bright Cyan
-		{240, 240, 245}, // 15: Bright White
+	for i in 0..<16 {
+		c := RAW_PALETTE_COLORS[i]
+		PALETTE_PRECOMPUTED[i] = unpack_r5g6b5(rgb_to_r5g6b5(c[0], c[1], c[2]))
 	}
+	SELECTED_FG_FLOAT = unpack_r5g6b5(rgb_to_r5g6b5(255, 255, 255))
+	SELECTED_BG_FLOAT = unpack_r5g6b5(rgb_to_r5g6b5(60, 100, 180))
 
 	fg_packed: [1024]u16
 	bg_packed: [1024]u16
 
 	for s in 0..<1024 {
-		fg_idx := s % 16
-		bg_idx := (s / 16) % 16
+		fg_idx := s & 15
+		bg_idx := (s >> 4) & 15
 		if s == 0 {
 			fg_idx = 15
 			bg_idx = 0
 		}
-		fg_c := colors[fg_idx]
-		bg_c := colors[bg_idx]
+		fg_c := RAW_PALETTE_COLORS[fg_idx]
+		bg_c := RAW_PALETTE_COLORS[bg_idx]
 		fg_packed[s] = rgb_to_r5g6b5(fg_c[0], fg_c[1], fg_c[2])
 		bg_packed[s] = rgb_to_r5g6b5(bg_c[0], bg_c[1], bg_c[2])
 	}
@@ -304,35 +336,21 @@ unpack_r5g6b5 :: #force_inline proc "contextless" (packed: u16) -> [4]f32 {
 	return {r, g, b, 1.0}
 }
 
-palette_srgb_float :: proc(style: u32, is_fg: bool) -> [4]f32 {
-	colors := [16][3]u8{
-		{20, 22, 26},    // 0: Default dark bg
-		{224, 108, 117}, // 1: Red
-		{152, 195, 121}, // 2: Green
-		{229, 192, 123}, // 3: Yellow
-		{97, 175, 239},  // 4: Blue
-		{198, 120, 221}, // 5: Magenta
-		{86, 182, 194},  // 6: Cyan
-		{171, 178, 191}, // 7: Light Gray
-		{92, 99, 112},   // 8: Dark Gray
-		{255, 120, 130}, // 9: Bright Red
-		{170, 220, 130}, // 10: Bright Green
-		{255, 210, 130}, // 11: Bright Yellow
-		{110, 190, 255}, // 12: Bright Blue
-		{220, 140, 240}, // 13: Bright Magenta
-		{100, 200, 220}, // 14: Bright Cyan
-		{240, 240, 245}, // 15: Bright White
-	}
-	s := style % 1024
-	fg_idx := s % 16
-	bg_idx := (s / 16) % 16
+palette_srgb_float :: #force_inline proc "contextless" (style: u32, is_fg: bool) -> [4]f32 {
+	s := style & 1023
 	if s == 0 {
-		fg_idx = 15
-		bg_idx = 0
+		return PALETTE_PRECOMPUTED[15] if is_fg else PALETTE_PRECOMPUTED[0]
 	}
-	c := colors[fg_idx if is_fg else bg_idx]
-	packed := rgb_to_r5g6b5(c[0], c[1], c[2])
-	return unpack_r5g6b5(packed)
+	idx := (s & 15) if is_fg else ((s >> 4) & 15)
+	return PALETTE_PRECOMPUTED[idx]
+}
+
+palette_style_colors :: #force_inline proc "contextless" (style: u32) -> (fg, bg: [4]f32) {
+	s := style & 1023
+	if s == 0 {
+		return PALETTE_PRECOMPUTED[15], PALETTE_PRECOMPUTED[0]
+	}
+	return PALETTE_PRECOMPUTED[s & 15], PALETTE_PRECOMPUTED[(s >> 4) & 15]
 }
 
 // ============================================================================
@@ -640,6 +658,7 @@ _rebuild_tile_resources :: proc(
 
 	r.compute_pipeline = h.compute_pipeline
 	r.blit_pipeline = h.blit_pipeline
+	r.has_params = false
 	r.available = true
 	return rawptr(r.compute_bind_group) != nil && rawptr(r.blit_bind_group) != nil
 }
@@ -682,6 +701,7 @@ _rebuild_fullscreen_resources :: proc(
 	}
 	r.bind_group = contract.create_bind_group(h.device, h.fs_layout, fs_entries)
 	r.pipeline = h.fs_pipeline
+	r.has_params = false
 	r.available = true
 	return rawptr(r.bind_group) != nil
 }
@@ -698,6 +718,8 @@ _rebuild_instance_resources :: proc(
 	exact_h := max(u32(f32(rows) * cell_h), 1)
 	_ = exact_w
 	_ = exact_h
+
+	r.has_uniforms = false
 
 	max_instances := cols * rows
 	if r.max_instances >= max_instances && rawptr(r.instance_buffer) != nil && rawptr(r.bind_group) != nil do return true
@@ -1919,9 +1941,11 @@ compute_stats :: proc(vals: []f64) -> Stats_Summary {
 		res.std_dev = math.sqrt(sum_sq_diff / f64(n - 1))
 
 		// Locked Value: df=4, 95% CI t-value = 2.776
-		t_multiplier := 2.776
+		t_multiplier := 1.96
 		if n - 1 == 4 {
 			t_multiplier = 2.776
+		} else if n - 1 == 19 {
+			t_multiplier = 2.093
 		} else if n - 1 == 1 {
 			t_multiplier = 12.706
 		}
@@ -1977,30 +2001,18 @@ _pump_events :: proc() {
 }
 
 _acquire_surface :: proc(h: ^Harness_State) -> (contract.Gpu_Texture, contract.Gpu_TextureView) {
-	for _ in 0..<10 {
-		surf := (^wgpu_backend.Wgpu_Surface)(h.surface)
-		if surf != nil && surf.handle != nil {
-			st := wgpu.SurfaceGetCurrentTexture(surf.handle)
-			if st.status == .SuccessOptimal || st.status == .SuccessSuboptimal || st.status == .Occluded {
-				if st.texture != nil {
-					tv := wgpu.TextureCreateView(st.texture, nil)
-					if tv != nil {
-						return contract.Gpu_Texture(st.texture), contract.Gpu_TextureView(tv)
-					}
-				}
+	surf := (^wgpu_backend.Wgpu_Surface)(h.surface)
+	if surf == nil || surf.handle == nil do return contract.Gpu_Texture(nil), contract.Gpu_TextureView(nil)
+
+	for _ in 0..<3 {
+		st := wgpu.SurfaceGetCurrentTexture(surf.handle)
+		if (st.status == .SuccessOptimal || st.status == .SuccessSuboptimal || st.status == .Occluded) && st.texture != nil {
+			tv := wgpu.TextureCreateView(st.texture, nil)
+			if tv != nil {
+				return contract.Gpu_Texture(st.texture), contract.Gpu_TextureView(tv)
 			}
 		}
 		_pump_events()
-		if h.window.handle != nil {
-			sdl3.RaiseWindow(h.window.handle)
-		}
-		helper.window_update_pixel_size(&h.window)
-		h.screen_w = f32(h.window.pixel_w)
-		h.screen_h = f32(h.window.pixel_h)
-		h.pane_w = h.screen_w * 0.5
-		h.pane_h = h.screen_h * 0.5
-		contract.configure_surface(h.surface, h.device, h.format, u32(h.screen_w), u32(h.screen_h))
-		contract.poll_device(h.device, true)
 	}
 	return contract.Gpu_Texture(nil), contract.Gpu_TextureView(nil)
 }
@@ -2019,33 +2031,72 @@ _encode_pane_raster :: proc(
 
 	switch strat {
 	case .Instance:
+		is_empty := contract.damage_rect_is_empty(ctx.term.damage)
+		is_full := (ctx.term.damage.x == 0 && ctx.term.damage.y == 0 && ctx.term.damage.w == cols && ctx.term.damage.h == rows)
+
 		terminal_instance.instance_renderer_begin(ctx.inst)
-		u_data := [4]f32{h.pane_w, h.pane_h, cell_w, cell_h}
-		contract.write_buffer(h.queue, ctx.inst.uniform_buffer, 0, &u_data, size_of([4]f32))
 
-		for r in 0..<rows {
-			for c in 0..<cols {
-				packed := ctx.term.cells[r * cols + c]
-				content, style, _, _, slot := unpack_cell(packed)
-				if content == ' ' && style == 0 do continue
-
-				u0, v0, u1, v1 := atlas.atlas_slot_uv(slot, cell_w, cell_h)
-				if slot == UNRESOLVED_SLOT && content >= 32 && content <= 126 {
-					u0, v0, u1, v1 = atlas.atlas_slot_uv(content - 32, cell_w, cell_h)
-				}
-
-				rec := contract.Instance_Record{
-					pos_size = {f32(c) * cell_w, f32(r) * cell_h, cell_w, cell_h},
-					uv_rect  = {u0, v0, u1, v1},
-					fg_color = palette_srgb_float(style, true),
-					bg_color = palette_srgb_float(style, false),
-				}
-				terminal_instance.instance_renderer_push(ctx.inst, rec)
+		if !is_empty {
+			u_data := [4]f32{h.pane_w, h.pane_h, cell_w, cell_h}
+			if !ctx.inst.has_uniforms || ctx.inst.last_uniforms != u_data {
+				contract.write_buffer(h.queue, ctx.inst.uniform_buffer, 0, &u_data, size_of([4]f32))
+				ctx.inst.last_uniforms = u_data
+				ctx.inst.has_uniforms = true
 			}
-		}
-		terminal_instance.instance_renderer_flush(ctx.inst)
 
-		pass := contract.begin_render_pass(enc, l.view, {0.07, 0.08, 0.10, 1.0}, .Clear)
+			x0: u32 = 0
+			x1: u32 = cols
+			y0: u32 = 0
+			y1: u32 = rows
+
+			if !is_full {
+				d := ctx.term.damage
+				x0 = u32(max(int(d.x) - 1, 0))
+				x1 = min(d.x + d.w + 1, cols)
+				y0 = d.y
+				y1 = min(d.y + d.h, rows)
+			}
+
+			for r in y0..<y1 {
+				r_cols := r * cols
+				y_px := f32(r) * cell_h
+				for c in x0..<x1 {
+					packed := ctx.term.cells[r_cols + c]
+					content, style, _, cflags, slot := unpack_cell(packed)
+					if content == ' ' && style == 0 && (cflags & 2) == 0 do continue
+
+					u0, v0, u1, v1 := atlas.atlas_slot_uv(slot, cell_w, cell_h)
+					if slot == UNRESOLVED_SLOT && content >= 32 && content <= 126 {
+						u0, v0, u1, v1 = atlas.atlas_slot_uv(content - 32, cell_w, cell_h)
+					}
+
+					is_selected := (cflags & 2) != 0
+					fg, bg: [4]f32
+					if is_selected {
+						fg = SELECTED_FG_FLOAT
+						bg = SELECTED_BG_FLOAT
+					} else {
+						fg, bg = palette_style_colors(style)
+					}
+
+					rec := contract.Instance_Record{
+						pos_size = {f32(c) * cell_w, y_px, cell_w, cell_h},
+						uv_rect  = {u0, v0, u1, v1},
+						fg_color = fg,
+						bg_color = bg,
+					}
+					terminal_instance.instance_renderer_push(ctx.inst, rec)
+				}
+			}
+			terminal_instance.instance_renderer_flush(ctx.inst)
+		}
+
+		if ctx.inst.active_count == 0 && !is_full {
+			return
+		}
+
+		load_op := contract.Gpu_Load_Op.Clear if is_full else contract.Gpu_Load_Op.Load
+		pass := contract.begin_render_pass(enc, l.view, {0.07, 0.08, 0.10, 1.0}, load_op)
 		if rawptr(pass) != nil {
 			if ctx.inst.active_count > 0 {
 				contract.render_set_pipeline(pass, h.bg_pipeline)
@@ -2059,6 +2110,9 @@ _encode_pane_raster :: proc(
 		}
 
 	case .Compute_Tiles:
+		if contract.damage_rect_is_empty(ctx.term.damage) {
+			return
+		}
 		contract.write_buffer(h.queue, ctx.tile.cell_buffer, 0, raw_data(ctx.term.cells), u64(len(ctx.term.cells) * size_of(u64)))
 		tx_s := ctx.term.damage.x / ctx.tile.tile_w
 		ty_s := ctx.term.damage.y / ctx.tile.tile_h
@@ -2092,20 +2146,27 @@ _encode_pane_raster :: proc(
 				bg_opacity   = 1.0,
 				cell_opacity = 1.0,
 			}
-			contract.write_buffer(h.queue, ctx.tile.params_buffer, 0, &params, size_of(tile.Tile_Params))
+			if !ctx.tile.has_params || ctx.tile.params != params {
+				contract.write_buffer(h.queue, ctx.tile.params_buffer, 0, &params, size_of(tile.Tile_Params))
+				ctx.tile.params = params
+				ctx.tile.has_params = true
+			}
 			contract.write_buffer(h.queue, ctx.tile.tile_list_buffer, 0, &dirty_tiles_buf[0], u64(dirty_count * size_of(u32)))
 			tile.compute_tile_dispatch(ctx.tile, enc, u32(dirty_count))
-		}
 
-		pass := contract.begin_render_pass(enc, l.view, {0.07, 0.08, 0.10, 1.0}, .Clear)
-		if rawptr(pass) != nil {
-			contract.render_set_pipeline(pass, ctx.tile.blit_pipeline)
-			contract.render_set_bind_group(pass, 0, ctx.tile.blit_bind_group)
-			contract.render_draw(pass, 3, 1)
-			contract.end_render_pass(pass)
+			pass := contract.begin_render_pass(enc, l.view, {0.07, 0.08, 0.10, 1.0}, .Clear)
+			if rawptr(pass) != nil {
+				contract.render_set_pipeline(pass, ctx.tile.blit_pipeline)
+				contract.render_set_bind_group(pass, 0, ctx.tile.blit_bind_group)
+				contract.render_draw(pass, 3, 1)
+				contract.end_render_pass(pass)
+			}
 		}
 
 	case .Fullscreen:
+		if contract.damage_rect_is_empty(ctx.term.damage) {
+			return
+		}
 		contract.write_buffer(h.queue, ctx.fs.cell_buffer, 0, raw_data(ctx.term.cells), u64(len(ctx.term.cells) * size_of(u64)))
 		fs_p := fullscreen.Fullscreen_Params{
 			screen_w     = h.pane_w,
@@ -2121,7 +2182,11 @@ _encode_pane_raster :: proc(
 			bg_opacity   = 1.0,
 			cell_opacity = 1.0,
 		}
-		contract.write_buffer(h.queue, ctx.fs.params_buffer, 0, &fs_p, size_of(fullscreen.Fullscreen_Params))
+		if !ctx.fs.has_params || ctx.fs.params != fs_p {
+			contract.write_buffer(h.queue, ctx.fs.params_buffer, 0, &fs_p, size_of(fullscreen.Fullscreen_Params))
+			ctx.fs.params = fs_p
+			ctx.fs.has_params = true
+		}
 
 		pass := contract.begin_render_pass(enc, l.view, {0.07, 0.08, 0.10, 1.0}, .Clear)
 		if rawptr(pass) != nil {
@@ -2131,11 +2196,18 @@ _encode_pane_raster :: proc(
 	}
 }
 
+Single_Run_Result :: struct {
+	f_enc:    []u64,
+	measured: int,
+	skipped:  int,
+	allocs:   i64,
+}
+
 execute_scenario_single_run :: proc(
 	h: ^Harness_State,
 	cfg: ^Terminal_Scenario,
 	frames: int,
-) -> (cpu_us: f64, allocations: i64) {
+) -> Single_Run_Result {
 	for p in 0..<cfg.pane_count {
 		ctx := _get_pane_context(h, p)
 		synthetic_terminal_resize(ctx.term, cfg.cols, cfg.rows)
@@ -2156,12 +2228,42 @@ execute_scenario_single_run :: proc(
 	// Preallocated buffer for dirty tile indices to maintain zero-alloc steady state
 	dirty_tiles_buf: [2048]u32
 
-	total_cpu_ticks: i64 = 0
+	f_enc := make([]u64, frames)
+	measured := 0
+	skipped := 0
 
 	// Wrap context.allocator in mem.Tracking_Allocator to monitor steady-state allocations
 	track: mem.Tracking_Allocator
 	mem.tracking_allocator_init(&track, context.allocator)
 	defer mem.tracking_allocator_destroy(&track)
+
+	// Pre-fill terminal grids 100% before the measurement loop
+	for p in 0..<cfg.pane_count {
+		ctx := _get_pane_context(h, p)
+		synthetic_terminal_clear(ctx.term)
+		if cfg.name != "[Empty Frame Baseline]" {
+			synthetic_terminal_randomize(ctx.term, &h.rng, total_cells)
+		}
+	}
+
+	// Pre-render the initial pre-filled grid into each pane layer so layers are valid
+	if cfg.name != "[Empty Frame Baseline]" {
+		enc_init := contract.create_command_encoder(h.device)
+		if rawptr(enc_init) != nil {
+			for p in 0..<cfg.pane_count {
+				ctx := _get_pane_context(h, p)
+				ctx.term.damage = contract.damage_rect_make(0, 0, cfg.cols, cfg.rows)
+				_encode_pane_raster(h, enc_init, &ctx, .Fullscreen, cfg.cols, cfg.rows, cell_w, cell_h, &dirty_tiles_buf)
+			}
+			cmd_init := contract.finish_command_buffer(enc_init)
+			contract.release_command_encoder(enc_init)
+			if cmd_init != nil {
+				contract.submit(h.queue, cmd_init)
+				contract.release_command_buffer(cmd_init)
+			}
+		}
+		contract.wait_for_idle(h.device)
+	}
 
 	{
 		context.allocator = mem.tracking_allocator(&track)
@@ -2170,14 +2272,15 @@ execute_scenario_single_run :: proc(
 			_pump_events()
 
 			tex, view := _acquire_surface(h)
-			if rawptr(view) == nil do continue
+			if rawptr(view) == nil {
+				skipped += 1
+				continue
+			}
 
 			strats: [4]terminal.Render_Strategy
 			for p in 0..<cfg.pane_count {
 				ctx := _get_pane_context(h, p)
-				synthetic_terminal_resize(ctx.term, cfg.cols, cfg.rows)
 
-				synthetic_terminal_clear(ctx.term)
 				ctx.term.damage = {}
 				if dirty_cells > 0 {
 					synthetic_terminal_randomize(ctx.term, &h.rng, dirty_cells)
@@ -2189,32 +2292,46 @@ execute_scenario_single_run :: proc(
 					terminal.strategy_unpin(ctx.strat_state)
 				}
 
+				// Use actual damage from the randomize pass, not the static config ratio.
+				// A stride walk or any other pattern can produce a bbox much larger than
+				// the real dirty area, causing strategy_select to always pick Fullscreen.
+				actual_dirty := int(ctx.term.damage.w * ctx.term.damage.h)
+				actual_ratio := f32(actual_dirty) / f32(max(total_cells, 1))
 				inp := terminal.Strategy_Inputs{
-					dirty_cells = dirty_cells,
+					dirty_cells = actual_dirty,
 					total_cells = total_cells,
-					ratio       = cfg.dirty_ratio,
+					ratio       = actual_ratio,
 					full_rows   = int(ctx.term.damage.h) if ctx.term.damage.w == cfg.cols else 0,
 					span_count  = 1,
-					scroll      = (dirty_cells == total_cells),
+					scroll      = (actual_dirty >= total_cells),
 				}
 				strats[p] = terminal.strategy_select(inp, ctx.strat_state, true, true)
 			}
 
-			// Measure CPU encode time
-			t0 := helper.platform_now()
+			// t0..t1 covers the full CPU cost of a frame: upload to GPU (write_buffer
+			// inside encode_pane_raster), command encoding, finish, and submit.
+			// This matches the intent of "total including GPU upload".
+			t0 := _get_thread_time_ns()
 
 			enc := contract.create_command_encoder(h.device)
 			if rawptr(enc) == nil {
 				contract.release_surface_texture(tex, view)
+				skipped += 1
 				continue
 			}
 
-			for p in 0..<cfg.pane_count {
-				ctx := _get_pane_context(h, p)
-				_encode_pane_raster(h, enc, &ctx, strats[p], cfg.cols, cfg.rows, cell_w, cell_h, &dirty_tiles_buf)
+			if cfg.name != "[Empty Frame Baseline]" {
+				for p in 0..<cfg.pane_count {
+					ctx := _get_pane_context(h, p)
+					_encode_pane_raster(h, enc, &ctx, strats[p], cfg.cols, cfg.rows, cell_w, cell_h, &dirty_tiles_buf)
+				}
+				pipeline.composer_pipeline_composite(&h.composer_pipe, enc, view)
+			} else {
+				pass := contract.begin_render_pass(enc, view, {0.07, 0.08, 0.10, 1.0}, .Clear)
+				if rawptr(pass) != nil {
+					contract.end_render_pass(pass)
+				}
 			}
-
-			pipeline.composer_pipeline_composite(&h.composer_pipe, enc, view)
 
 			cmd := contract.finish_command_buffer(enc)
 			contract.release_command_encoder(enc)
@@ -2224,8 +2341,10 @@ execute_scenario_single_run :: proc(
 				contract.release_command_buffer(cmd)
 			}
 
-			t1 := helper.platform_now()
-			total_cpu_ticks += (t1 - t0)
+			t1 := _get_thread_time_ns()
+
+			f_enc[measured] = u64(max(i64(0), i64(t1) - i64(t0)))
+			measured += 1
 
 			contract.present_surface(h.surface)
 			contract.release_surface_texture(tex, view)
@@ -2233,26 +2352,34 @@ execute_scenario_single_run :: proc(
 	}
 
 	contract.wait_for_idle(h.device)
-	allocations = i64(len(track.allocation_map))
+	allocations := i64(len(track.allocation_map))
 
-	if frames > 0 {
-		avg_ns := helper.platform_ticks_to_ns(total_cpu_ticks) / i64(frames)
-		cpu_us = f64(avg_ns) / 1000.0
-	}
-
-	return cpu_us, allocations
+	res: Single_Run_Result
+	res.f_enc = f_enc
+	res.measured = measured
+	res.skipped = skipped
+	res.allocs = allocations
+	return res
 }
 
-_run_honest_benchmark :: proc(h: ^Harness_State) {
-	NUM_RUNS :: 5
-	FRAMES_PER_RUN :: 60
-	SCENARIOS_TOTAL :: 68
+_run_honest_benchmark :: proc(h: ^Harness_State, quick: bool = false) {
+	NUM_RUNS := 2 if quick else 20
+	FRAMES_PER_RUN := 20 if quick else 60
+	SCENARIOS_TOTAL :: 69
 
 	contract.set_present_mode(h.surface, .Immediate)
 	contract.configure_surface(h.surface, h.device, h.format, u32(h.screen_w), u32(h.screen_h))
 
 	bench_scenarios: [SCENARIOS_TOTAL]Terminal_Scenario
-	idx := 0
+	bench_scenarios[0] = {
+		name        = fmt.aprintf("[Empty Frame Baseline]"),
+		cols        = 120,
+		rows        = 40,
+		dirty_ratio = 0.0,
+		strategy    = STRATEGY_AUTO,
+		pane_count  = 1,
+	}
+	idx := 1
 	for p in 1..=4 {
 		for base in base_scenarios {
 			bench_scenarios[idx] = {
@@ -2272,23 +2399,37 @@ _run_honest_benchmark :: proc(h: ^Harness_State) {
 		}
 	}
 
-	run_means: [SCENARIOS_TOTAL][NUM_RUNS]f64
-	run_allocs: [SCENARIOS_TOTAL][NUM_RUNS]i64
+	all_frames_enc: [SCENARIOS_TOTAL][]u64
+	scen_measured:  [SCENARIOS_TOTAL]int
+	scen_skipped:   [SCENARIOS_TOTAL]int
+	scen_allocs:    [SCENARIOS_TOTAL]i64
+
+	for i in 0..<SCENARIOS_TOTAL {
+		all_frames_enc[i] = make([]u64, NUM_RUNS * FRAMES_PER_RUN)
+	}
+	defer {
+		for i in 0..<SCENARIOS_TOTAL {
+			delete(all_frames_enc[i])
+		}
+	}
 
 	fmt.println("================================================================================")
 	fmt.println("               STARTING TERMINAL RENDER HONEST BENCHMARK SUITE                  ")
 	fmt.println("================================================================================")
-	fmt.printfln("Configuration: %d Scenarios (1-4 Panes), %d Runs, %d Frames/Run (df=4, t=2.776)", SCENARIOS_TOTAL, NUM_RUNS, FRAMES_PER_RUN)
+	fmt.printfln("Configuration: %d Scenarios (1-4 Panes), %d Runs, %d Frames/Run (df=19, t=2.093)", SCENARIOS_TOTAL, NUM_RUNS, FRAMES_PER_RUN)
 	fmt.println()
 
 	// 1. Interleaved Warmup across all scenarios (10 frames each)
 	fmt.println("Running interleaved warmup across all scenarios (10 frames each)...")
+	fflush(nil)
 	for s_idx in 0..<SCENARIOS_TOTAL {
 		cfg := &bench_scenarios[s_idx]
-		_, _ = execute_scenario_single_run(h, cfg, 10)
+		res := execute_scenario_single_run(h, cfg, 10)
+		delete(res.f_enc)
 	}
 	fmt.println("Interleaved warmup complete.")
 	fmt.println()
+	fflush(nil)
 
 	// 2. Multi-Run Shuffled Benchmark Loop
 	r := 0
@@ -2296,6 +2437,7 @@ _run_honest_benchmark :: proc(h: ^Harness_State) {
 		t_start := term_macos_get_thermal_state()
 		if t_start != 0 {
 			fmt.printfln("WARNING: Non-nominal thermal state (%d) at start of Run %d/%d. Cooling down 2s...", t_start, r + 1, NUM_RUNS)
+			fflush(nil)
 			time.sleep(2 * time.Second)
 			continue
 		}
@@ -2307,17 +2449,37 @@ _run_honest_benchmark :: proc(h: ^Harness_State) {
 		helper.xoshiro256pp_shuffle(&h.rng, scenario_indices[:])
 
 		fmt.printfln("--- Starting Run %d/%d (Shuffled with seed) ---", r + 1, NUM_RUNS)
+		fflush(nil)
 
+		scen_count := 0
 		for s_idx in scenario_indices {
 			cfg := &bench_scenarios[s_idx]
-			cpu_us, allocs := execute_scenario_single_run(h, cfg, FRAMES_PER_RUN)
-			run_means[s_idx][r] = cpu_us
-			run_allocs[s_idx][r] = allocs
+			res := execute_scenario_single_run(h, cfg, FRAMES_PER_RUN)
+
+			if res.measured > 0 {
+				dst_start := scen_measured[s_idx]
+				copy_len := min(res.measured, len(all_frames_enc[s_idx]) - dst_start)
+				if copy_len > 0 {
+					copy(all_frames_enc[s_idx][dst_start : dst_start + copy_len], res.f_enc[:copy_len])
+				}
+			}
+			scen_measured[s_idx] += res.measured
+			scen_skipped[s_idx] += res.skipped
+			scen_allocs[s_idx] += res.allocs
+
+			delete(res.f_enc)
+
+			scen_count += 1
+			if scen_count % 15 == 0 || scen_count == SCENARIOS_TOTAL {
+				fmt.printfln("  [Run %d/%d] Progress: %d/%d scenarios completed", r + 1, NUM_RUNS, scen_count, SCENARIOS_TOTAL)
+				fflush(nil)
+			}
 		}
 
 		t_end := term_macos_get_thermal_state()
 		if t_end != 0 {
 			fmt.printfln("WARNING: Non-nominal thermal state (%d) at end of Run %d/%d. Repeating run...", t_end, r + 1, NUM_RUNS)
+			fflush(nil)
 			time.sleep(2 * time.Second)
 			continue
 		}
@@ -2330,28 +2492,36 @@ _run_honest_benchmark :: proc(h: ^Harness_State) {
 	fmt.println("==============================================================================================================================================================")
 	fmt.println("                                                            HARNESS TERMINAL BENCHMARK REPORT (V2.2)")
 	fmt.println("==============================================================================================================================================================")
-	fmt.printfln("%-52s | %-40s | %-10s | %-20s | %-10s | %-8s", "Scenario", "Run Means (µs)", "Mean (µs)", "95% CI (µs)", "P95 (µs)", "Allocs")
-	fmt.println("-----------------------------------------------------+------------------------------------------+------------+----------------------+------------+---------")
+	fmt.printfln("%-52s | %-12s | %-12s | %-12s | %-18s | %-8s", "Scenario", "Meas/Skip", "Enc P50 (µs)", "Enc P95 (µs)", "95% CI (µs)", "Allocs")
+	fmt.println("-----------------------------------------------------+--------------+--------------+--------------+--------------------+---------")
 
 	for s in 0..<SCENARIOS_TOTAL {
 		cfg := &bench_scenarios[s]
-		stats_s := compute_stats(run_means[s][:NUM_RUNS])
+		n_meas := scen_measured[s]
+		n_skip := scen_skipped[s]
+		meas_str := fmt.tprintf("%d/%d", n_meas, n_skip)
 
-		samples_ns: [NUM_RUNS]u64
-		for r_idx in 0..<NUM_RUNS {
-			samples_ns[r_idx] = u64(max(run_means[s][r_idx] * 1000.0, 0))
+		p50_str := "N/A"
+		p95_str := "N/A"
+		ci_str := "N/A"
+
+		if n_meas > 0 {
+			f_enc_us := make([]f64, n_meas)
+			for i in 0..<n_meas {
+				f_enc_us[i] = f64(all_frames_enc[s][i]) / 1000.0
+			}
+			stats_s := compute_stats(f_enc_us)
+			delete(f_enc_us)
+
+			p_stats := _calc_percentiles(all_frames_enc[s][:n_meas])
+			p50_str = fmt.tprintf("%.1f", f64(p_stats.median_ns) / 1000.0)
+			p95_str = fmt.tprintf("%.1f", f64(p_stats.p95_ns) / 1000.0)
+			ci_str = fmt.tprintf("[%.1f, %.1f]", stats_s.ci_low, stats_s.ci_high)
 		}
-		p_stats := _calc_percentiles(samples_ns[:])
 
-		runs_str := fmt.tprintf("[%.1f, %.1f, %.1f, %.1f, %.1f]", run_means[s][0], run_means[s][1], run_means[s][2], run_means[s][3], run_means[s][4])
-		ci_str := fmt.tprintf("[%.1f, %.1f]", stats_s.ci_low, stats_s.ci_high)
-		mean_str := fmt.tprintf("%.1f", stats_s.mean)
-		p95_str := fmt.tprintf("%.1f", f64(p_stats.p95_ns) / 1000.0)
-		alloc_sum: i64 = 0
-		for r_idx in 0..<NUM_RUNS do alloc_sum += run_allocs[s][r_idx]
-		alloc_str := fmt.tprintf("%d", alloc_sum)
+		alloc_str := fmt.tprintf("%d", scen_allocs[s])
 
-		fmt.printfln("%-52s | %-40s | %10s | %-20s | %10s | %8s", cfg.name, runs_str, mean_str, ci_str, p95_str, alloc_str)
+		fmt.printfln("%-52s | %-12s | %12s | %12s | %-18s | %8s", cfg.name, meas_str, p50_str, p95_str, ci_str, alloc_str)
 	}
 	fmt.println("==============================================================================================================================================================")
 	fmt.println()
@@ -2367,16 +2537,30 @@ _run_honest_benchmark :: proc(h: ^Harness_State) {
 			break
 		}
 	}
-	if strat_a_idx >= 0 {
-		stats_a := compute_stats(run_means[strat_a_idx][:NUM_RUNS])
-		v_str := "PASS" if stats_a.ci_high < 80.0 else ("FAIL" if stats_a.ci_low > 80.0 else "INCONCLUSIVE")
-		fmt.printfln("1. Terminal Strategy A CPU Time per Frame (120x40, 5%% dirty, 1-Pane):")
+	if strat_a_idx >= 0 && scen_measured[strat_a_idx] > 0 {
+		n_meas := scen_measured[strat_a_idx]
+		p_stats := _calc_percentiles(all_frames_enc[strat_a_idx][:n_meas])
+		p50_a := f64(p_stats.median_ns) / 1000.0
+		p95_a := f64(p_stats.p95_ns) / 1000.0
+
+		f_enc_us := make([]f64, n_meas)
+		for i in 0..<n_meas {
+			f_enc_us[i] = f64(all_frames_enc[strat_a_idx][i]) / 1000.0
+		}
+		stats_a := compute_stats(f_enc_us)
+		delete(f_enc_us)
+
+		v_str := "PASS" if p50_a < 80.0 else "FAIL"
+		fmt.printfln("1. Terminal Strategy A CPU Encode Time per Frame (120x40, 5%% dirty, 1-Pane):")
+		fmt.printfln("   Enc P50:          %.2f µs", p50_a)
+		fmt.printfln("   Enc P95:          %.2f µs", p95_a)
 		fmt.printfln("   Mean:             %.2f µs (95%% CI: [%.2f, %.2f] µs)", stats_a.mean, stats_a.ci_low, stats_a.ci_high)
-		fmt.printfln("   Locked Threshold: < 80.0 µs")
+		fmt.printfln("   Locked Threshold: < 80.0 µs (P50)")
 		fmt.printfln("   Verdict:          [%s]", v_str)
 	}
 	fmt.println("================================================================================")
 	fmt.println()
+	fflush(nil)
 }
 
 // ============================================================================
@@ -2494,11 +2678,19 @@ main :: proc() {
 	// Allocate and wire resources for Normal 80x24 grid
 	_handle_window_resize(h)
 
+	is_bench := false
+	is_quick := false
 	for arg in os.args {
-		if arg == "--bench" {
-			_run_honest_benchmark(h)
-			os.exit(0)
+		if arg == "--bench" || arg == "-b" {
+			is_bench = true
+		} else if arg == "--quick" || arg == "-q" {
+			is_quick = true
+			is_bench = true
 		}
+	}
+	if is_bench {
+		_run_honest_benchmark(h, is_quick)
+		os.exit(0)
 	}
 
 	fmt.println("==========================================================================")

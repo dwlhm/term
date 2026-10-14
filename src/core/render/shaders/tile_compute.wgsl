@@ -128,17 +128,17 @@ fn pinned_slot(content: u32) -> i32 {
 // Each slot is 64x64 in the 1024x2048 atlas. The glyph ink spans
 // gw (cell_w or cell_w * 2 for wide) by cell_h within the slot origin.
 fn slot_uv(slot: u32, gw: f32) -> vec4<f32> {
-    let col = f32(slot % 16u);
-    let row = f32(slot / 16u);
-    let aw = f32(params.atlas_w);
-    let ah = f32(params.atlas_h);
-    let u0 = col * 64.0 / aw;
-    let v0 = row * 64.0 / ah;
+    let col = f32(slot & 15u);
+    let row = f32(slot >> 4u);
+    let inv_aw = 1.0 / f32(params.atlas_w);
+    let inv_ah = 1.0 / f32(params.atlas_h);
+    let u0 = col * (64.0 * inv_aw);
+    let v0 = row * (64.0 * inv_ah);
     return vec4<f32>(
         u0,
         v0,
-        u0 + gw / aw,
-        v0 + params.cell_h / ah,
+        u0 + gw * inv_aw,
+        v0 + params.cell_h * inv_ah,
     );
 }
 

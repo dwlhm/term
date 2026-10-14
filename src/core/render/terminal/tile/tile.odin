@@ -78,6 +78,7 @@ Compute_Tile_Renderer :: struct {
 	tiles_y:            u32,
 	tile_count:         u32,
 	params:             Tile_Params,
+	has_params:         bool,
 	bg_opacity:         f32,
 	cell_opacity:       f32,
 	allocator:          runtime.Allocator,

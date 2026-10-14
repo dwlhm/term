@@ -64,7 +64,7 @@ Strategy_State :: struct {
 
 // strategy_select_static maps input damage metrics directly to a strategy candidate.
 strategy_select_static :: #force_inline proc "contextless" (inp: Strategy_Inputs) -> Render_Strategy {
-	if inp.scroll do return .Instance
+	if inp.scroll && inp.ratio < STRATEGY_FULLSCREEN_MIN_RATIO do return .Instance
 	if inp.total_cells <= 0 do return .Instance
 	if inp.full_rows == 0 && inp.span_count == 1 && inp.dirty_cells == 1 {
 		return .Instance
@@ -120,8 +120,8 @@ strategy_select :: proc "contextless" (
 		}
 	}
 
-	// Structural invariants: scroll and single-cell updates are non-negotiable
-	if inp.scroll do return gated
+	// Structural invariants: small localized scroll and single-cell updates are non-negotiable
+	if inp.scroll && inp.ratio < STRATEGY_FULLSCREEN_MIN_RATIO do return gated
 	if inp.full_rows == 0 && inp.span_count == 1 && inp.dirty_cells == 1 {
 		return gated
 	}
@@ -141,7 +141,9 @@ strategy_select :: proc "contextless" (
 			return .Compute_Tiles
 		}
 	case .Instance:
-		if warm_in && warm_ct && compute_avail && avg_ct < avg_in {
+		if warm_in && warm_fs && fullscreen_avail && avg_fs < avg_in {
+			return .Fullscreen
+		} else if warm_in && warm_ct && compute_avail && avg_ct < avg_in {
 			return .Compute_Tiles
 		}
 	}
