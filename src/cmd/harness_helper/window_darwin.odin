@@ -65,6 +65,21 @@ when ODIN_OS == .Darwin {
 		_ = CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication)
 	}
 
+	platform_get_system_font_size :: proc() -> (size: f32, ok: bool) {
+		cls_nsfont := objc_getClass("NSFont")
+		if cls_nsfont == nil do return 0, false
+
+		meta_cls := object_getClass(id(cls_nsfont))
+		sel_system_size := sel_registerName("systemFontSize")
+		imp := class_getMethodImplementation(meta_cls, sel_system_size)
+		if imp == nil do return 0, false
+
+		Get_Float_Proc :: #type proc "c" (cls: Class, sel: SEL) -> f64
+		sz := (Get_Float_Proc(imp))(cls_nsfont, sel_system_size)
+		if sz > 0 do return f32(sz), true
+		return 0, false
+	}
+
 	_platform_configure_metal_layer :: proc(v: id, cf_top_left: rawptr) {
 		if v == nil do return
 		cls_v := object_getClass(v)

@@ -10,8 +10,16 @@ Cell_Pos :: struct {
 	col: int,
 }
 
+Selection_Mode :: enum u8 {
+	Stream,
+	Block,
+	Line,
+	Word,
+}
+
 Mouse_Selection :: struct {
 	active:     bool,
+	mode:       Selection_Mode,
 	pane_id:    u32,
 	start_cell: Cell_Pos,
 	end_cell:   Cell_Pos,
