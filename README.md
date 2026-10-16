@@ -1,7 +1,7 @@
 <div align="center">
   <img src="logo.svg" alt="Term Logo" width="160" height="160" />
   <h1>Term</h1>
-  <p><strong>A blazingly fast, GPU-accelerated terminal emulator built with Odin, Native Apple Metal and Standalone Headless MCP Server.</strong></p>
+  <p><strong>A blazingly fast, GPU-accelerated terminal emulator built with Odin and Native Apple Metal.</strong></p>
 
   [![CI](https://github.com/dwlhm/term/actions/workflows/ci.yml/badge.svg)](https://github.com/dwlhm/term/actions/workflows/ci.yml)
   [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -60,47 +60,21 @@ Rather than forcing a single rendering method across varying terminal workloads,
 - **Multi-Tab Sessions**: Concurrent independent terminal sessions with isolated PTY lifecycles, tab bar chrome, tab switching (`Cmd+1`..`Cmd+9`, `Cmd+Shift+[` / `]`), and non-blocking in-terminal search overlay (`Cmd+F`).
 - **Interactive Mouse Selection & URLs**: Linear, word, line, and rectangular block selection rendered via a zero-cost Metal overlay pipeline, with OSC 8 hyperlink detection and `Cmd+Click` opening.
 
-### 🤖 Standalone Headless Model Context Protocol (MCP) Server (`term-mcp`)
-Term includes a dedicated, standalone headless Model Context Protocol ([MCP](https://modelcontextprotocol.io)) server binary (`bin/term-mcp`) designed for AI coding agents and autonomous workflows. It provides native, ultra-low latency terminal session control without X11, Cocoa, or GPU window dependencies:
-- **7 MECE Core Automation Tools**:
-  - `terminal_create_session`: Spawns an isolated pseudo-terminal (PTY) session with configurable dimensions (`rows`, `cols`), working directory (`cwd`), shell executable (`shell`), and execution profile (`mode`).
-  - `terminal_close_session`: Closes an active terminal session, terminates its child process tree cleanly via process group signalling (`killpg`), and reclaims all virtual grid resources.
-  - `terminal_run_command`: Executes shell commands synchronously with deterministic dual-completion detection and exit code extraction, returning clean output without ANSI escape bloat.
-  - `terminal_send_input`: Writes raw text or characters directly into the session's PTY stdin.
-  - `terminal_send_key`: Emits special control keys and escape sequences (`Enter`, `Tab`, `Backspace`, `Escape`, `Ctrl+C`, `Ctrl+D`, `Ctrl+Z`, arrow navigation).
-  - `terminal_get_screen`: Captures a clean, 2D visual viewport snapshot from the virtual terminal grid with optional scrollback lines, stripping cursor position artifacts.
-  - `terminal_resize`: Dynamically resizes the virtual terminal grid and propagates `TIOCSWINSZ` / `SIGWINCH` window size change signals to active subprocesses.
-- **Hexagonal Architecture (`src/session_core`)**:
-  - Decoupled ports ([`Terminal_Control_Port`](file:///Users/dwlhm/project/term/src/session_core/ports.odin) & [`Terminal_Observer_Port`](file:///Users/dwlhm/project/term/src/session_core/ports.odin#L11-L17)) isolate core terminal logic from presentation frontends.
-  - **`Fast_Headless` Mode (Default)**: Strips interactive shell decoration, eliminates ZLE/precmd prompt latency, and executes commands with near-zero latency (**0.27 ms**) and massive stream throughput (**>80 MB/s**). Preserves the user's complete `$PATH` and environment with zero prompt baggage.
-  - **`Interactive_GUI` Mode**: Full interactive shell session with standard dotfile evaluation (`.zshrc`), line-editing, and live rendering across native Apple Metal viewports.
-- **Unrivaled Efficiency vs Node.js & Python**:
-  - **Command Latency**: **0.27 ms** ($p_{50}$) — **105× faster** than Node.js (`node-pty` + `xterm-headless` at 28.5 ms).
-  - **Physical RSS Memory**: **1.92 MB** (1 active session) — **44× lower** than Node.js (84.5 MB).
-  - **Output Verification**: **100% assertion pass rate** (103/103 assertions across 11 suites, 0.0% error rate).
-
 ---
 
 ## Documentation
 
-Term provides a modular documentation suite detailing installation, architecture, daily usage, declarative configuration, headless MCP automation, and empirical benchmarks:
-
-| Document | Description | Target Audience |
-|---|---|---|
-| **[Documentation Index](docs/README.md)** | Master documentation index, architectural invariants, and documentation map. | All users & contributors |
-| **[Getting Started](docs/getting-started.md)** | Installation, prerequisites, building debug/release binaries, macOS app bundling, DMG creation, and test suites. | New users & builders |
-| **[User Guide](docs/user-guide.md)** | Daily workflows, keyboard shortcuts, multi-tab lifecycle, session switcher modal, selection models, and search overlay. | End users |
-| **[Configuration Guide](docs/configuration.md)** | Declarative Odin AST configuration format, full options reference, color palettes, and custom keybindings. | Power users & customizers |
-| **[Architecture Specification](docs/architecture.md)** | System architecture, hexagonal core, Ports and Adapters, PTY lifecycle, scalar VT parser, 32-bit ARGB TrueColor, and Metal renderer. | Systems engineers |
-| **[MCP Server Specification](docs/mcp-server.md)** | Standalone headless MCP server guide, JSON-RPC 2.0 stdio protocol, 7 MECE automation tools, and AI agent integration. | AI tool builders & integrators |
-| **[Benchmark Report](docs/benchmarks.md)** | Empirical microbenchmarks, comparative evaluations (Term vs. Alacritty vs. Ghostty), video telemetry, and MCP latency tests. | Performance evaluators |
-| **[Developer Guide](docs/developer-guide.md)** | Contributing guidelines, coding conventions, architectural invariants, diagnostic probes, profiling, and test workflows. | Contributors & developers |
+- **[LAPORAN.md](LAPORAN.md)** — comprehensive engineering report and benchmarks.
+- **[COMPARATIVE_BENCHMARKS.md](COMPARATIVE_BENCHMARKS.md)** — head-to-head benchmarks vs. Alacritty and Ghostty.
+- **[RELEASE_NOTES.md](RELEASE_NOTES.md)** — release history and feature notes.
+- **[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)** — third-party licenses.
+- `docs/` — execution plans and reports (`ROADMAP_EXECUTION_PLAN.md`, `HARNESS_BENCHMARK_PLAN.md`, `PHASE_*_EXECUTION_REPORT.md`).
 
 ---
 
 ## Benchmarks & Verification
 
-All architectural decisions are documented with empirical benchmarks in [LAPORAN.md](file:///Users/dwlhm/project/term/LAPORAN.md), external comparative throughput and latency evaluations against Alacritty and Ghostty in [COMPARATIVE_BENCHMARKS.md](file:///Users/dwlhm/project/term/COMPARATIVE_BENCHMARKS.md), and comprehensive headless agent server evaluations in [MCP_BENCHMARKS.md](file:///Users/dwlhm/project/term/MCP_BENCHMARKS.md). Key findings include:
+All architectural decisions are documented with empirical benchmarks in [LAPORAN.md](LAPORAN.md) and external comparative throughput and latency evaluations against Alacritty and Ghostty in [COMPARATIVE_BENCHMARKS.md](COMPARATIVE_BENCHMARKS.md). Key findings include:
 
 | Metric / Component | Measured Result | Architectural Decision |
 |---|---|---|
@@ -112,8 +86,6 @@ All architectural decisions are documented with empirical benchmarks in [LAPORAN
 | **Adaptive Strategy Overhead** | $35.9\text{ ns}$ per frame | Negligible CPU cost for optimal GPU selection |
 | **WGPU vtable Overhead** | $46\text{ ns}$ / frame ($0.0003\%$) | wgpu/Metal retained over complex native Vulkan |
 | **SDF / MSDF Glyph Rendering** | $5/6$ quality gates failed | Discarded in favor of crisp bitmap atlas |
-| **MCP Command Latency ($p_{50}$)** | $0.27\text{ ms}$ | $105\times$ faster than Node.js; deterministic dual-completion detection |
-| **MCP RSS Memory (1 session)** | $1.92\text{ MB}$ | $44\times$ lower than Node.js; zero-dependency native Mach-O binary |
 
 ---
 
@@ -125,7 +97,6 @@ All architectural decisions are documented with empirical benchmarks in [LAPORAN
 Download the latest prebuilt release from [GitHub Releases](https://github.com/dwlhm/term/releases):
 - **Disk Image (`.dmg`)**: Download `Term.dmg`, open it, and drag `Term.app` into `/Applications`.
 - **Archive (`.tar.gz` / `.zip`)**: Download `term-macos-arm64.tar.gz` or `term-macos-arm64.zip`, extract, and move `Term.app` to `/Applications`.
-- **Headless MCP Server**: Download `term-mcp-macos-arm64.tar.gz` and extract `term-mcp` into your `$PATH`.
 
 #### Linux
 Download the latest Linux tarball from [GitHub Releases](https://github.com/dwlhm/term/releases):
@@ -136,7 +107,6 @@ cd term-v0.4.1-linux-x86_64
 sudo ./install.sh
 # (Or install to user directory: ./install.sh --prefix ~/.local)
 ```
-- **Headless MCP Server**: Download `term-mcp-linux-x86_64.tar.gz` and extract `term-mcp` into your `$PATH`.
 
 ### Building from Source
 
@@ -175,28 +145,14 @@ sudo ./install.sh
 git clone https://github.com/dwlhm/term.git
 cd term
 
-# 2. Build debug executable (bin/term)
-make build
+# 2. Build release executable (bin/term)
+make term
 
-# 3. Build optimized release binary
-make release
+# 3. Build debug executable
+make term-debug
 
 # 4. Launch Term
 make run
-
-# 5. Install system-wide (macOS: /Applications/Term.app; Linux: /usr/local/bin & /usr/local/share)
-sudo make install
-
-# 6. Package standalone Linux distribution tarball (Linux)
-make dist-linux
-
-# 7. Build macOS application bundle & DMG (macOS)
-make bundle
-make dmg
-
-# 8. Build standalone headless MCP server
-make build-mcp
-make release-mcp
 ```
 
 > [!NOTE]
@@ -212,27 +168,21 @@ make release-mcp
 # Type check all packages
 make check
 
-# Run all test suites (terminal, parser, pty, input, render, app, bench)
+# Run all test suites (terminal, pty, session, tabs, multiplexer, interaction, composer, chrome, render, gpu, features, e2e)
 make test
-
-# Run Odin MCP unit tests
-make test-mcp
 ```
 
 ### Compiling & Running Benchmarks
 
 ```bash
-# Compile benchmark tools
+# Run the composer benchmark harness
 make bench
 
-# Execute benchmark suites
-./bin/bench_terminal
-./bin/bench_parser
-./bin/bench_pty
-./bin/bench_input_photon
+# Quick smoke benchmark
+make bench-quick
 
-# Run comprehensive 11-suite MCP benchmark
-make bench-mcp
+# Run the session benchmark
+make bench-session
 ```
 
 ---
@@ -253,26 +203,23 @@ term/
 │       ├── SymbolsNerdFontMono-Regular.ttf
 │       ├── OFL-MapleMono.txt
 │       └── OFL-SymbolsNerdFont.txt
-├── bin/                     # Output binaries (term, Term.app, term-mcp, benchmarks)
-├── docs/                    # Modular documentation suite (Architecture, User Guide, Config, MCP, Benchmarks)
+├── bin/                     # Output binaries (term, harnesses, benchmarks)
+├── docs/                    # Development execution reports and roadmap
 ├── scripts/                 # Packaging, comparative benchmark suites, and utility scripts
 │   └── bundle_frameworks.sh # Standalone dylib relocation and codesigning automation
 ├── src/
-│   ├── app/                 # Main application loop, Cocoa/SDL integration
-│   ├── bench/               # Benchmark harness, trace replay, statistics
-│   ├── cmd/                 # Standalone binary entry points (term-mcp)
-│   ├── config/              # Declarative configuration, themes, and keybindings
-│   ├── interaction/         # Mouse selection, URL detection, clipboard actions
-│   ├── parser/              # VT state machine, UTF-8 parser, CSI handlers
-│   ├── platform/            # PTY lifecycle, keyboard/mouse input, windowing
-│   ├── render/              # Atlas, compiler, adaptive strategies (Instance, Tile, Fullscreen)
-│   ├── session_core/        # Hexagonal core session, ports, and execution modes
-│   ├── terminal/            # O(1) ring grid, grapheme segmentation, damage hierarchy
-│   └── ui/                  # Native tab bar, search overlay, modal dialogs, and chrome
+│   ├── app/term/            # Application layer (main, input, keymap, chrome_view, command_center, ...)
+│   ├── cmd/                 # Harnesses & standalone entry points (harness_*, bench_session, demo_session, test_e2e_real)
+│   ├── core/
+│   │   ├── chrome/          # UI chrome data (draw_list, hit_test, modals, splits, tabs)
+│   │   ├── composer/        # Render composition (blit, frame, layer, pipeline, scheduler, transition)
+│   │   ├── platform/        # PTY lifecycle, gpu/wgpu
+│   │   ├── render/          # Atlas, chrome, contract, shaders, terminal (instance/tile/fullscreen), three_d
+│   │   └── terminal/        # VT state machine (cell, damage, egc, extension, grid, parser)
+│   └── features/            # interaction, multiplexer, session, tabs
 ├── COMPARATIVE_BENCHMARKS.md # Empirical head-to-head benchmarks (Term vs. Alacritty vs. Ghostty)
 ├── LAPORAN.md               # Comprehensive 21-phase engineering report & benchmarks
-├── MCP_BENCHMARKS.md        # Performance benchmark report for term-mcp against Node/Python
-├── Makefile                 # Build, test, release, bundle, and benchmark automation
+├── Makefile                 # Build, test, check, and benchmark automation
 ├── RELEASE_NOTES.md         # Release history and feature notes (v0.3.0)
 ├── LICENSE                  # MIT License
 ├── THIRD_PARTY_NOTICES.md   # Third-party font, library, and dependency licenses
