@@ -20,6 +20,7 @@ Terminal_Session :: struct {
 	term:            terminal.Terminal,
 	in_prompt:       bool,
 	command_running: bool,
+	scroll_offset:   int,
 	title_buf:       [256]u8,
 	title_len:       int,
 	cwd_buf:         [512]u8,
@@ -90,6 +91,7 @@ session_create :: proc(config: Session_Config, allocator: runtime.Allocator = co
 	sess.allocator = allocator
 	sess.in_prompt = false
 	sess.command_running = false
+	sess.scroll_offset = 0
 	sess.title_len = 0
 	sess.cwd_len = 0
 

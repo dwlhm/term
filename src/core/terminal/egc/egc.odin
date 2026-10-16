@@ -3,6 +3,11 @@ package terminal_egc
 MAX_EGC_ENTRIES :: 256
 MAX_EGC_RUNES   :: 8
 
+// EGC_INDEX_BASE offsets a pool index when stored in a cell's `char` field, so
+// index 0 never collides with the empty-cell sentinel (char == 0 / ' '). A cell
+// with Has_Egc set stores (EGC_INDEX_BASE + index) in `char`.
+EGC_INDEX_BASE :: rune(0x110000)
+
 Egc_Entry :: struct {
 	runes:     [MAX_EGC_RUNES]rune,
 	len:       u8,

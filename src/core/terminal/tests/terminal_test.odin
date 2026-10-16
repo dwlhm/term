@@ -115,6 +115,64 @@ test_parser_sgr :: proc(t: ^testing.T) {
 	testing.expect(t, .Bold in cW.style, "Bold style flag expected on 'W'")
 }
 
+@test
+test_parser_combining_mark :: proc(t: ^testing.T) {
+	terminal: term.Terminal
+	term.terminal_init(&terminal, 4, 10)
+	defer term.terminal_destroy(&terminal)
+
+	// "e" + U+0301 (combining acute) in UTF-8
+	term.terminal_feed_bytes(&terminal, []u8{0x65, 0xCC, 0x81})
+
+	c := term.terminal_get_cell(&terminal, 0, 0)
+	testing.expect(t, .Has_Egc in c.flags, "Expected Has_Egc flag on combined cell")
+	runes := egc.egc_pool_get(&terminal.egc_pool, int(c.char - egc.EGC_INDEX_BASE))
+	testing.expect_value(t, len(runes), 2)
+	testing.expect_value(t, runes[0], 'e')
+	testing.expect_value(t, runes[1], rune(0x0301))
+	testing.expect_value(t, terminal.parser.cursor.col, 1)
+}
+
+@test
+test_parser_zwj_emoji :: proc(t: ^testing.T) {
+	terminal: term.Terminal
+	term.terminal_init(&terminal, 4, 10)
+	defer term.terminal_destroy(&terminal)
+
+	// U+1F468 (👨) + ZWJ (U+200D) + U+1F469 (👩)
+	term.terminal_feed_bytes(&terminal, []u8{0xF0, 0x9F, 0x91, 0xA8, 0xE2, 0x80, 0x8D, 0xF0, 0x9F, 0x91, 0xA9})
+
+	c := term.terminal_get_cell(&terminal, 0, 0)
+	testing.expect(t, .Has_Egc in c.flags, "Expected Has_Egc on ZWJ emoji")
+	testing.expect(t, .Wide_Lead in c.flags, "Expected Wide_Lead on ZWJ emoji")
+	runes := egc.egc_pool_get(&terminal.egc_pool, int(c.char - egc.EGC_INDEX_BASE))
+	testing.expect_value(t, len(runes), 3)
+	testing.expect_value(t, runes[0], rune(0x1F468))
+	testing.expect_value(t, runes[1], rune(0x200D))
+	testing.expect_value(t, runes[2], rune(0x1F469))
+
+	cont := term.terminal_get_cell(&terminal, 0, 1)
+	testing.expect(t, .Wide_Continuation in cont.flags, "Expected Wide_Continuation")
+	testing.expect_value(t, terminal.parser.cursor.col, 2)
+}
+
+@test
+test_parser_vs16_widen :: proc(t: ^testing.T) {
+	terminal: term.Terminal
+	term.terminal_init(&terminal, 4, 10)
+	defer term.terminal_destroy(&terminal)
+
+	// U+2640 (♀) + VS16 (U+FE0F): narrow text symbol widens to emoji presentation
+	term.terminal_feed_bytes(&terminal, []u8{0xE2, 0x99, 0x80, 0xEF, 0xB8, 0x8F})
+
+	c := term.terminal_get_cell(&terminal, 0, 0)
+	testing.expect(t, .Has_Egc in c.flags, "Expected Has_Egc")
+	testing.expect(t, .Wide_Lead in c.flags, "Expected Wide_Lead after VS16")
+	cont := term.terminal_get_cell(&terminal, 0, 1)
+	testing.expect(t, .Wide_Continuation in cont.flags, "Expected continuation")
+	testing.expect_value(t, terminal.parser.cursor.col, 2)
+}
+
 import "core:strings"
 
 // Mock state for verifying OSC extensions
@@ -186,3 +244,114 @@ test_osc_extension_dispatch :: proc(t: ^testing.T) {
 
 	testing.expect(t, mock.custom_received, "Custom OSC 999 handler not invoked")
 }
+
+@test
+test_parser_utf8_multibyte :: proc(t: ^testing.T) {
+	terminal: term.Terminal
+	term.terminal_init(&terminal, 24, 80)
+	defer term.terminal_destroy(&terminal)
+
+	// Feed Box drawing (3-byte UTF-8: 0xE2 0x94 0x80 -> U+2500 '─')
+	// Feed Braille (3-byte UTF-8: 0xE2 0xA0 0x81 -> U+2801 '⠁')
+	// Feed Nerd Font icon (3-byte UTF-8: 0xEF 0x90 0x98 -> U+F418 '')
+	// Feed Emoji (4-byte UTF-8: 0xF0 0x9F 0x9A 0x80 -> U+1F680 '🚀')
+	input := "─⠁🚀"
+	term.terminal_feed_string(&terminal, input)
+
+	c0 := term.terminal_get_cell(&terminal, 0, 0)
+	testing.expect_value(t, c0.char, rune(0x2500))
+
+	c1 := term.terminal_get_cell(&terminal, 0, 1)
+	testing.expect_value(t, c1.char, rune(0x2801))
+
+	c2 := term.terminal_get_cell(&terminal, 0, 2)
+	testing.expect_value(t, c2.char, rune(0xF418))
+
+	// Rocket is wide (2 columns)
+	c3 := term.terminal_get_cell(&terminal, 0, 3)
+	testing.expect_value(t, c3.char, rune(0x1F680))
+	testing.expect(t, .Wide_Lead in c3.flags, "Expected Wide_Lead flag on lead emoji cell")
+
+	c4 := term.terminal_get_cell(&terminal, 0, 4)
+	testing.expect(t, .Wide_Continuation in c4.flags, "Expected Wide_Continuation flag on continuation cell")
+}
+
+@test
+test_parser_decscusr_no_qq :: proc(t: ^testing.T) {
+	terminal: term.Terminal
+	term.terminal_init(&terminal, 24, 80)
+	defer term.terminal_destroy(&terminal)
+
+	// Feed zsh/p10k startup sequence setting cursor to steady bar: \x1b[6 q\x1b[6 q
+	term.terminal_feed_string(&terminal, "\x1b[6 q\x1b[6 q")
+
+	// Ensure no 'q' character leaked onto the screen grid
+	c0 := term.terminal_get_cell(&terminal, 0, 0)
+	testing.expect(t, c0.char == ' ' || c0.char == 0, "Character grid should not contain leaked 'q' from DECSCUSR")
+	testing.expect_value(t, terminal.parser.cursor.col, 0)
+	testing.expect_value(t, terminal.parser.cursor.row, 0)
+
+	// Verify cursor shape updated to Beam and blinking false (mode 6)
+	testing.expect(t, terminal.parser.cursor.shape == .Beam, "Cursor shape should be Beam for mode 6")
+	testing.expect(t, terminal.parser.cursor.blinking == false, "Cursor blinking should be false for steady bar mode 6")
+
+	// Test switching to blinking underline: \x1b[3 q
+	term.terminal_feed_string(&terminal, "\x1b[3 q")
+	testing.expect(t, terminal.parser.cursor.shape == .Underline, "Cursor shape should be Underline for mode 3")
+	testing.expect(t, terminal.parser.cursor.blinking == true, "Cursor blinking should be true for blinking underline mode 3")
+
+	// Feed text with embedded DECSCUSR: "Hello\x1b[2 qWorld"
+	term.terminal_feed_string(&terminal, "Hello\x1b[2 qWorld")
+	testing.expect(t, terminal.parser.cursor.shape == .Block, "Cursor shape should be Block for mode 2")
+	testing.expect(t, terminal.parser.cursor.blinking == false, "Cursor blinking should be false for steady block mode 2")
+
+	// Verify grid content is strictly "HelloWorld" without any extra 'q'
+	expected := "HelloWorld"
+	for ch, idx in expected {
+		cell_val := term.terminal_get_cell(&terminal, 0, idx)
+		testing.expect_value(t, cell_val.char, ch)
+	}
+}
+
+@test
+test_terminal_scrollback_history :: proc(t: ^testing.T) {
+	terminal: term.Terminal
+	term.terminal_init(&terminal, 4, 20)
+	defer term.terminal_destroy(&terminal)
+
+	// Feed 6 lines on a 4-line terminal (causes 2 full-screen scroll-ups)
+	term.terminal_feed_string(&terminal, "Line 1\r\nLine 2\r\nLine 3\r\nLine 4\r\nLine 5\r\nLine 6")
+
+	// History count should be at least 2
+	testing.expect(t, terminal.grid.history_count >= 2, "Expected history_count >= 2 after scrolling 6 lines on 4-row terminal")
+
+	// The row immediately above the viewport is row -1 in grid indexing (should contain "Line 2")
+	c_hist := term.terminal_get_cell(&terminal, -1, 0)
+	testing.expect(t, c_hist.char == 'L', "Expected 'L' on scrolled history row -1")
+
+	// Test clear history
+	grid.grid_clear_history(&terminal.grid)
+	testing.expect_value(t, terminal.grid.history_count, 0)
+}
+
+@test
+test_terminal_alt_screen_modes :: proc(t: ^testing.T) {
+	terminal: term.Terminal
+	term.terminal_init(&terminal, 24, 80)
+	defer term.terminal_destroy(&terminal)
+
+	testing.expect(t, !terminal.parser.in_alt_screen, "Expected normal screen initially")
+	testing.expect(t, !terminal.parser.cursor_key_mode, "Expected normal cursor keys initially")
+
+	// Enter alternate screen (?1049h) and set application cursor keys (?1h)
+	term.terminal_feed_string(&terminal, "\x1b[?1049h\x1b[?1h")
+	testing.expect(t, terminal.parser.in_alt_screen, "Expected in_alt_screen == true")
+	testing.expect(t, terminal.parser.cursor_key_mode, "Expected cursor_key_mode == true")
+
+	// Exit alternate screen (?1049l) and reset cursor keys (?1l)
+	term.terminal_feed_string(&terminal, "\x1b[?1049l\x1b[?1l")
+	testing.expect(t, !terminal.parser.in_alt_screen, "Expected in_alt_screen == false")
+	testing.expect(t, !terminal.parser.cursor_key_mode, "Expected cursor_key_mode == false")
+}
+
+

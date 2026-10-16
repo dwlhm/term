@@ -12,16 +12,19 @@ Row :: struct {
 	wrap:          bool,
 }
 
+DEFAULT_SCROLLBACK :: 2048
+
 Grid :: struct {
-	rows:        []Row,
-	cells_pool:  []cell.Semantic_Cell,
-	colors_pool: []cell.Direct_Color,
-	row_count:   int,
-	col_count:   int,
-	capacity:    int,
-	mask:        int,
-	origin:      int,
-	allocator:   runtime.Allocator,
+	rows:          []Row,
+	cells_pool:    []cell.Semantic_Cell,
+	colors_pool:   []cell.Direct_Color,
+	row_count:     int,
+	col_count:     int,
+	capacity:      int,
+	mask:          int,
+	origin:        int,
+	history_count: int,
+	allocator:     runtime.Allocator,
 }
 
 _next_pow2 :: proc(n: int) -> int {
@@ -35,16 +38,19 @@ _next_pow2 :: proc(n: int) -> int {
 
 grid_physical_row :: proc(g: ^Grid, logical_row: int) -> int {
 	if g == nil || g.capacity == 0 do return 0
-	return (g.origin + logical_row) & g.mask
+	idx := (g.origin + logical_row) % g.capacity
+	if idx < 0 do idx += g.capacity
+	return idx
 }
 
 grid_init :: proc(g: ^Grid, rows, cols: int, allocator: runtime.Allocator = context.allocator) {
 	if g == nil do return
 	g.row_count = max(1, rows)
 	g.col_count = max(1, cols)
-	g.capacity = _next_pow2(g.row_count)
+	g.capacity = _next_pow2(max(g.row_count, 1) + DEFAULT_SCROLLBACK)
 	g.mask = g.capacity - 1
 	g.origin = 0
+	g.history_count = 0
 	g.allocator = allocator
 
 	total_cells := g.capacity * g.col_count
@@ -85,10 +91,11 @@ grid_destroy :: proc(g: ^Grid) {
 	g.col_count = 0
 	g.capacity = 0
 	g.origin = 0
+	g.history_count = 0
 }
 
 grid_get_cell :: proc(g: ^Grid, row, col: int) -> cell.Semantic_Cell {
-	if g == nil || row < 0 || row >= g.row_count || col < 0 || col >= g.col_count {
+	if g == nil || row < -g.history_count || row >= g.row_count || col < 0 || col >= g.col_count {
 		return cell.CELL_DEFAULT
 	}
 	phys := grid_physical_row(g, row)
@@ -148,6 +155,11 @@ grid_clear_all :: proc(g: ^Grid, d: ^damage.Damage_Tracker) {
 	}
 }
 
+grid_clear_history :: proc(g: ^Grid) {
+	if g == nil do return
+	g.history_count = 0
+}
+
 // grid_scroll_up scrolls content up by n rows.
 // If scrolling the entire grid (0 to row_count-1), it executes in O(1) via ring buffer origin shift.
 grid_scroll_up :: proc(g: ^Grid, d: ^damage.Damage_Tracker, top, bottom: int, n: int) -> int {
@@ -161,6 +173,7 @@ grid_scroll_up :: proc(g: ^Grid, d: ^damage.Damage_Tracker, top, bottom: int, n:
 	// O(1) fast path: full-screen scroll
 	if t == 0 && b == g.row_count - 1 {
 		g.origin = (g.origin + actual) & g.mask
+		g.history_count = min(g.history_count + actual, g.capacity - g.row_count)
 		// Clear bottom exposed rows
 		for i in 0..<actual {
 			lr := g.row_count - actual + i

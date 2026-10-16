@@ -30,6 +30,7 @@ terminal_init :: proc(t: ^Terminal, rows, cols: int, allocator: runtime.Allocato
 	egc.egc_pool_init(&t.egc_pool)
 	extension.registry_init(&t.extensions)
 	parser.parser_init(&t.parser, t.rows, t.cols)
+	t.parser.egc_pool = &t.egc_pool
 }
 
 terminal_destroy :: proc(t: ^Terminal) {
@@ -55,7 +56,10 @@ terminal_resize :: proc(t: ^Terminal, new_rows, new_cols: int) {
 	t.rows = max(1, new_rows)
 	t.cols = max(1, new_cols)
 	grid.grid_resize(&t.grid, &t.damage, t.rows, t.cols)
-	parser.parser_reset(&t.parser, t.rows, t.cols)
+	t.parser.cursor.row = clamp(t.parser.cursor.row, 0, t.rows - 1)
+	t.parser.cursor.col = clamp(t.parser.cursor.col, 0, t.cols - 1)
+	t.parser.scroll_top = clamp(t.parser.scroll_top, 0, t.rows - 1)
+	t.parser.scroll_bottom = max(0, t.rows - 1)
 }
 
 terminal_get_cell :: proc(t: ^Terminal, row, col: int) -> cell.Semantic_Cell {
