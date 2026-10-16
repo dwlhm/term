@@ -21,8 +21,8 @@ Layout_State :: struct {
 layout_init :: proc(l: ^Layout_State, scale: f32 = 1.0) {
 	if l == nil do return
 	l.metrics = visual_metrics_make(scale)
-	l.screen_w = 1280.0 * l.metrics.scale
-	l.screen_h = 800.0 * l.metrics.scale
+	l.screen_w = f32(DEFAULT_WINDOW_WIDTH) * l.metrics.scale
+	l.screen_h = f32(DEFAULT_WINDOW_HEIGHT) * l.metrics.scale
 	l.mouse_y = 100.0 * l.metrics.scale
 	l.tab_bar_hovered = false
 	l.tab_bar_force = false
@@ -31,7 +31,11 @@ layout_init :: proc(l: ^Layout_State, scale: f32 = 1.0) {
 
 layout_set_scale :: proc(l: ^Layout_State, scale: f32) {
 	if l == nil do return
+	prev_cell_w := l.metrics.cell_w
+	prev_cell_h := l.metrics.cell_h
 	l.metrics = visual_metrics_make(scale)
+	if prev_cell_w > 0 do l.metrics.cell_w = prev_cell_w
+	if prev_cell_h > 0 do l.metrics.cell_h = prev_cell_h
 }
 
 layout_update :: proc(l: ^Layout_State, dt: f32) {

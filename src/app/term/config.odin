@@ -3,6 +3,130 @@ package term
 // Term Configuration, Visual Constants & Color Palette
 // Part of Tier 3 Application Shell (src/app/term/*).
 
+import "core:encoding/json"
+import "core:os"
+import "core:strings"
+
+DEFAULT_WINDOW_WIDTH:  i32 : 1280
+DEFAULT_WINDOW_HEIGHT: i32 : 800
+DEFAULT_FONT_SIZE:     f32 : 16.0
+
+Window_Config :: struct {
+	width:  i32 `json:"width"`,
+	height: i32 `json:"height"`,
+}
+
+Font_Config :: struct {
+	size: f32 `json:"size"`,
+}
+
+App_Config :: struct {
+	window_width:  i32           `json:"window_width"`,
+	window_height: i32           `json:"window_height"`,
+	width:         i32           `json:"width"`,
+	height:        i32           `json:"height"`,
+	window:        Window_Config `json:"window"`,
+	font_size:     f32           `json:"font_size"`,
+	font:          Font_Config   `json:"font"`,
+}
+
+config_default :: proc() -> App_Config {
+	return App_Config{
+		window_width  = DEFAULT_WINDOW_WIDTH,
+		window_height = DEFAULT_WINDOW_HEIGHT,
+		font_size     = 0,
+	}
+}
+
+// config_resolve_font_size extracts effective font size from config,
+// falling back to fallback_size (or DEFAULT_FONT_SIZE = 14.0) if unset or non-positive.
+config_resolve_font_size :: proc(cfg: ^App_Config, fallback_size: f32 = DEFAULT_FONT_SIZE) -> f32 {
+	if cfg != nil {
+		if cfg.font.size > 0 do return cfg.font.size
+		if cfg.font_size > 0 do return cfg.font_size
+	}
+	if fallback_size > 0 do return fallback_size
+	return DEFAULT_FONT_SIZE
+}
+
+// config_resolve_window_dimensions extracts effective width & height from config,
+// falling back to defaults (1280x800) if unset or non-positive.
+config_resolve_window_dimensions :: proc(cfg: ^App_Config) -> (width, height: i32) {
+	if cfg == nil do return DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT
+
+	w := cfg.window_width
+	if cfg.width > 0 do w = cfg.width
+	if cfg.window.width > 0 do w = cfg.window.width
+
+	h := cfg.window_height
+	if cfg.height > 0 do h = cfg.height
+	if cfg.window.height > 0 do h = cfg.window.height
+
+	if w <= 0 do w = DEFAULT_WINDOW_WIDTH
+	if h <= 0 do h = DEFAULT_WINDOW_HEIGHT
+
+	return w, h
+}
+
+// config_parse_json5 deserializes in-memory JSON5 payload into App_Config.
+// It has zero knowledge of files or filesystem paths.
+config_parse_json5 :: proc(data: []byte, allocator := context.temp_allocator) -> (cfg: App_Config, ok: bool) {
+	cfg = config_default()
+	if len(data) == 0 do return cfg, true
+
+	err := json.unmarshal(data, &cfg, spec = .JSON5, allocator = allocator)
+	if err != nil do return config_default(), false
+	return cfg, true
+}
+
+// config_resolve_path discovers the configuration file path by priority:
+// 1. $TERM_CONFIG
+// 2. $XDG_CONFIG_HOME/term/config.json
+// 3. ~/.config/term/config.json
+// 4. ~/.term/config.json
+config_resolve_path :: proc() -> (string, bool) {
+	if val := os.get_env("TERM_CONFIG", context.temp_allocator); len(val) > 0 {
+		if os.exists(val) do return val, true
+	}
+
+	if xdg := os.get_env("XDG_CONFIG_HOME", context.temp_allocator); len(xdg) > 0 {
+		p := strings.concatenate({xdg, "/term/config.json"}, context.temp_allocator)
+		if os.exists(p) do return p, true
+	}
+
+	if home := os.get_env("HOME", context.temp_allocator); len(home) > 0 {
+		p1 := strings.concatenate({home, "/.config/term/config.json"}, context.temp_allocator)
+		if os.exists(p1) do return p1, true
+
+		p2 := strings.concatenate({home, "/.term/config.json"}, context.temp_allocator)
+		if os.exists(p2) do return p2, true
+	}
+
+	return "", false
+}
+
+// config_load reads and decodes the user configuration file via config_parse_json5,
+// falling back silently to config_default() if absent or unreadable.
+config_load :: proc() -> App_Config {
+	path, found := config_resolve_path()
+	if !found do return config_default()
+
+	data, err := os.read_entire_file(path, context.temp_allocator)
+	if err != nil do return config_default()
+
+	cfg, ok := config_parse_json5(data)
+	if !ok do return config_default()
+
+	return cfg
+}
+
+// config_resolve_effective_font_size evaluates font size with fallback priority:
+// 1. user config (config.json)
+// 2. 16.0 (DEFAULT_FONT_SIZE)
+config_resolve_effective_font_size :: proc(cfg: ^App_Config) -> f32 {
+	return config_resolve_font_size(cfg, DEFAULT_FONT_SIZE)
+}
+
 WINDOW_MARGIN:        f32 : 8.0
 PANE_GAP:             f32 : 8.0
 BORDER_RADIUS:        f32 : 8.0
@@ -10,7 +134,7 @@ TAB_BAR_HEIGHT:       f32 : 38.0
 AUTO_HIDE_TRIGGER_Y:  f32 : 52.0
 
 DEFAULT_CELL_WIDTH:   f32 : 9.5
-DEFAULT_CELL_HEIGHT:  f32 : 19.0
+DEFAULT_CELL_HEIGHT:  f32 : 21.5
 
 Visual_Metrics :: struct {
 	scale:               f32,

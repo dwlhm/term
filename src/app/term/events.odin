@@ -1,0 +1,195 @@
+package term
+
+// Term Event Processing, Input Routing & Dispatch
+// Part of Tier 3 Application Shell (src/app/term/*).
+
+import "vendor:sdl3"
+
+import helper "../../cmd/harness_helper"
+import contract "../../core/render/contract"
+import tabs_feat "../../features/tabs"
+import mux_feat "../../features/multiplexer"
+import sess_feat "../../features/session"
+
+// FRAME_TICK_MS is the WaitEventTimeout wake interval: it paces cursor blink and
+// tab-bar animation, and bounds PTY output latency when no SDL event arrives.
+FRAME_TICK_MS :: 8
+
+app_handle_window_resize :: proc(app: ^Term_App) {
+	helper.window_update_pixel_size(&app.window)
+	scale := app.window.pixel_ratio
+	layout_set_scale(&app.layout, scale)
+
+	if app.font_ctx.has_font && app.font_ctx.rasterizer.metrics.cell_width > 0 {
+		app.layout.metrics.cell_w = app.font_ctx.rasterizer.metrics.cell_width
+		app.layout.metrics.cell_h = app.font_ctx.rasterizer.metrics.cell_height
+	}
+
+	// Rendering pipeline is fully in pixel space.
+	app.layout.screen_w = f32(app.window.pixel_w)
+	app.layout.screen_h = f32(app.window.pixel_h)
+	contract.configure_surface(app.surface, app.device, app.format, u32(app.window.pixel_w), u32(app.window.pixel_h))
+	composer_view_resize(&app.composer, app.layout.screen_w, app.layout.screen_h)
+	chrome_view_resize(&app.chrome_view, u32(app.layout.screen_w), u32(app.layout.screen_h))
+
+	app.mouse.cell_w = app.layout.metrics.cell_w
+	app.mouse.cell_h = app.layout.metrics.cell_h
+	app.mouse.pad_x = app.layout.metrics.pane_pad_x
+	app.mouse.pad_y = app.layout.metrics.pane_pad_y
+}
+
+app_handle_mouse_button_down :: proc(app: ^Term_App, ev: sdl3.MouseButtonEvent) {
+	// Scale SDL3 logical coords to pixel space on Retina displays.
+	ratio := app.window.pixel_ratio
+	mx := f32(ev.x) * ratio
+	my := f32(ev.y) * ratio
+
+	// Click on tab pills & close buttons
+	scale := app.layout.metrics.scale
+	bar_h := app.layout.metrics.tab_bar_height
+	tab_w := 160.0 * scale
+	tab_gap := 6.0 * scale
+	tabs_x := app.layout.metrics.traffic_clearance + 6.0 * scale
+	if my >= 0 && my <= bar_h {
+		for i in 0..<len(app.tabs_mgr.entries) {
+			tab_x := tabs_x + f32(i) * (tab_w + tab_gap)
+			if mx >= tab_x && mx <= tab_x + tab_w {
+				if mx >= tab_x + tab_w - 24.0 * scale {
+					app_close_tab(app, i)
+				} else {
+					tabs_feat.tabs_manager_select_tab(&app.tabs_mgr, i)
+				}
+				break
+			}
+		}
+		// Click on [+] new tab button
+		plus_x := tabs_x + f32(len(app.tabs_mgr.entries)) * (tab_w + tab_gap)
+		btn_w := 28.0 * scale
+		if mx >= plus_x && mx <= plus_x + btn_w {
+			app_execute_action(app, .Tab_New)
+		}
+	}
+
+	// Focus clicked pane & initiate selection
+	for &p in app.mux.panes {
+		if mouse_is_in_rect({mx, my}, p.rect) {
+			mux_feat.multiplexer_focus_pane(&app.mux, p.id)
+			mouse_on_button_down(&app.mouse, {mx, my}, u8(ev.button), p.id, p.rect, int(ev.clicks))
+			break
+		}
+	}
+}
+
+app_handle_mouse_wheel :: proc(app: ^Term_App, ev: sdl3.MouseWheelEvent) {
+	ratio := app.window.pixel_ratio
+	mx := ev.mouse_x * ratio
+	my := ev.mouse_y * ratio
+
+	target_pane: ^mux_feat.Pane_Entry = nil
+	for &p in app.mux.panes {
+		if mouse_is_in_rect({mx, my}, p.rect) {
+			target_pane = &p
+			break
+		}
+	}
+	if target_pane == nil {
+		target_pane = mux_feat.multiplexer_get_focused_pane(&app.mux)
+	}
+
+	if target_pane != nil && target_pane.session != nil {
+		sess := target_pane.session
+		lines := int(ev.y * 3.0)
+		if lines == 0 {
+			if ev.y > 0 do lines = 1
+			else if ev.y < 0 do lines = -1
+		}
+
+		if sess.term.parser.in_alt_screen {
+			// In alternate screen (less, vim, man, nano), stream cursor keys to PTY
+			up_key := "\x1bOA" if sess.term.parser.cursor_key_mode else "\x1b[A"
+			down_key := "\x1bOB" if sess.term.parser.cursor_key_mode else "\x1b[B"
+			if lines > 0 {
+				for _ in 0..<lines {
+					sess_feat.session_write_string(sess, up_key)
+				}
+			} else if lines < 0 {
+				for _ in 0..<(-lines) {
+					sess_feat.session_write_string(sess, down_key)
+				}
+			}
+		} else {
+			// In normal screen (shell CLI output), scroll viewport into scrollback history
+			max_history := sess.term.grid.history_count
+			sess.scroll_offset = clamp(sess.scroll_offset + lines, 0, max_history)
+		}
+	}
+}
+
+app_handle_text_input :: proc(app: ^Term_App, text: string) {
+	if app.cmd_center.visible {
+		command_center_handle_text(&app.cmd_center, text)
+	} else {
+		p := mux_feat.multiplexer_get_focused_pane(&app.mux)
+		if p != nil && p.session != nil {
+			p.session.scroll_offset = 0 // Auto-scroll to bottom on input
+			sess_feat.session_write_string(p.session, text)
+		}
+	}
+}
+
+app_handle_key_down :: proc(app: ^Term_App, ev: sdl3.KeyboardEvent) {
+	if app.cmd_center.visible {
+		act, handled := command_center_handle_key(&app.cmd_center, ev.key)
+		if act != .None do app_execute_action(app, act)
+		if handled do return
+	}
+
+	act, ok := keymap_evaluate(ev.key, ev.mod)
+	if ok {
+		app_execute_action(app, act)
+	} else {
+		res, encoded := input_encode_key(ev.key, ev.mod)
+		if encoded {
+			p := mux_feat.multiplexer_get_focused_pane(&app.mux)
+			if p != nil && p.session != nil {
+				p.session.scroll_offset = 0 // Auto-scroll to bottom on input
+				_, _ = sess_feat.session_write(p.session, res.bytes[:res.len])
+			}
+		}
+	}
+}
+
+app_process_events :: proc(app: ^Term_App) -> (dirty: bool) {
+	ev: sdl3.Event
+	// Block until an event arrives or the animation tick elapses, then drain
+	// any events queued behind it.
+	if !sdl3.WaitEventTimeout(&ev, FRAME_TICK_MS) do return false
+
+	for {
+		#partial switch ev.type {
+		case .QUIT:
+			app.running = false
+		case .WINDOW_PIXEL_SIZE_CHANGED:
+			app_handle_window_resize(app)
+		case .MOUSE_MOTION:
+			ratio := app.window.pixel_ratio
+			app.layout.mouse_y = f32(ev.motion.y) * ratio
+			pane := mux_feat.multiplexer_get_focused_pane(&app.mux)
+			pane_rect := pane.rect if pane != nil else [4]f32{0, 0, 0, 0}
+			mouse_on_motion(&app.mouse, {f32(ev.motion.x) * ratio, f32(ev.motion.y) * ratio}, pane_rect)
+		case .MOUSE_BUTTON_DOWN:
+			app_handle_mouse_button_down(app, ev.button)
+		case .MOUSE_BUTTON_UP:
+			mouse_on_button_up(&app.mouse, u8(ev.button.button))
+		case .MOUSE_WHEEL:
+			app_handle_mouse_wheel(app, ev.wheel)
+		case .TEXT_INPUT:
+			app_handle_text_input(app, string(ev.text.text))
+		case .KEY_DOWN:
+			app_handle_key_down(app, ev.key)
+		}
+
+		if !sdl3.PollEvent(&ev) do break
+	}
+	return true
+}
