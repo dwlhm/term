@@ -5,14 +5,15 @@ import "vendor:sdl3"
 
 // Window wraps an SDL3 window handle with dimension metadata.
 Window :: struct {
-	handle:     ^sdl3.Window,
-	width:      i32,
-	height:     i32,
-	pixel_w:    i32,
-	pixel_h:    i32,
-	title:      string,
-	is_open:    bool,
-	_title_buf: [256]u8,
+	handle:      ^sdl3.Window,
+	width:       i32,
+	height:      i32,
+	pixel_w:     i32,
+	pixel_h:     i32,
+	pixel_ratio: f32, // pixel_w / logical_width — DPI scale factor (2.0 on Retina)
+	title:       string,
+	is_open:     bool,
+	_title_buf:  [256]u8,
 }
 
 // window_init initializes SDL3 and creates a window with high pixel density and transparency.
@@ -87,4 +88,11 @@ window_update_pixel_size :: proc(w: ^Window) {
 	sdl3.GetWindowSize(w.handle, &lw, &lh)
 	w.width  = i32(lw)
 	w.height = i32(lh)
+
+	// Compute DPI scale factor; default to 1.0 if logical width is zero.
+	if lw > 0 {
+		w.pixel_ratio = f32(pw) / f32(lw)
+	} else {
+		w.pixel_ratio = 1.0
+	}
 }

@@ -279,7 +279,7 @@ font_rasterize_glyph_fitted :: proc(
 		return result
 	}
 
-	if FT_Load_Glyph(r.face, glyph_index, FT_LOAD_RENDER | FT_LOAD_TARGET_NORMAL) != 0 {
+	if FT_Load_Glyph(r.face, glyph_index, FT_LOAD_RENDER | FT_LOAD_TARGET_NORMAL | FT_LOAD_COLOR) != 0 {
 		return result
 	}
 
@@ -300,14 +300,14 @@ font_rasterize_glyph_fitted :: proc(
 		fit_factor := min(f32(max_w) / f32(width), f32(max_h) / f32(height))
 		scaled_size := max(1, current_size * fit_factor)
 		FT_Set_Pixel_Sizes(r.face, 0, FT_UInt(scaled_size))
-		if FT_Load_Glyph(r.face, glyph_index, FT_LOAD_RENDER | FT_LOAD_TARGET_NORMAL) == 0 {
+		if FT_Load_Glyph(r.face, glyph_index, FT_LOAD_RENDER | FT_LOAD_TARGET_NORMAL | FT_LOAD_COLOR) == 0 {
 			slot = r.face.glyph
 			width = int(slot.bitmap.width)
 			height = int(slot.bitmap.rows)
 			for (width > max_w || height > max_h) && scaled_size > 2 {
 				scaled_size *= 0.95
 				FT_Set_Pixel_Sizes(r.face, 0, FT_UInt(scaled_size))
-				if FT_Load_Glyph(r.face, glyph_index, FT_LOAD_RENDER | FT_LOAD_TARGET_NORMAL) != 0 {
+				if FT_Load_Glyph(r.face, glyph_index, FT_LOAD_RENDER | FT_LOAD_TARGET_NORMAL | FT_LOAD_COLOR) != 0 {
 					break
 				}
 				slot = r.face.glyph
@@ -405,6 +405,99 @@ font_rasterize_glyph :: proc(
 	allocator: runtime.Allocator = context.allocator,
 ) -> Glyph_Bitmap {
 	return font_rasterize_glyph_fitted(r, codepoint, 0, 0, allocator)
+}
+
+// Glyph_Color_Bitmap holds a rasterized color glyph's bitmap as RGBA8.
+Glyph_Color_Bitmap :: struct {
+	width:   int,
+	height:  int,
+	advance: f32,
+	pixels:  []u8, // RGBA8 (width * height * 4 bytes)
+}
+
+// font_rasterize_color_glyph rasterizes a color glyph (e.g. Apple Color Emoji)
+// and returns it as tightly packed RGBA8. FreeType delivers color bitmaps as
+// BGRA; this converts to RGBA so the caller can blit directly into an RGBA8
+// atlas. Monochrome faces (GRAY/MONO) are expanded to white-with-alpha.
+font_rasterize_color_glyph :: proc(
+	r: ^Font_Rasterizer,
+	codepoint: u32,
+	allocator: runtime.Allocator = context.allocator,
+) -> Glyph_Color_Bitmap {
+	if r == nil || r.face == nil do return {}
+	return font_rasterize_color_glyph_index(r, u32(FT_Get_Char_Index(r.face, FT_ULong(codepoint))), allocator)
+}
+
+// font_rasterize_color_glyph_index is the glyph-index variant of
+// font_rasterize_color_glyph, used for HarfBuzz-shaped clusters (ZWJ emoji
+// ligatures, keycaps, regional-indicator pairs).
+font_rasterize_color_glyph_index :: proc(
+	r: ^Font_Rasterizer,
+	glyph_index: u32,
+	allocator: runtime.Allocator = context.allocator,
+) -> Glyph_Color_Bitmap {
+	result: Glyph_Color_Bitmap
+	if r == nil || r.face == nil || glyph_index == 0 do return result
+
+	if FT_Load_Glyph(r.face, glyph_index, FT_LOAD_RENDER | FT_LOAD_COLOR) != 0 {
+		if FT_Load_Glyph(r.face, glyph_index, FT_LOAD_RENDER | FT_LOAD_TARGET_NORMAL) != 0 {
+			return result
+		}
+	}
+
+	slot := r.face.glyph
+	width := int(slot.bitmap.width)
+	height := int(slot.bitmap.rows)
+	if width <= 0 || height <= 0 {
+		result.advance = f32(slot.advance.x) / 64.0
+		return result
+	}
+
+	result.width = width
+	result.height = height
+	result.pixels = make([]u8, width * height * 4, allocator)
+	if result.pixels == nil do return result
+
+	pitch := int(slot.bitmap.pitch)
+	src_buf := slot.bitmap.buffer
+	mode := slot.bitmap.pixel_mode
+
+	for y in 0..<height {
+		for x in 0..<width {
+			dst := (y * width + x) * 4
+			if mode == u8(FT_Pixel_Mode.BGRA) {
+				src := y * pitch + x * 4
+				result.pixels[dst + 0] = src_buf[src + 2] // B -> R
+				result.pixels[dst + 1] = src_buf[src + 1] // G
+				result.pixels[dst + 2] = src_buf[src + 0] // R -> B
+				result.pixels[dst + 3] = src_buf[src + 3] // A
+			} else if mode == u8(FT_Pixel_Mode.GRAY) {
+				v := src_buf[y * pitch + x]
+				result.pixels[dst + 0] = v
+				result.pixels[dst + 1] = v
+				result.pixels[dst + 2] = v
+				result.pixels[dst + 3] = v
+			} else if mode == u8(FT_Pixel_Mode.MONO) {
+				b := src_buf[y * pitch + (x >> 3)]
+				val := (b >> uint(7 - (x & 7))) & 1
+				v := u8(val != 0 ? 255 : 0)
+				result.pixels[dst + 0] = v
+				result.pixels[dst + 1] = v
+				result.pixels[dst + 2] = v
+				result.pixels[dst + 3] = v
+			} else {
+				v := src_buf[y * pitch + x]
+				result.pixels[dst + 0] = v
+				result.pixels[dst + 1] = v
+				result.pixels[dst + 2] = v
+				result.pixels[dst + 3] = v
+			}
+		}
+	}
+
+	result.advance = f32(slot.advance.x) / 64.0
+	if result.advance <= 0 do result.advance = r.metrics.cell_width
+	return result
 }
 
 // _font_blit_glyph_pixels copies a rendered glyph bitmap into dst, anchored
@@ -551,7 +644,7 @@ font_rasterize_glyph_into :: proc(
 	glyph_index := FT_Get_Char_Index(r.face, FT_ULong(codepoint))
 	if glyph_index == 0 do return
 
-	if FT_Load_Glyph(r.face, glyph_index, FT_LOAD_RENDER | FT_LOAD_TARGET_NORMAL) != 0 do return
+	if FT_Load_Glyph(r.face, glyph_index, FT_LOAD_RENDER | FT_LOAD_TARGET_NORMAL | FT_LOAD_COLOR) != 0 do return
 
 	slot := r.face.glyph
 	if int(slot.bitmap.width) <= 0 || int(slot.bitmap.rows) <= 0 do return
