@@ -87,6 +87,18 @@ split_tree_destroy :: proc(node: ^Split_Node, allocator := context.allocator) {
 	free(node, allocator)
 }
 
+// split_tree_collect_pane_ids gathers the pane id of every leaf into ids.
+// Callers use this before destroying a tree to release every referenced pane.
+split_tree_collect_pane_ids :: proc(node: ^Split_Node, ids: ^[dynamic]u32) {
+	if node == nil || ids == nil do return
+	if node.kind == .Leaf {
+		append(ids, node.pane_id)
+		return
+	}
+	split_tree_collect_pane_ids(node.left, ids)
+	split_tree_collect_pane_ids(node.right, ids)
+}
+
 // split_tree_layout calculates physical screen rectangles for every node in the tree.
 split_tree_layout :: proc(node: ^Split_Node, target_rect: [4]f32) {
 	if node == nil do return
