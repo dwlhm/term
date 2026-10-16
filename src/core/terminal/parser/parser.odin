@@ -154,8 +154,12 @@ _parser_extend_anchor :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Track
 			cont := cell.cell_make(' ', base.fg, base.bg, base.style, {.Wide_Continuation})
 			grid.grid_set_cell(g, d, p.cursor.row, target_col + 1, cont)
 		}
-		if p.cursor.col == target_col + 1 && p.cursor.col + 1 < g.col_count {
-			p.cursor.col += 1
+		if p.cursor.col == target_col + 1 {
+			if p.cursor.col + 1 < g.col_count {
+				p.cursor.col += 1
+			} else {
+				p.cursor.pending_wrap = true
+			}
 		}
 	} else {
 		grid.grid_set_cell(g, d, p.cursor.row, target_col, new_cell)
@@ -174,13 +178,11 @@ _parser_put_char :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, c
 	// UAX #29 stateful anchor: a non-ASCII base rune may extend the cluster in
 	// the previous cell (ZWJ emoji, regional-indicator pairs, keycaps).
 	if ch >= 0x80 {
-		_parser_apply_pending_wrap(p, g, d)
-
-		target_col := p.cursor.col - 1
+		target_col := p.cursor.col if p.cursor.pending_wrap else p.cursor.col - 1
 		if target_col >= 0 {
 			prev := grid.grid_get_cell(g, p.cursor.row, target_col)
-			if .Wide_Continuation in prev.flags && p.cursor.col >= 2 {
-				target_col = p.cursor.col - 2
+			if .Wide_Continuation in prev.flags && target_col >= 1 {
+				target_col -= 1
 			}
 		}
 
@@ -238,9 +240,11 @@ _parser_put_char :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, c
 // emoji modifier, keycap, or regional indicator) to the grapheme cluster in the
 // cell to the left of the cursor, mirroring legacy terminal_put_combining.
 _parser_put_combining :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, ch: rune) {
-	if g == nil || p.egc_pool == nil || p.cursor.col == 0 do return
+	if g == nil || p.egc_pool == nil do return
 
-	target_col := p.cursor.col - 1
+	target_col := p.cursor.col if p.cursor.pending_wrap else p.cursor.col - 1
+	if target_col < 0 do return
+
 	prev := grid.grid_get_cell(g, p.cursor.row, target_col)
 	if .Wide_Continuation in prev.flags && target_col >= 1 {
 		target_col -= 1

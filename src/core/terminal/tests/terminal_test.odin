@@ -354,4 +354,37 @@ test_terminal_alt_screen_modes :: proc(t: ^testing.T) {
 	testing.expect(t, !terminal.parser.cursor_key_mode, "Expected cursor_key_mode == false")
 }
 
+@test
+test_parser_combining_at_right_margin :: proc(t: ^testing.T) {
+	terminal: term.Terminal
+	term.terminal_init(&terminal, 4, 5) // 5 columns (0..4)
+	defer term.terminal_destroy(&terminal)
+
+	// Feed "abcde" to fill row 0 completely (pending_wrap becomes true at col 4)
+	term.terminal_feed_string(&terminal, "abcde")
+	testing.expect(t, terminal.parser.cursor.pending_wrap, "Expected pending_wrap == true after filling row")
+	testing.expect_value(t, terminal.parser.cursor.col, 4)
+
+	// Feed combining acute: U+0301 (0xCC 0x81)
+	term.terminal_feed_bytes(&terminal, []u8{0xCC, 0x81})
+
+	// Cell at col 4 ('e') should have the combining mark attached, NOT col 3 ('d')
+	c3 := term.terminal_get_cell(&terminal, 0, 3)
+	testing.expect_value(t, c3.char, 'd')
+	testing.expect(t, .Has_Egc not_in c3.flags, "Col 3 should not have Has_Egc")
+
+	c4 := term.terminal_get_cell(&terminal, 0, 4)
+	testing.expect(t, .Has_Egc in c4.flags, "Col 4 ('e') should have Has_Egc attached at right margin")
+	runes := egc.egc_pool_get(&terminal.egc_pool, int(c4.char - egc.EGC_INDEX_BASE))
+	testing.expect_value(t, len(runes), 2)
+	testing.expect_value(t, runes[0], 'e')
+	testing.expect_value(t, runes[1], rune(0x0301))
+
+	// Subsequent normal char should wrap to row 1 col 0
+	term.terminal_feed_string(&terminal, "x")
+	c_wrap := term.terminal_get_cell(&terminal, 1, 0)
+	testing.expect_value(t, c_wrap.char, 'x')
+}
+
+
 
