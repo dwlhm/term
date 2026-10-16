@@ -24,6 +24,8 @@ EMOJI_FONT_CANDIDATES := []string{
 
 Emoji_Glyph :: struct {
 	u0, v0, u1, v1: f32,
+	width:          f32,
+	height:         f32,
 }
 
 Emoji_Atlas_Manager :: struct {
@@ -88,7 +90,7 @@ emoji_atlas_has_codepoint :: proc(ea: ^Emoji_Atlas_Manager, cp: rune) -> bool {
 
 _cluster_hash :: proc(runes: []rune) -> u64 {
 	hash: u64 = 14695981039346656037
-	bytes := transmute([]u8)runes
+	bytes := mem.slice_to_bytes(runes)
 	for b in bytes {
 		hash ~= u64(b)
 		hash *= 1099511628211
@@ -149,10 +151,12 @@ emoji_atlas_get_runes :: proc(ea: ^Emoji_Atlas_Manager, runes: []rune) -> (glyph
 	}
 
 	glyph = Emoji_Glyph{
-		u0 = f32(dst_x) / f32(EMOJI_ATLAS_DIM),
-		v0 = f32(dst_y) / f32(EMOJI_ATLAS_DIM),
-		u1 = f32(dst_x + bmp.width) / f32(EMOJI_ATLAS_DIM),
-		v1 = f32(dst_y + bmp.height) / f32(EMOJI_ATLAS_DIM),
+		u0     = f32(dst_x) / f32(EMOJI_ATLAS_DIM),
+		v0     = f32(dst_y) / f32(EMOJI_ATLAS_DIM),
+		u1     = f32(dst_x + bmp.width) / f32(EMOJI_ATLAS_DIM),
+		v1     = f32(dst_y + bmp.height) / f32(EMOJI_ATLAS_DIM),
+		width  = f32(bmp.width),
+		height = f32(bmp.height),
 	}
 	ea.glyphs[key] = glyph
 	ea.cursor_x += bmp.width + 1

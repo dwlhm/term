@@ -218,15 +218,9 @@ terminal_view_render_pane :: proc(
 			}
 
 			// Active selection highlight
-			if mouse != nil && mouse.selection.active {
-				min_r := min(mouse.selection.start_cell.row, mouse.selection.end_cell.row)
-				max_r := max(mouse.selection.start_cell.row, mouse.selection.end_cell.row)
-				min_c := min(mouse.selection.start_cell.col, mouse.selection.end_cell.col)
-				max_c := max(mouse.selection.start_cell.col, mouse.selection.end_cell.col)
-				if r >= min_r && r <= max_r && c >= min_c && c <= max_c {
-					fg = {1.0, 1.0, 1.0, 1.0}
-					bg = COLOR_SELECTION_BG
-				}
+			if mouse != nil && mouse.selection.active && selection_contains_cell(mouse.selection, r, c) {
+				fg = {1.0, 1.0, 1.0, 1.0}
+				bg = COLOR_SELECTION_BG
 			}
 
 			gw := cell_w * 2.0 if is_wide else cell_w
@@ -245,8 +239,18 @@ terminal_view_render_pane :: proc(
 								bg_color = bg,
 							}
 							terminal_instance.instance_renderer_push(&tv.inst_rend, bg_rec)
+
+							// Proportional fit & center inside cell box
+							fit_w := max(1.0, gw - 2.0)
+							fit_h := max(1.0, cell_h - 2.0)
+							scale := min(fit_w / max(1.0, eg.width), fit_h / max(1.0, eg.height))
+							draw_w := eg.width * scale
+							draw_h := eg.height * scale
+							offset_x := (gw - draw_w) * 0.5
+							offset_y := (cell_h - draw_h) * 0.5
+
 							emoji_rec := contract.Instance_Record{
-								pos_size = {x_pos, y_pos, gw, cell_h},
+								pos_size = {x_pos + offset_x, y_pos + offset_y, draw_w, draw_h},
 								uv_rect  = {eg.u0, eg.v0, eg.u1, eg.v1},
 								fg_color = {1, 1, 1, 1},
 								bg_color = {0, 0, 0, 0},
@@ -288,8 +292,17 @@ terminal_view_render_pane :: proc(
 				terminal_instance.instance_renderer_push(&tv.inst_rend, bg_rec)
 
 				if eg, eok := emoji_atlas_get(emoji_atlas, ch); eok {
+					// Proportional fit & center inside cell box
+					fit_w := max(1.0, gw - 2.0)
+					fit_h := max(1.0, cell_h - 2.0)
+					scale := min(fit_w / max(1.0, eg.width), fit_h / max(1.0, eg.height))
+					draw_w := eg.width * scale
+					draw_h := eg.height * scale
+					offset_x := (gw - draw_w) * 0.5
+					offset_y := (cell_h - draw_h) * 0.5
+
 					emoji_rec := contract.Instance_Record{
-						pos_size = {x_pos, y_pos, gw, cell_h},
+						pos_size = {x_pos + offset_x, y_pos + offset_y, draw_w, draw_h},
 						uv_rect  = {eg.u0, eg.v0, eg.u1, eg.v1},
 						fg_color = {1, 1, 1, 1},
 						bg_color = {0, 0, 0, 0},

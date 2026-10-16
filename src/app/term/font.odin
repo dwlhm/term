@@ -120,8 +120,8 @@ ATLAS_FALLBACK_MAX_SCALE : f32 : 4.0
 ATLAS_FALLBACK_FIT_STEP  : f32 : 0.95
 ATLAS_FALLBACK_FIT_STEPS : int : 24
 
-_is_powerline :: proc(cp: u32) -> bool {
-	return cp >= 0xE0B0 && cp <= 0xE0B3
+_is_box_or_block :: proc(cp: u32) -> bool {
+	return cp >= 0x2500 && cp <= 0x259F
 }
 
 // is_emoji_codepoint reports whether r is a standard emoji-presentation or
@@ -171,10 +171,10 @@ _blit_centered_bitmap :: proc(
 	}
 }
 
-// _rasterize_powerline renders a Powerline caret proportionally fitted and
-// centered in its cell. Powerline glyphs are standalone decorative separators
-// designed to hang at their own height, so they keep face-local placement.
-_rasterize_powerline :: proc(
+// _rasterize_symbol_fitted renders a symbol, PUA, Nerd Font icon, or Powerline
+// caret proportionally fitted and centered in its cell so it never exceeds the cell
+// width or gets clipped at the slot boundary.
+_rasterize_symbol_fitted :: proc(
 	r: ^helper.Font_Rasterizer,
 	cp: u32,
 	dst_pixels: []u8,
@@ -222,7 +222,7 @@ _rasterize_fallback_fitted :: proc(
 
 	ink_w, ink_h, _ := helper.font_measure_glyph_ink(r, cp, size)
 	steps := 0
-	for (ink_w > cell_w || ink_h > cell_h) && steps < ATLAS_FALLBACK_FIT_STEPS {
+	for (ink_w > center_w || ink_h > cell_h) && steps < ATLAS_FALLBACK_FIT_STEPS {
 		size *= ATLAS_FALLBACK_FIT_STEP
 		ink_w, ink_h, measured = helper.font_measure_glyph_ink(r, cp, size)
 		if !measured || ink_h <= 0 do break
@@ -248,30 +248,43 @@ font_rasterize_codepoint :: proc(
 
 	cell_w := int(fc.rasterizer.metrics.cell_width) if fc.has_font && fc.rasterizer.metrics.cell_width > 0 else 19
 	cell_h := int(fc.rasterizer.metrics.cell_height) if fc.has_font && fc.rasterizer.metrics.cell_height > 0 else 43
+	target_w := cell_w * 2 if is_wide else cell_w
 
-	// Powerline carets keep face-local fitted placement regardless of which
-	// face supplies the glyph.
-	if _is_powerline(cp) {
+	// 1. Box drawing and block elements: must connect seamlessly across cell borders
+	// without any padding, margin, or fitting.
+	if _is_box_or_block(cp) {
 		if fc.has_font && helper.font_rasterizer_find_glyph_index(&fc.rasterizer, cp) != 0 {
-			_rasterize_powerline(&fc.rasterizer, cp, dst_pixels, pitch, px, py, slot_w, slot_h, cell_w, cell_h, is_wide)
+			helper.font_rasterize_glyph_into(&fc.rasterizer, cp, dst_pixels, pitch, px, py, slot_w, slot_h)
 			return
 		}
 		for i in 0..<fc.fallback_count {
 			if helper.font_rasterizer_find_glyph_index(&fc.fallbacks[i], cp) != 0 {
-				_rasterize_powerline(&fc.fallbacks[i], cp, dst_pixels, pitch, px, py, slot_w, slot_h, cell_w, cell_h, is_wide)
+				helper.font_rasterize_glyph_into(&fc.fallbacks[i], cp, dst_pixels, pitch, px, py, slot_w, slot_h)
 				return
 			}
 		}
 		return
 	}
 
-	// 1. Primary face: baseline-anchored using the face's own ascender.
+	// 2. Primary face:
 	if fc.has_font && helper.font_rasterizer_find_glyph_index(&fc.rasterizer, cp) != 0 {
+		slot := fc.rasterizer.face.glyph
+		gid := helper.font_rasterizer_find_glyph_index(&fc.rasterizer, cp)
+		if helper.FT_Load_Glyph(fc.rasterizer.face, gid, helper.FT_LOAD_RENDER | helper.FT_LOAD_TARGET_NORMAL) == 0 {
+			w := int(slot.bitmap.width)
+			h := int(slot.bitmap.rows)
+			// Any glyph whose ink physically exceeds the allocated cell box is fitted
+			// and centered so it never gets cropped at the slot boundary.
+			if w > target_w || h > cell_h {
+				_rasterize_symbol_fitted(&fc.rasterizer, cp, dst_pixels, pitch, px, py, slot_w, slot_h, cell_w, cell_h, is_wide)
+				return
+			}
+		}
 		helper.font_rasterize_glyph_into(&fc.rasterizer, cp, dst_pixels, pitch, px, py, slot_w, slot_h)
 		return
 	}
 
-	// 2. Fallback chain: scale to primary cap height + bottom-align to primary baseline.
+	// 3. Fallback chain: scale to primary cap height + bottom-align to primary baseline.
 	center_w := cell_w * 2 if is_wide else cell_w
 	for i in 0..<fc.fallback_count {
 		if helper.font_rasterizer_find_glyph_index(&fc.fallbacks[i], cp) != 0 {
@@ -355,8 +368,9 @@ font_rasterize_cluster_into :: proc(
 is_emoji_cluster :: proc(runes: []rune) -> bool {
 	for r in runes {
 		if is_emoji_codepoint(r) do return true
-		if r == 0x200D || r == 0x20E3 do return true
+		if r == 0x200D || r == 0x20E3 || r == 0xFE0F do return true
 		if r >= 0x1F1E6 && r <= 0x1F1FF do return true
+		if cell.is_emoji_vs16_eligible(r) do return true
 	}
 	return false
 }
