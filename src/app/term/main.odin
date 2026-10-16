@@ -8,9 +8,10 @@ import "core:fmt"
 import "core:os"
 import "core:time"
 
-import helper "../../cmd/harness_helper"
+import plat_win "../../platform/window"
+import plat_clip "../../platform/clipboard"
 import contract "../../core/render/contract"
-import wgpu_backend "../../core/platform/gpu/wgpu"
+import wgpu_backend "../../platform/gpu/wgpu"
 import tabs_feat "../../features/tabs"
 import mux_feat "../../features/multiplexer"
 import sess_feat "../../features/session"
@@ -19,7 +20,7 @@ VERSION: string : "2.1.0"
 
 Term_App :: struct {
 	config:        App_Config,
-	window:        helper.Window,
+	window:        plat_win.Window,
 	surface:       rawptr,
 	instance:      rawptr,
 	device:        contract.Gpu_Device,
@@ -49,11 +50,11 @@ app_init :: proc(app: ^Term_App, initial_cmd: string = "") -> bool {
 	win_w, win_h := config_resolve_window_dimensions(&app.config)
 
 	// First initialize window with user-configured bounds (or default 1280x800)
-	if !helper.window_init(&app.window, "Term", win_w, win_h) {
+	if !plat_win.window_init(&app.window, "Term", win_w, win_h) {
 		return false
 	}
 
-	helper.window_update_pixel_size(&app.window)
+	plat_win.window_update_pixel_size(&app.window)
 	scale := app.window.pixel_ratio
 	layout_init(&app.layout, scale)
 
@@ -88,7 +89,7 @@ app_init :: proc(app: ^Term_App, initial_cmd: string = "") -> bool {
 
 	mouse_init(&app.mouse, app.layout.metrics.cell_w, app.layout.metrics.cell_h, app.layout.metrics.pane_pad_x, app.layout.metrics.pane_pad_y)
 	cursor_init(&app.cursor)
-	clipboard_init(&app.clipboard, helper.clipboard_set_text, helper.clipboard_get_text, helper.clipboard_has_text)
+	clipboard_init(&app.clipboard, plat_clip.clipboard_set_text, plat_clip.clipboard_get_text, plat_clip.clipboard_has_text)
 	command_center_init(&app.cmd_center)
 
 	tabs_feat.tabs_manager_init(&app.tabs_mgr, layout_compute_tab_bar_rect(&app.layout))
@@ -145,7 +146,7 @@ app_destroy :: proc(app: ^Term_App) {
 		app.instance = nil
 	}
 
-	helper.window_destroy(&app.window)
+	plat_win.window_destroy(&app.window)
 }
 
 app_run :: proc(app: ^Term_App) {

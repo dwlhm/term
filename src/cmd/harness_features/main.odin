@@ -12,9 +12,9 @@ import "core:time"
 import "vendor:sdl3"
 import "vendor:wgpu"
 
-import helper "../harness_helper"
+import plat_win "../../platform/window"
 import contract "../../core/render/contract"
-import wgpu_backend "../../core/platform/gpu/wgpu"
+import wgpu_backend "../../platform/gpu/wgpu"
 import composer "../../core/composer"
 import pipeline "../../core/composer/pipeline"
 import chrome_render "../../core/render/chrome"
@@ -29,7 +29,7 @@ import sess_feat "../../features/session"
 CHROME_BAR_HEIGHT: f32 : 36.0
 
 Harness_State :: struct {
-	window:        helper.Window,
+	window:        plat_win.Window,
 	device:        contract.Gpu_Device,
 	queue:         contract.Gpu_Queue,
 	format:        contract.Gpu_Format,
@@ -180,11 +180,11 @@ main :: proc() {
 	state.screen_h = 800.0
 
 	// 1. Initialize Window
-	if !helper.window_init(&state.window, "Term Phase 4 Feature Harness", i32(state.screen_w), i32(state.screen_h)) {
+	if !plat_win.window_init(&state.window, "Term Phase 4 Feature Harness", i32(state.screen_w), i32(state.screen_h)) {
 		fmt.eprintln("Failed to initialize SDL3 window")
 		return
 	}
-	defer helper.window_destroy(&state.window)
+	defer plat_win.window_destroy(&state.window)
 
 	// 2. Initialize WGPU Hardware
 	wgpu_backend.init_wgpu_driver()
@@ -193,7 +193,7 @@ main :: proc() {
 	state.device, state.queue = contract.request_device(instance, state.surface)
 	state.format = contract.get_preferred_format(state.surface, state.device)
 
-	helper.window_update_pixel_size(&state.window)
+	plat_win.window_update_pixel_size(&state.window)
 	screen_w := f32(state.window.pixel_w)
 	screen_h := f32(state.window.pixel_h)
 	state.screen_w = screen_w

@@ -7,7 +7,7 @@ package feature_multiplexer
 // Supports both Terminal PTY panes and 3D Canvas panes as first-class citizens.
 
 import "base:runtime"
-import pty "../../core/platform/pty"
+import pty "../../platform/pty"
 import chrome_splits "../../core/chrome/splits"
 import session "../session"
 import three_d "../../core/render/three_d"

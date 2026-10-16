@@ -24,9 +24,10 @@ import "core:time"
 import "vendor:sdl3"
 import "vendor:wgpu"
 
+import plat_win "../../platform/window"
 import helper "../harness_helper"
 import contract "../../core/render/contract"
-import wgpu_backend "../../core/platform/gpu/wgpu"
+import wgpu_backend "../../platform/gpu/wgpu"
 import composer "../../core/composer"
 import pipeline "../../core/composer/pipeline"
 import layer "../../core/composer/layer"
@@ -60,7 +61,7 @@ LAYER_PALETTE: [layer.MAX_COMPOSER_LAYERS][4]f64 = {
 }
 
 Harness_State :: struct {
-	window:              helper.Window,
+	window:              plat_win.Window,
 	instance:            rawptr,
 	surface:             rawptr,
 	device:              contract.Gpu_Device,
@@ -1536,7 +1537,7 @@ _acquire_surface :: proc(h: ^Harness_State) -> (contract.Gpu_Texture, contract.G
 		if h.window.handle != nil {
 			sdl3.RaiseWindow(h.window.handle)
 		}
-		helper.window_update_pixel_size(&h.window)
+		plat_win.window_update_pixel_size(&h.window)
 		h.screen_w = f32(h.window.pixel_w)
 		h.screen_h = f32(h.window.pixel_h)
 		contract.configure_surface(h.surface, h.device, h.format, u32(h.screen_w), u32(h.screen_h))
@@ -2614,11 +2615,11 @@ main :: proc() {
 	window_w: i32 = 1600
 	window_h: i32 = 1000
 
-	if !helper.window_init(&h.window, "Term - Standalone Native GUI Composer Harness & Benchmark", window_w, window_h) {
+	if !plat_win.window_init(&h.window, "Term - Standalone Native GUI Composer Harness & Benchmark", window_w, window_h) {
 		fmt.eprintln("Harness Error: window_init failed")
 		os.exit(1)
 	}
-	defer helper.window_destroy(&h.window)
+	defer plat_win.window_destroy(&h.window)
 
 	// Initialize WebGPU Hardware Driver
 	wgpu_backend.init_wgpu_driver()
@@ -2627,7 +2628,7 @@ main :: proc() {
 	h.device, h.queue = contract.request_device(h.instance, h.surface)
 	h.format = contract.get_preferred_format(h.surface, h.device)
 
-	helper.window_update_pixel_size(&h.window)
+	plat_win.window_update_pixel_size(&h.window)
 	h.screen_w = f32(h.window.pixel_w)
 	h.screen_h = f32(h.window.pixel_h)
 

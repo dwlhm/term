@@ -5,7 +5,7 @@ import "core:fmt"
 import "vendor:sdl3"
 import "vendor:wgpu"
 import wgpu_sdl3_glue "vendor:wgpu/sdl3glue"
-import contract "../../../render/contract"
+import contract "../../../core/render/contract"
 
 // Wgpu_Surface wraps the native WGPU surface handle and state.
 Wgpu_Surface :: struct {

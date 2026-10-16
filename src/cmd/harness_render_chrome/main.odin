@@ -25,10 +25,11 @@ when ODIN_OS == .Darwin {
 	}
 }
 
+import plat_win "../../platform/window"
 import helper "../harness_helper"
 
 import contract "../../core/render/contract"
-import wgpu_backend "../../core/platform/gpu/wgpu"
+import wgpu_backend "../../platform/gpu/wgpu"
 import composer "../../core/composer"
 import pipeline "../../core/composer/pipeline"
 import scheduler "../../core/composer/scheduler"
@@ -52,7 +53,7 @@ MODAL_LAYER_ID:  composer.Layer_Id : composer.MODAL_LAYER_ID
 CHROME_BAR_HEIGHT: f32 : 40.0
 
 Harness_State :: struct {
-	window:              helper.Window,
+	window:              plat_win.Window,
 	instance:            rawptr,
 	surface:             rawptr,
 	device:              contract.Gpu_Device,
@@ -1301,7 +1302,7 @@ _frame_acquire :: proc(user: rawptr) -> (contract.Gpu_Texture, contract.Gpu_Text
 		if h.window.handle != nil {
 			sdl3.RaiseWindow(h.window.handle)
 		}
-		helper.window_update_pixel_size(&h.window)
+		plat_win.window_update_pixel_size(&h.window)
 		screen_w := f32(h.window.pixel_w)
 		screen_h := f32(h.window.pixel_h)
 		contract.configure_surface(h.surface, h.device, h.format, u32(screen_w), u32(screen_h))
@@ -2875,7 +2876,7 @@ _handle_sdl_event :: proc(h: ^Harness_State, event: ^sdl3.Event) {
 		_mark_layer_dirty(h, PANE_2_ID)
 		_mark_layer_dirty(h, CHROME_LAYER_ID)
 	} else if event.type == .WINDOW_PIXEL_SIZE_CHANGED || event.type == .WINDOW_RESIZED {
-		helper.window_update_pixel_size(&h.window)
+		plat_win.window_update_pixel_size(&h.window)
 		new_w := f32(h.window.pixel_w)
 		new_h := f32(h.window.pixel_h)
 		contract.configure_surface(h.surface, h.device, h.format, u32(new_w), u32(new_h))
@@ -2906,11 +2907,11 @@ main :: proc() {
 	window_w: i32 = 1600
 	window_h: i32 = 1000
 
-	if !helper.window_init(&h.window, "Term - Standalone Native GUI Harness (OS-Style 4-Split Compositor)", window_w, window_h) {
+	if !plat_win.window_init(&h.window, "Term - Standalone Native GUI Harness (OS-Style 4-Split Compositor)", window_w, window_h) {
 		fmt.eprintln("harness error: window_init failed")
 		os.exit(1)
 	}
-	defer helper.window_destroy(&h.window)
+	defer plat_win.window_destroy(&h.window)
 
 	// Unified WGPU Hardware Setup across Darwin and Linux
 	wgpu_backend.init_wgpu_driver()
@@ -2919,7 +2920,7 @@ main :: proc() {
 	h.device, h.queue = contract.request_device(h.instance, h.surface)
 	h.format = contract.get_preferred_format(h.surface, h.device)
 
-	helper.window_update_pixel_size(&h.window)
+	plat_win.window_update_pixel_size(&h.window)
 	screen_w := f32(h.window.pixel_w)
 	screen_h := f32(h.window.pixel_h)
 

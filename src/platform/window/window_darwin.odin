@@ -1,4 +1,4 @@
-package harness_helper
+package platform_window
 
 import "vendor:sdl3"
 

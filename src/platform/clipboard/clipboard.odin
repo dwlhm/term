@@ -1,4 +1,4 @@
-package harness_helper
+package platform_clipboard
 
 import "base:runtime"
 import "core:strings"

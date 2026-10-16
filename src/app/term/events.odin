@@ -5,7 +5,7 @@ package term
 
 import "vendor:sdl3"
 
-import helper "../../cmd/harness_helper"
+import plat_win "../../platform/window"
 import contract "../../core/render/contract"
 import tabs_feat "../../features/tabs"
 import mux_feat "../../features/multiplexer"
@@ -16,7 +16,7 @@ import sess_feat "../../features/session"
 FRAME_TICK_MS :: 8
 
 app_handle_window_resize :: proc(app: ^Term_App) {
-	helper.window_update_pixel_size(&app.window)
+	plat_win.window_update_pixel_size(&app.window)
 	scale := app.window.pixel_ratio
 	layout_set_scale(&app.layout, scale)
 

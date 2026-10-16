@@ -2,7 +2,7 @@ package feature_session
 
 import "base:runtime"
 import "core:strings"
-import pty "../../core/platform/pty"
+import pty "../../platform/pty"
 import terminal "../../core/terminal"
 import cell "../../core/terminal/cell"
 import damage "../../core/terminal/damage"

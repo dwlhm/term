@@ -6,7 +6,7 @@ package term
 import "core:math"
 import "core:os"
 import cell "../../core/terminal/cell"
-import helper "../../cmd/harness_helper"
+import plat_font "../../platform/font"
 
 FONT_DISCOVERY_PATHS := []string{
 	"assets/fonts/MapleMono-NF-Regular.ttf",
@@ -33,9 +33,9 @@ FALLBACK_DISCOVERY_PATHS := []string{
 }
 
 Font_Context :: struct {
-	rasterizer:         helper.Font_Rasterizer,
+	rasterizer:         plat_font.Font_Rasterizer,
 	has_font:           bool,
-	fallbacks:          [MAX_FALLBACKS]helper.Font_Rasterizer,
+	fallbacks:          [MAX_FALLBACKS]plat_font.Font_Rasterizer,
 	fallback_paths:     [MAX_FALLBACKS]string,
 	fallback_count:     int,
 	pixel_size:         f32,
@@ -54,8 +54,8 @@ font_context_init :: proc(fc: ^Font_Context, pixel_size: f32 = 32.0) -> bool {
 	// 1. Discover Primary Font
 	for p in FONT_DISCOVERY_PATHS {
 		if os.is_file(p) {
-			err: helper.Font_Error
-			if helper.font_rasterizer_init(&fc.rasterizer, p, pixel_size, &err) {
+			err: plat_font.Font_Error
+			if plat_font.font_rasterizer_init(&fc.rasterizer, p, pixel_size, &err) {
 				fc.has_font = true
 				fc.active_path = p
 				break
@@ -75,8 +75,8 @@ font_context_init :: proc(fc: ^Font_Context, pixel_size: f32 = 32.0) -> bool {
 		if fc.fallback_count >= MAX_FALLBACKS do break
 		if p == fc.active_path do continue
 		if os.is_file(p) {
-			err: helper.Font_Error
-			if helper.font_rasterizer_init(&fc.fallbacks[fc.fallback_count], p, pixel_size, &err) {
+			err: plat_font.Font_Error
+			if plat_font.font_rasterizer_init(&fc.fallbacks[fc.fallback_count], p, pixel_size, &err) {
 				fc.fallback_paths[fc.fallback_count] = p
 				fc.fallback_count += 1
 			}
@@ -89,22 +89,22 @@ font_context_init :: proc(fc: ^Font_Context, pixel_size: f32 = 32.0) -> bool {
 font_context_destroy :: proc(fc: ^Font_Context) {
 	if fc == nil do return
 	if fc.has_font {
-		helper.font_rasterizer_destroy(&fc.rasterizer)
+		plat_font.font_rasterizer_destroy(&fc.rasterizer)
 		fc.has_font = false
 	}
 	for i in 0..<fc.fallback_count {
-		helper.font_rasterizer_destroy(&fc.fallbacks[i])
+		plat_font.font_rasterizer_destroy(&fc.fallbacks[i])
 	}
 	fc.fallback_count = 0
 }
 
 font_has_codepoint :: proc(fc: ^Font_Context, cp: u32) -> bool {
 	if fc == nil do return false
-	if fc.has_font && helper.font_rasterizer_find_glyph_index(&fc.rasterizer, cp) != 0 {
+	if fc.has_font && plat_font.font_rasterizer_find_glyph_index(&fc.rasterizer, cp) != 0 {
 		return true
 	}
 	for i in 0..<fc.fallback_count {
-		if helper.font_rasterizer_find_glyph_index(&fc.fallbacks[i], cp) != 0 {
+		if plat_font.font_rasterizer_find_glyph_index(&fc.fallbacks[i], cp) != 0 {
 			return true
 		}
 	}
@@ -133,11 +133,11 @@ is_emoji_codepoint :: proc(r: rune) -> bool {
 
 // _calibrate_reference measures the primary face's cap height and baseline row
 // from the rendered ink of a reference glyph ('H', falling back to '0').
-_calibrate_reference :: proc(r: ^helper.Font_Rasterizer) -> (cap_px, baseline_px: int) {
+_calibrate_reference :: proc(r: ^plat_font.Font_Rasterizer) -> (cap_px, baseline_px: int) {
 	references := [2]u32{'H', '0'}
 	for cp in references {
-		if helper.font_rasterizer_find_glyph_index(r, cp) == 0 do continue
-		_, height, _, bottom, ok := helper.font_measure_glyph_ink_box(r, cp)
+		if plat_font.font_rasterizer_find_glyph_index(r, cp) == 0 do continue
+		_, height, _, bottom, ok := plat_font.font_measure_glyph_ink_box(r, cp)
 		if ok do return height, bottom
 	}
 	return 0, -1
@@ -146,7 +146,7 @@ _calibrate_reference :: proc(r: ^helper.Font_Rasterizer) -> (cap_px, baseline_px
 // _blit_centered_bitmap copies a tight glyph bitmap into a slot rect, centering
 // it within (box_w x box_h) anchored at (px, py).
 _blit_centered_bitmap :: proc(
-	bmp: ^helper.Glyph_Bitmap,
+	bmp: ^plat_font.Glyph_Bitmap,
 	dst_pixels: []u8,
 	pitch: int,
 	px, py: int,
@@ -175,7 +175,7 @@ _blit_centered_bitmap :: proc(
 // caret proportionally fitted and centered in its cell so it never exceeds the cell
 // width or gets clipped at the slot boundary.
 _rasterize_symbol_fitted :: proc(
-	r: ^helper.Font_Rasterizer,
+	r: ^plat_font.Font_Rasterizer,
 	cp: u32,
 	dst_pixels: []u8,
 	pitch: int,
@@ -187,13 +187,13 @@ _rasterize_symbol_fitted :: proc(
 	box_w := cell_w * 2 if is_wide else cell_w
 	max_w := max(1, box_w - 2)
 	max_h := max(1, cell_h - 2)
-	bmp := helper.font_rasterize_glyph_fitted(r, cp, max_w, max_h)
+	bmp := plat_font.font_rasterize_glyph_fitted(r, cp, max_w, max_h)
 	defer if bmp.pixels != nil do delete(bmp.pixels)
 	if bmp.width > 0 && bmp.height > 0 && bmp.pixels != nil {
 		_blit_centered_bitmap(&bmp, dst_pixels, pitch, px, py, slot_w, slot_h, box_w, cell_h)
 		return
 	}
-	helper.font_rasterize_glyph_into(r, cp, dst_pixels, pitch, px, py, slot_w, slot_h)
+	plat_font.font_rasterize_glyph_into(r, cp, dst_pixels, pitch, px, py, slot_w, slot_h)
 }
 
 // _rasterize_fallback_fitted renders a fallback-face glyph scaled so its ink
@@ -202,7 +202,7 @@ _rasterize_symbol_fitted :: proc(
 // (_atlas_rasterize_fallback_fitted).
 _rasterize_fallback_fitted :: proc(
 	fc: ^Font_Context,
-	r: ^helper.Font_Rasterizer,
+	r: ^plat_font.Font_Rasterizer,
 	cp: u32,
 	dst_pixels: []u8,
 	pitch: int,
@@ -211,25 +211,25 @@ _rasterize_fallback_fitted :: proc(
 	cell_w, cell_h: int,
 	center_w: int,
 ) {
-	base_w, base_h, measured := helper.font_measure_glyph_ink(r, cp)
+	base_w, base_h, measured := plat_font.font_measure_glyph_ink(r, cp)
 	if fc.primary_cap_px <= 0 || fc.primary_baseline_px < 0 || !measured || base_w <= 0 || base_h <= 0 {
-		helper.font_rasterize_glyph_into(r, cp, dst_pixels, pitch, px, py, slot_w, slot_h)
+		plat_font.font_rasterize_glyph_into(r, cp, dst_pixels, pitch, px, py, slot_w, slot_h)
 		return
 	}
 
 	size := r.metrics.pixel_size * f32(fc.primary_cap_px) / f32(base_h)
 	size = min(size, r.metrics.pixel_size * ATLAS_FALLBACK_MAX_SCALE)
 
-	ink_w, ink_h, _ := helper.font_measure_glyph_ink(r, cp, size)
+	ink_w, ink_h, _ := plat_font.font_measure_glyph_ink(r, cp, size)
 	steps := 0
 	for (ink_w > center_w || ink_h > cell_h) && steps < ATLAS_FALLBACK_FIT_STEPS {
 		size *= ATLAS_FALLBACK_FIT_STEP
-		ink_w, ink_h, measured = helper.font_measure_glyph_ink(r, cp, size)
+		ink_w, ink_h, measured = plat_font.font_measure_glyph_ink(r, cp, size)
 		if !measured || ink_h <= 0 do break
 		steps += 1
 	}
 
-	helper.font_rasterize_glyph_sized_into(
+	plat_font.font_rasterize_glyph_sized_into(
 		r, cp, size, dst_pixels, pitch, px, py, slot_w, slot_h,
 		fc.primary_baseline_px, center_w,
 	)
@@ -253,13 +253,13 @@ font_rasterize_codepoint :: proc(
 	// 1. Box drawing and block elements: must connect seamlessly across cell borders
 	// without any padding, margin, or fitting.
 	if _is_box_or_block(cp) {
-		if fc.has_font && helper.font_rasterizer_find_glyph_index(&fc.rasterizer, cp) != 0 {
-			helper.font_rasterize_glyph_into(&fc.rasterizer, cp, dst_pixels, pitch, px, py, slot_w, slot_h)
+		if fc.has_font && plat_font.font_rasterizer_find_glyph_index(&fc.rasterizer, cp) != 0 {
+			plat_font.font_rasterize_glyph_into(&fc.rasterizer, cp, dst_pixels, pitch, px, py, slot_w, slot_h)
 			return
 		}
 		for i in 0..<fc.fallback_count {
-			if helper.font_rasterizer_find_glyph_index(&fc.fallbacks[i], cp) != 0 {
-				helper.font_rasterize_glyph_into(&fc.fallbacks[i], cp, dst_pixels, pitch, px, py, slot_w, slot_h)
+			if plat_font.font_rasterizer_find_glyph_index(&fc.fallbacks[i], cp) != 0 {
+				plat_font.font_rasterize_glyph_into(&fc.fallbacks[i], cp, dst_pixels, pitch, px, py, slot_w, slot_h)
 				return
 			}
 		}
@@ -267,10 +267,10 @@ font_rasterize_codepoint :: proc(
 	}
 
 	// 2. Primary face:
-	if fc.has_font && helper.font_rasterizer_find_glyph_index(&fc.rasterizer, cp) != 0 {
+	if fc.has_font && plat_font.font_rasterizer_find_glyph_index(&fc.rasterizer, cp) != 0 {
 		slot := fc.rasterizer.face.glyph
-		gid := helper.font_rasterizer_find_glyph_index(&fc.rasterizer, cp)
-		if helper.FT_Load_Glyph(fc.rasterizer.face, gid, helper.FT_LOAD_RENDER | helper.FT_LOAD_TARGET_NORMAL) == 0 {
+		gid := plat_font.font_rasterizer_find_glyph_index(&fc.rasterizer, cp)
+		if plat_font.FT_Load_Glyph(fc.rasterizer.face, gid, plat_font.FT_LOAD_RENDER | plat_font.FT_LOAD_TARGET_NORMAL) == 0 {
 			w := int(slot.bitmap.width)
 			h := int(slot.bitmap.rows)
 			// Any glyph whose ink physically exceeds the allocated cell box is fitted
@@ -280,14 +280,14 @@ font_rasterize_codepoint :: proc(
 				return
 			}
 		}
-		helper.font_rasterize_glyph_into(&fc.rasterizer, cp, dst_pixels, pitch, px, py, slot_w, slot_h)
+		plat_font.font_rasterize_glyph_into(&fc.rasterizer, cp, dst_pixels, pitch, px, py, slot_w, slot_h)
 		return
 	}
 
 	// 3. Fallback chain: scale to primary cap height + bottom-align to primary baseline.
 	center_w := cell_w * 2 if is_wide else cell_w
 	for i in 0..<fc.fallback_count {
-		if helper.font_rasterizer_find_glyph_index(&fc.fallbacks[i], cp) != 0 {
+		if plat_font.font_rasterizer_find_glyph_index(&fc.fallbacks[i], cp) != 0 {
 			_rasterize_fallback_fitted(fc, &fc.fallbacks[i], cp, dst_pixels, pitch, px, py, slot_w, slot_h, cell_w, cell_h, center_w)
 			return
 		}
@@ -296,11 +296,11 @@ font_rasterize_codepoint :: proc(
 
 // _font_face_for_codepoint returns the first face (primary then fallbacks) that
 // covers the codepoint, or nil when none does.
-_font_face_for_codepoint :: proc(fc: ^Font_Context, cp: u32) -> ^helper.Font_Rasterizer {
+_font_face_for_codepoint :: proc(fc: ^Font_Context, cp: u32) -> ^plat_font.Font_Rasterizer {
 	if fc == nil do return nil
-	if fc.has_font && helper.font_rasterizer_find_glyph_index(&fc.rasterizer, cp) != 0 do return &fc.rasterizer
+	if fc.has_font && plat_font.font_rasterizer_find_glyph_index(&fc.rasterizer, cp) != 0 do return &fc.rasterizer
 	for i in 0..<fc.fallback_count {
-		if helper.font_rasterizer_find_glyph_index(&fc.fallbacks[i], cp) != 0 do return &fc.fallbacks[i]
+		if plat_font.font_rasterizer_find_glyph_index(&fc.fallbacks[i], cp) != 0 do return &fc.fallbacks[i]
 	}
 	return nil
 }
@@ -308,7 +308,7 @@ _font_face_for_codepoint :: proc(fc: ^Font_Context, cp: u32) -> ^helper.Font_Ras
 // _blit_glyph_max max-blends a tight glyph bitmap into a slot at its baseline
 // anchor (bearing_x, ascent + bearing_y), used to overstrike combining marks.
 _blit_glyph_max :: proc(
-	bmp: ^helper.Glyph_Bitmap,
+	bmp: ^plat_font.Glyph_Bitmap,
 	dst_pixels: []u8,
 	pitch: int,
 	px, py: int,
@@ -354,7 +354,7 @@ font_rasterize_cluster_into :: proc(
 		mark_cp := u32(runes[i])
 		r := _font_face_for_codepoint(fc, mark_cp)
 		if r == nil do continue
-		bmp := helper.font_rasterize_glyph(r, mark_cp)
+		bmp := plat_font.font_rasterize_glyph(r, mark_cp)
 		if bmp.pixels != nil {
 			_blit_glyph_max(&bmp, dst_pixels, pitch, px, py, slot_w, slot_h, int(math.round(r.metrics.ascent)))
 			delete(bmp.pixels)

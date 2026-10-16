@@ -73,9 +73,11 @@ _get_thread_time_ns :: proc() -> u64 {
 	return u64(ts.tv_sec) * 1_000_000_000 + u64(ts.tv_nsec)
 }
 
+import plat_win "../../platform/window"
+import plat_font "../../platform/font"
 import helper "../harness_helper"
 import contract "../../core/render/contract"
-import wgpu_backend "../../core/platform/gpu/wgpu"
+import wgpu_backend "../../platform/gpu/wgpu"
 import composer "../../core/composer"
 import pipeline "../../core/composer/pipeline"
 import atlas "../../core/render/atlas"
@@ -358,7 +360,7 @@ palette_style_colors :: #force_inline proc "contextless" (style: u32) -> (fg, bg
 // ============================================================================
 
 Harness_State :: struct {
-	window:           helper.Window,
+	window:           plat_win.Window,
 	instance:         rawptr,
 	surface:          rawptr,
 	device:           contract.Gpu_Device,
@@ -432,19 +434,19 @@ _init_atlas :: proc(h: ^Harness_State) -> bool {
 	if !atlas.atlas_init(&h.atlas) do return false
 
 	font_path := "assets/fonts/MapleMono-NF-Regular.ttf"
-	r: helper.Font_Rasterizer
+	r: plat_font.Font_Rasterizer
 	has_font := false
 	if os.is_file(font_path) {
-		err: helper.Font_Error
-		has_font = helper.font_rasterizer_init(&r, font_path, 32.0, &err)
+		err: plat_font.Font_Error
+		has_font = plat_font.font_rasterizer_init(&r, font_path, 32.0, &err)
 	}
 
 	if has_font {
-		defer helper.font_rasterizer_destroy(&r)
+		defer plat_font.font_rasterizer_destroy(&r)
 		for cp in u32(32)..=126 {
 			slot := cp - 32
 			px, py := atlas.atlas_slot_origin(slot)
-			helper.font_rasterize_glyph_into(
+			plat_font.font_rasterize_glyph_into(
 				&r,
 				cp,
 				h.atlas.pixels,
@@ -807,7 +809,7 @@ _update_renderer_limits :: proc(h: ^Harness_State, cols, rows: u32) {
 }
 
 _handle_window_resize :: proc(h: ^Harness_State) {
-	helper.window_update_pixel_size(&h.window)
+	plat_win.window_update_pixel_size(&h.window)
 	h.screen_w = f32(h.window.pixel_w)
 	h.screen_h = f32(h.window.pixel_h)
 	h.pane_w = h.screen_w * 0.5
@@ -2581,11 +2583,11 @@ main :: proc() {
 	window_w: i32 = 1600
 	window_h: i32 = 1000
 
-	if !helper.window_init(&h.window, "Term - Terminal Render Harness", window_w, window_h) {
+	if !plat_win.window_init(&h.window, "Term - Terminal Render Harness", window_w, window_h) {
 		fmt.eprintln("harness error: window_init failed")
 		os.exit(1)
 	}
-	defer helper.window_destroy(&h.window)
+	defer plat_win.window_destroy(&h.window)
 
 	wgpu_backend.init_wgpu_driver()
 	h.instance = contract.create_instance()
@@ -2593,7 +2595,7 @@ main :: proc() {
 	h.device, h.queue = contract.request_device(h.instance, h.surface)
 	h.format = contract.get_preferred_format(h.surface, h.device)
 
-	helper.window_update_pixel_size(&h.window)
+	plat_win.window_update_pixel_size(&h.window)
 	h.screen_w = f32(h.window.pixel_w)
 	h.screen_h = f32(h.window.pixel_h)
 	h.pane_w = h.screen_w * 0.5

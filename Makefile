@@ -21,7 +21,7 @@ TEST_FLAGS ?= -define:ODIN_TEST_THREADS=1
 DEBUG_FLAGS ?= -debug
 RELEASE_FLAGS ?= -o:speed -no-bounds-check
 
-.PHONY: all term run term-debug harness-features run-harness-features harness-render-chrome run-harness-render-chrome harness-render-terminal run-harness-render-terminal harness-render-composer run-harness-composer test test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-gpu check check-linux clean help bench bench-quick
+.PHONY: all term run term-debug harness-features run-harness-features harness-render-chrome run-harness-render-chrome harness-render-terminal run-harness-render-terminal harness-render-composer run-harness-composer test test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-gpu check clean help bench bench-quick
 
 all: term harness-features harness-render-chrome harness-render-terminal harness-composer
 
@@ -78,7 +78,7 @@ test-terminal:
 	$(ODIN) test src/core/terminal/tests $(TEST_FLAGS)
 
 test-pty:
-	$(ODIN) test src/core/platform/pty/tests $(TEST_FLAGS)
+	$(ODIN) test src/platform/pty/tests $(TEST_FLAGS)
 
 test-session:
 	$(ODIN) test src/features/session/tests $(TEST_FLAGS)
@@ -151,7 +151,10 @@ check:
 	$(ODIN) check src/core/composer/transition $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/core/composer/frame $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/core/render/contract $(CHECK_FLAGS) -no-entry-point
-	$(ODIN) check src/core/platform/gpu/wgpu $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/platform/gpu/wgpu $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/platform/window $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/platform/clipboard $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/platform/font $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/core/render/atlas $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/core/render/terminal $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/core/render/terminal/instance $(CHECK_FLAGS) -no-entry-point
@@ -169,30 +172,6 @@ check:
 	$(ODIN) check src/core/render/three_d $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/app/term $(CHECK_FLAGS)
 
-check-linux:
-	$(ODIN) check src/core/composer $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
-	$(ODIN) check src/core/composer/layer $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
-	$(ODIN) check src/core/composer/blit $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
-	$(ODIN) check src/core/composer/pipeline $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
-	$(ODIN) check src/core/composer/frame $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
-	$(ODIN) check src/core/render/contract $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
-	$(ODIN) check src/core/platform/gpu/wgpu $(CHECK_FLAGS) -no-entry-point
-	$(ODIN) check src/core/render/atlas $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
-	$(ODIN) check src/core/render/terminal $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
-	$(ODIN) check src/core/render/terminal/instance $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
-	$(ODIN) check src/core/render/terminal/tile $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
-	$(ODIN) check src/core/render/terminal/fullscreen $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
-	$(ODIN) check src/core/chrome/draw_list $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
-	$(ODIN) check src/core/chrome/tabs $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
-	$(ODIN) check src/core/chrome/splits $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
-	$(ODIN) check src/core/chrome/hit_test $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
-	$(ODIN) check src/core/chrome/modals $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
-	$(ODIN) check src/core/render/chrome/surface $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
-	$(ODIN) check src/core/render/chrome/batch $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
-	$(ODIN) check src/core/render/chrome/sdf $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
-	$(ODIN) check src/core/render/chrome $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
-	$(ODIN) check src/core/render/three_d $(CHECK_FLAGS) -no-entry-point
-
 clean:
 	rm -rf $(OUT_DIR) $(OUT_DIR)/Term.app $(OUT_DIR)/Term.dmg $(OUT_DIR)/dmg_staging build term-app app.bin *.dSYM
 
@@ -209,7 +188,6 @@ help:
 	@echo "  test-composer               Run composer pipeline unit tests"
 	@echo "  test-render-contract        Run render contract & damage unit tests"
 	@echo "  check                       Type check all active core modules and harnesses"
-	@echo "  check-linux                 Type check core modules targeting Linux ARM64"
 	@echo "  clean                       Remove build artifacts and binaries"
 	@echo "  bench                       Run harness_composer full benchmark suite"
 	@echo "  bench-quick                 Run harness_composer quick benchmark suite"
