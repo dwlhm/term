@@ -27,11 +27,11 @@ all: term harness-features harness-render-chrome harness-render-terminal harness
 
 term:
 	@mkdir -p $(OUT_DIR)
-	$(ODIN) build src/app -out:$(OUT_DIR)/term $(RELEASE_FLAGS) $(COMMON_FLAGS)
+	$(ODIN) build src/app/term -out:$(OUT_DIR)/term $(RELEASE_FLAGS) $(COMMON_FLAGS)
 
 term-debug:
 	@mkdir -p $(OUT_DIR)
-	$(ODIN) build src/app -out:$(OUT_DIR)/term $(DEBUG_FLAGS) $(COMMON_FLAGS)
+	$(ODIN) build src/app/term -out:$(OUT_DIR)/term $(DEBUG_FLAGS) $(COMMON_FLAGS)
 
 run: term
 	./$(OUT_DIR)/term
@@ -167,6 +167,7 @@ check:
 	$(ODIN) check src/core/render/chrome/sdf $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/core/render/chrome $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/core/render/three_d $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/app/term $(CHECK_FLAGS)
 
 check-linux:
 	$(ODIN) check src/core/composer $(CHECK_FLAGS) -no-entry-point -target:linux_arm64
