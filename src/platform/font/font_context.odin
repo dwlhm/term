@@ -184,16 +184,14 @@ _rasterize_symbol_fitted :: proc(
 ) -> (draw_w: f32, offset_x: f32) {
 	gw := f32(cell_w * 2 if is_wide else cell_w)
 	max_h := max(1, int(f32(cell_h) * 0.90))
-	max_w := max(int(gw), slot_w - 2)
+	max_w := max(1, min(int(gw), slot_w - 2))
 
 	bmp := font_rasterize_glyph_fitted(r, cp, max_w, max_h)
 	defer if bmp.pixels != nil do delete(bmp.pixels)
 
 	if bmp.width > 0 && bmp.height > 0 && bmp.pixels != nil {
-		actual_w := max(gw, f32(bmp.width))
-		_blit_centered_bitmap(&bmp, dst_pixels, pitch, px, py, slot_w, slot_h, int(actual_w), cell_h)
-		ox := (gw - actual_w) * 0.5
-		return actual_w, ox
+		_blit_centered_bitmap(&bmp, dst_pixels, pitch, px, py, slot_w, slot_h, int(gw), cell_h)
+		return gw, 0.0
 	}
 
 	font_rasterize_glyph_into(r, cp, dst_pixels, pitch, px, py, slot_w, slot_h)
@@ -223,7 +221,7 @@ _rasterize_fallback_fitted :: proc(
 	size := r.metrics.pixel_size * target_h / f32(base_h)
 	size = min(size, r.metrics.pixel_size * ATLAS_FALLBACK_MAX_SCALE)
 
-	max_w := slot_w - 2
+	max_w := max(1, min(center_w, slot_w - 2))
 	ink_w, ink_h, _ := font_measure_glyph_ink(r, cp, size)
 	steps := 0
 	for (ink_w > max_w || ink_h > cell_h) && steps < ATLAS_FALLBACK_FIT_STEPS {
@@ -233,13 +231,11 @@ _rasterize_fallback_fitted :: proc(
 		steps += 1
 	}
 
-	actual_w := max(gw, f32(ink_w))
 	font_rasterize_glyph_sized_into(
 		r, cp, size, dst_pixels, pitch, px, py, slot_w, slot_h,
-		fc.primary_baseline_px, int(actual_w),
+		fc.primary_baseline_px, center_w,
 	)
-	ox := (gw - actual_w) * 0.5
-	return actual_w, ox
+	return gw, 0.0
 }
 
 font_rasterize_codepoint :: proc(
