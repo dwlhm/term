@@ -10,6 +10,7 @@
 - Emoji warna: atlas RGBA8 + pipeline emoji — `src/app/term/emoji_atlas.odin`, `src/core/render/shaders/emoji.wgsl`
 - Grapheme clustering UAX #29 (combining marks, ZWJ emoji, VS16, keycap, RI) — `src/core/terminal/{cell/grapheme.odin, parser/parser.odin, egc/egc.odin}`
 - Clipboard copy UTF-8 + resolusi EGC — `src/app/term/clipboard.odin`
+- TrueColor 24-bit direct color (`38;2` / `48;2`) + VT sanitization (ISO-2022 SCS, DCS, APC, CPR, DSR, DA, OSC 10/11) — `src/core/terminal/` & `src/app/term/`
 
 ---
 
@@ -23,13 +24,8 @@
 - Perbaikan arah: tambah atlas glyph + pipeline teks ke `Chrome_Renderer`, atau render teks via atlas yang sudah ada (`src/core/render/atlas`) + `Glyph_Atlas_Manager`.
 - Verifikasi: jalankan `make term`, buka app, pastikan judul tab & command center (Cmd+K) menampilkan teks.
 
-### A2. TrueColor 24-bit (SGR `38;2` / `48;2`) tidak dirender
-- File: `src/core/terminal/parser/parser.odin` (case `'m'`, sekitar baris 430–460).
-- Parser set `.Has_Direct_Color` tapi membuang nilai r,g,b (tidak menyimpannya).
-- `grid.colors_pool` / `Row.direct_colors` tidak pernah diisi oleh siapapun.
-- Renderer `src/app/term/terminal_view.odin` hanya pakai `color_from_palette_256(cell_val.fg)`.
-- Perbaikan: simpan RGB ke `direct_colors` (perlu API di grid), dan baca di terminal_view saat `.Has_Direct_Color`.
-- Verifikasi: `printf '\e[38;2;255;0;0mTEST\e[0m'` harus merah murni.
+### A2. [RESOLVED] TrueColor 24-bit (SGR `38;2` / `48;2`)
+- Selesai diimplementasikan: RGB direct colors disimpan di row/cell grid, dirender di `terminal_view_render_pane`, dan space cell dengan direct bg tidak di-skip. Verifikasi: `test_parser_truecolor_direct_color` green.
 
 ### A3. Resize kehilangan scrollback & tidak reflow wide char
 - File: `src/core/terminal/grid/grid.odin` (`grid_resize`).
