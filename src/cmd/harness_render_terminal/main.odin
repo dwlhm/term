@@ -421,6 +421,7 @@ Harness_State :: struct {
 	fs4_color_buf:    contract.Gpu_Buffer,
 	strat4_state:     terminal.Strategy_State,
 	last_strat4:      terminal.Render_Strategy,
+	prev_strat4:      terminal.Render_Strategy,
 	last_duration_ns: u64,
 
 	// Controls & PRNG
@@ -596,6 +597,7 @@ _create_shared_pipelines :: proc(h: ^Harness_State) -> bool {
 _rebuild_tile_resources :: proc(
 	h: ^Harness_State,
 	r: ^tile.Compute_Tile_Renderer,
+	color_buf: contract.Gpu_Buffer,
 	cols, rows: u32,
 	pane_w, pane_h: f32,
 ) -> bool {
@@ -649,6 +651,7 @@ _rebuild_tile_resources :: proc(
 		{binding = 4, view = h.atlas.gpu_view, entry_type = .Texture_View},
 		{binding = 5, sampler = r.sampler, entry_type = .Sampler},
 		{binding = 6, view = r.fb_view, entry_type = .Texture_View},
+		{binding = 7, buffer = color_buf, offset = 0, size = 0, entry_type = .Buffer},
 	}
 	r.compute_bind_group = contract.create_bind_group(h.device, h.compute_layout, c_entries)
 
@@ -801,10 +804,10 @@ _update_renderer_limits :: proc(h: ^Harness_State, cols, rows: u32) {
 	for p in 0..<4 {
 		ctx := _get_pane_context(h, p)
 		_rebuild_instance_resources(h, ctx.inst, cols, rows, h.pane_w, h.pane_h)
-		_rebuild_tile_resources(h, ctx.tile, cols, rows, h.pane_w, h.pane_h)
-		contract.write_buffer(h.queue, ctx.tile.lut_buffer, 0, &h.lut_words, size_of(h.lut_words))
 		_rebuild_fullscreen_resources(h, ctx.fs, ctx.color_buf, cols, rows, h.pane_w, h.pane_h)
 		contract.write_buffer(h.queue, ctx.fs.lut_buffer, 0, &h.lut_words, size_of(h.lut_words))
+		_rebuild_tile_resources(h, ctx.tile, ctx.color_buf^, cols, rows, h.pane_w, h.pane_h)
+		contract.write_buffer(h.queue, ctx.tile.lut_buffer, 0, &h.lut_words, size_of(h.lut_words))
 	}
 }
 
@@ -868,15 +871,6 @@ _render_frame :: proc(h: ^Harness_State) {
 	p1_hdr := "[PANE 1: INSTANCE BATCHING (Strategy A)]"
 	p2_hdr := "[PANE 2: COMPUTE TILES (Strategy B)]"
 	p3_hdr := "[PANE 3: FULLSCREEN DIRECT (Strategy C)]"
-
-	strat_name := "INSTANCE"
-	switch h.last_strat4 {
-	case .Instance:      strat_name = "INSTANCE"
-	case .Compute_Tiles: strat_name = "COMPUTE_TILES"
-	case .Fullscreen:    strat_name = "FULLSCREEN"
-	}
-	p4_hdr := fmt.bprintf(status_buf[:], "[PANE 4: DYNAMIC SELECTOR] Pick: %s (%dus)", strat_name, h.last_duration_ns / 1000)
-
 	ctrl_txt := "[Space] Toggle Blast | [R] Resize 80x24 <-> 500x200 | [C] Clear"
 
 	synthetic_terminal_write_text(&h.term1, 0, 1, p1_hdr, 6)
@@ -887,9 +881,6 @@ _render_frame :: proc(h: ^Harness_State) {
 
 	synthetic_terminal_write_text(&h.term3, 0, 1, p3_hdr, 5)
 	synthetic_terminal_write_text(&h.term3, 1, 1, ctrl_txt, 7)
-
-	synthetic_terminal_write_text(&h.term4, 0, 1, p4_hdr, 2)
-	synthetic_terminal_write_text(&h.term4, 1, 1, ctrl_txt, 7)
 
 	// Continuous Data Blasting
 	if h.blasting {
@@ -921,7 +912,7 @@ _render_frame :: proc(h: ^Harness_State) {
 		}
 	}
 
-	// Strategy Decision for Pane 4 via selector.odin
+	// Strategy Decision for Pane 4 via selector.odin (based on workload damage before header stamp)
 	total_cells := int(cols * rows)
 	p4_dirty := int(h.term4.damage.w * h.term4.damage.h)
 	p4_ratio := f32(p4_dirty) / f32(max(total_cells, 1))
@@ -931,12 +922,22 @@ _render_frame :: proc(h: ^Harness_State) {
 		ratio       = p4_ratio,
 		full_rows   = int(h.term4.damage.h) if h.term4.damage.w == cols else 0,
 		span_count  = 1,
-		scroll      = (h.term4.damage.w == cols && h.term4.damage.h == rows),
+		scroll      = (h.term4.damage.w == cols && h.term4.damage.h >= rows - 2),
 	}
 	t_sel_0 := time.tick_now()
 	h.last_strat4 = terminal.strategy_select(inp, &h.strat4_state, true, true)
 	h.last_duration_ns = u64(time.tick_since(t_sel_0))
 	terminal.strategy_record(&h.strat4_state, h.last_strat4, h.last_duration_ns)
+
+	strat_name := "INSTANCE"
+	switch h.last_strat4 {
+	case .Instance:      strat_name = "INSTANCE"
+	case .Compute_Tiles: strat_name = "COMPUTE_TILES"
+	case .Fullscreen:    strat_name = "FULLSCREEN"
+	}
+	p4_hdr := fmt.bprintf(status_buf[:], "[PANE 4: DYNAMIC SELECTOR] Pick: %-13s (%4dus)    ", strat_name, h.last_duration_ns / 1000)
+	synthetic_terminal_write_text(&h.term4, 0, 1, p4_hdr, 2)
+	synthetic_terminal_write_text(&h.term4, 1, 1, ctrl_txt, 7)
 
 	// Command Encoding & Submissions
 	enc := contract.create_command_encoder(h.device)
@@ -990,13 +991,20 @@ _render_frame :: proc(h: ^Harness_State) {
 	// 2. Pane 4 Compute Dispatch (if chosen)
 	dirty_tiles4 := make([dynamic]u32, context.temp_allocator)
 	if h.last_strat4 == .Compute_Tiles {
-		tx_s4 := h.term4.damage.x / h.tile4.tile_w
-		ty_s4 := h.term4.damage.y / h.tile4.tile_h
-		tx_e4 := min((h.term4.damage.x + h.term4.damage.w + h.tile4.tile_w - 1) / h.tile4.tile_w, h.tile4.tiles_x)
-		ty_e4 := min((h.term4.damage.y + h.term4.damage.h + h.tile4.tile_h - 1) / h.tile4.tile_h, h.tile4.tiles_y)
-		for ty in ty_s4..<ty_e4 {
-			for tx in tx_s4..<tx_e4 {
-				append(&dirty_tiles4, ty * h.tile4.tiles_x + tx)
+		full_tile_sync := (h.prev_strat4 != .Compute_Tiles) || (h.frame_counter <= 1)
+		if full_tile_sync {
+			for t_idx in 0..<h.tile4.tile_count {
+				append(&dirty_tiles4, t_idx)
+			}
+		} else {
+			tx_s4 := h.term4.damage.x / h.tile4.tile_w
+			ty_s4 := h.term4.damage.y / h.tile4.tile_h
+			tx_e4 := min((h.term4.damage.x + h.term4.damage.w + h.tile4.tile_w - 1) / h.tile4.tile_w, h.tile4.tiles_x)
+			ty_e4 := min((h.term4.damage.y + h.term4.damage.h + h.tile4.tile_h - 1) / h.tile4.tile_h, h.tile4.tiles_y)
+			for ty in ty_s4..<ty_e4 {
+				for tx in tx_s4..<tx_e4 {
+					append(&dirty_tiles4, ty * h.tile4.tiles_x + tx)
+				}
 			}
 		}
 		if len(dirty_tiles4) > 0 {
@@ -1023,6 +1031,7 @@ _render_frame :: proc(h: ^Harness_State) {
 			tile.compute_tile_dispatch(&h.tile4, enc, u32(len(dirty_tiles4)))
 		}
 	}
+	h.prev_strat4 = h.last_strat4
 
 	// Retrieve Backing Layers
 	l1 := pipeline.composer_pipeline_get_layer(&h.composer_pipe, 1)

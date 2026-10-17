@@ -209,13 +209,13 @@ fn fullscreen_fs_main(input: Fullscreen_Output) -> @location(0) vec4<f32> {
         let fg_argb = colors[ci * COLOR_WORDS_PER_CELL];
         let bg_argb = colors[ci * COLOR_WORDS_PER_CELL + 1u];
         has_direct_bg = bg_argb != 0u;
-        if (fg_argb != 0u) {
+        if (fg_argb != 0u && !cell_is_selected(cflags)) {
             fg_rgb = unpack_argb(fg_argb).rgb;
         } else {
             let fg_packed = select(lut_fg(style), lut_selection_fg(), cell_is_selected(cflags));
             fg_rgb = r5g6b5_to_rgb(fg_packed);
         }
-        if (bg_argb != 0u) {
+        if (bg_argb != 0u && !cell_is_selected(cflags)) {
             bg_rgb = unpack_argb(bg_argb).rgb;
         } else {
             let bg_packed = select(lut_bg(style), lut_selection_bg(), cell_is_selected(cflags));
@@ -257,8 +257,18 @@ fn fullscreen_fs_main(input: Fullscreen_Output) -> @location(0) vec4<f32> {
                         su = i32(nslot);
                     }
                     if (su >= 0) {
-                        let nfg_packed = select(lut_fg(nstyle), lut_selection_fg(), cell_is_selected(ncflags));
-                        let fg_rgb = r5g6b5_to_rgb(nfg_packed);
+                        var n_fg_rgb: vec3<f32>;
+                        if ((ncflags & CELL_FLAG_DIRECT_COLOR) != 0u && !cell_is_selected(ncflags)) {
+                            let nfg_argb = colors[ni * COLOR_WORDS_PER_CELL];
+                            if (nfg_argb != 0u) {
+                                n_fg_rgb = unpack_argb(nfg_argb).rgb;
+                            } else {
+                                n_fg_rgb = r5g6b5_to_rgb(lut_fg(nstyle));
+                            }
+                        } else {
+                            let nfg_packed = select(lut_fg(nstyle), lut_selection_fg(), cell_is_selected(ncflags));
+                            n_fg_rgb = r5g6b5_to_rgb(nfg_packed);
+                        }
                         let gw = params.cell_w * 2.0;
                         let uvs = slot_uv(u32(su), gw);
                         let fx = (input.clip_position.x - (x0 - params.cell_w)) / gw;
@@ -270,7 +280,7 @@ fn fullscreen_fs_main(input: Fullscreen_Output) -> @location(0) vec4<f32> {
                                 atlas_texture, atlas_sampler,
                                 vec2<f32>(u, v), 0.0).r;
                             if (alpha >= 0.01) {
-                                col = mix(col, fg_rgb, alpha);
+                                col = mix(col, n_fg_rgb, alpha);
                                 glyph_coverage = alpha;
                             }
                         }
