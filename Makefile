@@ -107,6 +107,13 @@ test-e2e:
 	$(ODIN) build src/cmd/test_e2e_real -out:$(OUT_DIR)/test_e2e_real $(DEBUG_FLAGS) $(COMMON_FLAGS)
 	./$(OUT_DIR)/test_e2e_real
 
+video-player:
+	@mkdir -p $(OUT_DIR)
+	swiftc -O scripts/term_video_player.swift -o $(OUT_DIR)/term_video_player
+
+stress-video: term video-player
+	./$(OUT_DIR)/term -e "./$(OUT_DIR)/term_video_player --plasma --fps 60 --duration 10"
+
 demo:
 	@mkdir -p $(OUT_DIR)
 	$(ODIN) build src/cmd/demo_session -out:$(OUT_DIR)/demo_session $(DEBUG_FLAGS) $(COMMON_FLAGS)
