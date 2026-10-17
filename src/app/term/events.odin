@@ -74,7 +74,11 @@ app_handle_mouse_button_down :: proc(app: ^Term_App, ev: sdl3.MouseButtonEvent) 
 	for &p in app.mux.panes {
 		if mouse_is_in_rect({mx, my}, p.rect) {
 			mux_feat.multiplexer_focus_pane(&app.mux, p.id)
-			mouse_on_button_down(&app.mouse, {mx, my}, u8(ev.button), p.id, p.rect, int(ev.clicks))
+			scroll_off := p.session.scroll_offset if p.session != nil else 0
+			mods := sdl3.GetModState()
+			is_shift := (mods & sdl3.KMOD_SHIFT) != sdl3.KMOD_NONE
+			is_alt   := (mods & sdl3.KMOD_ALT)   != sdl3.KMOD_NONE
+			mouse_on_button_down(&app.mouse, {mx, my}, u8(ev.button), p.id, p.rect, p.session, scroll_off, int(ev.clicks), is_shift, is_alt)
 			break
 		}
 	}
@@ -121,6 +125,9 @@ app_handle_mouse_wheel :: proc(app: ^Term_App, ev: sdl3.MouseWheelEvent) {
 			// In normal screen (shell CLI output), scroll viewport into scrollback history
 			max_history := sess.term.grid.history_count
 			sess.scroll_offset = clamp(sess.scroll_offset + lines, 0, max_history)
+			if app.mouse.is_down && app.mouse.button == sdl3.BUTTON_LEFT {
+				mouse_on_motion(&app.mouse, app.mouse.pos, target_pane.rect, sess, sess.scroll_offset)
+			}
 		}
 	}
 }
@@ -131,6 +138,9 @@ app_handle_text_input :: proc(app: ^Term_App, text: string) {
 	} else {
 		p := mux_feat.multiplexer_get_focused_pane(&app.mux)
 		if p != nil && p.session != nil {
+			if app.mouse.selection.active {
+				mouse_clear_selection(&app.mouse)
+			}
 			p.session.scroll_offset = 0 // Auto-scroll to bottom on input
 			sess_feat.session_write_string(p.session, text)
 		}
@@ -144,14 +154,39 @@ app_handle_key_down :: proc(app: ^Term_App, ev: sdl3.KeyboardEvent) {
 		if handled do return
 	}
 
+	// Escape clears text selection if active
+	if ev.key == sdl3.K_ESCAPE && app.mouse.selection.active {
+		mouse_clear_selection(&app.mouse)
+		return
+	}
+
+	is_shift := (ev.mod & sdl3.KMOD_SHIFT) != sdl3.KMOD_NONE
+
+	// If text selection is active, pressing an unshifted arrow key deselects
+	if app.mouse.selection.active && !is_shift {
+		switch ev.key {
+		case sdl3.K_LEFT, sdl3.K_RIGHT, sdl3.K_UP, sdl3.K_DOWN:
+			mouse_clear_selection(&app.mouse)
+		}
+	}
+
 	act, ok := keymap_evaluate(ev.key, ev.mod)
+	p := mux_feat.multiplexer_get_focused_pane(&app.mux)
+
+	// In alternate screen (e.g. vim), allow Shift+Arrow to stream to application instead of GUI selection
+	if ok && p != nil && p.session != nil && p.session.term.parser.in_alt_screen && is_selection_action(act) {
+		ok = false
+	}
+
 	if ok {
 		app_execute_action(app, act)
 	} else {
 		res, encoded := input_encode_key(ev.key, ev.mod)
 		if encoded {
-			p := mux_feat.multiplexer_get_focused_pane(&app.mux)
 			if p != nil && p.session != nil {
+				if app.mouse.selection.active {
+					mouse_clear_selection(&app.mouse)
+				}
 				p.session.scroll_offset = 0 // Auto-scroll to bottom on input
 				_, _ = sess_feat.session_write(p.session, res.bytes[:res.len])
 			}
@@ -176,7 +211,9 @@ app_process_events :: proc(app: ^Term_App) -> (dirty: bool) {
 			app.layout.mouse_y = f32(ev.motion.y) * ratio
 			pane := mux_feat.multiplexer_get_focused_pane(&app.mux)
 			pane_rect := pane.rect if pane != nil else [4]f32{0, 0, 0, 0}
-			mouse_on_motion(&app.mouse, {f32(ev.motion.x) * ratio, f32(ev.motion.y) * ratio}, pane_rect)
+			sess := pane.session if pane != nil else nil
+			scroll_off := sess.scroll_offset if sess != nil else 0
+			mouse_on_motion(&app.mouse, {f32(ev.motion.x) * ratio, f32(ev.motion.y) * ratio}, pane_rect, sess, scroll_off)
 		case .MOUSE_BUTTON_DOWN:
 			app_handle_mouse_button_down(app, ev.button)
 		case .MOUSE_BUTTON_UP:

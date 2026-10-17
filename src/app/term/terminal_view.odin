@@ -146,6 +146,7 @@ terminal_view_destroy :: proc(tv: ^Terminal_View) {
 terminal_view_render_pane :: proc(
 	tv: ^Terminal_View,
 	sess: ^sess_feat.Terminal_Session,
+	pane_id: u32,
 	pane_rect: [4]f32,
 	is_focused: bool,
 	mouse: ^Mouse_State,
@@ -217,8 +218,9 @@ terminal_view_render_pane :: proc(
 				fg, bg = bg, fg
 			}
 
-			// Active selection highlight
-			if mouse != nil && mouse.selection.active && selection_contains_cell(mouse.selection, r, c) {
+			// Active selection highlight (dynamically attached to buffer logical row)
+			cell_logical_r := r - sess.scroll_offset
+			if mouse != nil && mouse.selection.active && mouse.selection.pane_id == pane_id && selection_contains_cell(mouse.selection, cell_logical_r, c) {
 				fg = {1.0, 1.0, 1.0, 1.0}
 				bg = COLOR_SELECTION_BG
 			}

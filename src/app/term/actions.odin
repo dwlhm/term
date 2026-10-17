@@ -9,15 +9,18 @@ import chrome_splits "../../core/chrome/splits"
 import tabs_feat "../../features/tabs"
 import mux_feat "../../features/multiplexer"
 import sess_feat "../../features/session"
-import terminal "../../core/terminal"
 import terminal_grid "../../core/terminal/grid"
 
-// app_bind_session_extensions attaches OSC callbacks (e.g. OSC 52 clipboard)
-// to a freshly spawned terminal pane.
+_app_osc_52_sink :: proc(user_data: rawptr, text: string) -> bool {
+	cb := (^Clipboard_Bridge)(user_data)
+	return clipboard_set_text_guarded(cb, text)
+}
+
+// app_bind_session_extensions attaches decoupled clipboard sink to terminal sessions.
 app_bind_session_extensions :: proc(app: ^Term_App, p_id: u32) {
 	p := mux_feat.multiplexer_get_pane(&app.mux, p_id)
 	if p != nil && p.session != nil {
-		terminal.terminal_register_osc(&p.session.term, 52, osc_52_handler, rawptr(&app.clipboard))
+		sess_feat.session_set_clipboard_sink(p.session, _app_osc_52_sink, rawptr(&app.clipboard))
 	}
 }
 
@@ -123,7 +126,23 @@ app_execute_action :: proc(app: ^Term_App, act: Action_Id) {
 	case .Clipboard_Paste:
 		p := mux_feat.multiplexer_get_focused_pane(&app.mux)
 		if p != nil && p.session != nil {
+			if app.mouse.selection.active {
+				mouse_clear_selection(&app.mouse)
+			}
 			_ = clipboard_paste(&app.clipboard, p.session)
+		}
+
+	case .Select_All:
+		p := mux_feat.multiplexer_get_focused_pane(&app.mux)
+		if p != nil && p.session != nil {
+			mouse_select_all(&app.mouse, p.id, p.session)
+		}
+
+	case .Select_Left, .Select_Right, .Select_Up, .Select_Down,
+	     .Select_Word_Left, .Select_Word_Right, .Select_Line_Start, .Select_Line_End:
+		p := mux_feat.multiplexer_get_focused_pane(&app.mux)
+		if p != nil && p.session != nil {
+			mouse_keyboard_select(&app.mouse, p.id, p.session, act)
 		}
 
 	case .Scroll_Page_Up:

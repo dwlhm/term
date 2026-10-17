@@ -38,6 +38,14 @@ Action_Id :: enum {
 	Clipboard_Copy,
 	Clipboard_Paste,
 	Select_All,
+	Select_Left,
+	Select_Right,
+	Select_Up,
+	Select_Down,
+	Select_Word_Left,
+	Select_Word_Right,
+	Select_Line_Start,
+	Select_Line_End,
 	Font_Zoom_In,
 	Font_Zoom_Out,
 	Font_Zoom_Reset,
@@ -71,6 +79,14 @@ ACTION_CATALOG := []Action_Metadata{
 	{.Clipboard_Copy,        "Copy Text",                  "⌘C",       "Copy selected text"},
 	{.Clipboard_Paste,       "Paste Text",                 "⌘V",       "Paste text into terminal"},
 	{.Select_All,            "Select All Text",            "⌘A",       "Select all terminal text"},
+	{.Select_Left,           "Select Character Left",      "⇧←",       "Expand selection left"},
+	{.Select_Right,          "Select Character Right",     "⇧→",       "Expand selection right"},
+	{.Select_Up,             "Select Line Up",             "⇧↑",       "Expand selection up"},
+	{.Select_Down,           "Select Line Down",           "⇧↓",       "Expand selection down"},
+	{.Select_Word_Left,      "Select Word Left",           "⇧⌥←",      "Expand selection word left"},
+	{.Select_Word_Right,     "Select Word Right",          "⇧⌥→",      "Expand selection word right"},
+	{.Select_Line_Start,     "Select to Line Start",       "⇧⌘←",      "Expand selection to line start"},
+	{.Select_Line_End,       "Select to Line End",         "⇧⌘→",      "Expand selection to line end"},
 	{.Font_Zoom_In,          "Zoom In Font",               "⌘+",       "Increase terminal text size"},
 	{.Font_Zoom_Out,         "Zoom Out Font",              "⌘-",       "Decrease terminal text size"},
 	{.Font_Zoom_Reset,       "Reset Font Zoom",            "⌘0",       "Reset terminal text size"},
@@ -103,6 +119,8 @@ keymap_evaluate :: proc(key: sdl3.Keycode, mod: sdl3.Keymod) -> (Action_Id, bool
 			case sdl3.K_LEFTBRACKET:        return .Tab_Prev, true
 			case sdl3.K_R:                  return .App_Reload_Config, true
 			case sdl3.K_PLUS, sdl3.K_EQUALS: return .Font_Zoom_In, true
+			case sdl3.K_LEFT:               return .Select_Line_Start, true
+			case sdl3.K_RIGHT:              return .Select_Line_End, true
 			}
 		} else if is_ctrl {
 			switch key {
@@ -133,6 +151,24 @@ keymap_evaluate :: proc(key: sdl3.Keycode, mod: sdl3.Keymod) -> (Action_Id, bool
 			case sdl3.K_9:                  return .Tab_Select_9, true
 			case sdl3.K_Q:                  return .App_Quit, true
 			}
+		}
+	}
+
+	// macOS / Universal Option + Shift word navigation shortcuts
+	if is_alt && is_shift && !is_cmd && !is_ctrl {
+		switch key {
+		case sdl3.K_LEFT:  return .Select_Word_Left, true
+		case sdl3.K_RIGHT: return .Select_Word_Right, true
+		}
+	}
+
+	// Plain Shift + Arrow selection shortcuts
+	if is_shift && !is_cmd && !is_ctrl && !is_alt {
+		switch key {
+		case sdl3.K_LEFT:  return .Select_Left, true
+		case sdl3.K_RIGHT: return .Select_Right, true
+		case sdl3.K_UP:    return .Select_Up, true
+		case sdl3.K_DOWN:  return .Select_Down, true
 		}
 	}
 
@@ -171,3 +207,14 @@ keymap_evaluate :: proc(key: sdl3.Keycode, mod: sdl3.Keymod) -> (Action_Id, bool
 
 	return .None, false
 }
+
+is_selection_action :: proc(act: Action_Id) -> bool {
+	#partial switch act {
+	case .Select_Left, .Select_Right, .Select_Up, .Select_Down,
+	     .Select_Word_Left, .Select_Word_Right, .Select_Line_Start, .Select_Line_End:
+		return true
+	case:
+		return false
+	}
+}
+
