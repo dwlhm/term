@@ -78,7 +78,7 @@ terminal_resize :: proc(t: ^Terminal, new_rows, new_cols: int) {
 	if t == nil || (new_rows == t.rows && new_cols == t.cols) do return
 	t.rows = max(1, new_rows)
 	t.cols = max(1, new_cols)
-	grid.grid_resize(&t.grid, &t.damage, t.rows, t.cols)
+	grid.grid_resize(&t.grid, &t.damage, t.rows, t.cols, &t.parser.cursor.row, &t.parser.cursor.col, &t.parser.cursor.pending_wrap)
 	t.parser.cursor.row = clamp(t.parser.cursor.row, 0, t.rows - 1)
 	t.parser.cursor.col = clamp(t.parser.cursor.col, 0, t.cols - 1)
 	t.parser.scroll_top = clamp(t.parser.scroll_top, 0, t.rows - 1)

@@ -347,28 +347,13 @@ grid_scroll_down :: proc(
 	return actual
 }
 
-grid_resize :: proc(g: ^Grid, d: ^damage.Damage_Tracker, new_rows, new_cols: int) {
-	if g == nil || (new_rows == g.row_count && new_cols == g.col_count) do return
-
-	old := g^
-	grid_init(g, new_rows, new_cols, old.allocator)
-
-	// Copy existing visible cells up to min dimensions
-	min_r := min(old.row_count, new_rows)
-	min_c := min(old.col_count, new_cols)
-	for r in 0..<min_r {
-		old_phys := grid_physical_row(&old, r)
-		new_phys := grid_physical_row(g, r)
-		copy(g.rows[new_phys].cells[:min_c], old.rows[old_phys].cells[:min_c])
-		copy(g.rows[new_phys].direct_colors[:min_c], old.rows[old_phys].direct_colors[:min_c])
-		g.rows[new_phys].generation = 1
-	}
-
-	grid_destroy(&old)
-
-	if d != nil {
-		damage.damage_destroy(d)
-		damage.damage_init(d, new_rows, new_cols, g.allocator)
-		damage.damage_mark_all(d, 1)
-	}
+grid_resize :: proc(
+	g: ^Grid,
+	d: ^damage.Damage_Tracker,
+	new_rows, new_cols: int,
+	cursor_row: ^int = nil,
+	cursor_col: ^int = nil,
+	cursor_pending_wrap: ^bool = nil,
+) {
+	grid_resize_reflow(g, d, new_rows, new_cols, cursor_row, cursor_col, cursor_pending_wrap)
 }

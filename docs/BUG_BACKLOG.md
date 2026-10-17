@@ -27,11 +27,8 @@
 ### A2. [RESOLVED] TrueColor 24-bit (SGR `38;2` / `48;2`)
 - Selesai diimplementasikan: RGB direct colors disimpan di row/cell grid, dirender di `terminal_view_render_pane`, dan space cell dengan direct bg tidak di-skip. Verifikasi: `test_parser_truecolor_direct_color` green.
 
-### A3. Resize kehilangan scrollback & tidak reflow wide char
-- File: `src/core/terminal/grid/grid.odin` (`grid_resize`).
-- `grid_resize` membuat grid baru (`history_count=0`), hanya copy sel visible, tidak reflow karakter lebar.
-- Referensi: `legacy/src/terminal/resize.odin` (reflow + preserve history).
-- Verifikasi: buka app, scroll ke atas (history), resize window → history harus tetap ada.
+### A3. [RESOLVED] Resize scrollback & line reflow (baris baru / unwrap)
+- Selesai diimplementasikan: `grid_resize_reflow` di `src/core/terminal/grid/grid_reflow.odin`, reflow baris saat cols berubah (wrap baris baru atau unwrap), sanitasi boundary karakter lebar, tracking kursor, preservasi history scrollback, dan penanganan event resize `WINDOW_PIXEL_SIZE_CHANGED`, `WINDOW_RESIZED`, `WINDOW_EXPOSED` dengan konfigurasi surface/metal layer 1:1 tanpa distorsi/stretching. Verifikasi: 5 unit test di `test_terminal_resize_*` green.
 
 ### A4. OSC 52 (set clipboard remote) tidak terpasang di session
 - File: `src/features/session/session.odin` (`session_create`) — hanya register OSC 0/2/7/133.

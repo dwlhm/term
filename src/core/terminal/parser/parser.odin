@@ -120,6 +120,10 @@ parser_parse_byte :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, 
 			p.cursor.col = 0
 			p.cursor.pending_wrap = false
 		case '\n', 0x0B, 0x0C: // Line Feed, VT, FF
+			phys := grid.grid_physical_row(g, p.cursor.row)
+			if phys >= 0 && phys < len(g.rows) {
+				g.rows[phys].wrap = false
+			}
 			if p.cursor.row == p.scroll_bottom {
 				erase_c, erase_dc := _parser_erase_cell(p)
 				grid.grid_scroll_up(g, d, p.scroll_top, p.scroll_bottom, 1, erase_c, erase_dc)

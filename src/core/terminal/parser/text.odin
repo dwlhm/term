@@ -17,6 +17,10 @@ _parser_erase_cell :: proc(p: ^Parser) -> (c: cell.Semantic_Cell, dc: cell.Direc
 
 _parser_apply_pending_wrap :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker) {
 	if !p.cursor.pending_wrap do return
+	phys := grid.grid_physical_row(g, p.cursor.row)
+	if phys >= 0 && phys < len(g.rows) {
+		g.rows[phys].wrap = true
+	}
 	p.cursor.col = 0
 	if p.cursor.row == p.scroll_bottom {
 		erase_c, erase_dc := _parser_erase_cell(p)
@@ -151,6 +155,10 @@ _parser_put_char :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, c
 	}
 
 	if p.cursor.pending_wrap || (w == 2 && p.cursor.col >= g.col_count - 1) {
+		phys := grid.grid_physical_row(g, p.cursor.row)
+		if phys >= 0 && phys < len(g.rows) {
+			g.rows[phys].wrap = true
+		}
 		p.cursor.col = 0
 		if p.cursor.row == p.scroll_bottom {
 			erase_c, erase_dc := _parser_erase_cell(p)
