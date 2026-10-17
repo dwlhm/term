@@ -23,7 +23,7 @@ Pty_Config :: struct {
 	cols:  int,
 }
 
-PTY_RING_CAPACITY :: 65536 // 64 KiB ring buffer
+PTY_RING_CAPACITY :: 2 * 1024 * 1024 // 2 MiB lock-free/low-contention ring buffer
 
 Pty_Ring_Buffer :: struct {
 	buf:   [PTY_RING_CAPACITY]u8,
@@ -56,18 +56,26 @@ ring_write :: proc(r: ^Pty_Ring_Buffer, data: []u8) -> int {
 	sync.mutex_lock(&r.mutex)
 	defer sync.mutex_unlock(&r.mutex)
 
-	written := 0
+	to_write := len(data)
+	if to_write >= PTY_RING_CAPACITY {
+		// If incoming chunk exceeds whole ring, only keep the newest ring capacity
+		data_slice := data[to_write - (PTY_RING_CAPACITY - 1):]
+		return _ring_write_locked(r, data_slice)
+	}
+	return _ring_write_locked(r, data)
+}
+
+@(private = "file")
+_ring_write_locked :: proc(r: ^Pty_Ring_Buffer, data: []u8) -> int {
 	for b in data {
 		next_head := (r.head + 1) % PTY_RING_CAPACITY
 		if next_head == r.tail {
-			// Buffer full: drop or advance tail (drop oldest)
 			r.tail = (r.tail + 1) % PTY_RING_CAPACITY
 		}
 		r.buf[r.head] = b
 		r.head = next_head
-		written += 1
 	}
-	return written
+	return len(data)
 }
 
 ring_read :: proc(r: ^Pty_Ring_Buffer, out: []u8) -> int {

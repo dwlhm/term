@@ -7,22 +7,23 @@ import pty "../"
 
 @test
 test_ring_buffer :: proc(t: ^testing.T) {
-	ring: pty.Pty_Ring_Buffer
-	pty.ring_init(&ring)
+	ring := new(pty.Pty_Ring_Buffer)
+	defer free(ring)
+	pty.ring_init(ring)
 
 	data := []u8{'H', 'E', 'L', 'L', 'O'}
-	written := pty.ring_write(&ring, data)
+	written := pty.ring_write(ring, data)
 	testing.expect_value(t, written, 5)
 
-	avail := pty.ring_available(&ring)
+	avail := pty.ring_available(ring)
 	testing.expect_value(t, avail, 5)
 
 	out: [10]u8
-	read_n := pty.ring_read(&ring, out[:])
+	read_n := pty.ring_read(ring, out[:])
 	testing.expect_value(t, read_n, 5)
 	testing.expect_value(t, string(out[:read_n]), "HELLO")
 
-	testing.expect_value(t, pty.ring_available(&ring), 0)
+	testing.expect_value(t, pty.ring_available(ring), 0)
 }
 
 @test

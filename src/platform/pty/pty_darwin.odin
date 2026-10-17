@@ -53,10 +53,6 @@ _pty_spawn_platform :: proc(config: Pty_Config) -> (handle: ^Pty_Handle, err: Pt
 		return nil, .Master_Open_Failed
 	}
 
-	// Set non-blocking on master
-	fl := posix.fcntl(posix.FD(master), .GETFL)
-	_ = posix.fcntl(posix.FD(master), .SETFL, fl | c.int(posix.O_NONBLOCK))
-
 	pid := posix.fork()
 	if pid < 0 {
 		posix.close(posix.FD(master))
@@ -117,10 +113,10 @@ _pty_spawn_platform :: proc(config: Pty_Config) -> (handle: ^Pty_Handle, err: Pt
 	h.exit_code = 0
 	ring_init(&h.ring)
 
-	// Spawn background drain thread
+	// Spawn background drain thread with 64KB read buffer on blocking PTY master
 	h.drain_thread = thread.create_and_start_with_data(rawptr(h), proc(data: rawptr) {
 		handle := (^Pty_Handle)(data)
-		buf: [4096]u8
+		buf: [65536]u8
 
 		for handle.is_running {
 			n := posix.read(posix.FD(handle.master_fd), &buf[0], len(buf))
@@ -131,11 +127,10 @@ _pty_spawn_platform :: proc(config: Pty_Config) -> (handle: ^Pty_Handle, err: Pt
 				break
 			} else {
 				err_no := posix.errno()
-				if err_no == .EAGAIN || err_no == .EINTR {
-					posix.nanosleep(&posix.timespec{tv_nsec = 1_000_000}, nil) // 1ms sleep
+				if err_no == .EINTR {
 					continue
 				}
-				// EIO or other terminal hangup
+				// EIO (slave closed) or other terminal hangup
 				break
 			}
 		}
@@ -154,15 +149,17 @@ _pty_close_platform :: proc(h: ^Pty_Handle) {
 	if h == nil do return
 	h.is_running = false
 
+	// First terminate child process so slave end closes and master unblocks from read
+	if h.child_pid > 0 {
+		_ = posix.kill(posix.pid_t(h.child_pid), .SIGHUP)
+		_ = posix.kill(posix.pid_t(h.child_pid), .SIGKILL)
+		status: c.int = 0
+		_ = posix.waitpid(posix.pid_t(h.child_pid), &status, {.NOHANG})
+	}
+
 	if h.master_fd >= 0 {
 		posix.close(posix.FD(h.master_fd))
 		h.master_fd = -1
-	}
-
-	if h.child_pid > 0 {
-		_ = posix.kill(posix.pid_t(h.child_pid), .SIGHUP)
-		status: c.int = 0
-		_ = posix.waitpid(posix.pid_t(h.child_pid), &status, {.NOHANG})
 	}
 
 	if h.drain_thread != nil {
