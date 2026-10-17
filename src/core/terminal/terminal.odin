@@ -53,8 +53,16 @@ terminal_destroy :: proc(t: ^Terminal) {
 	grid.grid_destroy(&t.grid)
 	damage.damage_destroy(&t.damage)
 	extension.registry_destroy(&t.extensions)
+	egc.egc_pool_init(&t.egc_pool)
 	t.rows = 0
 	t.cols = 0
+}
+
+terminal_reset :: proc(t: ^Terminal) {
+	if t == nil do return
+	grid.grid_clear_all(&t.grid, &t.damage)
+	egc.egc_pool_init(&t.egc_pool)
+	parser.parser_reset(&t.parser, t.rows, t.cols)
 }
 
 terminal_feed_bytes :: proc(t: ^Terminal, data: []u8) {
@@ -82,9 +90,115 @@ terminal_get_cell :: proc(t: ^Terminal, row, col: int) -> cell.Semantic_Cell {
 	return grid.grid_get_cell(&t.grid, row, col)
 }
 
+terminal_get_direct_color :: proc(t: ^Terminal, row, col: int) -> cell.Direct_Color {
+	if t == nil do return {}
+	return grid.grid_get_direct_color(&t.grid, row, col)
+}
+
+terminal_get_row :: proc(t: ^Terminal, logical_row: int) -> ^grid.Row {
+	if t == nil do return nil
+	return grid.grid_get_row(&t.grid, logical_row)
+}
+
+terminal_physical_row :: proc(t: ^Terminal, logical_row: int) -> int {
+	if t == nil do return 0
+	return grid.grid_physical_row(&t.grid, logical_row)
+}
+
 terminal_consume_damage :: proc(t: ^Terminal) -> damage.Damage_Journal {
 	if t == nil do return damage.Damage_Journal{has_damage = false}
 	return damage.damage_consume(&t.damage)
+}
+
+terminal_get_egc_runes :: proc(t: ^Terminal, char_or_index: rune) -> []rune {
+	if t == nil do return nil
+	idx := int(char_or_index - egc.EGC_INDEX_BASE) if char_or_index >= egc.EGC_INDEX_BASE else int(char_or_index)
+	if idx < 0 || idx >= egc.MAX_EGC_ENTRIES do return nil
+	return egc.egc_pool_get(&t.egc_pool, idx)
+}
+
+terminal_cursor_pos :: proc(t: ^Terminal) -> (row, col: int) {
+	if t == nil do return 0, 0
+	return t.parser.cursor.row, t.parser.cursor.col
+}
+
+terminal_cursor_style :: proc(t: ^Terminal) -> (shape: parser.Cursor_Shape, blinking, visible: bool) {
+	if t == nil do return .Block, false, false
+	return t.parser.cursor.shape, t.parser.cursor.blinking, t.parser.cursor.visible
+}
+
+terminal_cursor_direct_color :: proc(t: ^Terminal) -> cell.Direct_Color {
+	if t == nil do return {}
+	return t.parser.cursor.direct_color
+}
+
+terminal_cursor_active_bg :: proc(t: ^Terminal) -> u8 {
+	if t == nil do return 0
+	return t.parser.cursor.active_bg
+}
+
+terminal_cursor_active_fg :: proc(t: ^Terminal) -> u8 {
+	if t == nil do return 0
+	return t.parser.cursor.active_fg
+}
+
+terminal_in_alt_screen :: proc(t: ^Terminal) -> bool {
+	if t == nil do return false
+	return t.parser.in_alt_screen
+}
+
+terminal_cursor_key_mode :: proc(t: ^Terminal) -> bool {
+	if t == nil do return false
+	return t.parser.cursor_key_mode
+}
+
+terminal_history_count :: proc(t: ^Terminal) -> int {
+	if t == nil do return 0
+	return t.grid.history_count
+}
+
+terminal_clear_history :: proc(t: ^Terminal) {
+	if t == nil do return
+	grid.grid_clear_history(&t.grid)
+}
+
+terminal_sample_bg :: proc(t: ^Terminal, scroll_offset: int = 0) -> (dc: cell.Direct_Color, palette_idx: u8, found: bool) {
+	if t == nil || t.rows <= 0 || t.cols <= 0 do return {}, 0, false
+
+	mid_r := t.rows / 2
+	mid_c := t.cols / 2
+	probe_points := [4][2]int{
+		{mid_r, mid_c},  // Dead center of TUI canvas
+		{0, 0},          // Top left
+		{1, 0},          // Second row left (below header)
+		{t.rows - 1, 0}, // Bottom row left (statusline or command line)
+	}
+
+	for pt in probe_points {
+		r := pt[0]
+		c := pt[1]
+		if r < 0 || r >= t.rows || c < 0 || c >= t.cols do continue
+		row := terminal_get_row(t, r - scroll_offset)
+		if row == nil || c >= len(row.cells) do continue
+
+		cell_val := row.cells[c]
+		if .Has_Direct_Color in cell_val.flags && c < len(row.direct_colors) && row.direct_colors[c].has_bg {
+			return row.direct_colors[c], 0, true
+		}
+		if cell_val.bg != 0 {
+			return {}, cell_val.bg, true
+		}
+	}
+
+	// Parser active background if cursor has bg
+	if t.parser.cursor.direct_color.has_bg {
+		return t.parser.cursor.direct_color, 0, true
+	}
+	if t.parser.cursor.active_bg != 0 {
+		return {}, t.parser.cursor.active_bg, true
+	}
+
+	return {}, 0, false
 }
 
 terminal_register_osc :: proc(t: ^Terminal, osc_id: int, handler: extension.Osc_Handler_Proc, user_data: rawptr = nil) -> bool {

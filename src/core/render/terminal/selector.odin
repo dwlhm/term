@@ -1,4 +1,4 @@
-package terminal
+package render_terminal
 
 // Terminal Content Pillar - Online Adaptive Strategy Selector.
 //

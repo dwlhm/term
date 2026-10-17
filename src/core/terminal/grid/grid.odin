@@ -94,6 +94,13 @@ grid_destroy :: proc(g: ^Grid) {
 	g.history_count = 0
 }
 
+grid_get_row :: proc(g: ^Grid, row: int) -> ^Row {
+	if g == nil || row < -g.history_count || row >= g.row_count do return nil
+	phys := grid_physical_row(g, row)
+	if phys < 0 || phys >= len(g.rows) do return nil
+	return &g.rows[phys]
+}
+
 grid_get_cell :: proc(g: ^Grid, row, col: int) -> cell.Semantic_Cell {
 	if g == nil || row < -g.history_count || row >= g.row_count || col < 0 || col >= g.col_count {
 		return cell.CELL_DEFAULT
@@ -169,6 +176,10 @@ grid_clear_line :: proc(
 	for c in c_start..<c_end {
 		r.cells[c] = fill
 		r.direct_colors[c] = dc
+	}
+	if c_start == 0 && c_end >= g.col_count {
+		r.wrap = false
+		r.is_prompt = false
 	}
 	r.generation += 1
 	if d != nil {
