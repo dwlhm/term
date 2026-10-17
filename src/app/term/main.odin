@@ -10,7 +10,9 @@ import "core:time"
 
 import plat_win "../../platform/window"
 import plat_clip "../../platform/clipboard"
+import plat_font "../../platform/font"
 import contract "../../core/render/contract"
+import damage "../../core/terminal/damage"
 import wgpu_backend "../../platform/gpu/wgpu"
 import tabs_feat "../../features/tabs"
 import mux_feat "../../features/multiplexer"
@@ -29,11 +31,10 @@ Term_App :: struct {
 	running:       bool,
 	time_elapsed:  f32,
 
-	layout:        Layout_State,
-	font_ctx:      Font_Context,
-	glyph_atlas:   Glyph_Atlas_Manager,
-	emoji_atlas:   Emoji_Atlas_Manager,
-	term_view:     Terminal_View,
+	layout:            Layout_State,
+	text_atlas:        plat_font.Text_Atlas,
+	current_font_size: f32,
+	term_view:         Terminal_View,
 	chrome_view:   Chrome_View,
 	composer:      Composer_View,
 	mouse:         Mouse_State,
@@ -56,7 +57,8 @@ app_init :: proc(app: ^Term_App, initial_cmd: string = "") -> bool {
 
 	plat_win.window_update_pixel_size(&app.window)
 	scale := app.window.pixel_ratio
-	layout_init(&app.layout, scale)
+	pad_x, pad_y := config_resolve_padding(&app.config)
+	layout_init(&app.layout, scale, pad_x, pad_y)
 
 	// In high-DPI (Retina), render surface and composition textures use full backing pixels
 	app.layout.screen_w = f32(app.window.pixel_w)
@@ -70,20 +72,16 @@ app_init :: proc(app: ^Term_App, initial_cmd: string = "") -> bool {
 
 	contract.configure_surface(app.surface, app.device, app.format, u32(app.layout.screen_w), u32(app.layout.screen_h))
 
-	// Initialize font context with DPI-scaled pixel size
+	// Initialize text atlas with DPI-scaled pixel size
 	base_font_size := config_resolve_effective_font_size(&app.config)
+	app.current_font_size = base_font_size
 	font_size := base_font_size * scale
-	font_context_init(&app.font_ctx, font_size)
-	if app.font_ctx.has_font && app.font_ctx.rasterizer.metrics.cell_width > 0 {
-		app.layout.metrics.cell_w = app.font_ctx.rasterizer.metrics.cell_width
-		app.layout.metrics.cell_h = app.font_ctx.rasterizer.metrics.cell_height
-	}
-	if !glyph_atlas_init(&app.glyph_atlas, &app.font_ctx) do return false
-	if !glyph_atlas_upload(&app.glyph_atlas, app.device, app.queue) do return false
-	if !emoji_atlas_init(&app.emoji_atlas, font_size) do return false
-	if !emoji_atlas_upload(&app.emoji_atlas, app.device, app.queue) do return false
+	if !plat_font.text_atlas_init(&app.text_atlas, font_size) do return false
+	if !plat_font.text_atlas_upload(&app.text_atlas, app.device, app.queue) do return false
+	app.layout.metrics.cell_w = app.text_atlas.cell_w
+	app.layout.metrics.cell_h = app.text_atlas.cell_h
 
-	if !terminal_view_init(&app.term_view, app.device, app.queue, app.format, app.glyph_atlas.atlas.gpu_view, app.emoji_atlas.gpu_view) do return false
+	if !terminal_view_init(&app.term_view, app.device, app.queue, app.format, app.text_atlas.glyph_view, app.text_atlas.emoji_view) do return false
 	if !chrome_view_init(&app.chrome_view, app.device, app.queue, app.format, u32(app.layout.screen_w), u32(app.layout.screen_h)) do return false
 	if !composer_view_init(&app.composer, app.device, app.queue, app.format, app.layout.screen_w, app.layout.screen_h) do return false
 
@@ -129,9 +127,7 @@ app_destroy :: proc(app: ^Term_App) {
 	composer_view_destroy(&app.composer)
 	chrome_view_destroy(&app.chrome_view)
 	terminal_view_destroy(&app.term_view)
-	glyph_atlas_destroy(&app.glyph_atlas)
-	emoji_atlas_destroy(&app.emoji_atlas)
-	font_context_destroy(&app.font_ctx)
+	plat_font.text_atlas_destroy(&app.text_atlas)
 
 	// Tear down the GPU backend in reverse acquisition order. The queue is owned
 	// by the device and released together with it.
@@ -147,6 +143,39 @@ app_destroy :: proc(app: ^Term_App) {
 	}
 
 	plat_win.window_destroy(&app.window)
+}
+
+app_apply_font_size :: proc(app: ^Term_App, new_size: f32) {
+	if app == nil || new_size <= 0 do return
+	app.current_font_size = new_size
+	scale := app.window.pixel_ratio if app.window.pixel_ratio > 0 else 1.0
+	font_size := new_size * scale
+
+	if !plat_font.text_atlas_set_pixel_size(&app.text_atlas, font_size, app.device, app.queue) do return
+	app.layout.metrics.cell_w = app.text_atlas.cell_w
+	app.layout.metrics.cell_h = app.text_atlas.cell_h
+	app.mouse.cell_w = app.text_atlas.cell_w
+	app.mouse.cell_h = app.text_atlas.cell_h
+
+	for &pane in app.mux.panes {
+		if pane.kind == .Terminal && pane.session != nil {
+			damage.damage_mark_all(&pane.session.term.damage)
+		}
+	}
+	app.layout.tab_bar_force = true
+}
+
+app_adjust_font_size :: proc(app: ^Term_App, delta: f32) {
+	if app == nil do return
+	new_size := clamp(app.current_font_size + delta, 8.0, 32.0)
+	if new_size == app.current_font_size do return
+	app_apply_font_size(app, new_size)
+}
+
+app_reset_font_size :: proc(app: ^Term_App) {
+	if app == nil do return
+	base_size := config_resolve_effective_font_size(&app.config)
+	app_apply_font_size(app, base_size)
 }
 
 app_run :: proc(app: ^Term_App) {

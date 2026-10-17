@@ -53,7 +53,7 @@ app_render_frame :: proc(app: ^Term_App) {
 	if term_layer != nil {
 		for &pane in app.mux.panes {
 			if pane.kind == .Terminal && pane.session != nil && pane.rect[2] > 10 {
-				terminal_view_render_pane(&app.term_view, pane.session, pane.id, pane.rect, pane.is_focused, &app.mouse, app.time_elapsed, term_layer.view, &app.glyph_atlas, &app.emoji_atlas, app.layout.metrics, app.layout.screen_w, app.layout.screen_h)
+				terminal_view_render_pane(&app.term_view, pane.session, pane.id, pane.rect, pane.is_focused, &app.mouse, app.time_elapsed, term_layer.view, &app.text_atlas, app.layout.metrics, app.layout.screen_w, app.layout.screen_h)
 			}
 		}
 	}

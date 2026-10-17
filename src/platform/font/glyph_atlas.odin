@@ -1,7 +1,7 @@
-package term
+package platform_font
 
 // GPU Atlas Memory, Dynamic Prewarm & UV Mapping Manager
-// Part of Tier 3 Application Shell (src/app/term/*).
+// Platform Font Subsystem (src/platform/font/*).
 
 import "core:mem"
 import core_atlas "../../core/render/atlas"
@@ -23,13 +23,176 @@ PINNED_UI_CODEPOINTS := [12]rune{
 }
 
 Glyph_Atlas_Manager :: struct {
-	atlas:           core_atlas.Atlas,
-	fc:              ^Font_Context,
-	dynamic_slots:   [core_atlas.FALLBACK_COUNT]rune,
+	atlas:            core_atlas.Atlas,
+	fc:               ^Font_Context,
+	dynamic_slots:    [core_atlas.FALLBACK_COUNT]rune,
 	dynamic_clusters: [core_atlas.FALLBACK_COUNT]u64,
-	dynamic_cursor:  int,
-	lookup_cache:    map[rune]u32,
-	cluster_cache:   map[u64]u32,
+	dynamic_cursor:   int,
+	lookup_cache:     map[rune]u32,
+	cluster_cache:    map[u64]u32,
+}
+
+_cluster_hash :: proc(runes: []rune) -> u64 {
+	hash: u64 = 14695981039346656037
+	bytes := mem.slice_to_bytes(runes)
+	for b in bytes {
+		hash ~= u64(b)
+		hash *= 1099511628211
+	}
+	return hash
+}
+
+_glyph_atlas_prewarm_pinned :: proc(gam: ^Glyph_Atlas_Manager) {
+	if gam == nil do return
+	fc := gam.fc
+	cell_w := f32(fc.rasterizer.metrics.cell_width) if fc != nil && fc.rasterizer.metrics.cell_width > 0 else 19.0
+	cell_h := f32(fc.rasterizer.metrics.cell_height) if fc != nil && fc.rasterizer.metrics.cell_height > 0 else 43.0
+
+	// 1. Prewarm ASCII (0x20 .. 0x7E)
+	for cp in u32(0x20)..=0x7E {
+		slot := u32(core_atlas.PINNED_ASCII_BASE + (cp - 0x20))
+		px, py := core_atlas.atlas_slot_origin(slot)
+
+		draw_w: f32 = cell_w
+		offset_x: f32 = 0.0
+
+		if fc != nil && font_has_codepoint(fc, cp) {
+			draw_w, offset_x = font_rasterize_codepoint(
+				fc, cp, gam.atlas.pixels,
+				core_atlas.ATLAS_WIDTH, int(px), int(py),
+				core_atlas.ATLAS_GLYPH_SIZE, core_atlas.ATLAS_GLYPH_SIZE,
+			)
+		} else if cp > 0x20 {
+			_draw_fallback_box(gam.atlas.pixels, core_atlas.ATLAS_WIDTH, int(px), int(py), cp)
+		}
+		u0, v0, u1, v1 := core_atlas.atlas_slot_uv(slot, draw_w, cell_h)
+		gam.atlas.slots[slot] = core_atlas.Atlas_Slot{
+			u0       = u0,
+			v0       = v0,
+			u1       = u1,
+			v1       = v1,
+			draw_w   = draw_w,
+			offset_x = offset_x,
+			advance  = cell_w,
+			valid    = true,
+		}
+	}
+
+	// 2. Prewarm Box Drawing (0x2500 .. 0x257F)
+	for cp in u32(0x2500)..=0x257F {
+		slot := u32(core_atlas.PINNED_BOX_BASE + (cp - 0x2500))
+		px, py := core_atlas.atlas_slot_origin(slot)
+
+		draw_w: f32 = cell_w
+		offset_x: f32 = 0.0
+
+		if fc != nil && font_has_codepoint(fc, cp) {
+			draw_w, offset_x = font_rasterize_codepoint(
+				fc, cp, gam.atlas.pixels,
+				core_atlas.ATLAS_WIDTH, int(px), int(py),
+				core_atlas.ATLAS_GLYPH_SIZE, core_atlas.ATLAS_GLYPH_SIZE,
+			)
+		} else {
+			_draw_procedural_box_drawing(gam.atlas.pixels, core_atlas.ATLAS_WIDTH, int(px), int(py), cp)
+		}
+		u0, v0, u1, v1 := core_atlas.atlas_slot_uv(slot, draw_w, cell_h)
+		gam.atlas.slots[slot] = core_atlas.Atlas_Slot{
+			u0       = u0,
+			v0       = v0,
+			u1       = u1,
+			v1       = v1,
+			draw_w   = draw_w,
+			offset_x = offset_x,
+			advance  = cell_w,
+			valid    = true,
+		}
+	}
+
+	// 3. Prewarm Block Elements (0x2580 .. 0x259F)
+	for cp in u32(0x2580)..=0x259F {
+		slot := u32(core_atlas.PINNED_BLOCK_BASE + (cp - 0x2580))
+		px, py := core_atlas.atlas_slot_origin(slot)
+
+		draw_w: f32 = cell_w
+		offset_x: f32 = 0.0
+
+		if fc != nil && font_has_codepoint(fc, cp) {
+			draw_w, offset_x = font_rasterize_codepoint(
+				fc, cp, gam.atlas.pixels,
+				core_atlas.ATLAS_WIDTH, int(px), int(py),
+				core_atlas.ATLAS_GLYPH_SIZE, core_atlas.ATLAS_GLYPH_SIZE,
+			)
+		} else {
+			_draw_procedural_block_element(gam.atlas.pixels, core_atlas.ATLAS_WIDTH, int(px), int(py), cp)
+		}
+		u0, v0, u1, v1 := core_atlas.atlas_slot_uv(slot, draw_w, cell_h)
+		gam.atlas.slots[slot] = core_atlas.Atlas_Slot{
+			u0       = u0,
+			v0       = v0,
+			u1       = u1,
+			v1       = v1,
+			draw_w   = draw_w,
+			offset_x = offset_x,
+			advance  = cell_w,
+			valid    = true,
+		}
+	}
+
+	// 4. Prewarm Powerline Symbols (0xE0B0 .. 0xE0B3)
+	for cp in u32(0xE0B0)..=0xE0B3 {
+		slot := u32(core_atlas.PINNED_POWERLINE_BASE + (cp - 0xE0B0))
+		px, py := core_atlas.atlas_slot_origin(slot)
+
+		draw_w: f32 = cell_w
+		offset_x: f32 = 0.0
+
+		if fc != nil && font_has_codepoint(fc, cp) {
+			draw_w, offset_x = font_rasterize_codepoint(
+				fc, cp, gam.atlas.pixels,
+				core_atlas.ATLAS_WIDTH, int(px), int(py),
+				core_atlas.ATLAS_GLYPH_SIZE, core_atlas.ATLAS_GLYPH_SIZE,
+			)
+		}
+		u0, v0, u1, v1 := core_atlas.atlas_slot_uv(slot, draw_w, cell_h)
+		gam.atlas.slots[slot] = core_atlas.Atlas_Slot{
+			u0       = u0,
+			v0       = v0,
+			u1       = u1,
+			v1       = v1,
+			draw_w   = draw_w,
+			offset_x = offset_x,
+			advance  = cell_w,
+			valid    = true,
+		}
+	}
+
+	// 5. Prewarm UI Symbols (Command, Option, Arrows, etc.)
+	for cp, idx in PINNED_UI_CODEPOINTS {
+		slot := u32(core_atlas.PINNED_UI_BASE + idx)
+		px, py := core_atlas.atlas_slot_origin(slot)
+
+		draw_w: f32 = cell_w
+		offset_x: f32 = 0.0
+
+		if fc != nil && font_has_codepoint(fc, u32(cp)) {
+			draw_w, offset_x = font_rasterize_codepoint(
+				fc, u32(cp), gam.atlas.pixels,
+				core_atlas.ATLAS_WIDTH, int(px), int(py),
+				core_atlas.ATLAS_GLYPH_SIZE, core_atlas.ATLAS_GLYPH_SIZE,
+			)
+		}
+		u0, v0, u1, v1 := core_atlas.atlas_slot_uv(slot, draw_w, cell_h)
+		gam.atlas.slots[slot] = core_atlas.Atlas_Slot{
+			u0       = u0,
+			v0       = v0,
+			u1       = u1,
+			v1       = v1,
+			draw_w   = draw_w,
+			offset_x = offset_x,
+			advance  = cell_w,
+			valid    = true,
+		}
+	}
 }
 
 glyph_atlas_init :: proc(gam: ^Glyph_Atlas_Manager, fc: ^Font_Context) -> bool {
@@ -40,88 +203,22 @@ glyph_atlas_init :: proc(gam: ^Glyph_Atlas_Manager, fc: ^Font_Context) -> bool {
 	gam.cluster_cache = make(map[u64]u32, 64)
 	gam.dynamic_cursor = 0
 
-	// 1. Prewarm ASCII (0x20 .. 0x7E)
-	for cp in u32(0x20)..=0x7E {
-		slot := u32(core_atlas.PINNED_ASCII_BASE + (cp - 0x20))
-		px, py := core_atlas.atlas_slot_origin(slot)
-
-		if fc != nil && font_has_codepoint(fc, cp) {
-			font_rasterize_codepoint(
-				fc, cp, gam.atlas.pixels,
-				core_atlas.ATLAS_WIDTH, int(px), int(py),
-				core_atlas.ATLAS_GLYPH_SIZE, core_atlas.ATLAS_GLYPH_SIZE,
-			)
-		} else if cp > 0x20 {
-			_draw_fallback_box(gam.atlas.pixels, core_atlas.ATLAS_WIDTH, int(px), int(py), cp)
-		}
-		gam.atlas.slots[slot].valid = true
-	}
-
-	// 2. Prewarm Box Drawing (0x2500 .. 0x257F)
-	for cp in u32(0x2500)..=0x257F {
-		slot := u32(core_atlas.PINNED_BOX_BASE + (cp - 0x2500))
-		px, py := core_atlas.atlas_slot_origin(slot)
-
-		if fc != nil && font_has_codepoint(fc, cp) {
-			font_rasterize_codepoint(
-				fc, cp, gam.atlas.pixels,
-				core_atlas.ATLAS_WIDTH, int(px), int(py),
-				core_atlas.ATLAS_GLYPH_SIZE, core_atlas.ATLAS_GLYPH_SIZE,
-			)
-		} else {
-			_draw_procedural_box_drawing(gam.atlas.pixels, core_atlas.ATLAS_WIDTH, int(px), int(py), cp)
-		}
-		gam.atlas.slots[slot].valid = true
-	}
-
-	// 3. Prewarm Block Elements (0x2580 .. 0x259F)
-	for cp in u32(0x2580)..=0x259F {
-		slot := u32(core_atlas.PINNED_BLOCK_BASE + (cp - 0x2580))
-		px, py := core_atlas.atlas_slot_origin(slot)
-
-		if fc != nil && font_has_codepoint(fc, cp) {
-			font_rasterize_codepoint(
-				fc, cp, gam.atlas.pixels,
-				core_atlas.ATLAS_WIDTH, int(px), int(py),
-				core_atlas.ATLAS_GLYPH_SIZE, core_atlas.ATLAS_GLYPH_SIZE,
-			)
-		} else {
-			_draw_procedural_block_element(gam.atlas.pixels, core_atlas.ATLAS_WIDTH, int(px), int(py), cp)
-		}
-		gam.atlas.slots[slot].valid = true
-	}
-
-	// 4. Prewarm Powerline Symbols (0xE0B0 .. 0xE0B3)
-	for cp in u32(0xE0B0)..=0xE0B3 {
-		slot := u32(core_atlas.PINNED_POWERLINE_BASE + (cp - 0xE0B0))
-		px, py := core_atlas.atlas_slot_origin(slot)
-
-		if fc != nil && font_has_codepoint(fc, cp) {
-			font_rasterize_codepoint(
-				fc, cp, gam.atlas.pixels,
-				core_atlas.ATLAS_WIDTH, int(px), int(py),
-				core_atlas.ATLAS_GLYPH_SIZE, core_atlas.ATLAS_GLYPH_SIZE,
-			)
-		}
-		gam.atlas.slots[slot].valid = true
-	}
-
-	// 5. Prewarm UI Symbols (Command, Option, Arrows, etc.)
-	for cp, idx in PINNED_UI_CODEPOINTS {
-		slot := u32(core_atlas.PINNED_UI_BASE + idx)
-		px, py := core_atlas.atlas_slot_origin(slot)
-
-		if fc != nil && font_has_codepoint(fc, u32(cp)) {
-			font_rasterize_codepoint(
-				fc, u32(cp), gam.atlas.pixels,
-				core_atlas.ATLAS_WIDTH, int(px), int(py),
-				core_atlas.ATLAS_GLYPH_SIZE, core_atlas.ATLAS_GLYPH_SIZE,
-			)
-		}
-		gam.atlas.slots[slot].valid = true
-	}
-
+	_glyph_atlas_prewarm_pinned(gam)
 	return true
+}
+
+glyph_atlas_clear_and_prewarm :: proc(gam: ^Glyph_Atlas_Manager) {
+	if gam == nil do return
+	mem.zero_slice(gam.atlas.pixels)
+	clear(&gam.lookup_cache)
+	clear(&gam.cluster_cache)
+	gam.dynamic_cursor = 0
+	for i in 0..<core_atlas.FALLBACK_COUNT {
+		gam.dynamic_slots[i] = 0
+		gam.dynamic_clusters[i] = 0
+	}
+	_glyph_atlas_prewarm_pinned(gam)
+	gam.atlas.gpu_dirty = true
 }
 
 glyph_atlas_upload :: proc(gam: ^Glyph_Atlas_Manager, device: contract.Gpu_Device, queue: contract.Gpu_Queue) -> bool {
@@ -196,8 +293,14 @@ glyph_atlas_get_or_rasterize :: proc(gam: ^Glyph_Atlas_Manager, cp: rune, is_wid
 
 	u := u32(cp)
 	rendered := false
+	cell_w := f32(gam.fc.rasterizer.metrics.cell_width) if gam.fc != nil && gam.fc.rasterizer.metrics.cell_width > 0 else 19.0
+	cell_h := f32(gam.fc.rasterizer.metrics.cell_height) if gam.fc != nil && gam.fc.rasterizer.metrics.cell_height > 0 else 43.0
+	gw := cell_w * 2.0 if is_wide else cell_w
+	draw_w: f32 = gw
+	offset_x: f32 = 0.0
+
 	if gam.fc != nil && font_has_codepoint(gam.fc, u) {
-		font_rasterize_codepoint(
+		draw_w, offset_x = font_rasterize_codepoint(
 			gam.fc, u, gam.atlas.pixels,
 			core_atlas.ATLAS_WIDTH, int(px), int(py),
 			core_atlas.ATLAS_GLYPH_SIZE, core_atlas.ATLAS_GLYPH_SIZE,
@@ -214,7 +317,17 @@ glyph_atlas_get_or_rasterize :: proc(gam: ^Glyph_Atlas_Manager, cp: rune, is_wid
 		rendered = true
 	}
 
-	gam.atlas.slots[slot_idx].valid = rendered
+	u0, v0, u1, v1 := core_atlas.atlas_slot_uv(slot_idx, draw_w, cell_h)
+	gam.atlas.slots[slot_idx] = core_atlas.Atlas_Slot{
+		u0       = u0,
+		v0       = v0,
+		u1       = u1,
+		v1       = v1,
+		draw_w   = draw_w,
+		offset_x = offset_x,
+		advance  = gw,
+		valid    = rendered,
+	}
 	gam.atlas.gpu_dirty = true
 	gam.dynamic_slots[slot_idx - core_atlas.FALLBACK_BASE] = cp
 	gam.dynamic_clusters[slot_idx - core_atlas.FALLBACK_BASE] = 0
@@ -251,8 +364,14 @@ glyph_atlas_get_or_rasterize_cluster :: proc(gam: ^Glyph_Atlas_Manager, runes: [
 	}
 
 	rendered := false
+	cell_w := f32(gam.fc.rasterizer.metrics.cell_width) if gam.fc != nil && gam.fc.rasterizer.metrics.cell_width > 0 else 19.0
+	cell_h := f32(gam.fc.rasterizer.metrics.cell_height) if gam.fc != nil && gam.fc.rasterizer.metrics.cell_height > 0 else 43.0
+	gw := cell_w * 2.0 if is_wide else cell_w
+	draw_w: f32 = gw
+	offset_x: f32 = 0.0
+
 	if gam.fc != nil {
-		font_rasterize_cluster_into(
+		draw_w, offset_x = font_rasterize_cluster_into(
 			gam.fc, runes, gam.atlas.pixels,
 			core_atlas.ATLAS_WIDTH, int(px), int(py),
 			core_atlas.ATLAS_GLYPH_SIZE, core_atlas.ATLAS_GLYPH_SIZE,
@@ -264,7 +383,17 @@ glyph_atlas_get_or_rasterize_cluster :: proc(gam: ^Glyph_Atlas_Manager, runes: [
 		rendered = true
 	}
 
-	gam.atlas.slots[slot_idx].valid = rendered
+	u0, v0, u1, v1 := core_atlas.atlas_slot_uv(slot_idx, draw_w, cell_h)
+	gam.atlas.slots[slot_idx] = core_atlas.Atlas_Slot{
+		u0       = u0,
+		v0       = v0,
+		u1       = u1,
+		v1       = v1,
+		draw_w   = draw_w,
+		offset_x = offset_x,
+		advance  = gw,
+		valid    = rendered,
+	}
 	gam.atlas.gpu_dirty = true
 	gam.dynamic_slots[pos] = 0
 	gam.dynamic_clusters[pos] = key
@@ -289,11 +418,6 @@ _draw_fallback_box :: proc(pixels: []u8, pitch, px, py: int, cp: u32, is_wide: b
 }
 
 _draw_procedural_braille :: proc(pixels: []u8, pitch, px, py: int, cp: u32) {
-	// Unicode Braille Pattern: 0x2800 + 8-bit mask
-	// Dot 1: 0x01 (top left)       Dot 4: 0x08 (top right)
-	// Dot 2: 0x02 (mid-top left)   Dot 5: 0x10 (mid-top right)
-	// Dot 3: 0x04 (mid-low left)   Dot 6: 0x20 (mid-low right)
-	// Dot 7: 0x40 (bottom left)    Dot 8: 0x80 (bottom right)
 	mask := cp - 0x2800
 
 	dot_coords := [8][2]int{
@@ -324,7 +448,6 @@ _draw_procedural_box_drawing :: proc(pixels: []u8, pitch, px, py: int, cp: u32) 
 	mid_x := px + core_atlas.ATLAS_GLYPH_SIZE / 2
 	mid_y := py + core_atlas.ATLAS_GLYPH_SIZE / 2
 
-	// Draw standard cross or border lines
 	for y in 0..<core_atlas.ATLAS_GLYPH_SIZE {
 		pixels[(py + y) * pitch + mid_x] = 220
 		pixels[(py + y) * pitch + (mid_x + 1)] = 220
@@ -336,7 +459,6 @@ _draw_procedural_box_drawing :: proc(pixels: []u8, pitch, px, py: int, cp: u32) 
 }
 
 _draw_procedural_block_element :: proc(pixels: []u8, pitch, px, py: int, cp: u32) {
-	// Full block (0x2588) or upper/lower half
 	half_h := core_atlas.ATLAS_GLYPH_SIZE / 2
 	y_start := 0
 	y_end := core_atlas.ATLAS_GLYPH_SIZE

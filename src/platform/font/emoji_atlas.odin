@@ -1,15 +1,11 @@
-package term
+package platform_font
 
 // Color Emoji Atlas (RGBA8) for the modern terminal shell.
-// Ported from legacy/src/render/emoji_atlas.odin and adapted to the
-// contract GPU backend. FreeType delivers Apple Color Emoji bitmaps as BGRA;
-// harness_plat_font.font_rasterize_color_glyph converts them to RGBA so they can
-// be packed here and sampled by the emoji pipeline unchanged.
+// Platform Font Subsystem (src/platform/font/*).
 
 import "core:mem"
 import "core:os"
 import contract "../../core/render/contract"
-import plat_font "../../platform/font"
 
 EMOJI_ATLAS_DIM :: 1024
 
@@ -29,7 +25,7 @@ Emoji_Glyph :: struct {
 }
 
 Emoji_Atlas_Manager :: struct {
-	face:        plat_font.Font_Rasterizer,
+	face:        Font_Rasterizer,
 	has_font:    bool,
 	pixels:      []u8, // RGBA8 (DIM * DIM * 4)
 	cursor_x:    int,
@@ -54,8 +50,8 @@ emoji_atlas_init :: proc(ea: ^Emoji_Atlas_Manager, pixel_size: f32) -> bool {
 
 	for path in EMOJI_FONT_CANDIDATES {
 		if os.is_file(path) {
-			err: plat_font.Font_Error
-			if plat_font.font_rasterizer_init(&ea.face, path, pixel_size, &err) {
+			err: Font_Error
+			if font_rasterizer_init(&ea.face, path, pixel_size, &err) {
 				ea.has_font = true
 				break
 			}
@@ -64,9 +60,33 @@ emoji_atlas_init :: proc(ea: ^Emoji_Atlas_Manager, pixel_size: f32) -> bool {
 	return true
 }
 
+emoji_atlas_reset :: proc(ea: ^Emoji_Atlas_Manager, pixel_size: f32) -> bool {
+	if ea == nil do return false
+	mem.zero_slice(ea.pixels)
+	clear(&ea.glyphs)
+	ea.cursor_x = 1
+	ea.cursor_y = 1
+	ea.row_height = 0
+	if ea.has_font {
+		font_rasterizer_destroy(&ea.face)
+		ea.has_font = false
+	}
+	for path in EMOJI_FONT_CANDIDATES {
+		if os.is_file(path) {
+			err: Font_Error
+			if font_rasterizer_init(&ea.face, path, pixel_size, &err) {
+				ea.has_font = true
+				break
+			}
+		}
+	}
+	ea.gpu_dirty = true
+	return ea.has_font
+}
+
 emoji_atlas_destroy :: proc(ea: ^Emoji_Atlas_Manager) {
 	if ea == nil do return
-	if ea.has_font do plat_font.font_rasterizer_destroy(&ea.face)
+	if ea.has_font do font_rasterizer_destroy(&ea.face)
 	ea.has_font = false
 	delete(ea.glyphs)
 	if len(ea.pixels) > 0 {
@@ -85,17 +105,7 @@ emoji_atlas_destroy :: proc(ea: ^Emoji_Atlas_Manager) {
 
 emoji_atlas_has_codepoint :: proc(ea: ^Emoji_Atlas_Manager, cp: rune) -> bool {
 	if ea == nil || !ea.has_font do return false
-	return plat_font.font_rasterizer_find_glyph_index(&ea.face, u32(cp)) != 0
-}
-
-_cluster_hash :: proc(runes: []rune) -> u64 {
-	hash: u64 = 14695981039346656037
-	bytes := mem.slice_to_bytes(runes)
-	for b in bytes {
-		hash ~= u64(b)
-		hash *= 1099511628211
-	}
-	return hash
+	return font_rasterizer_find_glyph_index(&ea.face, u32(cp)) != 0
 }
 
 // emoji_atlas_get rasterizes and packs a single color emoji codepoint.
@@ -113,14 +123,14 @@ emoji_atlas_get_runes :: proc(ea: ^Emoji_Atlas_Manager, runes: []rune) -> (glyph
 	if g, found := ea.glyphs[key]; found do return g, true
 
 	glyph_id: u32 = 0
-	if shaped, shaped_ok := plat_font.font_shape_cluster(&ea.face, runes); shaped_ok && shaped.glyph_count > 0 {
+	if shaped, shaped_ok := font_shape_cluster(&ea.face, runes); shaped_ok && shaped.glyph_count > 0 {
 		glyph_id = shaped.glyphs[0].glyph_id
 	} else {
-		glyph_id = plat_font.font_rasterizer_find_glyph_index(&ea.face, u32(runes[0]))
+		glyph_id = font_rasterizer_find_glyph_index(&ea.face, u32(runes[0]))
 	}
 	if glyph_id == 0 do return {}, false
 
-	bmp := plat_font.font_rasterize_color_glyph_index(&ea.face, glyph_id)
+	bmp := font_rasterize_color_glyph_index(&ea.face, glyph_id)
 	defer if bmp.pixels != nil do delete(bmp.pixels)
 	if bmp.width <= 0 || bmp.height <= 0 || bmp.pixels == nil do return {}, false
 

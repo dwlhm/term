@@ -175,6 +175,63 @@ font_rasterizer_init :: proc(
 	return true
 }
 
+// font_rasterizer_set_pixel_size reconfigures font pixel size and re-evaluates metrics.
+font_rasterizer_set_pixel_size :: proc(r: ^Font_Rasterizer, pixel_size: f32) -> bool {
+	if r == nil || r.face == nil || pixel_size <= 0 do return false
+
+	FT_Set_Pixel_Sizes(r.face, 0, FT_UInt(pixel_size))
+	if r.hb_font != nil {
+		hb_ft_font_changed(r.hb_font)
+	}
+
+	r.metrics.pixel_size = pixel_size
+	if r.face.size != nil {
+		sm := &r.face.size.metrics
+		r.metrics.ascent = f32(sm.ascender) / 64.0
+		r.metrics.descent = f32(sm.descender) / 64.0
+		line_height := f32(sm.height) / 64.0
+		r.metrics.line_gap = max(0, line_height - (r.metrics.ascent - r.metrics.descent))
+		if r.face.units_per_EM > 0 {
+			r.scale = pixel_size / f32(r.face.units_per_EM)
+		} else {
+			r.scale = f32(sm.y_scale) / 65536.0
+		}
+	} else {
+		if r.face.units_per_EM > 0 {
+			r.scale = pixel_size / f32(r.face.units_per_EM)
+		} else {
+			r.scale = 1.0
+		}
+		r.metrics.ascent = f32(r.face.ascender) * r.scale
+		r.metrics.descent = f32(r.face.descender) * r.scale
+		r.metrics.line_gap = max(0, f32(r.face.height) * r.scale - (r.metrics.ascent - r.metrics.descent))
+	}
+	r.metrics.scale = r.scale
+	r.metrics.cell_height = math.ceil(r.metrics.ascent - r.metrics.descent + r.metrics.line_gap)
+
+	advance_px: f32 = 0
+	sample_runes := []rune{'M', 'W', 'm', '0', 'A', ' ', 0x2500, 0xE0B0, 0xF179, 0xF07B}
+	for sr in sample_runes {
+		g_idx := FT_Get_Char_Index(r.face, FT_ULong(sr))
+		if g_idx != 0 {
+			if FT_Load_Glyph(r.face, g_idx, FT_LOAD_DEFAULT) == 0 {
+				adv := f32(r.face.glyph.advance.x) / 64.0
+				if adv > 0 {
+					advance_px = adv
+					break
+				}
+			}
+		}
+	}
+	if advance_px > 0 {
+		r.metrics.cell_width = math.ceil(advance_px)
+	} else {
+		r.metrics.cell_width = math.ceil(pixel_size * 0.6)
+	}
+
+	return true
+}
+
 // font_rasterizer_destroy frees all font resources in reverse order of initialization.
 font_rasterizer_destroy :: proc(r: ^Font_Rasterizer) {
 	if r == nil {

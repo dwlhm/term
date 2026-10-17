@@ -18,9 +18,9 @@ Layout_State :: struct {
 	metrics:          Visual_Metrics,
 }
 
-layout_init :: proc(l: ^Layout_State, scale: f32 = 1.0) {
+layout_init :: proc(l: ^Layout_State, scale: f32 = 1.0, pad_x: f32 = DEFAULT_PANE_PAD_X, pad_y: f32 = DEFAULT_PANE_PAD_Y) {
 	if l == nil do return
-	l.metrics = visual_metrics_make(scale)
+	l.metrics = visual_metrics_make(scale, pad_x, pad_y)
 	l.screen_w = f32(DEFAULT_WINDOW_WIDTH) * l.metrics.scale
 	l.screen_h = f32(DEFAULT_WINDOW_HEIGHT) * l.metrics.scale
 	l.mouse_y = 100.0 * l.metrics.scale
@@ -33,7 +33,9 @@ layout_set_scale :: proc(l: ^Layout_State, scale: f32) {
 	if l == nil do return
 	prev_cell_w := l.metrics.cell_w
 	prev_cell_h := l.metrics.cell_h
-	l.metrics = visual_metrics_make(scale)
+	prev_pad_x := l.metrics.pane_pad_x / l.metrics.scale if l.metrics.scale > 0 else DEFAULT_PANE_PAD_X
+	prev_pad_y := l.metrics.pane_pad_y / l.metrics.scale if l.metrics.scale > 0 else DEFAULT_PANE_PAD_Y
+	l.metrics = visual_metrics_make(scale, prev_pad_x, prev_pad_y)
 	if prev_cell_w > 0 do l.metrics.cell_w = prev_cell_w
 	if prev_cell_h > 0 do l.metrics.cell_h = prev_cell_h
 }

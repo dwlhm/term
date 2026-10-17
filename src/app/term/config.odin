@@ -9,7 +9,7 @@ import "core:strings"
 
 DEFAULT_WINDOW_WIDTH:  i32 : 1280
 DEFAULT_WINDOW_HEIGHT: i32 : 800
-DEFAULT_FONT_SIZE:     f32 : 16.0
+DEFAULT_FONT_SIZE:     f32 : 13.0
 
 Window_Config :: struct {
 	width:  i32 `json:"width"`,
@@ -20,14 +20,22 @@ Font_Config :: struct {
 	size: f32 `json:"size"`,
 }
 
+Padding_Config :: struct {
+	x: f32 `json:"x"`,
+	y: f32 `json:"y"`,
+}
+
 App_Config :: struct {
-	window_width:  i32           `json:"window_width"`,
-	window_height: i32           `json:"window_height"`,
-	width:         i32           `json:"width"`,
-	height:        i32           `json:"height"`,
-	window:        Window_Config `json:"window"`,
-	font_size:     f32           `json:"font_size"`,
-	font:          Font_Config   `json:"font"`,
+	window_width:  i32            `json:"window_width"`,
+	window_height: i32            `json:"window_height"`,
+	width:         i32            `json:"width"`,
+	height:        i32            `json:"height"`,
+	window:        Window_Config  `json:"window"`,
+	font_size:     f32            `json:"font_size"`,
+	font:          Font_Config    `json:"font"`,
+	pad_x:         f32            `json:"pad_x"`,
+	pad_y:         f32            `json:"pad_y"`,
+	padding:       Padding_Config `json:"padding"`,
 }
 
 config_default :: proc() -> App_Config {
@@ -35,7 +43,27 @@ config_default :: proc() -> App_Config {
 		window_width  = DEFAULT_WINDOW_WIDTH,
 		window_height = DEFAULT_WINDOW_HEIGHT,
 		font_size     = 0,
+		pad_x         = -1.0,
+		pad_y         = -1.0,
+		padding       = {x = -1.0, y = -1.0},
 	}
+}
+
+DEFAULT_PANE_PAD_X: f32 : 4.0
+DEFAULT_PANE_PAD_Y: f32 : 4.0
+
+// config_resolve_padding extracts configured pad_x and pad_y, falling back to default (4.0).
+config_resolve_padding :: proc(cfg: ^App_Config) -> (pad_x, pad_y: f32) {
+	pad_x = DEFAULT_PANE_PAD_X
+	pad_y = DEFAULT_PANE_PAD_Y
+	if cfg != nil {
+		if cfg.padding.x >= 0 do pad_x = cfg.padding.x
+		else if cfg.pad_x >= 0 do pad_x = cfg.pad_x
+
+		if cfg.padding.y >= 0 do pad_y = cfg.padding.y
+		else if cfg.pad_y >= 0 do pad_y = cfg.pad_y
+	}
+	return pad_x, pad_y
 }
 
 // config_resolve_font_size extracts effective font size from config,
@@ -150,7 +178,7 @@ Visual_Metrics :: struct {
 	pane_pad_y:          f32,
 }
 
-visual_metrics_make :: proc(scale: f32 = 1.0) -> Visual_Metrics {
+visual_metrics_make :: proc(scale: f32 = 1.0, pad_x: f32 = DEFAULT_PANE_PAD_X, pad_y: f32 = DEFAULT_PANE_PAD_Y) -> Visual_Metrics {
 	s := max(1.0, scale)
 	return Visual_Metrics{
 		scale               = s,
@@ -162,8 +190,8 @@ visual_metrics_make :: proc(scale: f32 = 1.0) -> Visual_Metrics {
 		tab_bar_height      = TAB_BAR_HEIGHT * s,
 		auto_hide_trigger_y = AUTO_HIDE_TRIGGER_Y * s,
 		traffic_clearance   = 78.0 * s,
-		pane_pad_x          = 10.0 * s,
-		pane_pad_y          = 6.0 * s,
+		pane_pad_x          = pad_x * s,
+		pane_pad_y          = pad_y * s,
 	}
 }
 

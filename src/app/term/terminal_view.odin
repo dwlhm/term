@@ -10,6 +10,7 @@ import terminal_instance "../../core/render/terminal/instance"
 import terminal_grid "../../core/terminal/grid"
 import egc "../../core/terminal/egc"
 import sess_feat "../../features/session"
+import plat_font "../../platform/font"
 
 GLYPH_WGSL :: #load("../../core/render/shaders/glyph.wgsl", string)
 BG_WGSL    :: #load("../../core/render/shaders/bg.wgsl", string)
@@ -82,7 +83,7 @@ terminal_view_init :: proc(
 	if rawptr(tv.bg_pipeline) == nil do return false
 	tv.bg_layout = contract.pipeline_get_bind_group_layout(tv.bg_pipeline, 0)
 
-	if !terminal_instance.instance_renderer_init(&tv.inst_rend, device, queue, 8192, atlas_view, format) {
+	if !terminal_instance.instance_renderer_init(&tv.inst_rend, device, queue, 16384, atlas_view, format) {
 		return false
 	}
 
@@ -143,6 +144,61 @@ terminal_view_destroy :: proc(tv: ^Terminal_View) {
 	if rawptr(tv.emoji_pipeline) != nil do contract.destroy_render_pipeline(tv.emoji_pipeline)
 }
 
+terminal_view_resolve_active_bg :: proc(sess: ^sess_feat.Terminal_Session) -> [4]f32 {
+	if sess == nil do return COLOR_PANE_BG
+
+	// 1. Explicit OSC 11 background
+	if sess.has_custom_bg {
+		return sess.custom_bg
+	}
+
+	// 2. Active TUI grid background sampling
+	// Sample center of screen first, then top/bottom corners
+	g := &sess.term.grid
+	rows := sess.term.rows
+	cols := sess.term.cols
+	if rows <= 0 || cols <= 0 || len(g.rows) == 0 do return COLOR_PANE_BG
+
+	mid_r := rows / 2
+	mid_c := cols / 2
+	probe_points := [4][2]int{
+		{mid_r, mid_c}, // Dead center of TUI canvas
+		{0, 0},         // Top left
+		{1, 0},         // Second row left (below header)
+		{rows - 1, 0},  // Bottom row left (statusline or command line)
+	}
+
+	for pt in probe_points {
+		r := pt[0]
+		c := pt[1]
+		if r < 0 || r >= rows do continue
+		phy_r := terminal_grid.grid_physical_row(g, r - sess.scroll_offset)
+		if phy_r < 0 || phy_r >= len(g.rows) do continue
+		row := &g.rows[phy_r]
+		if c < 0 || c >= len(row.cells) do continue
+
+		cell_val := row.cells[c]
+		if .Has_Direct_Color in cell_val.flags && c < len(row.direct_colors) && row.direct_colors[c].has_bg {
+			dc := row.direct_colors[c].bg
+			return [4]f32{f32(dc[0]) / 255.0, f32(dc[1]) / 255.0, f32(dc[2]) / 255.0, 1.0}
+		}
+		if cell_val.bg != 0 {
+			return color_from_palette_256(cell_val.bg)
+		}
+	}
+
+	// 3. Parser active background if cursor has direct color bg
+	if sess.term.parser.cursor.direct_color.has_bg {
+		dc := sess.term.parser.cursor.direct_color.bg
+		return [4]f32{f32(dc[0]) / 255.0, f32(dc[1]) / 255.0, f32(dc[2]) / 255.0, 1.0}
+	}
+	if sess.term.parser.cursor.active_bg != 0 {
+		return color_from_palette_256(sess.term.parser.cursor.active_bg)
+	}
+
+	return COLOR_PANE_BG
+}
+
 terminal_view_render_pane :: proc(
 	tv: ^Terminal_View,
 	sess: ^sess_feat.Terminal_Session,
@@ -152,12 +208,14 @@ terminal_view_render_pane :: proc(
 	mouse: ^Mouse_State,
 	time_elapsed: f32,
 	target_view: contract.Gpu_TextureView,
-	gam: ^Glyph_Atlas_Manager,
-	emoji_atlas: ^Emoji_Atlas_Manager,
+	text_atlas: ^plat_font.Text_Atlas,
 	metrics: Visual_Metrics,
 	screen_w, screen_h: f32,
 ) {
-	if tv == nil || sess == nil || rawptr(target_view) == nil || gam == nil do return
+	if tv == nil || sess == nil || rawptr(target_view) == nil || text_atlas == nil do return
+
+	gam := &text_atlas.glyph_atlas
+	emoji_atlas := &text_atlas.emoji_atlas
 
 	cell_w := metrics.cell_w
 	cell_h := metrics.cell_h
@@ -171,11 +229,12 @@ terminal_view_render_pane :: proc(
 	contract.write_buffer(tv.queue, tv.emoji_rend.uniform_buffer, 0, &u_data, size_of([4]f32))
 
 	// 1. Emit Solid Background Card for Pane
+	active_bg := terminal_view_resolve_active_bg(sess)
 	pane_bg := contract.Instance_Record{
 		pos_size = pane_rect,
 		uv_rect  = {0, 0, 0, 0},
 		fg_color = {0, 0, 0, 0},
-		bg_color = COLOR_PANE_BG,
+		bg_color = active_bg,
 	}
 	terminal_instance.instance_renderer_push(&tv.inst_rend, pane_bg)
 
@@ -194,12 +253,19 @@ terminal_view_render_pane :: proc(
 			if c >= len(row.cells) do break
 			cell_val := row.cells[c]
 
-			// Skip wide continuation cell as it was already drawn by the lead cell
+			// Skip wide continuation cell only if its predecessor is an active wide lead
 			if .Wide_Continuation in cell_val.flags {
-				continue
+				if c > 0 && .Wide_Lead in row.cells[c - 1].flags {
+					continue
+				}
 			}
 
-			if (cell_val.char == 0 || cell_val.char == ' ') && cell_val.bg == 0 && cell_val.style == {} {
+			has_direct_bg := false
+			if .Has_Direct_Color in cell_val.flags && c < len(row.direct_colors) {
+				has_direct_bg = row.direct_colors[c].has_bg
+			}
+
+			if (cell_val.char == 0 || cell_val.char == ' ') && cell_val.bg == 0 && cell_val.style == {} && !has_direct_bg {
 				continue
 			}
 
@@ -208,7 +274,16 @@ terminal_view_render_pane :: proc(
 
 			fg := color_from_palette_256(cell_val.fg)
 			bg := color_from_palette_256(cell_val.bg) if cell_val.bg != 0 else COLOR_PANE_BG
-			if .Bold in cell_val.style && cell_val.fg < 8 {
+			if .Has_Direct_Color in cell_val.flags && c < len(row.direct_colors) {
+				dc := row.direct_colors[c]
+				if dc.has_fg {
+					fg = {f32(dc.fg[0]) / 255.0, f32(dc.fg[1]) / 255.0, f32(dc.fg[2]) / 255.0, 1.0}
+				}
+				if dc.has_bg {
+					bg = {f32(dc.bg[0]) / 255.0, f32(dc.bg[1]) / 255.0, f32(dc.bg[2]) / 255.0, 1.0}
+				}
+			}
+			if .Bold in cell_val.style && cell_val.fg < 8 && (.Has_Direct_Color not_in cell_val.flags || !row.direct_colors[c].has_fg) {
 				fg = PALETTE_COLORS[(cell_val.fg + 8) & 15]
 			}
 			if .Dim in cell_val.style {
@@ -232,8 +307,8 @@ terminal_view_render_pane :: proc(
 			if .Has_Egc in cell_val.flags {
 				if runes := egc.egc_pool_get(&sess.term.egc_pool, int(ch - egc.EGC_INDEX_BASE)); runes != nil && len(runes) > 0 {
 					handled := false
-					if emoji_atlas != nil && is_emoji_cluster(runes) {
-						if eg, eok := emoji_atlas_get_runes(emoji_atlas, runes); eok {
+					if emoji_atlas != nil && plat_font.is_emoji_cluster(runes) {
+						if eg, eok := plat_font.emoji_atlas_get_runes(emoji_atlas, runes); eok {
 							bg_rec := contract.Instance_Record{
 								pos_size = {x_pos, y_pos, gw, cell_h},
 								uv_rect  = {0, 0, 0, 0},
@@ -242,10 +317,8 @@ terminal_view_render_pane :: proc(
 							}
 							terminal_instance.instance_renderer_push(&tv.inst_rend, bg_rec)
 
-							// Proportional fit & center inside cell box
-							fit_w := max(1.0, gw - 2.0)
-							fit_h := max(1.0, cell_h - 2.0)
-							scale := min(fit_w / max(1.0, eg.width), fit_h / max(1.0, eg.height))
+							base_h := cell_h * 0.95
+							scale := base_h / max(1.0, eg.height)
 							draw_w := eg.width * scale
 							draw_h := eg.height * scale
 							offset_x := (gw - draw_w) * 0.5
@@ -262,11 +335,11 @@ terminal_view_render_pane :: proc(
 						}
 					}
 					if !handled {
-						if slot, sok := glyph_atlas_get_or_rasterize_cluster(gam, runes, is_wide); sok {
-							u0, v0, u1, v1 := atlas.atlas_slot_uv(slot, gw, cell_h)
+						if slot, sok := plat_font.glyph_atlas_get_or_rasterize_cluster(gam, runes, is_wide); sok {
+							slot_info := gam.atlas.slots[slot]
 							rec := contract.Instance_Record{
-								pos_size = {x_pos, y_pos, gw, cell_h},
-								uv_rect  = {u0, v0, u1, v1},
+								pos_size = {x_pos + slot_info.offset_x, y_pos, slot_info.draw_w, cell_h},
+								uv_rect  = {slot_info.u0, slot_info.v0, slot_info.u1, slot_info.v1},
 								fg_color = fg,
 								bg_color = bg,
 							}
@@ -284,7 +357,7 @@ terminal_view_render_pane :: proc(
 			// Color emoji: background stays in the main batch (drawn by the bg
 			// pass); the color bitmap goes to the dedicated emoji batch so it is
 			// sampled unchanged from the RGBA8 emoji atlas.
-			if emoji_atlas != nil && is_emoji_codepoint(ch) {
+			if emoji_atlas != nil && plat_font.is_emoji_codepoint(ch) {
 				bg_rec := contract.Instance_Record{
 					pos_size = {x_pos, y_pos, gw, cell_h},
 					uv_rect  = {0, 0, 0, 0},
@@ -293,11 +366,9 @@ terminal_view_render_pane :: proc(
 				}
 				terminal_instance.instance_renderer_push(&tv.inst_rend, bg_rec)
 
-				if eg, eok := emoji_atlas_get(emoji_atlas, ch); eok {
-					// Proportional fit & center inside cell box
-					fit_w := max(1.0, gw - 2.0)
-					fit_h := max(1.0, cell_h - 2.0)
-					scale := min(fit_w / max(1.0, eg.width), fit_h / max(1.0, eg.height))
+				if eg, eok := plat_font.emoji_atlas_get(emoji_atlas, ch); eok {
+					base_h := cell_h * 0.95
+					scale := base_h / max(1.0, eg.height)
 					draw_w := eg.width * scale
 					draw_h := eg.height * scale
 					offset_x := (gw - draw_w) * 0.5
@@ -314,15 +385,15 @@ terminal_view_render_pane :: proc(
 				continue
 			}
 
-			slot, ok := glyph_atlas_get_or_rasterize(gam, ch, is_wide)
+			slot, ok := plat_font.glyph_atlas_get_or_rasterize(gam, ch, is_wide)
 			if !ok {
 				slot = 0 // Space
 			}
-			u0, v0, u1, v1 := atlas.atlas_slot_uv(slot, gw, cell_h)
+			slot_info := gam.atlas.slots[slot]
 
 			rec := contract.Instance_Record{
-				pos_size = {x_pos, y_pos, gw, cell_h},
-				uv_rect  = {u0, v0, u1, v1},
+				pos_size = {x_pos + slot_info.offset_x, y_pos, slot_info.draw_w, cell_h},
+				uv_rect  = {slot_info.u0, slot_info.v0, slot_info.u1, slot_info.v1},
 				fg_color = fg,
 				bg_color = bg,
 			}
@@ -331,12 +402,7 @@ terminal_view_render_pane :: proc(
 	}
 
 	// Synchronize GPU atlas texture if new glyphs were dynamically rasterized
-	if gam.atlas.gpu_dirty {
-		glyph_atlas_upload(gam, tv.device, tv.queue)
-	}
-	if emoji_atlas != nil && emoji_atlas.gpu_dirty {
-		emoji_atlas_upload(emoji_atlas, tv.device, tv.queue)
-	}
+	plat_font.text_atlas_sync_gpu(text_atlas, tv.device, tv.queue)
 
 	terminal_instance.instance_renderer_flush(&tv.inst_rend)
 	terminal_instance.instance_renderer_flush(&tv.emoji_rend)

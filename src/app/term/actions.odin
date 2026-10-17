@@ -191,6 +191,15 @@ app_execute_action :: proc(app: ^Term_App, act: Action_Id) {
 			sess_feat.session_write_string(p.session, "\x0c") // Form feed / clear
 		}
 
+	case .Font_Zoom_In:
+		app_adjust_font_size(app, 1.0)
+
+	case .Font_Zoom_Out:
+		app_adjust_font_size(app, -1.0)
+
+	case .Font_Zoom_Reset:
+		app_reset_font_size(app)
+
 	case .App_Reload_Config:
 		app.config = config_load()
 

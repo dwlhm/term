@@ -20,9 +20,9 @@ app_handle_window_resize :: proc(app: ^Term_App) {
 	scale := app.window.pixel_ratio
 	layout_set_scale(&app.layout, scale)
 
-	if app.font_ctx.has_font && app.font_ctx.rasterizer.metrics.cell_width > 0 {
-		app.layout.metrics.cell_w = app.font_ctx.rasterizer.metrics.cell_width
-		app.layout.metrics.cell_h = app.font_ctx.rasterizer.metrics.cell_height
+	if app.text_atlas.cell_w > 0 {
+		app.layout.metrics.cell_w = app.text_atlas.cell_w
+		app.layout.metrics.cell_h = app.text_atlas.cell_h
 	}
 
 	// Rendering pipeline is fully in pixel space.

@@ -54,12 +54,14 @@ FALLBACK_COUNT :: ATLAS_SLOT_COUNT - FALLBACK_BASE // 241
 
 // Atlas_Slot: Sub-slot UV mapping and metrics for a rasterized glyph.
 Atlas_Slot :: struct {
-	u0:      f32,  // Left normalized texcoord (origin)
-	v0:      f32,  // Top normalized texcoord (origin)
-	u1:      f32,  // Right normalized texcoord (origin + ink width)
-	v1:      f32,  // Bottom normalized texcoord (origin + cell height)
-	advance: f32,  // Monospace advance in pixels
-	valid:   bool, // True if slot is populated
+	u0:       f32,  // Left normalized texcoord (origin)
+	v0:       f32,  // Top normalized texcoord (origin)
+	u1:       f32,  // Right normalized texcoord (origin + ink width)
+	v1:       f32,  // Bottom normalized texcoord (origin + cell height)
+	draw_w:   f32,  // Rendered quad width
+	offset_x: f32,  // Horizontal centering offset relative to cell
+	advance:  f32,  // Monospace advance in pixels
+	valid:    bool, // True if slot is populated
 }
 
 // Atlas: Pure core_render font atlas resource state.
@@ -115,12 +117,14 @@ atlas_init :: proc(a: ^Atlas, allocator: runtime.Allocator = context.allocator) 
 	for i in 0..<ATLAS_SLOT_COUNT {
 		u0, v0, u1, v1 := atlas_slot_uv(u32(i), f32(ATLAS_GLYPH_SIZE), f32(ATLAS_GLYPH_SIZE))
 		a.slots[i] = Atlas_Slot{
-			u0      = u0,
-			v0      = v0,
-			u1      = u1,
-			v1      = v1,
-			advance = f32(ATLAS_GLYPH_SIZE),
-			valid   = false,
+			u0       = u0,
+			v0       = v0,
+			u1       = u1,
+			v1       = v1,
+			draw_w   = f32(ATLAS_GLYPH_SIZE),
+			offset_x = 0,
+			advance  = f32(ATLAS_GLYPH_SIZE),
+			valid    = false,
 		}
 	}
 	a.gpu_dirty = true
