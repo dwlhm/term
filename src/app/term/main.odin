@@ -18,6 +18,7 @@ import wgpu_backend "../../platform/gpu/wgpu"
 import tabs_feat "../../features/tabs"
 import mux_feat "../../features/multiplexer"
 import sess_feat "../../features/session"
+import telemetry "../../features/telemetry"
 
 VERSION: string : "2.1.0"
 
@@ -31,6 +32,7 @@ Term_App :: struct {
 	format:        contract.Gpu_Format,
 	running:       bool,
 	time_elapsed:  f32,
+	start_time:    time.Time,
 
 	layout:            Layout_State,
 	text_atlas:        plat_font.Text_Atlas,
@@ -45,9 +47,11 @@ Term_App :: struct {
 
 	tabs_mgr:      tabs_feat.Tabs_Manager,
 	mux:           mux_feat.Multiplexer,
+	diag:          Diagnostics,
 }
 
-app_init :: proc(app: ^Term_App, initial_cmd: string = "") -> bool {
+app_init :: proc(app: ^Term_App, opts: Cli_Options = {}) -> bool {
+	diagnostics_init(&app.diag, opts)
 	app.config = config_load()
 	win_w, win_h := config_resolve_window_dimensions(&app.config)
 
@@ -87,6 +91,7 @@ app_init :: proc(app: ^Term_App, initial_cmd: string = "") -> bool {
 
 	if !terminal_view_init(&app.term_view, app.device, app.queue, app.format, app.text_atlas.glyph_view, app.text_atlas.emoji_view) do return false
 	if !chrome_view_init(&app.chrome_view, app.device, app.queue, app.format, u32(app.layout.screen_w), u32(app.layout.screen_h)) do return false
+	chrome_view_set_atlas(&app.chrome_view, app.text_atlas.glyph_view, app.text_atlas.cell_w, app.text_atlas.cell_h)
 	if !composer_view_init(&app.composer, app.device, app.queue, app.format, app.layout.screen_w, app.layout.screen_h) do return false
 
 	mouse_init(&app.mouse, app.layout.metrics.cell_w, app.layout.metrics.cell_h, app.layout.metrics.pane_pad_x, app.layout.metrics.pane_pad_y)
@@ -113,20 +118,22 @@ app_init :: proc(app: ^Term_App, initial_cmd: string = "") -> bool {
 		mux_feat.multiplexer_sync_split_rects(&app.mux, app.tabs_mgr.entries[0].split_tree)
 	}
 
-	if len(initial_cmd) > 0 {
+	if len(opts.initial_cmd) > 0 {
 		p := mux_feat.multiplexer_get_pane(&app.mux, p_term)
 		if p != nil && p.session != nil {
-			sess_feat.session_write_string(p.session, fmt.tprintf("%s\n", initial_cmd))
+			sess_feat.session_write_string(p.session, fmt.tprintf("%s\n", opts.initial_cmd))
 		}
 	}
 
 	app.running = true
+	app.start_time = time.now()
 	_ = sdl3.AddEventWatch(app_event_watch, app)
 	return true
 }
 
 app_destroy :: proc(app: ^Term_App) {
 	if app == nil do return
+	diagnostics_shutdown(app)
 	sdl3.RemoveEventWatch(app_event_watch, app)
 	mux_feat.multiplexer_destroy(&app.mux)
 	tabs_feat.tabs_manager_destroy(&app.tabs_mgr)
@@ -162,6 +169,7 @@ app_apply_font_size :: proc(app: ^Term_App, new_size: f32) {
 	app.layout.metrics.cell_h = app.text_atlas.cell_h
 	app.mouse.cell_w = app.text_atlas.cell_w
 	app.mouse.cell_h = app.text_atlas.cell_h
+	chrome_view_set_atlas(&app.chrome_view, app.text_atlas.glyph_view, app.text_atlas.cell_w, app.text_atlas.cell_h)
 
 	for &pane in app.mux.panes {
 		if pane.kind == .Terminal && pane.session != nil {
@@ -193,50 +201,38 @@ app_run :: proc(app: ^Term_App) {
 		app.time_elapsed += dt
 
 		layout_update(&app.layout, dt)
-		dirty := app_process_events(app)
+		term_dirty := false
+
+		has_pending := mux_feat.multiplexer_has_pending_data(&app.mux)
+		if app_process_events(app, has_pending) {
+			term_dirty = true
+		}
 		if !app.running do break
 
-		if mux_feat.multiplexer_drain_all(&app.mux) > 0 do dirty = true
+		drained := mux_feat.multiplexer_drain_all(&app.mux)
+		telemetry.telemetry_add_drain(&app.diag.tel, drained)
+		if drained > 0 do term_dirty = true
 
-		if app_sync_layout_and_winsize(app) do dirty = true
+		if app_sync_layout_and_winsize(app) do term_dirty = true
+		diagnostics_poll(app)
 
 		// Render only on real change or active animation; stay idle otherwise.
-		if dirty || app_needs_animation(app) {
-			app_render_frame(app)
+		if term_dirty || app_needs_animation(app) {
+			frame_start := time.tick_now()
+			app_render_frame(app, term_dirty)
+			telemetry.telemetry_end_frame(&app.diag.tel, u64(time.tick_since(frame_start)))
 		}
 	}
-}
-
-// app_parse_cli_args parses command-line arguments.
-// Returns should_continue = false if the application handled -v or -h and should terminate.
-app_parse_cli_args :: proc(args: []string) -> (initial_cmd: string, should_continue: bool) {
-	for i := 1; i < len(args); i += 1 {
-		arg := args[i]
-		if arg == "-v" || arg == "--version" {
-			fmt.printfln("Term %s (Modern Floating Card Compositor Architecture)", VERSION)
-			return "", false
-		} else if arg == "-h" || arg == "--help" {
-			fmt.println("Usage: term [options]")
-			fmt.println("  -e <cmd>        Execute command in initial shell")
-			fmt.println("  -v, --version   Print version information")
-			fmt.println("  -h, --help      Show help")
-			return "", false
-		} else if arg == "-e" && i + 1 < len(args) {
-			initial_cmd = args[i + 1]
-			i += 1
-		}
-	}
-	return initial_cmd, true
 }
 
 main :: proc() {
-	cmd, should_continue := app_parse_cli_args(os.args)
+	opts, should_continue := app_parse_cli_args(os.args)
 	if !should_continue do return
 
 	app := new(Term_App)
 	defer free(app)
 
-	if !app_init(app, cmd) {
+	if !app_init(app, opts) {
 		fmt.eprintln("Failed to initialize Term application")
 		app_destroy(app) // Release whatever was initialized before the failure.
 		os.exit(1)

@@ -65,11 +65,13 @@ app_event_watch :: proc "c" (userdata: rawptr, event: ^sdl3.Event) -> bool {
 	#partial switch event.type {
 	case .WINDOW_RESIZED, .WINDOW_PIXEL_SIZE_CHANGED, .WINDOW_EXPOSED:
 		context = runtime.default_context()
+		defer free_all(context.temp_allocator)
 		app := (^Term_App)(userdata)
 		if app != nil && app.running && app.window.handle != nil && event.window.windowID == sdl3.GetWindowID(app.window.handle) {
 			sdl3.FlushEvents(sdl3.EventType.WINDOW_RESIZED, sdl3.EventType.WINDOW_PIXEL_SIZE_CHANGED)
 			app_handle_window_resize(app)
-			app_render_frame(app)
+			_ = mux_feat.multiplexer_drain_all(&app.mux)
+			app_render_frame(app, true)
 		}
 	}
 	return true
@@ -231,11 +233,15 @@ app_handle_key_down :: proc(app: ^Term_App, ev: sdl3.KeyboardEvent) {
 	}
 }
 
-app_process_events :: proc(app: ^Term_App) -> (dirty: bool) {
+app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty: bool) {
 	ev: sdl3.Event
-	// Block until an event arrives or the animation tick elapses, then drain
-	// any events queued behind it.
-	if !sdl3.WaitEventTimeout(&ev, FRAME_TICK_MS) do return false
+	if non_blocking {
+		if !sdl3.PollEvent(&ev) do return false
+	} else {
+		// Block until an event arrives or the animation tick elapses, then drain
+		// any events queued behind it.
+		if !sdl3.WaitEventTimeout(&ev, FRAME_TICK_MS) do return false
+	}
 
 	for {
 		#partial switch ev.type {

@@ -12,11 +12,43 @@ import tabs_feat "../../features/tabs"
 import mux_feat "../../features/multiplexer"
 
 Chrome_View :: struct {
-	rend:      chrome_render.Chrome_Renderer,
-	draw_list: chrome_dl.Ui_Draw_List,
-	device:    contract.Gpu_Device,
-	queue:     contract.Gpu_Queue,
-	format:    contract.Gpu_Format,
+	rend:         chrome_render.Chrome_Renderer,
+	draw_list:    chrome_dl.Ui_Draw_List,
+	device:       contract.Gpu_Device,
+	queue:        contract.Gpu_Queue,
+	format:       contract.Gpu_Format,
+	last_dl_hash: u64,
+	has_dl_hash:  bool,
+}
+
+_fnv1a_bytes :: #force_inline proc "contextless" (h: u64, data: []byte) -> u64 {
+	hash := h
+	for b in data {
+		hash = (hash ~ u64(b)) * 1099511628211
+	}
+	return hash
+}
+
+_chrome_draw_list_hash :: proc "contextless" (dl: ^chrome_dl.Ui_Draw_List, screen_w, screen_h: f32) -> u64 {
+	hash: u64 = 14695981039346656037
+	dims := [2]f32{screen_w, screen_h}
+	hash = _fnv1a_bytes(hash, ([^]byte)(&dims)[:size_of(dims)])
+	if dl == nil do return hash
+
+	for i in 0..<len(dl.commands) {
+		cmd := dl.commands[i]
+		kind_u := u32(cmd.kind)
+		hash = _fnv1a_bytes(hash, ([^]byte)(&kind_u)[:size_of(u32)])
+		hash = _fnv1a_bytes(hash, ([^]byte)(&cmd.rect)[:size_of([4]f32)])
+		hash = _fnv1a_bytes(hash, ([^]byte)(&cmd.color)[:size_of([4]f32)])
+		hash = _fnv1a_bytes(hash, ([^]byte)(&cmd.border_color)[:size_of([4]f32)])
+		hash = _fnv1a_bytes(hash, ([^]byte)(&cmd.radius)[:size_of(f32)])
+		hash = _fnv1a_bytes(hash, ([^]byte)(&cmd.clip_rect)[:size_of([4]f32)])
+		if len(cmd.text) > 0 {
+			hash = _fnv1a_bytes(hash, transmute([]byte)(cmd.text))
+		}
+	}
+	return hash
 }
 
 chrome_view_init :: proc(
@@ -30,10 +62,19 @@ chrome_view_init :: proc(
 	cv.device = device
 	cv.queue = queue
 	cv.format = format
+	cv.last_dl_hash = 0
+	cv.has_dl_hash = false
 
 	chrome_render.chrome_renderer_init(&cv.rend, device, queue, screen_w, screen_h, format)
 	chrome_dl.ui_draw_list_init(&cv.draw_list)
 	return true
+}
+
+chrome_view_set_atlas :: proc(cv: ^Chrome_View, atlas_view: contract.Gpu_TextureView, cell_w, cell_h: f32) {
+	if cv == nil do return
+	chrome_render.chrome_renderer_set_atlas(&cv.rend, atlas_view, cell_w, cell_h)
+	cv.has_dl_hash = false
+	chrome_render.chrome_renderer_mark_dirty(&cv.rend, true)
 }
 
 chrome_view_destroy :: proc(cv: ^Chrome_View) {
@@ -44,10 +85,11 @@ chrome_view_destroy :: proc(cv: ^Chrome_View) {
 
 chrome_view_resize :: proc(cv: ^Chrome_View, screen_w, screen_h: u32) {
 	if cv == nil do return
+	cv.has_dl_hash = false
 	chrome_render.chrome_renderer_resize(&cv.rend, screen_w, screen_h)
 }
 
-chrome_view_build_and_render :: proc(
+chrome_view_build_draw_list :: proc(
 	cv: ^Chrome_View,
 	layout: ^Layout_State,
 	tabs: ^tabs_feat.Tabs_Manager,
@@ -55,9 +97,8 @@ chrome_view_build_and_render :: proc(
 	cmd_center: ^Command_Center_State,
 	cursor_state: ^Cursor_State,
 	time_elapsed: f32,
-	target_view: contract.Gpu_TextureView,
-) {
-	if cv == nil || rawptr(target_view) == nil do return
+) -> (dirty: bool) {
+	if cv == nil do return false
 
 	chrome_dl.ui_draw_list_clear(&cv.draw_list)
 
@@ -196,6 +237,39 @@ chrome_view_build_and_render :: proc(
 		command_center_emit_draw_list(cmd_center, &cv.draw_list, layout.screen_w, layout.screen_h, layout.metrics.scale)
 	}
 
-	chrome_render.chrome_renderer_mark_dirty(&cv.rend, true)
+	screen_w := layout.screen_w if layout != nil else f32(cv.rend.width)
+	screen_h := layout.screen_h if layout != nil else f32(cv.rend.height)
+	dl_hash := _chrome_draw_list_hash(&cv.draw_list, screen_w, screen_h)
+	if !cv.has_dl_hash || dl_hash != cv.last_dl_hash {
+		cv.last_dl_hash = dl_hash
+		cv.has_dl_hash = true
+		chrome_render.chrome_renderer_mark_dirty(&cv.rend, true)
+		return true
+	}
+	return chrome_render.chrome_renderer_is_dirty(&cv.rend)
+}
+
+chrome_view_encode :: proc(
+	cv: ^Chrome_View,
+	enc: contract.Gpu_CommandEncoder,
+	target_view: contract.Gpu_TextureView,
+	load_op: contract.Gpu_Load_Op = .Clear,
+) -> bool {
+	if cv == nil || rawptr(enc) == nil || rawptr(target_view) == nil do return false
+	return chrome_render.chrome_renderer_encode(&cv.rend, enc, &cv.draw_list, target_view, load_op)
+}
+
+chrome_view_build_and_render :: proc(
+	cv: ^Chrome_View,
+	layout: ^Layout_State,
+	tabs: ^tabs_feat.Tabs_Manager,
+	mux: ^mux_feat.Multiplexer,
+	cmd_center: ^Command_Center_State,
+	cursor_state: ^Cursor_State,
+	time_elapsed: f32,
+	target_view: contract.Gpu_TextureView,
+) {
+	if cv == nil || rawptr(target_view) == nil do return
+	_ = chrome_view_build_draw_list(cv, layout, tabs, mux, cmd_center, cursor_state, time_elapsed)
 	_ = chrome_render.chrome_renderer_render(&cv.rend, &cv.draw_list, target_view)
 }

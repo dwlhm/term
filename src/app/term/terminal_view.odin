@@ -55,6 +55,54 @@ terminal_view_resolve_active_bg :: proc(sess: ^sess_feat.Terminal_Session) -> [4
 	return COLOR_PANE_BG
 }
 
+terminal_view_encode_pane :: proc(
+	tv: ^Terminal_View,
+	enc: contract.Gpu_CommandEncoder,
+	sess: ^sess_feat.Terminal_Session,
+	pane_id: u32,
+	pane_rect: [4]f32,
+	is_focused: bool,
+	mouse: ^Mouse_State,
+	time_elapsed: f32,
+	target_view: contract.Gpu_TextureView,
+	text_atlas: ^plat_font.Text_Atlas,
+	metrics: Visual_Metrics,
+	screen_w, screen_h: f32,
+	load_op: contract.Gpu_Load_Op = .Load,
+) {
+	if tv == nil || rawptr(enc) == nil || sess == nil || rawptr(target_view) == nil || text_atlas == nil do return
+
+	sel_active := mouse != nil && mouse.selection.active && mouse.selection.pane_id == pane_id
+	sel_r_start := mouse.selection.start_cell.row if sel_active else -1
+	sel_c_start := mouse.selection.start_cell.col if sel_active else -1
+	sel_r_end := mouse.selection.end_cell.row if sel_active else -1
+	sel_c_end := mouse.selection.end_cell.col if sel_active else -1
+
+	terminal_render.terminal_renderer_encode(
+		&tv.rend,
+		enc,
+		&sess.term,
+		target_view,
+		text_atlas,
+		pane_rect,
+		metrics.cell_w,
+		metrics.cell_h,
+		metrics.pane_pad_x,
+		metrics.pane_pad_y,
+		sess.scroll_offset,
+		screen_w,
+		screen_h,
+		sess.has_custom_bg,
+		sess.custom_bg,
+		sel_r_start,
+		sel_c_start,
+		sel_r_end,
+		sel_c_end,
+		sel_active,
+		load_op,
+	)
+}
+
 terminal_view_render_pane :: proc(
 	tv: ^Terminal_View,
 	sess: ^sess_feat.Terminal_Session,

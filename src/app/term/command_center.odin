@@ -165,13 +165,13 @@ command_center_emit_draw_list :: proc(cc: ^Command_Center_State, dl: ^chrome_dl.
 
 		// Action Title
 		title_col: [4]f32 = {1.0, 1.0, 1.0, 1.0} if is_sel else {0.85, 0.88, 0.92, 0.95}
-		chrome_dl.ui_draw_text(dl, {row_rect[0] + 14, row_rect[1] + 6, row_rect[2] - 120, 18}, meta.title, title_col)
+		chrome_dl.ui_draw_text(dl, {row_rect[0] + 14.0 * s, row_rect[1] + 6.0 * s, row_rect[2] - 120.0 * s, 18.0 * s}, meta.title, title_col)
 
 		// Shortcut Badge
 		if len(meta.shortcut) > 0 {
 			badge_col: [4]f32 = {0.75, 0.88, 1.0, 1.0} if is_sel else {0.50, 0.56, 0.66, 0.90}
-			badge_x := row_rect[0] + row_rect[2] - 90.0
-			chrome_dl.ui_draw_text(dl, {badge_x, row_rect[1] + 6, 80, 18}, meta.shortcut, badge_col)
+			badge_x := row_rect[0] + row_rect[2] - 90.0 * s
+			chrome_dl.ui_draw_text(dl, {badge_x, row_rect[1] + 6.0 * s, 80.0 * s, 18.0 * s}, meta.shortcut, badge_col)
 		}
 	}
 }
