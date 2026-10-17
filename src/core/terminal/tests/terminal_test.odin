@@ -386,5 +386,37 @@ test_parser_combining_at_right_margin :: proc(t: ^testing.T) {
 	testing.expect_value(t, c_wrap.char, 'x')
 }
 
+@test
+test_osc_52_extension :: proc(t: ^testing.T) {
+	terminal: term.Terminal
+	term.terminal_init(&terminal, 24, 80)
+	defer term.terminal_destroy(&terminal)
+
+	captured_text: string
+	sink_called := false
+
+	ctx := extension.Osc_52_Context{
+		sink = proc(user_data: rawptr, text: string) -> bool {
+			p_text := (^string)(user_data)
+			p_text^ = strings.clone(text)
+			return true
+		},
+		user_data = &captured_text,
+	}
+
+	term.terminal_register_osc(&terminal, 52, extension.osc_52_handler, &ctx)
+
+	// Feed valid base64 "SGVsbG8=" ("Hello")
+	term.terminal_feed_string(&terminal, "\x1b]52;c;SGVsbG8=\x07")
+	testing.expect_value(t, captured_text, "Hello")
+	delete(captured_text)
+	captured_text = ""
+
+	// Feed query "?" -> security must reject and not call sink
+	term.terminal_feed_string(&terminal, "\x1b]52;c;?\x07")
+	testing.expect_value(t, captured_text, "")
+}
+
+
 
 

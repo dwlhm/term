@@ -4,8 +4,11 @@ import "base:runtime"
 import "core:strings"
 import pty "../../platform/pty"
 import terminal "../../core/terminal"
+import extension "../../core/terminal/extension"
 import cell "../../core/terminal/cell"
 import damage "../../core/terminal/damage"
+
+Osc_52_Clipboard_Sink :: extension.Osc_52_Clipboard_Sink
 
 Session_Config :: struct {
 	shell: string,
@@ -25,6 +28,7 @@ Terminal_Session :: struct {
 	title_len:       int,
 	cwd_buf:         [512]u8,
 	cwd_len:         int,
+	osc_52_ctx:      extension.Osc_52_Context,
 	allocator:       runtime.Allocator,
 }
 
@@ -101,6 +105,7 @@ session_create :: proc(config: Session_Config, allocator: runtime.Allocator = co
 	terminal.terminal_register_osc(&sess.term, 0, _osc_title_handler, rawptr(sess))
 	terminal.terminal_register_osc(&sess.term, 2, _osc_title_handler, rawptr(sess))
 	terminal.terminal_register_osc(&sess.term, 7, _osc_cwd_handler, rawptr(sess))
+	terminal.terminal_register_osc(&sess.term, 52, extension.osc_52_handler, rawptr(&sess.osc_52_ctx))
 	terminal.terminal_register_osc(&sess.term, 133, _osc_133_handler, rawptr(sess))
 
 	return sess, .None
@@ -180,3 +185,10 @@ session_is_in_prompt :: proc(sess: ^Terminal_Session) -> bool {
 	if sess == nil do return false
 	return sess.in_prompt
 }
+
+session_set_clipboard_sink :: proc(sess: ^Terminal_Session, sink: extension.Osc_52_Clipboard_Sink, user_data: rawptr) {
+	if sess == nil do return
+	sess.osc_52_ctx.sink = sink
+	sess.osc_52_ctx.user_data = user_data
+}
+

@@ -2,6 +2,7 @@ package feature_session_tests
 
 import "core:testing"
 import "core:time"
+import "core:strings"
 import session "../"
 
 @test
@@ -93,6 +94,24 @@ test_session_osc_extensions :: proc(t: ^testing.T) {
 	testing.expect_value(t, session.session_get_title(sess), "My Cool Window")
 	testing.expect_value(t, session.session_get_cwd(sess), "file:///Users/dwlhm/project/term")
 	testing.expect(t, session.session_is_in_prompt(sess), "Expected in_prompt == true from OSC 133;A")
+
+	// Test OSC 52 Clipboard Sink
+	copied_clipboard: string
+	session.session_set_clipboard_sink(sess, proc(user_data: rawptr, text: string) -> bool {
+		s_ptr := (^string)(user_data)
+		s_ptr^ = strings.clone(text)
+		return true
+	}, &copied_clipboard)
+
+	session.session_write_string(sess, "printf '\\033]52;c;TmVvdmltQ2xpcA==\\007'\n")
+	start = time.now()
+	for time.since(start) < 600 * time.Millisecond {
+		session.session_drain(sess)
+		if copied_clipboard == "NeovimClip" do break
+		time.sleep(20 * time.Millisecond)
+	}
+	testing.expect_value(t, copied_clipboard, "NeovimClip")
+	delete(copied_clipboard)
 }
 
 @test
