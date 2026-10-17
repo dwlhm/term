@@ -36,8 +36,10 @@ Semantic_Cell :: struct {
 
 // Direct_Color stores optional 24-bit RGB TrueColor values in parallel row buffers.
 Direct_Color :: struct {
-	fg: [3]u8, // R, G, B
-	bg: [3]u8, // R, G, B
+	fg:     [3]u8, // R, G, B
+	bg:     [3]u8, // R, G, B
+	has_fg: bool,
+	has_bg: bool,
 }
 
 // CELL_DEFAULT represents a blank terminal cell with default attributes.

@@ -28,8 +28,15 @@ Terminal_Session :: struct {
 	title_len:       int,
 	cwd_buf:         [512]u8,
 	cwd_len:         int,
+	custom_bg:       [4]f32,
+	has_custom_bg:   bool,
 	osc_52_ctx:      extension.Osc_52_Context,
+	osc_color_cfg:   extension.Osc_Color_Config,
 	allocator:       runtime.Allocator,
+}
+
+_session_color_responder :: proc(term: rawptr, response: []u8) -> bool {
+	return terminal.terminal_emit_response(term, response)
 }
 
 _osc_title_handler :: proc(user_data: rawptr, osc_id: int, payload: string, term_ptr: rawptr) -> bool {
@@ -105,8 +112,27 @@ session_create :: proc(config: Session_Config, allocator: runtime.Allocator = co
 	terminal.terminal_register_osc(&sess.term, 0, _osc_title_handler, rawptr(sess))
 	terminal.terminal_register_osc(&sess.term, 2, _osc_title_handler, rawptr(sess))
 	terminal.terminal_register_osc(&sess.term, 7, _osc_cwd_handler, rawptr(sess))
+	terminal.terminal_register_osc(&sess.term, 10, extension.osc_color_handler, rawptr(&sess.osc_color_cfg))
+	terminal.terminal_register_osc(&sess.term, 11, extension.osc_color_handler, rawptr(&sess.osc_color_cfg))
+	terminal.terminal_register_osc(&sess.term, 111, extension.osc_color_handler, rawptr(&sess.osc_color_cfg))
 	terminal.terminal_register_osc(&sess.term, 52, extension.osc_52_handler, rawptr(&sess.osc_52_ctx))
 	terminal.terminal_register_osc(&sess.term, 133, _osc_133_handler, rawptr(sess))
+
+	sess.osc_color_cfg.responder = _session_color_responder
+	sess.osc_color_cfg.user_data = rawptr(sess)
+	sess.osc_color_cfg.on_bg_change = proc(user_data: rawptr, r, g, b: f32) {
+		s := (^Terminal_Session)(user_data)
+		if s != nil {
+			s.custom_bg = {r, g, b, 1.0}
+			s.has_custom_bg = true
+		}
+	}
+	sess.osc_color_cfg.on_bg_reset = proc(user_data: rawptr) {
+		s := (^Terminal_Session)(user_data)
+		if s != nil {
+			s.has_custom_bg = false
+		}
+	}
 
 	return sess, .None
 }
@@ -134,6 +160,14 @@ session_drain :: proc(sess: ^Terminal_Session) -> int {
 		if n <= 0 do break
 		terminal.terminal_feed_bytes(&sess.term, buf[:n])
 		total_drained += n
+	}
+
+	// Flush any pending terminal responses (DSR, CPR, DA, OSC 10/11) back to PTY master
+	resp_buf: [256]u8
+	for {
+		resp_n := terminal.terminal_drain_response(&sess.term, resp_buf[:])
+		if resp_n <= 0 do break
+		_, _ = pty.pty_write(sess.pty, resp_buf[:resp_n])
 	}
 
 	return total_drained

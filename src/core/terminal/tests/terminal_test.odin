@@ -417,6 +417,328 @@ test_osc_52_extension :: proc(t: ^testing.T) {
 	testing.expect_value(t, captured_text, "")
 }
 
+@test
+test_parser_iso2022_charset_no_stray_b :: proc(t: ^testing.T) {
+	terminal: term.Terminal
+	term.terminal_init(&terminal, 24, 80)
+	defer term.terminal_destroy(&terminal)
+
+	// Feed \x1b(B (Select ASCII into G0) and \x1b)0 (DEC special graphics)
+	term.terminal_feed_string(&terminal, "\x1b(B\x1b)0Hello")
+	testing.expect_value(t, terminal.parser.cursor.col, 5)
+
+	// Verify row 0 contains "Hello" starting at col 0, NO stray 'B' or '0'
+	testing.expect_value(t, term.terminal_get_cell(&terminal, 0, 0).char, 'H')
+	testing.expect_value(t, term.terminal_get_cell(&terminal, 0, 1).char, 'e')
+	testing.expect_value(t, term.terminal_get_cell(&terminal, 0, 2).char, 'l')
+	testing.expect_value(t, term.terminal_get_cell(&terminal, 0, 3).char, 'l')
+	testing.expect_value(t, term.terminal_get_cell(&terminal, 0, 4).char, 'o')
+}
+
+@test
+test_parser_dcs_and_apc_swallowed :: proc(t: ^testing.T) {
+	terminal: term.Terminal
+	term.terminal_init(&terminal, 24, 80)
+	defer term.terminal_destroy(&terminal)
+
+	// Feed XTGETTCAP DCS sequence and Kitty Graphics APC query
+	term.terminal_feed_string(&terminal, "\x1bP+q4D73\x1b\\")
+	term.terminal_feed_string(&terminal, "\x1b_Gi=31337,s=1;AAAA\x1b\\")
+
+	// Neither payload must be emitted onto the screen
+	testing.expect_value(t, terminal.parser.cursor.col, 0)
+	testing.expect_value(t, terminal.parser.cursor.row, 0)
+	testing.expect_value(t, term.terminal_get_cell(&terminal, 0, 0).char, ' ')
+}
+
+@test
+test_parser_csi_colon_subparameter :: proc(t: ^testing.T) {
+	terminal: term.Terminal
+	term.terminal_init(&terminal, 24, 80)
+	defer term.terminal_destroy(&terminal)
+
+	// Feed curly underline \x1b[4:3m then "Text"
+	term.terminal_feed_string(&terminal, "\x1b[4:3mText")
+	testing.expect_value(t, terminal.parser.cursor.col, 4)
+	testing.expect_value(t, term.terminal_get_cell(&terminal, 0, 0).char, 'T')
+	testing.expect_value(t, term.terminal_get_cell(&terminal, 0, 1).char, 'e')
+	testing.expect_value(t, term.terminal_get_cell(&terminal, 0, 2).char, 'x')
+	testing.expect_value(t, term.terminal_get_cell(&terminal, 0, 3).char, 't')
+}
+
+@test
+test_parser_truecolor_direct_color :: proc(t: ^testing.T) {
+	terminal: term.Terminal
+	term.terminal_init(&terminal, 24, 80)
+	defer term.terminal_destroy(&terminal)
+
+	// Set 24-bit TrueColor FG (255, 128, 64) and BG (10, 20, 30)
+	term.terminal_feed_string(&terminal, "\x1b[38;2;255;128;64m\x1b[48;2;10;20;30mZ\x1b[0m")
+
+	c := term.terminal_get_cell(&terminal, 0, 0)
+	testing.expect_value(t, c.char, 'Z')
+	testing.expect(t, .Has_Direct_Color in c.flags, "Expected Has_Direct_Color flag on cell")
+
+	dc := terminal.grid.rows[0].direct_colors[0]
+	testing.expect(t, dc.has_fg, "Expected has_fg == true")
+	testing.expect_value(t, dc.fg[0], 255)
+	testing.expect_value(t, dc.fg[1], 128)
+	testing.expect_value(t, dc.fg[2], 64)
+
+	testing.expect(t, dc.has_bg, "Expected has_bg == true")
+	testing.expect_value(t, dc.bg[0], 10)
+	testing.expect_value(t, dc.bg[1], 20)
+	testing.expect_value(t, dc.bg[2], 30)
+}
+
+@test
+test_parser_queries_response :: proc(t: ^testing.T) {
+	terminal: term.Terminal
+	term.terminal_init(&terminal, 24, 80)
+	defer term.terminal_destroy(&terminal)
+
+	// 1. DSR 5n -> \x1b[0n
+	term.terminal_feed_string(&terminal, "\x1b[5n")
+	resp: [64]u8
+	n := term.terminal_drain_response(&terminal, resp[:])
+	testing.expect_value(t, string(resp[:n]), "\x1b[0n")
+
+	// 2. DA1 -> \x1b[?62;c
+	term.terminal_feed_string(&terminal, "\x1b[c")
+	n = term.terminal_drain_response(&terminal, resp[:])
+	testing.expect_value(t, string(resp[:n]), "\x1b[?62;c")
+
+	// 3. Move cursor to row 4, col 9 (1-indexed: row 5, col 10) and request CPR
+	term.terminal_feed_string(&terminal, "\x1b[5;10H\x1b[6n")
+	n = term.terminal_drain_response(&terminal, resp[:])
+	testing.expect_value(t, string(resp[:n]), "\x1b[5;10R")
+}
+
+@test
+test_osc_color_queries :: proc(t: ^testing.T) {
+	terminal: term.Terminal
+	term.terminal_init(&terminal, 24, 80)
+	defer term.terminal_destroy(&terminal)
+
+	color_cfg := extension.Osc_Color_Config{
+		responder = proc(term_ptr: rawptr, response: []u8) -> bool {
+			return term.terminal_emit_response(term_ptr, response)
+		},
+	}
+	term.terminal_register_osc(&terminal, 10, extension.osc_color_handler, &color_cfg)
+	term.terminal_register_osc(&terminal, 11, extension.osc_color_handler, &color_cfg)
+
+	// Query FG
+	term.terminal_feed_string(&terminal, "\x1b]10;?\x07")
+	resp: [64]u8
+	n := term.terminal_drain_response(&terminal, resp[:])
+	testing.expect_value(t, string(resp[:n]), "\x1b]10;rgb:c6c6/d0d0/f0f0\x1b\\")
+
+	// Query BG
+	term.terminal_feed_string(&terminal, "\x1b]11;?\x07")
+	n = term.terminal_drain_response(&terminal, resp[:])
+	testing.expect_value(t, string(resp[:n]), "\x1b]11;rgb:1414/1616/1b1b\x1b\\")
+}
+
+@test
+test_parser_bce_erase_line :: proc(t: ^testing.T) {
+	terminal: term.Terminal
+	term.terminal_init(&terminal, 24, 80)
+	defer term.terminal_destroy(&terminal)
+
+	// Set background to TrueColor (30, 34, 42) and Erase in Line (EL)
+	term.terminal_feed_string(&terminal, "\x1b[48;2;30;34;42m\x1b[K")
+
+	// Col 0..79 on row 0 must have Has_Direct_Color and direct background color (30, 34, 42)
+	c0 := term.terminal_get_cell(&terminal, 0, 0)
+	testing.expect(t, .Has_Direct_Color in c0.flags, "Expected Has_Direct_Color on BCE erased cell")
+	dc0 := terminal.grid.rows[0].direct_colors[0]
+	testing.expect(t, dc0.has_bg, "Expected dc.has_bg == true")
+	testing.expect_value(t, dc0.bg[0], 30)
+	testing.expect_value(t, dc0.bg[1], 34)
+	testing.expect_value(t, dc0.bg[2], 42)
+
+	c79 := term.terminal_get_cell(&terminal, 0, 79)
+	testing.expect(t, .Has_Direct_Color in c79.flags, "Expected Has_Direct_Color on BCE erased cell 79")
+	dc79 := terminal.grid.rows[0].direct_colors[79]
+	testing.expect(t, dc79.has_bg, "Expected dc.has_bg == true")
+	testing.expect_value(t, dc79.bg[0], 30)
+	testing.expect_value(t, dc79.bg[1], 34)
+	testing.expect_value(t, dc79.bg[2], 42)
+}
+
+@test
+test_parser_ech :: proc(t: ^testing.T) {
+	terminal: term.Terminal
+	term.terminal_init(&terminal, 24, 80)
+	defer term.terminal_destroy(&terminal)
+
+	// Write 10 characters: "0123456789", return to col 2, erase 4 characters via ECH (\x1b[4X)
+	term.terminal_feed_string(&terminal, "0123456789\r\x1b[2C\x1b[4X")
+
+	// Cursor should NOT move on ECH
+	testing.expect_value(t, terminal.parser.cursor.col, 2)
+	testing.expect_value(t, terminal.parser.cursor.row, 0)
+
+	// Cols 0, 1 should remain '0', '1'
+	testing.expect_value(t, term.terminal_get_cell(&terminal, 0, 0).char, '0')
+	testing.expect_value(t, term.terminal_get_cell(&terminal, 0, 1).char, '1')
+
+	// Cols 2..5 should be erased to ' '
+	for c in 2..=5 {
+		testing.expect_value(t, term.terminal_get_cell(&terminal, 0, c).char, ' ')
+	}
+
+	// Cols 6..9 should remain '6', '7', '8', '9'
+	testing.expect_value(t, term.terminal_get_cell(&terminal, 0, 6).char, '6')
+	testing.expect_value(t, term.terminal_get_cell(&terminal, 0, 7).char, '7')
+	testing.expect_value(t, term.terminal_get_cell(&terminal, 0, 8).char, '8')
+	testing.expect_value(t, term.terminal_get_cell(&terminal, 0, 9).char, '9')
+}
+
+@test
+test_parser_ech_bce :: proc(t: ^testing.T) {
+	terminal: term.Terminal
+	term.terminal_init(&terminal, 24, 80)
+	defer term.terminal_destroy(&terminal)
+
+	// Set direct bg color to (50, 60, 70) and erase 5 characters
+	term.terminal_feed_string(&terminal, "\x1b[48;2;50;60;70m\x1b[5X")
+
+	for c in 0..<5 {
+		cell_val := term.terminal_get_cell(&terminal, 0, c)
+		testing.expect_value(t, cell_val.char, ' ')
+		testing.expect(t, .Has_Direct_Color in cell_val.flags, "Expected Has_Direct_Color on BCE ECH cell")
+		dc := terminal.grid.rows[0].direct_colors[c]
+		testing.expect(t, dc.has_bg, "Expected dc.has_bg == true")
+		testing.expect_value(t, dc.bg[0], 50)
+		testing.expect_value(t, dc.bg[1], 60)
+		testing.expect_value(t, dc.bg[2], 70)
+	}
+}
+
+@test
+test_parser_cha_vpa_cnl_cpl :: proc(t: ^testing.T) {
+	terminal: term.Terminal
+	term.terminal_init(&terminal, 24, 80)
+	defer term.terminal_destroy(&terminal)
+
+	// Move to col 15 via CHA (\x1b[15G) (1-indexed -> 14)
+	term.terminal_feed_string(&terminal, "\x1b[15G")
+	testing.expect_value(t, terminal.parser.cursor.col, 14)
+
+	// Move to row 10 via VPA (\x1b[10d) (1-indexed -> 9)
+	term.terminal_feed_string(&terminal, "\x1b[10d")
+	testing.expect_value(t, terminal.parser.cursor.row, 9)
+
+	// Cursor Next Line (\x1b[3E) -> down 3 rows, col 0
+	term.terminal_feed_string(&terminal, "\x1b[3E")
+	testing.expect_value(t, terminal.parser.cursor.row, 12)
+	testing.expect_value(t, terminal.parser.cursor.col, 0)
+
+	// Cursor Previous Line (\x1b[2F) -> up 2 rows, col 0
+	term.terminal_feed_string(&terminal, "\x1b[2F")
+	testing.expect_value(t, terminal.parser.cursor.row, 10)
+	testing.expect_value(t, terminal.parser.cursor.col, 0)
+}
+
+@test
+test_parser_wide_char_overwrite :: proc(t: ^testing.T) {
+	terminal: term.Terminal
+	term.terminal_init(&terminal, 24, 80)
+	defer term.terminal_destroy(&terminal)
+
+	// Write wide character '世' (U+4E16) at col 0 (occupies col 0 and 1)
+	term.terminal_feed_string(&terminal, "世")
+	c0 := term.terminal_get_cell(&terminal, 0, 0)
+	c1 := term.terminal_get_cell(&terminal, 0, 1)
+	testing.expect(t, .Wide_Lead in c0.flags, "Expected Wide_Lead at col 0")
+	testing.expect(t, .Wide_Continuation in c1.flags, "Expected Wide_Continuation at col 1")
+
+	// Move cursor to col 0 and overwrite with narrow 'A'
+	term.terminal_feed_string(&terminal, "\rA")
+	c0_new := term.terminal_get_cell(&terminal, 0, 0)
+	c1_new := term.terminal_get_cell(&terminal, 0, 1)
+	testing.expect_value(t, c0_new.char, 'A')
+	testing.expect(t, .Wide_Lead not_in c0_new.flags, "Wide_Lead must be removed from col 0")
+	// Col 1 must have been sanitized: orphan Wide_Continuation removed
+	testing.expect(t, .Wide_Continuation not_in c1_new.flags, "Orphan Wide_Continuation must be sanitized at col 1")
+
+	// Now write wide char at cols 2..3
+	term.terminal_feed_string(&terminal, "\x1b[3G界") // col 2 (1-indexed 3)
+	c2 := term.terminal_get_cell(&terminal, 0, 2)
+	c3 := term.terminal_get_cell(&terminal, 0, 3)
+	testing.expect(t, .Wide_Lead in c2.flags, "Expected Wide_Lead at col 2")
+	testing.expect(t, .Wide_Continuation in c3.flags, "Expected Wide_Continuation at col 3")
+
+	// Overwrite col 3 (the continuation cell) with narrow 'B'
+	term.terminal_feed_string(&terminal, "\x1b[4GB")
+	c2_new := term.terminal_get_cell(&terminal, 0, 2)
+	c3_new := term.terminal_get_cell(&terminal, 0, 3)
+	testing.expect_value(t, c3_new.char, 'B')
+	testing.expect(t, .Wide_Continuation not_in c3_new.flags, "Wide_Continuation must be removed from col 3")
+	// Col 2 (the lead) must have been neutralized to space
+	testing.expect_value(t, c2_new.char, ' ')
+	testing.expect(t, .Wide_Lead not_in c2_new.flags, "Orphan Wide_Lead must be neutralized at col 2")
+}
+
+@test
+test_parser_ech_wide_boundary :: proc(t: ^testing.T) {
+	terminal: term.Terminal
+	term.terminal_init(&terminal, 24, 80)
+	defer term.terminal_destroy(&terminal)
+
+	// Write "A世B" -> col 0: 'A', col 1: '世' (lead), col 2: ' ' (cont), col 3: 'B'
+	term.terminal_feed_string(&terminal, "A世B")
+	testing.expect(t, .Wide_Lead in term.terminal_get_cell(&terminal, 0, 1).flags, "col 1 Wide_Lead")
+	testing.expect(t, .Wide_Continuation in term.terminal_get_cell(&terminal, 0, 2).flags, "col 2 Wide_Continuation")
+
+	// Erase 1 character at col 2 (the continuation cell) via ECH
+	term.terminal_feed_string(&terminal, "\x1b[3G\x1b[1X")
+	c1 := term.terminal_get_cell(&terminal, 0, 1)
+	c2 := term.terminal_get_cell(&terminal, 0, 2)
+	// Col 1 must be neutralized to space, col 2 erased to space
+	testing.expect_value(t, c1.char, ' ')
+	testing.expect(t, .Wide_Lead not_in c1.flags, "col 1 lead neutralized")
+	testing.expect_value(t, c2.char, ' ')
+	testing.expect(t, .Wide_Continuation not_in c2.flags, "col 2 cont erased")
+}
+
+@test
+test_parser_decoupled_osc_callback :: proc(t: ^testing.T) {
+	terminal: term.Terminal
+	term.terminal_init(&terminal, 24, 80)
+	defer term.terminal_destroy(&terminal)
+
+	Osc_Capture :: struct {
+		received_id:      int,
+		received_payload: [64]u8,
+		payload_len:      int,
+		called:           bool,
+	}
+	capture := Osc_Capture{}
+
+	// Override parser callback directly (proving pure decoupling from extensions)
+	terminal.parser.user_data = &capture
+	terminal.parser.on_osc = proc(user_data: rawptr, osc_id: int, payload: string) -> bool {
+		cap := (^Osc_Capture)(user_data)
+		cap.received_id = osc_id
+		cap.payload_len = min(len(payload), len(cap.received_payload))
+		copy(cap.received_payload[:cap.payload_len], payload[:cap.payload_len])
+		cap.called = true
+		return true
+	}
+
+	term.terminal_feed_string(&terminal, "\x1b]133;A\x07")
+	testing.expect(t, capture.called, "Expected on_osc to be called")
+	testing.expect_value(t, capture.received_id, 133)
+	testing.expect_value(t, string(capture.received_payload[:capture.payload_len]), "A")
+}
+
+
+
+
+
 
 
 

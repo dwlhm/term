@@ -31,6 +31,21 @@ terminal_init :: proc(t: ^Terminal, rows, cols: int, allocator: runtime.Allocato
 	extension.registry_init(&t.extensions)
 	parser.parser_init(&t.parser, t.rows, t.cols)
 	t.parser.egc_pool = &t.egc_pool
+	t.parser.on_osc = _terminal_on_osc
+	t.parser.on_csi = _terminal_on_csi
+	t.parser.user_data = rawptr(t)
+}
+
+_terminal_on_osc :: proc(user_data: rawptr, osc_id: int, payload: string) -> bool {
+	if user_data == nil do return false
+	t := (^Terminal)(user_data)
+	return extension.registry_dispatch_osc(&t.extensions, osc_id, payload, user_data)
+}
+
+_terminal_on_csi :: proc(user_data: rawptr, cmd: rune, params: []int) -> bool {
+	if user_data == nil do return false
+	t := (^Terminal)(user_data)
+	return extension.registry_dispatch_csi(&t.extensions, cmd, params, user_data)
 }
 
 terminal_destroy :: proc(t: ^Terminal) {
@@ -44,7 +59,7 @@ terminal_destroy :: proc(t: ^Terminal) {
 
 terminal_feed_bytes :: proc(t: ^Terminal, data: []u8) {
 	if t == nil || len(data) == 0 do return
-	parser.parser_parse_bytes(&t.parser, &t.grid, &t.damage, &t.extensions, data, rawptr(t))
+	parser.parser_parse_bytes(&t.parser, &t.grid, &t.damage, data)
 }
 
 terminal_feed_string :: proc(t: ^Terminal, s: string) {
@@ -80,4 +95,19 @@ terminal_register_osc :: proc(t: ^Terminal, osc_id: int, handler: extension.Osc_
 terminal_register_extension :: proc(t: ^Terminal, ext: extension.Terminal_Extension) -> bool {
 	if t == nil do return false
 	return extension.registry_register_extension(&t.extensions, ext, rawptr(t))
+}
+
+terminal_emit_response :: proc(term_ptr: rawptr, data: []u8) -> bool {
+	if term_ptr == nil do return false
+	t := (^Terminal)(term_ptr)
+	return parser.parser_emit_response(&t.parser, data)
+}
+
+terminal_emit_response_string :: proc(term_ptr: rawptr, s: string) -> bool {
+	return terminal_emit_response(term_ptr, transmute([]u8)s)
+}
+
+terminal_drain_response :: proc(t: ^Terminal, out: []u8) -> int {
+	if t == nil do return 0
+	return parser.parser_drain_response(&t.parser, out)
 }

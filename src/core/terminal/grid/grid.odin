@@ -102,6 +102,14 @@ grid_get_cell :: proc(g: ^Grid, row, col: int) -> cell.Semantic_Cell {
 	return g.rows[phys].cells[col]
 }
 
+grid_get_direct_color :: proc(g: ^Grid, row, col: int) -> cell.Direct_Color {
+	if g == nil || row < -g.history_count || row >= g.row_count || col < 0 || col >= g.col_count {
+		return {}
+	}
+	phys := grid_physical_row(g, row)
+	return g.rows[phys].direct_colors[col]
+}
+
 grid_get_cell_ptr :: proc(g: ^Grid, row, col: int) -> ^cell.Semantic_Cell {
 	if g == nil || row < 0 || row >= g.row_count || col < 0 || col >= g.col_count {
 		return nil
@@ -110,14 +118,19 @@ grid_get_cell_ptr :: proc(g: ^Grid, row, col: int) -> ^cell.Semantic_Cell {
 	return &g.rows[phys].cells[col]
 }
 
-grid_set_cell :: proc(g: ^Grid, d: ^damage.Damage_Tracker, row, col: int, c: cell.Semantic_Cell) -> bool {
+grid_set_cell :: proc(g: ^Grid, d: ^damage.Damage_Tracker, row, col: int, c: cell.Semantic_Cell, dc: cell.Direct_Color = {}) -> bool {
 	if g == nil || row < 0 || row >= g.row_count || col < 0 || col >= g.col_count {
 		return false
 	}
 	phys := grid_physical_row(g, row)
 	r := &g.rows[phys]
-	if r.cells[col] != c {
+	if r.cells[col] != c || (.Has_Direct_Color in c.flags && r.direct_colors[col] != dc) {
 		r.cells[col] = c
+		if .Has_Direct_Color in c.flags {
+			r.direct_colors[col] = dc
+		} else {
+			r.direct_colors[col] = {}
+		}
 		r.generation += 1
 		if d != nil {
 			damage.damage_mark_cell(d, row, col, r.generation)
@@ -126,7 +139,15 @@ grid_set_cell :: proc(g: ^Grid, d: ^damage.Damage_Tracker, row, col: int, c: cel
 	return true
 }
 
-grid_clear_line :: proc(g: ^Grid, d: ^damage.Damage_Tracker, row: int, col_start: int = 0, col_end: int = -1) {
+grid_clear_line :: proc(
+	g: ^Grid,
+	d: ^damage.Damage_Tracker,
+	row: int,
+	col_start: int = 0,
+	col_end: int = -1,
+	fill: cell.Semantic_Cell = cell.CELL_DEFAULT,
+	dc: cell.Direct_Color = {},
+) {
 	if g == nil || row < 0 || row >= g.row_count do return
 	phys := grid_physical_row(g, row)
 	r := &g.rows[phys]
@@ -135,8 +156,19 @@ grid_clear_line :: proc(g: ^Grid, d: ^damage.Damage_Tracker, row: int, col_start
 	c_start := max(0, col_start)
 	if c_start >= c_end do return
 
+	// Boundary wide-char sanitization
+	if c_start > 0 && .Wide_Continuation in r.cells[c_start].flags {
+		r.cells[c_start - 1] = fill
+		r.direct_colors[c_start - 1] = dc
+	}
+	if c_end < g.col_count && .Wide_Continuation in r.cells[c_end].flags {
+		r.cells[c_end] = fill
+		r.direct_colors[c_end] = dc
+	}
+
 	for c in c_start..<c_end {
-		r.cells[c] = cell.CELL_DEFAULT
+		r.cells[c] = fill
+		r.direct_colors[c] = dc
 	}
 	r.generation += 1
 	if d != nil {
@@ -144,10 +176,15 @@ grid_clear_line :: proc(g: ^Grid, d: ^damage.Damage_Tracker, row: int, col_start
 	}
 }
 
-grid_clear_all :: proc(g: ^Grid, d: ^damage.Damage_Tracker) {
+grid_clear_all :: proc(
+	g: ^Grid,
+	d: ^damage.Damage_Tracker,
+	fill: cell.Semantic_Cell = cell.CELL_DEFAULT,
+	dc: cell.Direct_Color = {},
+) {
 	if g == nil do return
 	for r in 0..<g.row_count {
-		grid_clear_line(g, d, r, 0, g.col_count)
+		grid_clear_line(g, d, r, 0, g.col_count, fill, dc)
 	}
 	g.origin = 0
 	if d != nil {
@@ -162,7 +199,14 @@ grid_clear_history :: proc(g: ^Grid) {
 
 // grid_scroll_up scrolls content up by n rows.
 // If scrolling the entire grid (0 to row_count-1), it executes in O(1) via ring buffer origin shift.
-grid_scroll_up :: proc(g: ^Grid, d: ^damage.Damage_Tracker, top, bottom: int, n: int) -> int {
+grid_scroll_up :: proc(
+	g: ^Grid,
+	d: ^damage.Damage_Tracker,
+	top, bottom: int,
+	n: int,
+	fill: cell.Semantic_Cell = cell.CELL_DEFAULT,
+	dc: cell.Direct_Color = {},
+) -> int {
 	if g == nil || g.row_count == 0 || n <= 0 do return 0
 	t := max(0, top)
 	b := min(g.row_count - 1, bottom)
@@ -180,7 +224,8 @@ grid_scroll_up :: proc(g: ^Grid, d: ^damage.Damage_Tracker, top, bottom: int, n:
 			phys := grid_physical_row(g, lr)
 			r := &g.rows[phys]
 			for c in 0..<g.col_count {
-				r.cells[c] = cell.CELL_DEFAULT
+				r.cells[c] = fill
+				r.direct_colors[c] = dc
 			}
 			r.generation += 1
 			r.wrap = false
@@ -197,6 +242,7 @@ grid_scroll_up :: proc(g: ^Grid, d: ^damage.Damage_Tracker, top, bottom: int, n:
 		src_phys := grid_physical_row(g, i + actual)
 		dst_phys := grid_physical_row(g, i)
 		copy(g.rows[dst_phys].cells, g.rows[src_phys].cells)
+		copy(g.rows[dst_phys].direct_colors, g.rows[src_phys].direct_colors)
 		g.rows[dst_phys].generation += 1
 		g.rows[dst_phys].wrap = g.rows[src_phys].wrap
 		g.rows[dst_phys].is_prompt = g.rows[src_phys].is_prompt
@@ -208,7 +254,8 @@ grid_scroll_up :: proc(g: ^Grid, d: ^damage.Damage_Tracker, top, bottom: int, n:
 		phys := grid_physical_row(g, i)
 		r := &g.rows[phys]
 		for c in 0..<g.col_count {
-			r.cells[c] = cell.CELL_DEFAULT
+			r.cells[c] = fill
+			r.direct_colors[c] = dc
 		}
 		r.generation += 1
 		r.wrap = false
@@ -222,7 +269,14 @@ grid_scroll_up :: proc(g: ^Grid, d: ^damage.Damage_Tracker, top, bottom: int, n:
 }
 
 // grid_scroll_down scrolls content down by n rows.
-grid_scroll_down :: proc(g: ^Grid, d: ^damage.Damage_Tracker, top, bottom: int, n: int) -> int {
+grid_scroll_down :: proc(
+	g: ^Grid,
+	d: ^damage.Damage_Tracker,
+	top, bottom: int,
+	n: int,
+	fill: cell.Semantic_Cell = cell.CELL_DEFAULT,
+	dc: cell.Direct_Color = {},
+) -> int {
 	if g == nil || g.row_count == 0 || n <= 0 do return 0
 	t := max(0, top)
 	b := min(g.row_count - 1, bottom)
@@ -238,7 +292,8 @@ grid_scroll_down :: proc(g: ^Grid, d: ^damage.Damage_Tracker, top, bottom: int, 
 			phys := grid_physical_row(g, i)
 			r := &g.rows[phys]
 			for c in 0..<g.col_count {
-				r.cells[c] = cell.CELL_DEFAULT
+				r.cells[c] = fill
+				r.direct_colors[c] = dc
 			}
 			r.generation += 1
 			r.wrap = false
@@ -255,6 +310,7 @@ grid_scroll_down :: proc(g: ^Grid, d: ^damage.Damage_Tracker, top, bottom: int, 
 		src_phys := grid_physical_row(g, i - actual)
 		dst_phys := grid_physical_row(g, i)
 		copy(g.rows[dst_phys].cells, g.rows[src_phys].cells)
+		copy(g.rows[dst_phys].direct_colors, g.rows[src_phys].direct_colors)
 		g.rows[dst_phys].generation += 1
 		g.rows[dst_phys].wrap = g.rows[src_phys].wrap
 		g.rows[dst_phys].is_prompt = g.rows[src_phys].is_prompt
@@ -266,7 +322,8 @@ grid_scroll_down :: proc(g: ^Grid, d: ^damage.Damage_Tracker, top, bottom: int, 
 		phys := grid_physical_row(g, i)
 		r := &g.rows[phys]
 		for c in 0..<g.col_count {
-			r.cells[c] = cell.CELL_DEFAULT
+			r.cells[c] = fill
+			r.direct_colors[c] = dc
 		}
 		r.generation += 1
 		r.wrap = false
@@ -292,6 +349,7 @@ grid_resize :: proc(g: ^Grid, d: ^damage.Damage_Tracker, new_rows, new_cols: int
 		old_phys := grid_physical_row(&old, r)
 		new_phys := grid_physical_row(g, r)
 		copy(g.rows[new_phys].cells[:min_c], old.rows[old_phys].cells[:min_c])
+		copy(g.rows[new_phys].direct_colors[:min_c], old.rows[old_phys].direct_colors[:min_c])
 		g.rows[new_phys].generation = 1
 	}
 
