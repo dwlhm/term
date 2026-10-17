@@ -12,6 +12,7 @@ import three_d "../../core/render/three_d"
 import tabs "../tabs"
 import multiplexer "../multiplexer"
 import session "../session"
+import terminal_grid "../../core/terminal/grid"
 
 Modifier_Flags :: bit_set[Modifier_Key]
 Modifier_Key :: enum {
@@ -28,18 +29,6 @@ Interaction_Mode :: enum {
 	Interacting_3D,
 }
 
-Cell_Pos :: struct {
-	row: int,
-	col: int,
-}
-
-Text_Selection :: struct {
-	active:     bool,
-	pane_id:    u32,
-	start_cell: Cell_Pos,
-	end_cell:   Cell_Pos,
-}
-
 Action_Kind :: enum {
 	None,
 	Tab_Selected,
@@ -49,6 +38,7 @@ Action_Kind :: enum {
 	Pane_Split_Requested,
 	Pane_Toggle_3D_Requested,
 	Text_Copied,
+	Text_Selected_All,
 }
 
 Interaction_Action :: struct {
@@ -86,6 +76,7 @@ interaction_on_mouse_down :: proc(
 	pos: [2]f32,
 	button: int,
 	mods: Modifier_Flags,
+	clicks: int = 1,
 ) -> Interaction_Action {
 	if s == nil || tm == nil || mux == nil do return {kind = .None}
 
@@ -123,10 +114,32 @@ interaction_on_mouse_down :: proc(
 				s.mode = .Selecting_Text
 				s.selection.active = true
 				s.selection.pane_id = hit.pane_id
-				c_x := int((pos.x - pane.rect[0]) / s.cell_width)
-				c_y := int((pos.y - pane.rect[1]) / s.cell_height)
-				s.selection.start_cell = {row = max(0, c_y), col = max(0, c_x)}
-				s.selection.end_cell = s.selection.start_cell
+				scroll_off := pane.session.scroll_offset if pane.session != nil else 0
+				c_r, c_c := pixel_to_cell(pos, pane.rect, s.cell_width, s.cell_height, 0.0, 0.0)
+				c_r -= scroll_off
+
+				if clicks >= 3 {
+					cols := pane.session.term.cols if pane.session != nil else 80
+					start_c, end_c := line_find_bounds(cols)
+					s.selection.mode = .Line
+					s.selection.start_cell = {row = c_r, col = start_c}
+					s.selection.end_cell = {row = c_r, col = end_c}
+				} else if clicks == 2 {
+					start_c, end_c := max(0, c_c), max(0, c_c)
+					if pane.session != nil {
+						phy_r := terminal_grid.grid_physical_row(&pane.session.term.grid, c_r)
+						if phy_r < len(pane.session.term.grid.rows) {
+							start_c, end_c = word_find_bounds(&pane.session.term.grid.rows[phy_r], max(0, c_c))
+						}
+					}
+					s.selection.mode = .Word
+					s.selection.start_cell = {row = c_r, col = start_c}
+					s.selection.end_cell = {row = c_r, col = end_c}
+				} else {
+					s.selection.mode = .Stream
+					s.selection.start_cell = {row = c_r, col = max(0, c_c)}
+					s.selection.end_cell = s.selection.start_cell
+				}
 			}
 		}
 		return Interaction_Action{kind = .Pane_Focused, pane_id = hit.pane_id}
@@ -164,9 +177,10 @@ interaction_on_mouse_move :: proc(
 	case .Selecting_Text:
 		pane := multiplexer.multiplexer_get_pane(mux, s.selection.pane_id)
 		if pane != nil {
-			c_x := int((pos.x - pane.rect[0]) / s.cell_width)
-			c_y := int((pos.y - pane.rect[1]) / s.cell_height)
-			s.selection.end_cell = {row = max(0, c_y), col = max(0, c_x)}
+			scroll_off := pane.session.scroll_offset if pane.session != nil else 0
+			c_r, c_c := pixel_to_cell(pos, pane.rect, s.cell_width, s.cell_height, 0.0, 0.0)
+			c_r -= scroll_off
+			s.selection.end_cell = {row = c_r, col = max(0, c_c)}
 		}
 
 	case .Interacting_3D:
@@ -245,32 +259,29 @@ interaction_on_key_press :: proc(
 		case '3':
 			// 3D canvas toggle shortcut: Cmd+Shift+3 or Cmd+3
 			return Interaction_Action{kind = .Pane_Toggle_3D_Requested}
+		case 'a', 'A':
+			// Select All
+			pane := multiplexer.multiplexer_get_focused_pane(mux)
+			if pane != nil && pane.session != nil {
+				g := &pane.session.term.grid
+				s.selection.active = true
+				s.selection.mode = .Stream
+				s.selection.pane_id = pane.id
+				s.selection.start_cell = {row = -g.history_count, col = 0}
+				s.selection.end_cell = {row = pane.session.term.rows - 1, col = max(0, pane.session.term.cols - 1)}
+				return Interaction_Action{kind = .Text_Selected_All, pane_id = pane.id}
+			}
 		case 'c', 'C':
 			// Copy selection
 			if s.selection.active {
 				pane := multiplexer.multiplexer_get_pane(mux, s.selection.pane_id)
 				if pane != nil && pane.session != nil {
-					// Copy selected text into clipboard_buf
-					s.clipboard_len = 0
-					min_r := min(s.selection.start_cell.row, s.selection.end_cell.row)
-					max_r := max(s.selection.start_cell.row, s.selection.end_cell.row)
-					min_c := min(s.selection.start_cell.col, s.selection.end_cell.col)
-					max_c := max(s.selection.start_cell.col, s.selection.end_cell.col)
-
-					for r in min_r..=max_r {
-						for c in min_c..=max_c {
-							ch := session.session_get_cell(pane.session, r, c).char
-							if s.clipboard_len < len(s.clipboard_buf) - 4 {
-								s.clipboard_buf[s.clipboard_len] = u8(ch) if (ch >= 32 && ch <= 126) else ' '
-								s.clipboard_len += 1
-							}
-						}
-						if r < max_r && s.clipboard_len < len(s.clipboard_buf) - 1 {
-							s.clipboard_buf[s.clipboard_len] = '\n'
-							s.clipboard_len += 1
-						}
+					if text, ok := session_extract_selection(pane.session, s.selection, context.temp_allocator); ok {
+						copy_len := min(len(text), len(s.clipboard_buf))
+						copy(s.clipboard_buf[:copy_len], text[:copy_len])
+						s.clipboard_len = copy_len
+						return Interaction_Action{kind = .Text_Copied}
 					}
-					return Interaction_Action{kind = .Text_Copied}
 				}
 			}
 		}
@@ -279,6 +290,9 @@ interaction_on_key_press :: proc(
 	// 2. Normal key routed to active terminal session PTY
 	pane := multiplexer.multiplexer_get_focused_pane(mux)
 	if pane != nil && pane.kind == .Terminal && pane.session != nil {
+		if s.selection.active {
+			s.selection.active = false
+		}
 		buf: [4]u8
 		if key_char >= 0 && key_char <= 127 {
 			buf[0] = u8(key_char)

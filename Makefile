@@ -170,6 +170,11 @@ check:
 	$(ODIN) check src/core/render/chrome/sdf $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/core/render/chrome $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/core/render/three_d $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/core/terminal/extension $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/features/session $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/features/tabs $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/features/multiplexer $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/features/interaction $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/app/term $(CHECK_FLAGS)
 
 clean:
