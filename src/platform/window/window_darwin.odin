@@ -96,6 +96,35 @@ when ODIN_OS == .Darwin {
 					Set_Obj_Proc :: #type proc "c" (target: id, sel: SEL, obj: id)
 					(Set_Obj_Proc(imp_set_gravity))(layer, sel_set_gravity, id(cf_top_left))
 				}
+
+				sel_sublayers := sel_registerName("sublayers")
+				imp_sublayers := class_getMethodImplementation(cls_layer, sel_sublayers)
+				if imp_sublayers != nil {
+					sublayers := (Get_Obj_Proc(imp_sublayers))(layer, sel_sublayers)
+					if sublayers != nil {
+						cls_arr := object_getClass(sublayers)
+						sel_count := sel_registerName("count")
+						sel_obj_at := sel_registerName("objectAtIndex:")
+						imp_count := class_getMethodImplementation(cls_arr, sel_count)
+						imp_obj_at := class_getMethodImplementation(cls_arr, sel_obj_at)
+						if imp_count != nil && imp_obj_at != nil {
+							Get_Count_Proc :: #type proc "c" (target: id, sel: SEL) -> uint
+							Get_Obj_At_Proc :: #type proc "c" (target: id, sel: SEL, idx: uint) -> id
+							cnt := (Get_Count_Proc(imp_count))(sublayers, sel_count)
+							for i in 0..<cnt {
+								sub_layer := (Get_Obj_At_Proc(imp_obj_at))(sublayers, sel_obj_at, i)
+								if sub_layer != nil {
+									cls_sub := object_getClass(sub_layer)
+									imp_sub_grav := class_getMethodImplementation(cls_sub, sel_set_gravity)
+									if imp_sub_grav != nil {
+										Set_Obj_Proc :: #type proc "c" (target: id, sel: SEL, obj: id)
+										(Set_Obj_Proc(imp_sub_grav))(sub_layer, sel_set_gravity, id(cf_top_left))
+									}
+								}
+							}
+						}
+					}
+				}
 			}
 		}
 		sel_subviews := sel_registerName("subviews")

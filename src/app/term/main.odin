@@ -7,6 +7,7 @@ package term
 import "core:fmt"
 import "core:os"
 import "core:time"
+import "vendor:sdl3"
 
 import plat_win "../../platform/window"
 import plat_clip "../../platform/clipboard"
@@ -71,6 +72,9 @@ app_init :: proc(app: ^Term_App, initial_cmd: string = "") -> bool {
 	app.format = contract.get_preferred_format(app.surface, app.device)
 
 	contract.configure_surface(app.surface, app.device, app.format, u32(app.layout.screen_w), u32(app.layout.screen_h))
+	when ODIN_OS == .Darwin {
+		plat_win.platform_setup_metal_layer(app.window.handle)
+	}
 
 	// Initialize text atlas with DPI-scaled pixel size
 	base_font_size := config_resolve_effective_font_size(&app.config)
@@ -117,11 +121,13 @@ app_init :: proc(app: ^Term_App, initial_cmd: string = "") -> bool {
 	}
 
 	app.running = true
+	_ = sdl3.AddEventWatch(app_event_watch, app)
 	return true
 }
 
 app_destroy :: proc(app: ^Term_App) {
 	if app == nil do return
+	sdl3.RemoveEventWatch(app_event_watch, app)
 	mux_feat.multiplexer_destroy(&app.mux)
 	tabs_feat.tabs_manager_destroy(&app.tabs_mgr)
 	composer_view_destroy(&app.composer)

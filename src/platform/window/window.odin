@@ -96,3 +96,10 @@ window_update_pixel_size :: proc(w: ^Window) {
 		w.pixel_ratio = 1.0
 	}
 }
+
+when ODIN_OS != .Darwin {
+	platform_disable_press_and_hold :: proc() {}
+	platform_setup_unified_titlebar :: proc(sdl_window: ^sdl3.Window) -> bool { return false }
+	platform_setup_metal_layer :: proc(sdl_window: ^sdl3.Window) -> bool { return false }
+}
+

@@ -3,10 +3,13 @@ package term
 // Term Event Processing, Input Routing & Dispatch
 // Part of Tier 3 Application Shell (src/app/term/*).
 
+import "base:runtime"
 import "vendor:sdl3"
 
 import plat_win "../../platform/window"
 import contract "../../core/render/contract"
+import chrome_render "../../core/render/chrome"
+import damage "../../core/terminal/damage"
 import tabs_feat "../../features/tabs"
 import mux_feat "../../features/multiplexer"
 import sess_feat "../../features/session"
@@ -17,6 +20,8 @@ FRAME_TICK_MS :: 8
 
 app_handle_window_resize :: proc(app: ^Term_App) {
 	plat_win.window_update_pixel_size(&app.window)
+	if app.window.pixel_w <= 0 || app.window.pixel_h <= 0 do return
+
 	scale := app.window.pixel_ratio
 	layout_set_scale(&app.layout, scale)
 
@@ -25,17 +30,49 @@ app_handle_window_resize :: proc(app: ^Term_App) {
 		app.layout.metrics.cell_h = app.text_atlas.cell_h
 	}
 
+	size_changed := app.layout.screen_w != f32(app.window.pixel_w) || app.layout.screen_h != f32(app.window.pixel_h)
+
 	// Rendering pipeline is fully in pixel space.
 	app.layout.screen_w = f32(app.window.pixel_w)
 	app.layout.screen_h = f32(app.window.pixel_h)
-	contract.configure_surface(app.surface, app.device, app.format, u32(app.window.pixel_w), u32(app.window.pixel_h))
-	composer_view_resize(&app.composer, app.layout.screen_w, app.layout.screen_h)
-	chrome_view_resize(&app.chrome_view, u32(app.layout.screen_w), u32(app.layout.screen_h))
+
+	if size_changed {
+		contract.configure_surface(app.surface, app.device, app.format, u32(app.window.pixel_w), u32(app.window.pixel_h))
+		composer_view_resize(&app.composer, app.layout.screen_w, app.layout.screen_h)
+		chrome_view_resize(&app.chrome_view, u32(app.layout.screen_w), u32(app.layout.screen_h))
+	}
 
 	app.mouse.cell_w = app.layout.metrics.cell_w
 	app.mouse.cell_h = app.layout.metrics.cell_h
 	app.mouse.pad_x = app.layout.metrics.pane_pad_x
 	app.mouse.pad_y = app.layout.metrics.pane_pad_y
+
+	when ODIN_OS == .Darwin {
+		plat_win.platform_setup_metal_layer(app.window.handle)
+	}
+
+	app_sync_layout_and_winsize(app)
+	for &pane in app.mux.panes {
+		if pane.kind == .Terminal && pane.session != nil {
+			damage.damage_mark_all(&pane.session.term.damage)
+		}
+	}
+	chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
+}
+
+app_event_watch :: proc "c" (userdata: rawptr, event: ^sdl3.Event) -> bool {
+	if event == nil || userdata == nil do return true
+	#partial switch event.type {
+	case .WINDOW_RESIZED, .WINDOW_PIXEL_SIZE_CHANGED, .WINDOW_EXPOSED:
+		context = runtime.default_context()
+		app := (^Term_App)(userdata)
+		if app != nil && app.running && app.window.handle != nil && event.window.windowID == sdl3.GetWindowID(app.window.handle) {
+			sdl3.FlushEvents(sdl3.EventType.WINDOW_RESIZED, sdl3.EventType.WINDOW_PIXEL_SIZE_CHANGED)
+			app_handle_window_resize(app)
+			app_render_frame(app)
+		}
+	}
+	return true
 }
 
 app_handle_mouse_button_down :: proc(app: ^Term_App, ev: sdl3.MouseButtonEvent) {
@@ -204,7 +241,8 @@ app_process_events :: proc(app: ^Term_App) -> (dirty: bool) {
 		#partial switch ev.type {
 		case .QUIT:
 			app.running = false
-		case .WINDOW_PIXEL_SIZE_CHANGED:
+		case .WINDOW_PIXEL_SIZE_CHANGED, .WINDOW_RESIZED, .WINDOW_EXPOSED:
+			sdl3.FlushEvents(sdl3.EventType.WINDOW_RESIZED, sdl3.EventType.WINDOW_PIXEL_SIZE_CHANGED)
 			app_handle_window_resize(app)
 		case .MOUSE_MOTION:
 			ratio := app.window.pixel_ratio
