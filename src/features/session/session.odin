@@ -4,6 +4,7 @@ import "base:runtime"
 import "core:strings"
 import pty "../../platform/pty"
 import terminal "../../core/terminal"
+import grid "../../core/terminal/grid"
 import extension "../../core/terminal/extension"
 import cell "../../core/terminal/cell"
 import damage "../../core/terminal/damage"
@@ -67,6 +68,13 @@ _osc_133_handler :: proc(user_data: rawptr, osc_id: int, payload: string, term_p
 	case 'A': // Prompt start
 		sess.in_prompt = true
 		sess.command_running = false
+		t := (^terminal.Terminal)(term_ptr)
+		if t != nil {
+			phys := grid.grid_physical_row(&t.grid, t.parser.cursor.row)
+			if phys >= 0 && phys < len(t.grid.rows) {
+				t.grid.rows[phys].is_prompt = true
+			}
+		}
 	case 'B': // Prompt end (command line entry start)
 		sess.in_prompt = false
 		sess.command_running = false
@@ -152,7 +160,7 @@ session_destroy :: proc(sess: ^Terminal_Session) {
 session_drain :: proc(sess: ^Terminal_Session) -> int {
 	if sess == nil || sess.pty == nil do return 0
 
-	buf: [4096]u8
+	buf: [65536]u8
 	total_drained := 0
 
 	for {
@@ -184,10 +192,11 @@ session_write_string :: proc(sess: ^Terminal_Session, s: string) -> (int, pty.Pt
 
 session_resize :: proc(sess: ^Terminal_Session, cols, rows: u16) {
 	if sess == nil do return
+	terminal.terminal_resize(&sess.term, int(rows), int(cols))
 	if sess.pty != nil {
 		_ = pty.pty_resize(sess.pty, cols, rows)
 	}
-	terminal.terminal_resize(&sess.term, int(rows), int(cols))
+	sess.scroll_offset = clamp(sess.scroll_offset, 0, sess.term.grid.history_count)
 }
 
 session_is_alive :: proc(sess: ^Terminal_Session) -> (bool, int) {

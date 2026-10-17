@@ -237,8 +237,24 @@ multiplexer_drain_all :: proc(m: ^Multiplexer) -> int {
 	return total_drained
 }
 
+multiplexer_has_pending_data :: proc(m: ^Multiplexer) -> bool {
+	if m == nil do return false
+	for &p in m.panes {
+		if p.session != nil && p.session.pty != nil {
+			if pty.ring_available(&p.session.pty.ring) > 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 multiplexer_sync_split_rects :: proc(m: ^Multiplexer, root: ^chrome_splits.Split_Node) {
-	if m == nil || root == nil do return
+	if m == nil do return
+	for &p in m.panes {
+		p.rect = {}
+	}
+	if root == nil do return
 
 	_walk_splits(m, root)
 }
