@@ -134,8 +134,7 @@ multiplexer_close_pane :: proc(m: ^Multiplexer, pane_id: u32) -> bool {
 	if m.focused_pane_id == pane_id {
 		if len(m.panes) > 0 {
 			new_idx := min(idx, len(m.panes) - 1)
-			m.focused_pane_id = m.panes[new_idx].id
-			m.panes[new_idx].is_focused = true
+			multiplexer_focus_pane(m, m.panes[new_idx].id)
 		} else {
 			m.focused_pane_id = 0
 		}
