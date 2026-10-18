@@ -16,6 +16,8 @@ Wgpu_Surface :: struct {
 	width:        u32,
 	height:       u32,
 	present_mode: wgpu.PresentMode,
+	alpha_mode:   wgpu.CompositeAlphaMode,
+	transparent:  bool,
 	configured:   bool,
 }
 
@@ -278,6 +280,15 @@ _wgpu_request_device :: proc(instance: rawptr, surface: rawptr) -> (device: cont
 	adapter := adapter_res.adapter
 	defer wgpu.AdapterRelease(adapter)
 
+	if surface != nil {
+		s := (^Wgpu_Surface)(surface)
+		if s.adapter != nil {
+			wgpu.AdapterRelease(s.adapter)
+		}
+		s.adapter = adapter
+		wgpu.AdapterAddRef(adapter)
+	}
+
 	features: [2]wgpu.FeatureName
 	feature_count: uint = 0
 	if wgpu.AdapterHasFeature(adapter, .TimestampQuery) {
@@ -355,6 +366,7 @@ _wgpu_configure_surface :: proc(surface: rawptr, device: contract.Gpu_Device, fo
 	if dev == nil do return
 
 	wgpu_fmt := _contract_to_wgpu_format(format)
+	target_alpha := wgpu.CompositeAlphaMode.Opaque
 	if surf.adapter != nil {
 		caps, status := wgpu.SurfaceGetCapabilities(surf.handle, surf.adapter)
 		if status == .Success {
@@ -382,8 +394,38 @@ _wgpu_configure_surface :: proc(surface: rawptr, device: contract.Gpu_Device, fo
 					wgpu_fmt = formats[0]
 				}
 			}
+			// Validate and pick supported alphaMode
+			if surf.transparent {
+				alpha_modes := caps.alphaModes[:caps.alphaModeCount]
+				for mode in alpha_modes {
+					if mode == .Unpremultiplied {
+						target_alpha = .Unpremultiplied
+						break
+					}
+					if mode == .Premultiplied {
+						target_alpha = .Premultiplied
+					}
+				}
+				if target_alpha == .Opaque {
+					for mode in alpha_modes {
+						if mode != .Opaque {
+							target_alpha = mode
+							break
+						}
+					}
+				}
+			} else {
+				target_alpha = .Opaque
+			}
 		}
 	}
+
+	if target_alpha == .Opaque && surf.transparent {
+		when ODIN_OS == .Darwin {
+			target_alpha = .Unpremultiplied
+		}
+	}
+	surf.alpha_mode = target_alpha
 
 	if wgpu_fmt == .Undefined {
 		when ODIN_OS == .Darwin {
@@ -407,7 +449,7 @@ _wgpu_configure_surface :: proc(surface: rawptr, device: contract.Gpu_Device, fo
 		usage       = { .RenderAttachment },
 		width       = w,
 		height      = h,
-		alphaMode   = .Opaque,
+		alphaMode   = surf.alpha_mode,
 		presentMode = surf.present_mode,
 	}
 	wgpu.SurfaceConfigure(surf.handle, &config)
@@ -415,6 +457,57 @@ _wgpu_configure_surface :: proc(surface: rawptr, device: contract.Gpu_Device, fo
 	surf.width = w
 	surf.height = h
 	surf.configured = true
+}
+
+surface_set_transparent :: proc(surface: rawptr, transparent: bool) {
+	if surface == nil do return
+	s := (^Wgpu_Surface)(surface)
+	s.transparent = transparent
+	if s.configured && s.handle != nil && s.device != nil {
+		target_alpha := wgpu.CompositeAlphaMode.Opaque
+		if s.adapter != nil {
+			caps, status := wgpu.SurfaceGetCapabilities(s.handle, s.adapter)
+			if status == .Success {
+				defer wgpu.SurfaceCapabilitiesFreeMembers(caps)
+				if transparent {
+					alpha_modes := caps.alphaModes[:caps.alphaModeCount]
+					for mode in alpha_modes {
+						if mode == .Unpremultiplied {
+							target_alpha = .Unpremultiplied
+							break
+						}
+						if mode == .Premultiplied {
+							target_alpha = .Premultiplied
+						}
+					}
+					if target_alpha == .Opaque {
+						for mode in alpha_modes {
+							if mode != .Opaque {
+								target_alpha = mode
+								break
+							}
+						}
+					}
+				}
+			}
+		}
+		if target_alpha == .Opaque && transparent {
+			when ODIN_OS == .Darwin {
+				target_alpha = .Unpremultiplied
+			}
+		}
+		s.alpha_mode = target_alpha
+		config := wgpu.SurfaceConfiguration{
+			device      = s.device,
+			format      = s.format,
+			usage       = { .RenderAttachment },
+			width       = s.width,
+			height      = s.height,
+			alphaMode   = s.alpha_mode,
+			presentMode = s.present_mode,
+		}
+		wgpu.SurfaceConfigure(s.handle, &config)
+	}
 }
 
 _wgpu_set_present_mode :: proc(surface: rawptr, mode: contract.Gpu_Present_Mode) {

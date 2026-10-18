@@ -100,6 +100,7 @@ window_update_pixel_size :: proc(w: ^Window) {
 when ODIN_OS != .Darwin {
 	platform_disable_press_and_hold :: proc() {}
 	platform_setup_unified_titlebar :: proc(sdl_window: ^sdl3.Window) -> bool { return false }
-	platform_setup_metal_layer :: proc(sdl_window: ^sdl3.Window) -> bool { return false }
+	platform_setup_metal_layer :: proc(sdl_window: ^sdl3.Window, is_opaque: bool = false) -> bool { return false }
+	platform_setup_window_vibrancy :: proc(sdl_window: ^sdl3.Window, enabled: bool) -> bool { return false }
 }
 

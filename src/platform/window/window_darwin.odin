@@ -80,7 +80,7 @@ when ODIN_OS == .Darwin {
 		return 0, false
 	}
 
-	_platform_configure_metal_layer :: proc(v: id, cf_top_left: rawptr) {
+	_platform_configure_metal_layer :: proc(v: id, cf_top_left: rawptr, is_opaque: bool = false) {
 		if v == nil do return
 		cls_v := object_getClass(v)
 		Get_Obj_Proc :: #type proc "c" (target: id, sel: SEL) -> id
@@ -88,13 +88,22 @@ when ODIN_OS == .Darwin {
 		imp_layer := class_getMethodImplementation(cls_v, sel_layer)
 		if imp_layer != nil {
 			layer := (Get_Obj_Proc(imp_layer))(v, sel_layer)
-			if layer != nil && cf_top_left != nil {
+			if layer != nil {
 				cls_layer := object_getClass(layer)
 				sel_set_gravity := sel_registerName("setContentsGravity:")
-				imp_set_gravity := class_getMethodImplementation(cls_layer, sel_set_gravity)
-				if imp_set_gravity != nil {
-					Set_Obj_Proc :: #type proc "c" (target: id, sel: SEL, obj: id)
-					(Set_Obj_Proc(imp_set_gravity))(layer, sel_set_gravity, id(cf_top_left))
+				if cf_top_left != nil {
+					imp_set_gravity := class_getMethodImplementation(cls_layer, sel_set_gravity)
+					if imp_set_gravity != nil {
+						Set_Obj_Proc :: #type proc "c" (target: id, sel: SEL, obj: id)
+						(Set_Obj_Proc(imp_set_gravity))(layer, sel_set_gravity, id(cf_top_left))
+					}
+				}
+
+				sel_set_opaque := sel_registerName("setOpaque:")
+				imp_set_opaque := class_getMethodImplementation(cls_layer, sel_set_opaque)
+				if imp_set_opaque != nil {
+					Set_Bool_Proc :: #type proc "c" (target: id, sel: SEL, flag: BOOL)
+					(Set_Bool_Proc(imp_set_opaque))(layer, sel_set_opaque, is_opaque)
 				}
 
 				sel_sublayers := sel_registerName("sublayers")
@@ -115,10 +124,17 @@ when ODIN_OS == .Darwin {
 								sub_layer := (Get_Obj_At_Proc(imp_obj_at))(sublayers, sel_obj_at, i)
 								if sub_layer != nil {
 									cls_sub := object_getClass(sub_layer)
-									imp_sub_grav := class_getMethodImplementation(cls_sub, sel_set_gravity)
-									if imp_sub_grav != nil {
-										Set_Obj_Proc :: #type proc "c" (target: id, sel: SEL, obj: id)
-										(Set_Obj_Proc(imp_sub_grav))(sub_layer, sel_set_gravity, id(cf_top_left))
+									if cf_top_left != nil {
+										imp_sub_grav := class_getMethodImplementation(cls_sub, sel_set_gravity)
+										if imp_sub_grav != nil {
+											Set_Obj_Proc :: #type proc "c" (target: id, sel: SEL, obj: id)
+											(Set_Obj_Proc(imp_sub_grav))(sub_layer, sel_set_gravity, id(cf_top_left))
+										}
+									}
+									imp_sub_op := class_getMethodImplementation(cls_sub, sel_set_opaque)
+									if imp_sub_op != nil {
+										Set_Bool_Proc :: #type proc "c" (target: id, sel: SEL, flag: BOOL)
+										(Set_Bool_Proc(imp_sub_op))(sub_layer, sel_set_opaque, is_opaque)
 									}
 								}
 							}
@@ -143,14 +159,14 @@ when ODIN_OS == .Darwin {
 					cnt := (Get_Count_Proc(imp_count))(subviews, sel_count)
 					for i in 0..<cnt {
 						sub := (Get_Obj_At_Proc(imp_obj_at))(subviews, sel_obj_at, i)
-						_platform_configure_metal_layer(sub, cf_top_left)
+						_platform_configure_metal_layer(sub, cf_top_left, is_opaque)
 					}
 				}
 			}
 		}
 	}
 
-	platform_setup_metal_layer :: proc(sdl_window: ^sdl3.Window) -> bool {
+	platform_setup_metal_layer :: proc(sdl_window: ^sdl3.Window, is_opaque: bool = false) -> bool {
 		if sdl_window == nil do return false
 		props := sdl3.GetWindowProperties(sdl_window)
 		nswindow := id(sdl3.GetPointerProperty(props, sdl3.PROP_WINDOW_COCOA_WINDOW_POINTER, nil))
@@ -169,7 +185,7 @@ when ODIN_OS == .Darwin {
 			defer CFRelease(cf_top_left)
 		}
 
-		_platform_configure_metal_layer(contentView, cf_top_left)
+		_platform_configure_metal_layer(contentView, cf_top_left, is_opaque)
 		return true
 	}
 
@@ -235,6 +251,153 @@ when ODIN_OS == .Darwin {
 		}
 
 		platform_setup_metal_layer(sdl_window)
+		return true
+	}
+
+	platform_setup_window_vibrancy :: proc(sdl_window: ^sdl3.Window, enabled: bool) -> bool {
+		if sdl_window == nil do return false
+		props := sdl3.GetWindowProperties(sdl_window)
+		nswindow := id(sdl3.GetPointerProperty(props, sdl3.PROP_WINDOW_COCOA_WINDOW_POINTER, nil))
+		if nswindow == nil do return false
+		cls_win := object_getClass(nswindow)
+
+		sel_set_opaque := sel_registerName("setOpaque:")
+		imp_set_opaque := class_getMethodImplementation(cls_win, sel_set_opaque)
+		if imp_set_opaque != nil {
+			Set_Bool_Proc :: #type proc "c" (target: id, sel: SEL, flag: BOOL)
+			(Set_Bool_Proc(imp_set_opaque))(nswindow, sel_set_opaque, !enabled)
+		}
+
+		cls_nscolor := objc_getClass("NSColor")
+		if cls_nscolor != nil {
+			sel_clear_color := sel_registerName("clearColor")
+			imp_clear_color := class_getMethodImplementation(object_getClass(id(cls_nscolor)), sel_clear_color)
+			if imp_clear_color != nil {
+				Get_Obj_Proc :: #type proc "c" (target: id, sel: SEL) -> id
+				clear_color := (Get_Obj_Proc(imp_clear_color))(id(cls_nscolor), sel_clear_color)
+				if clear_color != nil {
+					sel_set_bg := sel_registerName("setBackgroundColor:")
+					imp_set_bg := class_getMethodImplementation(cls_win, sel_set_bg)
+					if imp_set_bg != nil {
+						Set_Obj_Proc :: #type proc "c" (target: id, sel: SEL, obj: id)
+						(Set_Obj_Proc(imp_set_bg))(nswindow, sel_set_bg, clear_color)
+					}
+				}
+			}
+		}
+
+		sel_contentView := sel_registerName("contentView")
+		imp_contentView := class_getMethodImplementation(cls_win, sel_contentView)
+		if imp_contentView == nil do return false
+		Get_Obj_Proc :: #type proc "c" (target: id, sel: SEL) -> id
+		contentView := (Get_Obj_Proc(imp_contentView))(nswindow, sel_contentView)
+		if contentView == nil do return false
+		cls_cv := object_getClass(contentView)
+
+		platform_setup_metal_layer(sdl_window, !enabled)
+
+		cls_vev := objc_getClass("NSVisualEffectView")
+		if cls_vev == nil do return false
+
+		sel_subviews := sel_registerName("subviews")
+		imp_subviews := class_getMethodImplementation(cls_cv, sel_subviews)
+		if imp_subviews != nil {
+			subviews := (Get_Obj_Proc(imp_subviews))(contentView, sel_subviews)
+			if subviews != nil {
+				cls_arr := object_getClass(subviews)
+				sel_count := sel_registerName("count")
+				sel_obj_at := sel_registerName("objectAtIndex:")
+				imp_count := class_getMethodImplementation(cls_arr, sel_count)
+				imp_obj_at := class_getMethodImplementation(cls_arr, sel_obj_at)
+				if imp_count != nil && imp_obj_at != nil {
+					Get_Count_Proc :: #type proc "c" (target: id, sel: SEL) -> uint
+					Get_Obj_At_Proc :: #type proc "c" (target: id, sel: SEL, idx: uint) -> id
+					cnt := (Get_Count_Proc(imp_count))(subviews, sel_count)
+					for i in 0..<cnt {
+						sub := (Get_Obj_At_Proc(imp_obj_at))(subviews, sel_obj_at, i)
+						if sub != nil && object_getClass(sub) == cls_vev {
+							sel_set_hidden := sel_registerName("setHidden:")
+							imp_set_hidden := class_getMethodImplementation(cls_vev, sel_set_hidden)
+							if imp_set_hidden != nil {
+								Set_Bool_Proc :: #type proc "c" (target: id, sel: SEL, flag: BOOL)
+								(Set_Bool_Proc(imp_set_hidden))(sub, sel_set_hidden, !enabled)
+							}
+							return true
+						}
+					}
+				}
+			}
+		}
+
+		if !enabled do return true
+
+		sel_alloc := sel_registerName("alloc")
+		imp_alloc := class_getMethodImplementation(object_getClass(id(cls_vev)), sel_alloc)
+		if imp_alloc == nil do return false
+		vev_alloc := (Get_Obj_Proc(imp_alloc))(id(cls_vev), sel_alloc)
+		if vev_alloc == nil do return false
+
+		NSRect :: struct {
+			origin: [2]f64,
+			size:   [2]f64,
+		}
+		sel_bounds := sel_registerName("bounds")
+		imp_bounds := class_getMethodImplementation(cls_cv, sel_bounds)
+		bounds: NSRect
+		if imp_bounds != nil {
+			Get_Rect_Proc :: #type proc "c" (target: id, sel: SEL) -> NSRect
+			bounds = (Get_Rect_Proc(imp_bounds))(contentView, sel_bounds)
+		}
+
+		sel_initWithFrame := sel_registerName("initWithFrame:")
+		imp_initWithFrame := class_getMethodImplementation(object_getClass(vev_alloc), sel_initWithFrame)
+		if imp_initWithFrame == nil do return false
+		Init_Frame_Proc :: #type proc "c" (target: id, sel: SEL, frame: NSRect) -> id
+		vev := (Init_Frame_Proc(imp_initWithFrame))(vev_alloc, sel_initWithFrame, bounds)
+		if vev == nil do return false
+
+		cls_vev_inst := object_getClass(vev)
+
+		// Material: 2 = UnderWindowBackground (native macOS vibrant blurred glass)
+		sel_setMaterial := sel_registerName("setMaterial:")
+		imp_setMaterial := class_getMethodImplementation(cls_vev_inst, sel_setMaterial)
+		if imp_setMaterial != nil {
+			Set_Int_Proc :: #type proc "c" (target: id, sel: SEL, val: int)
+			(Set_Int_Proc(imp_setMaterial))(vev, sel_setMaterial, 2)
+		}
+
+		// BlendingMode: 0 = BehindWindow
+		sel_setBlendingMode := sel_registerName("setBlendingMode:")
+		imp_setBlendingMode := class_getMethodImplementation(cls_vev_inst, sel_setBlendingMode)
+		if imp_setBlendingMode != nil {
+			Set_Int_Proc :: #type proc "c" (target: id, sel: SEL, val: int)
+			(Set_Int_Proc(imp_setBlendingMode))(vev, sel_setBlendingMode, 0)
+		}
+
+		// State: 1 = Active
+		sel_setState := sel_registerName("setState:")
+		imp_setState := class_getMethodImplementation(cls_vev_inst, sel_setState)
+		if imp_setState != nil {
+			Set_Int_Proc :: #type proc "c" (target: id, sel: SEL, val: int)
+			(Set_Int_Proc(imp_setState))(vev, sel_setState, 1)
+		}
+
+		// AutoresizingMask: NSViewWidthSizable (2) | NSViewHeightSizable (16) = 18
+		sel_setAutoresizingMask := sel_registerName("setAutoresizingMask:")
+		imp_setAutoresizingMask := class_getMethodImplementation(cls_vev_inst, sel_setAutoresizingMask)
+		if imp_setAutoresizingMask != nil {
+			Set_Uint_Proc :: #type proc "c" (target: id, sel: SEL, val: uint)
+			(Set_Uint_Proc(imp_setAutoresizingMask))(vev, sel_setAutoresizingMask, 18)
+		}
+
+		// Add subview positioned below all other views: NSWindowBelow = -1
+		sel_addSubviewPositioned := sel_registerName("addSubview:positioned:relativeTo:")
+		imp_addSubviewPositioned := class_getMethodImplementation(cls_cv, sel_addSubviewPositioned)
+		if imp_addSubviewPositioned != nil {
+			Add_Sub_Proc :: #type proc "c" (target: id, sel: SEL, view: id, pos: int, relativeTo: id)
+			(Add_Sub_Proc(imp_addSubviewPositioned))(contentView, sel_addSubviewPositioned, vev, -1, nil)
+		}
+
 		return true
 	}
 }
