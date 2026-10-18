@@ -99,6 +99,61 @@ split_tree_collect_pane_ids :: proc(node: ^Split_Node, ids: ^[dynamic]u32) {
 	split_tree_collect_pane_ids(node.right, ids)
 }
 
+// split_tree_find_leaf locates the leaf Split_Node corresponding to pane_id.
+split_tree_find_leaf :: proc(node: ^Split_Node, pane_id: u32) -> ^Split_Node {
+	if node == nil do return nil
+	if node.kind == .Leaf {
+		if node.pane_id == pane_id do return node
+		return nil
+	}
+	if found := split_tree_find_leaf(node.left, pane_id); found != nil do return found
+	return split_tree_find_leaf(node.right, pane_id)
+}
+
+// split_tree_remove_pane removes a leaf pane and collapses the parent split node,
+// elevating the remaining sibling to the parent's position in the hierarchy.
+split_tree_remove_pane :: proc(root: ^^Split_Node, pane_id: u32, allocator := context.allocator) -> bool {
+	if root == nil || root^ == nil do return false
+
+	curr := root^
+	if curr.kind == .Leaf {
+		if curr.pane_id == pane_id {
+			split_tree_destroy(curr, allocator)
+			root^ = nil
+			return true
+		}
+		return false
+	}
+
+	// If left child is the target leaf, collapse parent and elevate right sibling.
+	if curr.left != nil && curr.left.kind == .Leaf && curr.left.pane_id == pane_id {
+		sibling := curr.right
+		free(curr.left, allocator)
+		free(curr, allocator)
+		root^ = sibling
+		return true
+	}
+
+	// If right child is the target leaf, collapse parent and elevate left sibling.
+	if curr.right != nil && curr.right.kind == .Leaf && curr.right.pane_id == pane_id {
+		sibling := curr.left
+		free(curr.right, allocator)
+		free(curr, allocator)
+		root^ = sibling
+		return true
+	}
+
+	// Otherwise search subtrees recursively.
+	if curr.left != nil && split_tree_remove_pane(&curr.left, pane_id, allocator) {
+		return true
+	}
+	if curr.right != nil && split_tree_remove_pane(&curr.right, pane_id, allocator) {
+		return true
+	}
+
+	return false
+}
+
 // split_tree_layout calculates physical screen rectangles for every node in the tree.
 split_tree_layout :: proc(node: ^Split_Node, target_rect: [4]f32) {
 	if node == nil do return

@@ -245,3 +245,104 @@ test_splits_preview_fixtures :: proc(t: ^testing.T) {
 	draw_list.ui_draw_list_destroy(&dl)
 	testing.expect_value(t, track.current_memory_allocated, 0)
 }
+
+@test
+test_splits_find_and_remove :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	alloc := mem.tracking_allocator(&track)
+
+	root := split_node_create_leaf(1, alloc)
+
+	// Single leaf find
+	testing.expect(t, split_tree_find_leaf(root, 1) == root)
+	testing.expect(t, split_tree_find_leaf(root, 99) == nil)
+
+	// Split 1 into (1, 2)
+	l1, r2 := split_node_split(root, .Horizontal, 0.5, 2, alloc)
+	testing.expect(t, l1 != nil && r2 != nil)
+
+	// Split 2 into (2, 3)
+	l2, r3 := split_node_split(r2, .Vertical, 0.5, 3, alloc)
+	testing.expect(t, l2 != nil && r3 != nil)
+
+	// Find in 3-pane tree
+	testing.expect(t, split_tree_find_leaf(root, 1) == l1)
+	testing.expect(t, split_tree_find_leaf(root, 2) == l2)
+	testing.expect(t, split_tree_find_leaf(root, 3) == r3)
+	testing.expect(t, split_tree_find_leaf(root, 4) == nil)
+
+	// Remove pane 2 (child of right subtree)
+	ok := split_tree_remove_pane(&root, 2, alloc)
+	testing.expect(t, ok, "Removing pane 2 should succeed")
+	testing.expect(t, root.kind == .Horizontal, "Root should still be Horizontal")
+	testing.expect(t, root.left == l1, "Left should still be pane 1")
+	testing.expect(t, root.right.kind == .Leaf && root.right.pane_id == 3, "Right should now be promoted leaf pane 3")
+
+	// Remove pane 1 (left child of root)
+	ok = split_tree_remove_pane(&root, 1, alloc)
+	testing.expect(t, ok, "Removing pane 1 should succeed")
+	testing.expect(t, root.kind == .Leaf, "Root should now collapse to Leaf")
+	testing.expect_value(t, root.pane_id, u32(3))
+
+	// Remove final pane 3
+	ok = split_tree_remove_pane(&root, 3, alloc)
+	testing.expect(t, ok, "Removing pane 3 should succeed")
+	testing.expect(t, root == nil, "Root should now be nil")
+
+	testing.expect_value(t, track.current_memory_allocated, 0)
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_splits_three_pane_remove_leaf_order :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	alloc := mem.tracking_allocator(&track)
+
+	// User flow: Pane 1 is split right -> (Pane 1, Pane 2)
+	root := split_node_create_leaf(1, alloc)
+	split_node_split(root, .Horizontal, 0.5, 2, alloc)
+
+	// User focuses pane 2 and splits right again -> (Pane 2, Pane 3)
+	leaf2 := split_tree_find_leaf(root, 2)
+	testing.expect(t, leaf2 != nil)
+	split_node_split(leaf2, .Horizontal, 0.5, 3, alloc)
+
+	// Tree structure:
+	//         Root (H)
+	//        /        \
+	//     Leaf(1)   Inner (H)
+	//               /       \
+	//            Leaf(2)   Leaf(3)
+	testing.expect(t, split_tree_find_leaf(root, 1) != nil)
+	testing.expect(t, split_tree_find_leaf(root, 2) != nil)
+	testing.expect(t, split_tree_find_leaf(root, 3) != nil)
+
+	// User types 'exit' in Pane 3 (reap dead session -> remove pane 3)
+	ok := split_tree_remove_pane(&root, 3, alloc)
+	testing.expect(t, ok, "Removing pane 3 should succeed")
+	testing.expect(t, root != nil, "Root should remain non-nil")
+	testing.expect(t, root.kind == .Horizontal, "Root should still be Horizontal")
+	testing.expect(t, split_tree_find_leaf(root, 1) != nil, "Pane 1 must remain")
+	testing.expect(t, split_tree_find_leaf(root, 2) != nil, "Pane 2 must remain")
+	testing.expect(t, split_tree_find_leaf(root, 3) == nil, "Pane 3 must be gone")
+
+	// User types 'exit' in Pane 2 -> root collapses to single Leaf(1)
+	ok = split_tree_remove_pane(&root, 2, alloc)
+	testing.expect(t, ok, "Removing pane 2 should succeed")
+	testing.expect(t, root != nil && root.kind == .Leaf, "Root should collapse to Leaf")
+	testing.expect_value(t, root.pane_id, u32(1))
+
+	// User types 'exit' in Pane 1 -> root becomes nil
+	ok = split_tree_remove_pane(&root, 1, alloc)
+	testing.expect(t, ok, "Removing final pane 1 should succeed")
+	testing.expect(t, root == nil, "Root should be nil after all panes removed")
+
+	testing.expect_value(t, track.current_memory_allocated, 0)
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+
