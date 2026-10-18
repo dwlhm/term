@@ -231,6 +231,9 @@ app_run :: proc(app: ^Term_App) {
 		telemetry.telemetry_add_drain(&app.diag.tel, drained)
 		if drained > 0 do term_dirty = true
 
+		if app_reap_dead_sessions(app) do term_dirty = true
+		if !app.running do break
+
 		if app_sync_layout_and_winsize(app) do term_dirty = true
 		diagnostics_poll(app)
 

@@ -47,11 +47,78 @@ app_close_tab :: proc(app: ^Term_App, tab_idx: int) {
 	chrome_splits.split_tree_collect_pane_ids(app.tabs_mgr.entries[tab_idx].split_tree, &pane_ids)
 
 	for pid in pane_ids {
+		terminal_view_release_pane(&app.term_view, pid)
 		mux_feat.multiplexer_close_pane(&app.mux, pid)
 	}
 
 	tabs_feat.tabs_manager_close_tab(&app.tabs_mgr, tab_idx)
+	if len(app.tabs_mgr.entries) == 0 {
+		app.running = false
+	}
 	app.layout.tab_bar_force = true
+}
+
+// app_close_pane releases an individual pane, collapses the split tree,
+// and closes the tab if no panes remain.
+app_close_pane :: proc(app: ^Term_App, pane_id: u32) {
+	if app == nil || pane_id == 0 do return
+
+	terminal_view_release_pane(&app.term_view, pane_id)
+
+	found_tab_idx := -1
+	for i in 0..<len(app.tabs_mgr.entries) {
+		tab := &app.tabs_mgr.entries[i]
+		if chrome_splits.split_tree_find_leaf(tab.split_tree, pane_id) != nil {
+			found_tab_idx = i
+			break
+		}
+	}
+
+	if found_tab_idx >= 0 {
+		tab := &app.tabs_mgr.entries[found_tab_idx]
+		_ = chrome_splits.split_tree_remove_pane(&tab.split_tree, pane_id, app.tabs_mgr.allocator)
+		if tab.split_tree == nil {
+			mux_feat.multiplexer_close_pane(&app.mux, pane_id)
+			app_close_tab(app, found_tab_idx)
+			return
+		}
+	}
+
+	mux_feat.multiplexer_close_pane(&app.mux, pane_id)
+
+	if found_tab_idx >= 0 {
+		tab := &app.tabs_mgr.entries[found_tab_idx]
+		if tab.active_pane_id == pane_id {
+			tab.active_pane_id = app.mux.focused_pane_id
+		}
+	}
+
+	app_sync_layout_and_winsize(app)
+}
+
+// app_reap_dead_sessions checks all terminal panes for terminated child shells
+// (e.g. user typed 'exit' or sent EOF/SIGTERM) and closes them cleanly.
+app_reap_dead_sessions :: proc(app: ^Term_App) -> (reaped: bool) {
+	if app == nil do return false
+
+	dead_ids: [dynamic]u32
+	defer delete(dead_ids)
+
+	for &p in app.mux.panes {
+		if p.kind == .Terminal && p.session != nil {
+			alive, _ := sess_feat.session_is_alive(p.session)
+			if !alive {
+				append(&dead_ids, p.id)
+			}
+		}
+	}
+
+	for pid in dead_ids {
+		app_close_pane(app, pid)
+		reaped = true
+	}
+
+	return reaped
 }
 
 // app_execute_action dispatches higher-level UI and workspace commands.
@@ -97,8 +164,14 @@ app_execute_action :: proc(app: ^Term_App, act: Action_Id) {
 		if !ok do return
 		_, active_tab := tabs_feat.tabs_manager_get_active(&app.tabs_mgr)
 		if active_tab != nil && active_tab.split_tree != nil {
-			chrome_splits.split_node_split(active_tab.split_tree, .Horizontal, 0.5, new_p)
+			target_leaf := chrome_splits.split_tree_find_leaf(active_tab.split_tree, app.mux.focused_pane_id)
+			if target_leaf == nil {
+				target_leaf = active_tab.split_tree
+			}
+			chrome_splits.split_node_split(target_leaf, .Horizontal, 0.5, new_p, app.tabs_mgr.allocator)
 			mux_feat.multiplexer_focus_pane(&app.mux, new_p)
+			active_tab.active_pane_id = new_p
+			app_sync_layout_and_winsize(app)
 		}
 
 	case .Pane_Split_Down:
@@ -106,8 +179,19 @@ app_execute_action :: proc(app: ^Term_App, act: Action_Id) {
 		if !ok do return
 		_, active_tab := tabs_feat.tabs_manager_get_active(&app.tabs_mgr)
 		if active_tab != nil && active_tab.split_tree != nil {
-			chrome_splits.split_node_split(active_tab.split_tree, .Vertical, 0.5, new_p)
+			target_leaf := chrome_splits.split_tree_find_leaf(active_tab.split_tree, app.mux.focused_pane_id)
+			if target_leaf == nil {
+				target_leaf = active_tab.split_tree
+			}
+			chrome_splits.split_node_split(target_leaf, .Vertical, 0.5, new_p, app.tabs_mgr.allocator)
 			mux_feat.multiplexer_focus_pane(&app.mux, new_p)
+			active_tab.active_pane_id = new_p
+			app_sync_layout_and_winsize(app)
+		}
+
+	case .Pane_Close:
+		if app.mux.focused_pane_id != 0 {
+			app_close_pane(app, app.mux.focused_pane_id)
 		}
 
 	case .Pane_Focus_Next:

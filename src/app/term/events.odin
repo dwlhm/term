@@ -113,6 +113,10 @@ app_handle_mouse_button_down :: proc(app: ^Term_App, ev: sdl3.MouseButtonEvent) 
 	for &p in app.mux.panes {
 		if mouse_is_in_rect({mx, my}, p.rect) {
 			mux_feat.multiplexer_focus_pane(&app.mux, p.id)
+			_, active_tab := tabs_feat.tabs_manager_get_active(&app.tabs_mgr)
+			if active_tab != nil {
+				active_tab.active_pane_id = p.id
+			}
 			scroll_off := p.session.scroll_offset if p.session != nil else 0
 			mods := sdl3.GetModState()
 			is_shift := (mods & sdl3.KMOD_SHIFT) != sdl3.KMOD_NONE

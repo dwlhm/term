@@ -102,16 +102,10 @@ chrome_view_build_draw_list :: proc(
 
 	chrome_dl.ui_draw_list_clear(&cv.draw_list)
 
-	// 1. Draw Pane Shadows & Split Dividers
+	// 1. Draw Pane Components & Cursor (No borders/shadows: focus indicated by background contrast)
 	if mux != nil {
-		pane_count := len(mux.panes)
 		for &pane in mux.panes {
 			if pane.rect[2] <= 0 || pane.rect[3] <= 0 do continue
-
-			if pane_count > 1 && !pane.is_focused {
-				// Unfocused panes only get a subtle border when multiple split panes exist
-				chrome_dl.ui_draw_border(&cv.draw_list, pane.rect, COLOR_PANE_BORDER, layout.metrics.border_radius)
-			}
 
 			// 2. Draw Cursor for this terminal pane
 			if pane.session != nil {
