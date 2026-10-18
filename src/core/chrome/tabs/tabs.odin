@@ -67,11 +67,15 @@ tabs_remove :: proc(m: ^Chrome_Tabs_Model, idx: int) -> bool {
 	ordered_remove(&m.tabs, idx)
 	if len(m.tabs) == 0 {
 		m.active_idx = -1
+		return true
+	}
+	if m.active_idx > idx {
+		m.active_idx -= 1
 	} else if m.active_idx >= len(m.tabs) {
 		m.active_idx = len(m.tabs) - 1
-		m.tabs[m.active_idx].active = true
-	} else if m.active_idx == idx {
-		m.tabs[m.active_idx].active = true
+	}
+	for i in 0..<len(m.tabs) {
+		m.tabs[i].active = (i == m.active_idx)
 	}
 	return true
 }

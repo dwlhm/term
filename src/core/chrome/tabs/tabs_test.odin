@@ -80,6 +80,33 @@ test_tabs_lifecycle_and_active_tracking :: proc(t: ^testing.T) {
 }
 
 @test
+test_tabs_remove_preceding_active :: proc(t: ^testing.T) {
+	m: Chrome_Tabs_Model
+	tabs_model_init(&m, {0, 0, 800, 36})
+	defer tabs_model_destroy(&m)
+
+	tabs_add(&m, 1, "Tab 0")
+	tabs_add(&m, 2, "Tab 1")
+	tabs_add(&m, 3, "Tab 2")
+	tabs_add(&m, 4, "Tab 3")
+
+	// Set Tab 2 active (index 2)
+	tabs_set_active(&m, 2)
+	testing.expect_value(t, m.active_idx, 2)
+	testing.expect(t, m.tabs[2].active)
+
+	// Close Tab 0 (preceding the active tab)
+	testing.expect(t, tabs_remove(&m, 0))
+	testing.expect_value(t, len(m.tabs), 3)
+	// Active index should have decremented from 2 to 1 (still pointing to Tab 2)
+	testing.expect_value(t, m.active_idx, 1)
+	testing.expect_value(t, m.tabs[1].id, u32(3))
+	testing.expect(t, m.tabs[1].active)
+	testing.expect(t, !m.tabs[0].active)
+	testing.expect(t, !m.tabs[2].active)
+}
+
+@test
 test_tabs_close_rect_math :: proc(t: ^testing.T) {
 	bar_rect: [4]f32 = {100.0, 50.0, 800.0, 40.0}
 	m: Chrome_Tabs_Model
