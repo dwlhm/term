@@ -57,3 +57,26 @@ test_tabs_lifecycle :: proc(t: ^testing.T) {
 	testing.expect(t, closed, "Close tab 0 failed")
 	testing.expect_value(t, feature.tabs_manager_tab_count(&tm), 1)
 }
+
+@test
+test_tabs_many_tabs_and_title_update :: proc(t: ^testing.T) {
+	tm: feature.Tabs_Manager
+	bar_rect: [4]f32 = {0.0, 0.0, 1000.0, 30.0}
+	feature.tabs_manager_init(&tm, bar_rect)
+	defer feature.tabs_manager_destroy(&tm)
+
+	// Create 20 tabs
+	for i in 0..<20 {
+		feature.tabs_manager_create_tab(&tm, "Shell", u32(100 + i))
+	}
+	testing.expect_value(t, feature.tabs_manager_tab_count(&tm), 20)
+
+	// Set dynamic masked titles
+	feature.tabs_manager_set_title(&tm, 5, "~/project/term")
+	feature.tabs_manager_set_title(&tm, 19, "nvim config.odin")
+
+	_, entry5 := feature.tabs_manager_get_active(&tm)
+	_ = entry5
+	testing.expect_value(t, string(tm.entries[5].title_buf[:tm.entries[5].title_len]), "~/project/term")
+	testing.expect_value(t, string(tm.entries[19].title_buf[:tm.entries[19].title_len]), "nvim config.odin")
+}
