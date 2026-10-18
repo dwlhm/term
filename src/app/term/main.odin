@@ -44,6 +44,7 @@ Term_App :: struct {
 	cursor:        Cursor_State,
 	clipboard:     Clipboard_Bridge,
 	cmd_center:    Command_Center_State,
+	tab_switcher:  Tab_Switcher_State,
 
 	tabs_mgr:      tabs_feat.Tabs_Manager,
 	mux:           mux_feat.Multiplexer,
@@ -116,6 +117,7 @@ app_init :: proc(app: ^Term_App, opts: Cli_Options = {}) -> bool {
 	cursor_init(&app.cursor)
 	clipboard_init(&app.clipboard, plat_clip.clipboard_set_text, plat_clip.clipboard_get_text, plat_clip.clipboard_has_text)
 	command_center_init(&app.cmd_center)
+	tab_switcher_init(&app.tab_switcher)
 
 	tabs_feat.tabs_manager_init(&app.tabs_mgr, layout_compute_tab_bar_rect(&app.layout))
 	mux_feat.multiplexer_init(&app.mux)

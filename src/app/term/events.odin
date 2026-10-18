@@ -83,30 +83,67 @@ app_handle_mouse_button_down :: proc(app: ^Term_App, ev: sdl3.MouseButtonEvent) 
 	mx := f32(ev.x) * ratio
 	my := f32(ev.y) * ratio
 
-	// Click on tab pills & close buttons
+	if app.tab_switcher.visible {
+		target_tab, handled := tab_switcher_handle_click(&app.tab_switcher, mx, my)
+		if target_tab >= 0 do app_select_tab(app, target_tab)
+		if handled do return
+	}
+
+	// Click on tab pills, buttons, or free space in tab bar
 	scale := app.layout.metrics.scale
 	bar_h := app.layout.metrics.tab_bar_height
-	tab_w := 160.0 * scale
-	tab_gap := 6.0 * scale
+	tab_h: f32 = 22.0 * scale
+	tab_y := (bar_h - tab_h) * 0.5
+	tab_w: f32 = 140.0 * scale
+	tab_gap: f32 = 6.0 * scale
 	tabs_x := app.layout.metrics.traffic_clearance + 6.0 * scale
+
+	// Fixed right-side buttons: [⊞] Overview and [+] New Tab
+	btn_w: f32 = tab_h
+	btn_gap: f32 = 4.0 * scale
+	right_margin: f32 = 12.0 * scale
+	btn_ov_x := app.layout.screen_w - right_margin - btn_w
+	btn_plus_x := btn_ov_x - btn_gap - btn_w
+	tabs_end_x := btn_plus_x - 8.0 * scale
+
 	if my >= 0 && my <= bar_h {
+		// 1. Click on [⊞] Show All Tabs button
+		if mx >= btn_ov_x && mx <= btn_ov_x + btn_w && my >= tab_y && my <= tab_y + tab_h {
+			app_execute_action(app, .Tab_Overview_Toggle)
+			return
+		}
+
+		// 2. Click on [+] new tab button
+		if mx >= btn_plus_x && mx <= btn_plus_x + btn_w && my >= tab_y && my <= tab_y + tab_h {
+			app_execute_action(app, .Tab_New)
+			return
+		}
+
+		// 3. Click on tab pills & close buttons within visible bounds
 		for i in 0..<len(app.tabs_mgr.entries) {
-			tab_x := tabs_x + f32(i) * (tab_w + tab_gap)
-			if mx >= tab_x && mx <= tab_x + tab_w {
-				if mx >= tab_x + tab_w - 24.0 * scale {
+			tab_item_x := tabs_x + f32(i) * (tab_w + tab_gap) - app.layout.tab_scroll_offset
+			draw_x := max(tabs_x, tab_item_x)
+			draw_r := min(tabs_end_x, tab_item_x + tab_w)
+			if draw_x >= draw_r do continue
+
+			if mx >= draw_x && mx <= draw_r && my >= tab_y && my <= tab_y + tab_h {
+				if mx >= tab_item_x + tab_w - 24.0 * scale {
 					app_close_tab(app, i)
 				} else {
-					tabs_feat.tabs_manager_select_tab(&app.tabs_mgr, i)
+					app_select_tab(app, i)
 				}
-				break
+				return
 			}
 		}
-		// Click on [+] new tab button
-		plus_x := tabs_x + f32(len(app.tabs_mgr.entries)) * (tab_w + tab_gap)
-		btn_w := 28.0 * scale
-		if mx >= plus_x && mx <= plus_x + btn_w {
-			app_execute_action(app, .Tab_New)
+
+		// 4. Double click on free space in title bar -> Toggle Maximize / Zoom
+		if ev.clicks == 2 {
+			plat_win.platform_toggle_maximize(app.window.handle)
+			return
 		}
+
+		// Tab bar click absorbed, prevent fallthrough into panes
+		return
 	}
 
 	// Focus clicked pane & initiate selection
@@ -131,6 +168,23 @@ app_handle_mouse_wheel :: proc(app: ^Term_App, ev: sdl3.MouseWheelEvent) {
 	ratio := app.window.pixel_ratio
 	mx := ev.mouse_x * ratio
 	my := ev.mouse_y * ratio
+
+	// If Tab Switcher modal is visible, route wheel scrolling to it
+	if app.tab_switcher.visible {
+		tab_switcher_handle_wheel(&app.tab_switcher, ev.y)
+		app.layout.tab_bar_force = true
+		return
+	}
+
+	// If scrolling over tab bar, scroll tabs horizontally smoothly
+	if my <= app.layout.metrics.tab_bar_height {
+		scale := app.layout.metrics.scale
+		wheel_delta := (ev.x != 0.0 ? ev.x : -ev.y) * 16.0 * scale
+		app.layout.tab_scroll_offset += wheel_delta
+		layout_tab_bar_clamp_scroll(&app.layout, len(app.tabs_mgr.entries), 80.0 * scale)
+		app.layout.tab_bar_force = true
+		return
+	}
 
 	target_pane: ^mux_feat.Pane_Entry = nil
 	for &p in app.mux.panes {
@@ -178,6 +232,8 @@ app_handle_mouse_wheel :: proc(app: ^Term_App, ev: sdl3.MouseWheelEvent) {
 app_handle_text_input :: proc(app: ^Term_App, text: string) {
 	if app.cmd_center.visible {
 		command_center_handle_text(&app.cmd_center, text)
+	} else if app.tab_switcher.visible {
+		tab_switcher_handle_text(&app.tab_switcher, &app.tabs_mgr, text)
 	} else {
 		p := mux_feat.multiplexer_get_focused_pane(&app.mux)
 		if p != nil && p.session != nil {
@@ -194,6 +250,10 @@ app_handle_key_down :: proc(app: ^Term_App, ev: sdl3.KeyboardEvent) {
 	if app.cmd_center.visible {
 		act, handled := command_center_handle_key(&app.cmd_center, ev.key)
 		if act != .None do app_execute_action(app, act)
+		if handled do return
+	} else if app.tab_switcher.visible {
+		target_tab, handled := tab_switcher_handle_key(&app.tab_switcher, &app.tabs_mgr, ev.key)
+		if target_tab >= 0 do app_select_tab(app, target_tab)
 		if handled do return
 	}
 

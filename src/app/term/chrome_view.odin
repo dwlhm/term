@@ -95,6 +95,7 @@ chrome_view_build_draw_list :: proc(
 	tabs: ^tabs_feat.Tabs_Manager,
 	mux: ^mux_feat.Multiplexer,
 	cmd_center: ^Command_Center_State,
+	tab_switcher: ^Tab_Switcher_State,
 	cursor_state: ^Cursor_State,
 	time_elapsed: f32,
 ) -> (dirty: bool) {
@@ -163,68 +164,113 @@ chrome_view_build_draw_list :: proc(
 		bar_h := layout.metrics.tab_bar_height
 		scale := layout.metrics.scale
 
-		tab_h := bar_h - 10.0 * scale
-		tab_y := 5.0 * scale
+		tab_h: f32 = 22.0 * scale
+		tab_y := (bar_h - tab_h) * 0.5
 		tabs_x := layout.metrics.traffic_clearance + 6.0 * scale
-		tab_w: f32 = 160.0 * scale
+		tab_w: f32 = 140.0 * scale
 		tab_gap: f32 = 6.0 * scale
+		capsule_radius := tab_h * 0.5
 
+		// Fixed right-side buttons: [⊞] Overview and [+] New Tab
+		btn_w: f32 = tab_h
+		btn_gap: f32 = 4.0 * scale
+		right_margin: f32 = 12.0 * scale
+
+		btn_ov_x := layout.screen_w - right_margin - btn_w
+		btn_plus_x := btn_ov_x - btn_gap - btn_w
+		tabs_end_x := btn_plus_x - 8.0 * scale
+
+		avail_tabs_w := max(40.0 * scale, tabs_end_x - tabs_x)
+
+		// Clamp tab scroll offset
+		total_tabs_w := f32(len(tabs.entries)) * (tab_w + tab_gap)
+		max_scroll := max(0.0, total_tabs_w - avail_tabs_w)
+		layout.tab_scroll_offset = clamp(layout.tab_scroll_offset, 0.0, max_scroll)
+
+		// Render visible tabs
 		for i in 0..<len(tabs.entries) {
-			tab_item_x := tabs_x + f32(i) * (tab_w + tab_gap)
-			if tab_item_x + tab_w > layout.screen_w - 60.0 * scale do break
+			tab_item_x := tabs_x + f32(i) * (tab_w + tab_gap) - layout.tab_scroll_offset
+			draw_x := max(tabs_x, tab_item_x)
+			draw_r := min(tabs_end_x, tab_item_x + tab_w)
+			draw_w := draw_r - draw_x
+
+			// Skip tabs completely outside the visible tab viewport
+			if draw_w <= 2.0 * scale do continue
 
 			is_active := (i == tabs.model.active_idx)
-			pill_rect: [4]f32 = {tab_item_x, tab_y, tab_w, tab_h}
+			pill_rect: [4]f32 = {draw_x, tab_y, draw_w, tab_h}
 
-			// Detached rounded pill
 			pill_bg := COLOR_TAB_ACTIVE_BG if is_active else COLOR_TAB_INACTIVE_BG
-			chrome_dl.ui_draw_rounded_rect(&cv.draw_list, pill_rect, pill_bg, 6.0 * scale)
-
-			// Subtle border for pill
-			border_col: [4]f32 = {0.30, 0.45, 0.70, 0.90} if is_active else {0.18, 0.22, 0.28, 0.60}
-			chrome_dl.ui_draw_border(&cv.draw_list, pill_rect, border_col, 6.0 * scale)
-
-			if is_active {
-				// Accent top highlight line
-				chrome_dl.ui_draw_rounded_rect(&cv.draw_list, {tab_item_x + 8.0 * scale, tab_y + 1.0 * scale, tab_w - 16.0 * scale, 2.0 * scale}, COLOR_TAB_ACTIVE_LINE, 1.0 * scale)
-			}
-
-			// Tab title text
-			tab_title := string(tabs.entries[i].title_buf[:tabs.entries[i].title_len]) if tabs.entries[i].title_len > 0 else "Shell"
-			txt_col := COLOR_TAB_TEXT_ACTIVE if is_active else COLOR_TAB_TEXT_INACT
-			chrome_dl.ui_draw_text(&cv.draw_list, {tab_item_x + 12.0 * scale, tab_y + 6.0 * scale, tab_w - 36.0 * scale, 18.0 * scale}, tab_title, txt_col)
+			chrome_dl.ui_draw_rounded_rect(&cv.draw_list, pill_rect, pill_bg, capsule_radius)
 
 			// Close button [x]
-			close_col: [4]f32 = {0.70, 0.75, 0.85, 0.85} if is_active else {0.45, 0.50, 0.60, 0.60}
-			close_x := tab_item_x + tab_w - 20.0 * scale
-			close_y := tab_y + (tab_h - 2.0 * scale) * 0.5
-			chrome_dl.ui_draw_rect(&cv.draw_list, {close_x, close_y, 8.0 * scale, 2.0 * scale}, close_col)
+			close_w: f32 = 24.0 * scale
+			has_close := (tab_item_x + tab_w - 18.0 * scale <= draw_r) && (draw_w >= 36.0 * scale)
+
+			// Tab Title
+			text_x := draw_x + 10.0 * scale
+			text_max_w := (draw_r - (close_w if has_close else 8.0 * scale)) - text_x
+
+			if text_max_w > 8.0 * scale {
+				tab_title := string(tabs.entries[i].title_buf[:tabs.entries[i].title_len]) if tabs.entries[i].title_len > 0 else "Shell"
+				txt_col := COLOR_TAB_TEXT_ACTIVE if is_active else COLOR_TAB_TEXT_INACT
+				text_y := tab_y + (tab_h - 14.0 * scale) * 0.5
+				chrome_dl.ui_draw_text(&cv.draw_list, {text_x, text_y, text_max_w, 14.0 * scale}, tab_title, txt_col)
+			}
+
+			if has_close {
+				close_col: [4]f32 = {0.75, 0.80, 0.90, 0.85} if is_active else {0.40, 0.45, 0.55, 0.45}
+				close_x := tab_item_x + tab_w - 18.0 * scale
+				close_y := tab_y + (tab_h - 13.0 * scale) * 0.5
+				chrome_dl.ui_draw_text(&cv.draw_list, {close_x, close_y, 10.0 * scale, 13.0 * scale}, "x", close_col)
+			}
 		}
 
-		// New Tab Button [+] Detached Pill
-		tab_count := f32(len(tabs.entries))
-		btn_plus_x := tabs_x + tab_count * (tab_w + tab_gap)
-		btn_w: f32 = 28.0 * scale
-		if btn_plus_x + btn_w < layout.screen_w - 20.0 * scale {
+		// New Tab Button [+]
+		if btn_plus_x > tabs_x {
 			plus_rect: [4]f32 = {btn_plus_x, tab_y, btn_w, tab_h}
-			plus_bg: [4]f32 = {0.14, 0.17, 0.23, 0.85}
-			chrome_dl.ui_draw_rounded_rect(&cv.draw_list, plus_rect, plus_bg, 6.0 * scale)
-			chrome_dl.ui_draw_border(&cv.draw_list, plus_rect, {0.22, 0.28, 0.36, 0.70}, 6.0 * scale)
+			plus_bg: [4]f32 = {0.11, 0.13, 0.17, 0.50}
+			chrome_dl.ui_draw_rounded_rect(&cv.draw_list, plus_rect, plus_bg, capsule_radius)
 
 			// Plus icon
-			icon_col: [4]f32 = {0.80, 0.85, 0.95, 0.90}
-			cx := btn_plus_x + (btn_w - 10.0 * scale) * 0.5
-			cy := tab_y + (tab_h - 2.0 * scale) * 0.5
-			chrome_dl.ui_draw_rect(&cv.draw_list, {cx, cy, 10.0 * scale, 2.0 * scale}, icon_col)
-			cx2 := btn_plus_x + (btn_w - 2.0 * scale) * 0.5
-			cy2 := tab_y + (tab_h - 10.0 * scale) * 0.5
-			chrome_dl.ui_draw_rect(&cv.draw_list, {cx2, cy2, 2.0 * scale, 10.0 * scale}, icon_col)
+			icon_col: [4]f32 = {0.70, 0.75, 0.85, 0.75}
+			cx := btn_plus_x + (btn_w - 8.0 * scale) * 0.5
+			cy := tab_y + (tab_h - 1.5 * scale) * 0.5
+			chrome_dl.ui_draw_rounded_rect(&cv.draw_list, {cx, cy, 8.0 * scale, 1.5 * scale}, icon_col, 0.75 * scale)
+			cx2 := btn_plus_x + (btn_w - 1.5 * scale) * 0.5
+			cy2 := tab_y + (tab_h - 8.0 * scale) * 0.5
+			chrome_dl.ui_draw_rounded_rect(&cv.draw_list, {cx2, cy2, 1.5 * scale, 8.0 * scale}, icon_col, 0.75 * scale)
+		}
+
+		// Tab Overview Button [⊞]
+		if btn_ov_x > tabs_x {
+			ov_rect: [4]f32 = {btn_ov_x, tab_y, btn_w, tab_h}
+			is_ov_open := (tab_switcher != nil && tab_switcher.visible)
+			ov_bg: [4]f32 = {0.18, 0.22, 0.30, 0.90} if is_ov_open else {0.11, 0.13, 0.17, 0.50}
+			chrome_dl.ui_draw_rounded_rect(&cv.draw_list, ov_rect, ov_bg, capsule_radius)
+
+			// Grid icon [⊞] (four small squares)
+			sq_s: f32 = 3.5 * scale
+			sq_gap: f32 = 1.5 * scale
+			top_left_x := btn_ov_x + (btn_w - (sq_s * 2.0 + sq_gap)) * 0.5
+			top_left_y := tab_y + (tab_h - (sq_s * 2.0 + sq_gap)) * 0.5
+			icon_col: [4]f32 = {0.80, 0.88, 1.0, 0.90} if is_ov_open else {0.70, 0.75, 0.85, 0.75}
+
+			chrome_dl.ui_draw_rounded_rect(&cv.draw_list, {top_left_x, top_left_y, sq_s, sq_s}, icon_col, 0.8 * scale)
+			chrome_dl.ui_draw_rounded_rect(&cv.draw_list, {top_left_x + sq_s + sq_gap, top_left_y, sq_s, sq_s}, icon_col, 0.8 * scale)
+			chrome_dl.ui_draw_rounded_rect(&cv.draw_list, {top_left_x, top_left_y + sq_s + sq_gap, sq_s, sq_s}, icon_col, 0.8 * scale)
+			chrome_dl.ui_draw_rounded_rect(&cv.draw_list, {top_left_x + sq_s + sq_gap, top_left_y + sq_s + sq_gap, sq_s, sq_s}, icon_col, 0.8 * scale)
 		}
 	}
 
-	// 4. Spotlight Command Center Overlay (Top Layer)
+	// 4. Spotlight Command Center Overlay
 	if cmd_center != nil && cmd_center.visible {
 		command_center_emit_draw_list(cmd_center, &cv.draw_list, layout.screen_w, layout.screen_h, layout.metrics.scale)
+	}
+
+	// 5. Tab Overview & Switcher Overlay (Top Layer)
+	if tab_switcher != nil && tab_switcher.visible {
+		tab_switcher_emit_draw_list(tab_switcher, tabs, &cv.draw_list, layout.screen_w, layout.screen_h, layout.metrics.scale)
 	}
 
 	screen_w := layout.screen_w if layout != nil else f32(cv.rend.width)
@@ -255,11 +301,12 @@ chrome_view_build_and_render :: proc(
 	tabs: ^tabs_feat.Tabs_Manager,
 	mux: ^mux_feat.Multiplexer,
 	cmd_center: ^Command_Center_State,
+	tab_switcher: ^Tab_Switcher_State,
 	cursor_state: ^Cursor_State,
 	time_elapsed: f32,
 	target_view: contract.Gpu_TextureView,
 ) {
 	if cv == nil || rawptr(target_view) == nil do return
-	_ = chrome_view_build_draw_list(cv, layout, tabs, mux, cmd_center, cursor_state, time_elapsed)
+	_ = chrome_view_build_draw_list(cv, layout, tabs, mux, cmd_center, tab_switcher, cursor_state, time_elapsed)
 	_ = chrome_render.chrome_renderer_render(&cv.rend, &cv.draw_list, target_view)
 }

@@ -10,6 +10,8 @@ import tabs_feat "../../features/tabs"
 import mux_feat "../../features/multiplexer"
 import sess_feat "../../features/session"
 import terminal_grid "../../core/terminal/grid"
+import damage "../../core/terminal/damage"
+import chrome_render "../../core/render/chrome"
 
 _app_osc_52_sink :: proc(user_data: rawptr, text: string) -> bool {
 	cb := (^Clipboard_Bridge)(user_data)
@@ -37,10 +39,37 @@ app_spawn_terminal_pane :: proc(app: ^Term_App, rows: int = 24, cols: int = 80) 
 	return new_p, true
 }
 
+// app_select_tab activates the requested tab, synchronizes multiplexer focus to the
+// tab's active pane, updates geometry & PTY winsize, marks damage on newly visible panes,
+// and ensures chrome renderer redraws.
+app_select_tab :: proc(app: ^Term_App, idx: int) {
+	if app == nil || idx < 0 || idx >= len(app.tabs_mgr.entries) do return
+
+	if !tabs_feat.tabs_manager_select_tab(&app.tabs_mgr, idx) do return
+
+	_, active_tab := tabs_feat.tabs_manager_get_active(&app.tabs_mgr)
+	if active_tab != nil && active_tab.active_pane_id != 0 {
+		mux_feat.multiplexer_focus_pane(&app.mux, active_tab.active_pane_id)
+	}
+
+	app_sync_layout_and_winsize(app)
+
+	// Mark all visible panes in this tab as damaged so their content renders immediately
+	for &pane in app.mux.panes {
+		if pane.kind == .Terminal && pane.session != nil && pane.rect[2] > 0 {
+			damage.damage_mark_all(&pane.session.term.damage)
+		}
+	}
+
+	layout_tab_bar_ensure_visible(&app.layout, idx, len(app.tabs_mgr.entries), 80.0 * app.layout.metrics.scale)
+	chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
+	app.layout.tab_bar_force = true
+}
+
 // app_close_tab releases every pane referenced by the tab's split tree before
 // removing the tab, so no session/PTY is left orphaned in the multiplexer.
 app_close_tab :: proc(app: ^Term_App, tab_idx: int) {
-	if tab_idx < 0 || tab_idx >= len(app.tabs_mgr.entries) do return
+	if app == nil || tab_idx < 0 || tab_idx >= len(app.tabs_mgr.entries) do return
 
 	pane_ids: [dynamic]u32
 	defer delete(pane_ids)
@@ -54,7 +83,25 @@ app_close_tab :: proc(app: ^Term_App, tab_idx: int) {
 	tabs_feat.tabs_manager_close_tab(&app.tabs_mgr, tab_idx)
 	if len(app.tabs_mgr.entries) == 0 {
 		app.running = false
+		return
 	}
+
+	// Select and focus the newly active tab
+	act_idx, active_tab := tabs_feat.tabs_manager_get_active(&app.tabs_mgr)
+	if act_idx >= 0 && active_tab != nil {
+		if active_tab.active_pane_id != 0 {
+			mux_feat.multiplexer_focus_pane(&app.mux, active_tab.active_pane_id)
+		}
+		app_sync_layout_and_winsize(app)
+		for &pane in app.mux.panes {
+			if pane.kind == .Terminal && pane.session != nil && pane.rect[2] > 0 {
+				damage.damage_mark_all(&pane.session.term.damage)
+			}
+		}
+	}
+
+	layout_tab_bar_clamp_scroll(&app.layout, len(app.tabs_mgr.entries), 80.0 * app.layout.metrics.scale)
+	chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
 	app.layout.tab_bar_force = true
 }
 
@@ -89,11 +136,23 @@ app_close_pane :: proc(app: ^Term_App, pane_id: u32) {
 	if found_tab_idx >= 0 {
 		tab := &app.tabs_mgr.entries[found_tab_idx]
 		if tab.active_pane_id == pane_id {
-			tab.active_pane_id = app.mux.focused_pane_id
+			first_leaf := chrome_splits.split_tree_first_leaf(tab.split_tree)
+			if first_leaf != nil {
+				tab.active_pane_id = first_leaf.pane_id
+				mux_feat.multiplexer_focus_pane(&app.mux, tab.active_pane_id)
+			} else {
+				tab.active_pane_id = app.mux.focused_pane_id
+			}
 		}
 	}
 
 	app_sync_layout_and_winsize(app)
+	for &pane in app.mux.panes {
+		if pane.kind == .Terminal && pane.session != nil && pane.rect[2] > 0 {
+			damage.damage_mark_all(&pane.session.term.damage)
+		}
+	}
+	chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
 }
 
 // app_reap_dead_sessions checks all terminal panes for terminated child shells
@@ -127,12 +186,16 @@ app_execute_action :: proc(app: ^Term_App, act: Action_Id) {
 	case .Command_Center_Toggle:
 		command_center_toggle(&app.cmd_center)
 
+	case .Tab_Overview_Toggle:
+		tab_switcher_toggle(&app.tab_switcher, &app.tabs_mgr)
+
 	case .Tab_New:
 		new_p, ok := app_spawn_terminal_pane(app, 24, 80)
 		if !ok do return
-		tabs_feat.tabs_manager_create_tab(&app.tabs_mgr, "Shell", new_p)
-		mux_feat.multiplexer_focus_pane(&app.mux, new_p)
-		app.layout.tab_bar_force = true
+		_, new_idx := tabs_feat.tabs_manager_create_tab(&app.tabs_mgr, "Shell", new_p)
+		if new_idx >= 0 {
+			app_select_tab(app, new_idx)
+		}
 
 	case .Tab_Close:
 		act_idx, _ := tabs_feat.tabs_manager_get_active(&app.tabs_mgr)
@@ -142,22 +205,19 @@ app_execute_action :: proc(app: ^Term_App, act: Action_Id) {
 		cnt := len(app.tabs_mgr.entries)
 		if cnt > 0 {
 			next_idx := (app.tabs_mgr.model.active_idx + 1) % cnt
-			tabs_feat.tabs_manager_select_tab(&app.tabs_mgr, next_idx)
+			app_select_tab(app, next_idx)
 		}
-		app.layout.tab_bar_force = true
 
 	case .Tab_Prev:
 		cnt := len(app.tabs_mgr.entries)
 		if cnt > 0 {
 			prev_idx := (app.tabs_mgr.model.active_idx - 1 + cnt) % cnt
-			tabs_feat.tabs_manager_select_tab(&app.tabs_mgr, prev_idx)
+			app_select_tab(app, prev_idx)
 		}
-		app.layout.tab_bar_force = true
 
 	case .Tab_Select_1, .Tab_Select_2, .Tab_Select_3, .Tab_Select_4, .Tab_Select_5, .Tab_Select_6, .Tab_Select_7, .Tab_Select_8, .Tab_Select_9:
 		idx := int(act) - int(Action_Id.Tab_Select_1)
-		tabs_feat.tabs_manager_select_tab(&app.tabs_mgr, idx)
-		app.layout.tab_bar_force = true
+		app_select_tab(app, idx)
 
 	case .Pane_Split_Right:
 		new_p, ok := app_spawn_terminal_pane(app, 24, 80)
@@ -195,7 +255,26 @@ app_execute_action :: proc(app: ^Term_App, act: Action_Id) {
 		}
 
 	case .Pane_Focus_Next:
-		mux_feat.multiplexer_cycle_focus(&app.mux)
+		_, active_tab := tabs_feat.tabs_manager_get_active(&app.tabs_mgr)
+		if active_tab != nil && active_tab.split_tree != nil {
+			pane_ids: [dynamic]u32
+			defer delete(pane_ids)
+			chrome_splits.split_tree_collect_pane_ids(active_tab.split_tree, &pane_ids)
+			if len(pane_ids) > 1 {
+				cur_idx := 0
+				for id, i in pane_ids {
+					if id == app.mux.focused_pane_id {
+						cur_idx = i
+						break
+					}
+				}
+				next_id := pane_ids[(cur_idx + 1) % len(pane_ids)]
+				mux_feat.multiplexer_focus_pane(&app.mux, next_id)
+				active_tab.active_pane_id = next_id
+			}
+		} else {
+			mux_feat.multiplexer_cycle_focus(&app.mux)
+		}
 
 	case .Pane_Toggle_Zoom:
 		p := mux_feat.multiplexer_get_focused_pane(&app.mux)

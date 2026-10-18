@@ -3,20 +3,89 @@ package term
 // Term Surface Rendering, Layer Composition & Layout Synchronization
 // Part of Tier 3 Application Shell (src/app/term/*).
 
+import "core:os"
+import "core:strings"
 import "core:time"
 import contract "../../core/render/contract"
 import composer "../../core/composer"
 import pipeline "../../core/composer/pipeline"
 import scheduler "../../core/composer/scheduler"
 import frame "../../core/composer/frame"
+import chrome_splits "../../core/chrome/splits"
 import tabs_feat "../../features/tabs"
 import mux_feat "../../features/multiplexer"
 import sess_feat "../../features/session"
 import telemetry "../../features/telemetry"
 
+// tab_title_mask_path replaces $HOME or /Users/<user> / /home/<user> with ~
+tab_title_mask_path :: proc(title: string, allocator := context.temp_allocator) -> string {
+	if len(title) == 0 do return "Shell"
+
+	// 1. Exact $HOME match or prefix
+	home := os.get_env("HOME", allocator)
+	if len(home) > 0 {
+		if title == home do return "~"
+		if strings.has_prefix(title, home) {
+			rest := title[len(home):]
+			if len(rest) > 0 && rest[0] == '/' {
+				return strings.concatenate({"~", rest}, allocator)
+			}
+		}
+		if idx := strings.index(title, home); idx >= 0 {
+			before := title[:idx]
+			after := title[idx + len(home):]
+			return strings.concatenate({before, "~", after}, allocator)
+		}
+	}
+
+	// 2. Generic /Users/<user> or /home/<user> heuristic fallback
+	user_prefix := "/Users/" when ODIN_OS == .Darwin else "/home/"
+	if strings.has_prefix(title, user_prefix) {
+		rest := title[len(user_prefix):]
+		if slash_idx := strings.index_byte(rest, '/'); slash_idx >= 0 {
+			return strings.concatenate({"~", rest[slash_idx:]}, allocator)
+		} else {
+			return "~"
+		}
+	}
+
+	return title
+}
+
+// app_sync_tab_titles reads dynamic PTY OSC titles from active pane sessions and updates tabs
+app_sync_tab_titles :: proc(app: ^Term_App) -> (dirty: bool) {
+	if app == nil do return false
+
+	for i in 0..<len(app.tabs_mgr.entries) {
+		entry := &app.tabs_mgr.entries[i]
+		pane_id := entry.active_pane_id
+		if pane_id == 0 && entry.split_tree != nil {
+			if leaf := chrome_splits.split_tree_first_leaf(entry.split_tree); leaf != nil {
+				pane_id = leaf.pane_id
+			}
+		}
+
+		p := mux_feat.multiplexer_get_pane(&app.mux, pane_id)
+		if p != nil && p.session != nil {
+			raw_title := sess_feat.session_get_title(p.session)
+			if len(raw_title) > 0 {
+				masked := tab_title_mask_path(raw_title, context.temp_allocator)
+				current := string(entry.title_buf[:entry.title_len])
+				if current != masked {
+					tabs_feat.tabs_manager_set_title(&app.tabs_mgr, i, masked)
+					dirty = true
+				}
+			}
+		}
+	}
+	return dirty
+}
+
 // app_sync_layout_and_winsize synchronizes the active tab split geometry
 // and updates the PTY window size (TIOCSWINSZ) for any mutated terminal panes.
 app_sync_layout_and_winsize :: proc(app: ^Term_App) -> (dirty: bool) {
+	if app_sync_tab_titles(app) do dirty = true
+
 	// Sync active tab split tree with uniform margin == pane gap
 	content_area := layout_compute_content_area(&app.layout)
 	_, active_tab := tabs_feat.tabs_manager_get_active(&app.tabs_mgr)
@@ -130,6 +199,7 @@ app_render_frame :: proc(app: ^Term_App, term_dirty: bool = true) {
 		&app.tabs_mgr,
 		&app.mux,
 		&app.cmd_center,
+		&app.tab_switcher,
 		&app.cursor,
 		app.time_elapsed,
 	)

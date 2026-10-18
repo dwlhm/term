@@ -185,8 +185,8 @@ config_resolve_effective_font_size :: proc(cfg: ^App_Config) -> f32 {
 WINDOW_MARGIN:        f32 : 8.0
 PANE_GAP:             f32 : 8.0
 BORDER_RADIUS:        f32 : 8.0
-TAB_BAR_HEIGHT:       f32 : 38.0
-AUTO_HIDE_TRIGGER_Y:  f32 : 52.0
+TAB_BAR_HEIGHT:       f32 : 30.0
+AUTO_HIDE_TRIGGER_Y:  f32 : 42.0
 
 DEFAULT_CELL_WIDTH:   f32 : 9.5
 DEFAULT_CELL_HEIGHT:  f32 : 21.5
@@ -271,12 +271,12 @@ COLOR_PANE_BG         := [4]f32{0.08, 0.09, 0.12, 1.0}
 COLOR_PANE_BORDER     := [4]f32{0.16, 0.19, 0.25, 0.80}
 COLOR_PANE_FOCUS      := [4]f32{0.24, 0.30, 0.40, 0.70}
 
-// Tab Colors
-COLOR_TAB_INACTIVE_BG := [4]f32{0.12, 0.14, 0.19, 0.95}
-COLOR_TAB_ACTIVE_BG   := [4]f32{0.18, 0.23, 0.32, 1.00}
+// Tab Colors (Modern borderless capsule palette with pane-like hierarchy)
+COLOR_TAB_INACTIVE_BG := [4]f32{0.10, 0.12, 0.16, 0.45}
+COLOR_TAB_ACTIVE_BG   := [4]f32{0.18, 0.22, 0.30, 0.95}
 COLOR_TAB_ACTIVE_LINE := [4]f32{0.45, 0.60, 0.80, 0.90}
-COLOR_TAB_TEXT_ACTIVE := [4]f32{0.95, 0.96, 0.98, 1.00}
-COLOR_TAB_TEXT_INACT  := [4]f32{0.60, 0.65, 0.72, 0.85}
+COLOR_TAB_TEXT_ACTIVE := [4]f32{0.95, 0.97, 1.00, 1.00}
+COLOR_TAB_TEXT_INACT  := [4]f32{0.50, 0.54, 0.62, 0.70}
 
 // Cursor & Selection Colors
 COLOR_CURSOR_BLOCK    := [4]f32{0.28, 0.68, 1.00, 0.85}

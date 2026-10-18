@@ -13,6 +13,7 @@ Action_Id :: enum {
 	Tab_Close,
 	Tab_Next,
 	Tab_Prev,
+	Tab_Overview_Toggle,
 	Tab_Select_1,
 	Tab_Select_2,
 	Tab_Select_3,
@@ -67,6 +68,7 @@ ACTION_CATALOG := []Action_Metadata{
 	{.Tab_Close,             "Close Tab",                  "⌘W",       "Close the active tab"},
 	{.Tab_Next,              "Next Tab",                   "^Tab",     "Switch to the next tab"},
 	{.Tab_Prev,              "Previous Tab",               "⇧^Tab",    "Switch to previous tab"},
+	{.Tab_Overview_Toggle,   "Show All Tabs",              "⇧⌘A / ⇧⌘O","Open tab overview and quick switcher"},
 	{.Pane_Split_Right,      "Split Pane Right",           "⌘D",       "Split terminal horizontally"},
 	{.Pane_Split_Down,       "Split Pane Down",            "⇧⌘D",      "Split terminal vertically"},
 	{.Pane_Close,            "Close Pane",                 "⇧⌘W",      "Close active split pane"},
@@ -112,6 +114,7 @@ keymap_evaluate :: proc(key: sdl3.Keycode, mod: sdl3.Keymod) -> (Action_Id, bool
 		if is_shift {
 			switch key {
 			case sdl3.K_P:                  return .Command_Center_Toggle, true
+			case sdl3.K_A, sdl3.K_O:        return .Tab_Overview_Toggle, true
 			case sdl3.K_D:                  return .Pane_Split_Down, true
 			case sdl3.K_W:                  return .Pane_Close, true
 			case sdl3.K_RETURN, sdl3.K_KP_ENTER: return .Pane_Toggle_Zoom, true
@@ -176,6 +179,7 @@ keymap_evaluate :: proc(key: sdl3.Keycode, mod: sdl3.Keymod) -> (Action_Id, bool
 	if is_ctrl && is_shift {
 		switch key {
 		case sdl3.K_P:                      return .Command_Center_Toggle, true
+		case sdl3.K_A, sdl3.K_O:            return .Tab_Overview_Toggle, true
 		case sdl3.K_T:                      return .Tab_New, true
 		case sdl3.K_W:                      return .Tab_Close, true
 		case sdl3.K_C:                      return .Clipboard_Copy, true

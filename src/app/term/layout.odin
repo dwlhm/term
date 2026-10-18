@@ -14,8 +14,9 @@ Layout_State :: struct {
 	mouse_y:          f32,
 	tab_bar_hovered:  bool,
 	tab_bar_force:    bool,
-	tab_bar_anim_t:   f32, // 0.0 (hidden) .. 1.0 (fully visible)
-	metrics:          Visual_Metrics,
+	tab_bar_anim_t:    f32, // 0.0 (hidden) .. 1.0 (fully visible)
+	tab_scroll_offset: f32, // Horizontal scroll offset for tab bar
+	metrics:           Visual_Metrics,
 }
 
 layout_init :: proc(l: ^Layout_State, scale: f32 = 1.0, pad_x: f32 = DEFAULT_PANE_PAD_X, pad_y: f32 = DEFAULT_PANE_PAD_Y) {
@@ -27,6 +28,39 @@ layout_init :: proc(l: ^Layout_State, scale: f32 = 1.0, pad_x: f32 = DEFAULT_PAN
 	l.tab_bar_hovered = false
 	l.tab_bar_force = false
 	l.tab_bar_anim_t = 1.0 // Start visible, then auto-hide
+	l.tab_scroll_offset = 0.0
+}
+
+layout_tab_bar_clamp_scroll :: proc(l: ^Layout_State, tab_count: int, right_margin: f32) {
+	if l == nil do return
+	scale := l.metrics.scale
+	tab_w: f32 = 140.0 * scale
+	tab_gap: f32 = 6.0 * scale
+	tabs_x := l.metrics.traffic_clearance + 6.0 * scale
+
+	total_tabs_w := f32(tab_count) * (tab_w + tab_gap)
+	avail_w := max(50.0 * scale, l.screen_w - tabs_x - right_margin)
+	max_scroll := max(0.0, total_tabs_w - avail_w)
+	l.tab_scroll_offset = clamp(l.tab_scroll_offset, 0.0, max_scroll)
+}
+
+layout_tab_bar_ensure_visible :: proc(l: ^Layout_State, tab_idx: int, tab_count: int, right_margin: f32) {
+	if l == nil || tab_idx < 0 do return
+	scale := l.metrics.scale
+	tab_w: f32 = 140.0 * scale
+	tab_gap: f32 = 6.0 * scale
+	tabs_x := l.metrics.traffic_clearance + 6.0 * scale
+
+	tab_left := f32(tab_idx) * (tab_w + tab_gap)
+	tab_right := tab_left + tab_w
+	avail_w := max(50.0 * scale, l.screen_w - tabs_x - right_margin)
+
+	if tab_left < l.tab_scroll_offset {
+		l.tab_scroll_offset = tab_left
+	} else if tab_right > l.tab_scroll_offset + avail_w {
+		l.tab_scroll_offset = tab_right - avail_w
+	}
+	layout_tab_bar_clamp_scroll(l, tab_count, right_margin)
 }
 
 layout_set_scale :: proc(l: ^Layout_State, scale: f32) {
@@ -61,11 +95,13 @@ layout_compute_content_area :: proc(l: ^Layout_State) -> [4]f32 {
 	if l == nil do return {0, 0, 0, 0}
 	m := l.metrics.window_margin
 	top_y := l.metrics.tab_bar_height
+	top_gap := 4.0 * l.metrics.scale
+	y := top_y + top_gap
 	return {
 		m,
-		top_y + m,
+		y,
 		max(1.0, l.screen_w - 2.0 * m),
-		max(1.0, l.screen_h - top_y - 2.0 * m),
+		max(1.0, l.screen_h - y - m),
 	}
 }
 
