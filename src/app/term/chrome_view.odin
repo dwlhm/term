@@ -102,13 +102,16 @@ chrome_view_build_draw_list :: proc(
 
 	chrome_dl.ui_draw_list_clear(&cv.draw_list)
 
-	// 1. Draw Pane Outlines & Focus Rings for each pane
+	// 1. Draw Pane Shadows & Split Dividers
 	if mux != nil {
+		pane_count := len(mux.panes)
 		for &pane in mux.panes {
 			if pane.rect[2] <= 0 || pane.rect[3] <= 0 do continue
 
-			border_col := COLOR_PANE_FOCUS if pane.is_focused else COLOR_PANE_BORDER
-			chrome_dl.ui_draw_border(&cv.draw_list, pane.rect, border_col, layout.metrics.border_radius)
+			if pane_count > 1 && !pane.is_focused {
+				// Unfocused panes only get a subtle border when multiple split panes exist
+				chrome_dl.ui_draw_border(&cv.draw_list, pane.rect, COLOR_PANE_BORDER, layout.metrics.border_radius)
+			}
 
 			// 2. Draw Cursor for this terminal pane
 			if pane.session != nil {
@@ -165,13 +168,6 @@ chrome_view_build_draw_list :: proc(
 	if layout != nil && tabs != nil {
 		bar_h := layout.metrics.tab_bar_height
 		scale := layout.metrics.scale
-
-		// Top Tab Bar background & subtle bottom border
-		chrome_dl.ui_draw_rect(&cv.draw_list, {0, 0, layout.screen_w, bar_h}, {0.08, 0.09, 0.12, 1.0})
-		chrome_dl.ui_draw_rect(&cv.draw_list, {0, bar_h - 1.0, layout.screen_w, 1.0}, {0.16, 0.19, 0.25, 0.8})
-
-		// Vertical divider separating native macOS traffic lights (x=0..74) from tabs
-		chrome_dl.ui_draw_rect(&cv.draw_list, {74.0 * scale, 8.0 * scale, 1.0, bar_h - 16.0 * scale}, {0.18, 0.22, 0.28, 0.8})
 
 		tab_h := bar_h - 10.0 * scale
 		tab_y := 5.0 * scale

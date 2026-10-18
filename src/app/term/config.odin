@@ -12,8 +12,10 @@ DEFAULT_WINDOW_HEIGHT: i32 : 800
 DEFAULT_FONT_SIZE:     f32 : 13.0
 
 Window_Config :: struct {
-	width:  i32 `json:"width"`,
-	height: i32 `json:"height"`,
+	width:   i32  `json:"width"`,
+	height:  i32  `json:"height"`,
+	blur:    bool `json:"blur"`,
+	opacity: f32  `json:"opacity"`,
 }
 
 Font_Config :: struct {
@@ -26,26 +28,35 @@ Padding_Config :: struct {
 }
 
 App_Config :: struct {
-	window_width:  i32            `json:"window_width"`,
-	window_height: i32            `json:"window_height"`,
-	width:         i32            `json:"width"`,
-	height:        i32            `json:"height"`,
-	window:        Window_Config  `json:"window"`,
-	font_size:     f32            `json:"font_size"`,
-	font:          Font_Config    `json:"font"`,
-	pad_x:         f32            `json:"pad_x"`,
-	pad_y:         f32            `json:"pad_y"`,
-	padding:       Padding_Config `json:"padding"`,
+	window_width:   i32            `json:"window_width"`,
+	window_height:  i32            `json:"window_height"`,
+	width:          i32            `json:"width"`,
+	height:         i32            `json:"height"`,
+	window:         Window_Config  `json:"window"`,
+	font_size:      f32            `json:"font_size"`,
+	font:           Font_Config    `json:"font"`,
+	pad_x:          f32            `json:"pad_x"`,
+	pad_y:          f32            `json:"pad_y"`,
+	padding:        Padding_Config `json:"padding"`,
+	blur:           bool           `json:"blur"`,
+	window_opacity: f32            `json:"window_opacity"`,
 }
 
 config_default :: proc() -> App_Config {
+	default_blur := true when ODIN_OS == .Darwin else false
 	return App_Config{
-		window_width  = DEFAULT_WINDOW_WIDTH,
-		window_height = DEFAULT_WINDOW_HEIGHT,
-		font_size     = 0,
-		pad_x         = -1.0,
-		pad_y         = -1.0,
-		padding       = {x = -1.0, y = -1.0},
+		window_width   = DEFAULT_WINDOW_WIDTH,
+		window_height  = DEFAULT_WINDOW_HEIGHT,
+		font_size      = 0,
+		pad_x          = -1.0,
+		pad_y          = -1.0,
+		padding        = {x = -1.0, y = -1.0},
+		blur           = default_blur,
+		window_opacity = -1.0,
+		window         = {
+			blur    = default_blur,
+			opacity = -1.0,
+		},
 	}
 }
 
@@ -94,6 +105,22 @@ config_resolve_window_dimensions :: proc(cfg: ^App_Config) -> (width, height: i3
 	if h <= 0 do h = DEFAULT_WINDOW_HEIGHT
 
 	return w, h
+}
+
+// config_resolve_window_blur checks whether native window blur/vibrancy is enabled.
+config_resolve_window_blur :: proc(cfg: ^App_Config) -> bool {
+	if cfg == nil do return false
+	if !cfg.blur do return false
+	if !cfg.window.blur do return false
+	return true
+}
+
+// config_resolve_window_opacity returns the window background opacity (0.0 = fully transparent/blur, 1.0 = solid).
+config_resolve_window_opacity :: proc(cfg: ^App_Config) -> f32 {
+	if cfg == nil do return 0.0
+	if cfg.window.opacity >= 0.0 do return clamp(cfg.window.opacity, 0.0, 1.0)
+	if cfg.window_opacity >= 0.0 do return clamp(cfg.window_opacity, 0.0, 1.0)
+	return 0.0
 }
 
 // config_parse_json5 deserializes in-memory JSON5 payload into App_Config.
@@ -240,14 +267,14 @@ color_from_palette_256 :: proc(idx: u8) -> [4]f32 {
 
 // Background & Card Colors
 COLOR_WINDOW_BG       := [4]f32{0.05, 0.06, 0.08, 1.0}
-COLOR_PANE_BG         := [4]f32{0.08, 0.09, 0.12, 0.96}
+COLOR_PANE_BG         := [4]f32{0.08, 0.09, 0.12, 1.0}
 COLOR_PANE_BORDER     := [4]f32{0.16, 0.19, 0.25, 0.80}
-COLOR_PANE_FOCUS      := [4]f32{0.25, 0.55, 0.95, 0.90}
+COLOR_PANE_FOCUS      := [4]f32{0.24, 0.30, 0.40, 0.70}
 
 // Tab Colors
-COLOR_TAB_INACTIVE_BG := [4]f32{0.12, 0.14, 0.19, 0.75}
-COLOR_TAB_ACTIVE_BG   := [4]f32{0.20, 0.25, 0.35, 0.95}
-COLOR_TAB_ACTIVE_LINE := [4]f32{0.30, 0.65, 1.00, 1.00}
+COLOR_TAB_INACTIVE_BG := [4]f32{0.12, 0.14, 0.19, 0.95}
+COLOR_TAB_ACTIVE_BG   := [4]f32{0.18, 0.23, 0.32, 1.00}
+COLOR_TAB_ACTIVE_LINE := [4]f32{0.45, 0.60, 0.80, 0.90}
 COLOR_TAB_TEXT_ACTIVE := [4]f32{0.95, 0.96, 0.98, 1.00}
 COLOR_TAB_TEXT_INACT  := [4]f32{0.60, 0.65, 0.72, 0.85}
 

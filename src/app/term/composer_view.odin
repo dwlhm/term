@@ -69,6 +69,11 @@ composer_view_destroy :: proc(cv: ^Composer_View) {
 	pipeline.composer_pipeline_destroy(&cv.pipe)
 }
 
+composer_view_set_clear_color :: proc(cv: ^Composer_View, color: [4]f64) {
+	if cv == nil do return
+	pipeline.composer_pipeline_set_clear_color(&cv.pipe, color)
+}
+
 composer_view_resize :: proc(cv: ^Composer_View, screen_w, screen_h: f32) {
 	if cv == nil do return
 	cv.screen_w = screen_w

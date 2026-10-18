@@ -100,6 +100,7 @@ terminal_view_encode_pane :: proc(
 		sel_c_end,
 		sel_active,
 		load_op,
+		metrics.border_radius,
 	)
 }
 
@@ -144,5 +145,6 @@ terminal_view_render_pane :: proc(
 		sel_r_end,
 		sel_c_end,
 		sel_active,
+		metrics.border_radius,
 	)
 }

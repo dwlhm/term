@@ -72,12 +72,22 @@ app_init :: proc(app: ^Term_App, opts: Cli_Options = {}) -> bool {
 	wgpu_backend.init_wgpu_driver()
 	app.instance = contract.create_instance()
 	app.surface = wgpu_backend.create_surface(app.instance, app.window.handle)
+
+	blur_enabled := config_resolve_window_blur(&app.config)
+	if opts.blur_override == 1 do blur_enabled = false
+	else if opts.blur_override == 2 do blur_enabled = true
+
+	opacity := config_resolve_window_opacity(&app.config)
+	if opts.opacity_override >= 0.0 do opacity = clamp(opts.opacity_override, 0.0, 1.0)
+
+	wgpu_backend.surface_set_transparent(app.surface, blur_enabled)
+
 	app.device, app.queue = contract.request_device(app.instance, app.surface)
 	app.format = contract.get_preferred_format(app.surface, app.device)
 
 	contract.configure_surface(app.surface, app.device, app.format, u32(app.layout.screen_w), u32(app.layout.screen_h))
 	when ODIN_OS == .Darwin {
-		plat_win.platform_setup_metal_layer(app.window.handle)
+		plat_win.platform_setup_window_vibrancy(app.window.handle, blur_enabled)
 	}
 
 	// Initialize text atlas with DPI-scaled pixel size
@@ -93,6 +103,14 @@ app_init :: proc(app: ^Term_App, opts: Cli_Options = {}) -> bool {
 	if !chrome_view_init(&app.chrome_view, app.device, app.queue, app.format, u32(app.layout.screen_w), u32(app.layout.screen_h)) do return false
 	chrome_view_set_atlas(&app.chrome_view, app.text_atlas.glyph_view, app.text_atlas.cell_w, app.text_atlas.cell_h)
 	if !composer_view_init(&app.composer, app.device, app.queue, app.format, app.layout.screen_w, app.layout.screen_h) do return false
+
+	clear_col: [4]f64
+	if blur_enabled {
+		clear_col = {0.05, 0.06, 0.08, f64(opacity)}
+	} else {
+		clear_col = {0.05, 0.06, 0.08, 1.0}
+	}
+	composer_view_set_clear_color(&app.composer, clear_col)
 
 	mouse_init(&app.mouse, app.layout.metrics.cell_w, app.layout.metrics.cell_h, app.layout.metrics.pane_pad_x, app.layout.metrics.pane_pad_y)
 	cursor_init(&app.cursor)

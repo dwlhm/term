@@ -100,7 +100,7 @@ _app_frame_raster :: proc(user: rawptr, enc: contract.Gpu_CommandEncoder, l: ^co
 			}
 		}
 		if first {
-			pass := contract.begin_render_pass(enc, l.view, {0.08, 0.09, 0.12, 1.0}, .Clear)
+			pass := contract.begin_render_pass(enc, l.view, {0.0, 0.0, 0.0, 0.0}, .Clear)
 			if rawptr(pass) != nil do contract.end_render_pass(pass)
 		}
 		return true

@@ -96,6 +96,12 @@ composer_pipeline_set_load_op :: proc(cp: ^Composer_Pipeline, op: contract.Gpu_L
 	cp.load_op = op
 }
 
+// composer_pipeline_set_clear_color configures the background clear color for root surface compositing.
+composer_pipeline_set_clear_color :: proc(cp: ^Composer_Pipeline, color: [4]f64) {
+	if cp == nil do return
+	cp.clear_color = color
+}
+
 // composer_pipeline_acquire_layer allocates or reuses a backing layer and ensures its ID is tracked in layer order.
 composer_pipeline_acquire_layer :: proc(
 	cp: ^Composer_Pipeline,
