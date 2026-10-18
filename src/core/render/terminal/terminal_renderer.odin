@@ -768,6 +768,7 @@ terminal_renderer_encode :: proc(
 	selected_c_end: int = -1,
 	selection_active: bool = false,
 	load_op: contract.Gpu_Load_Op = .Load,
+	border_radius: f32 = 0.0,
 ) {
 	if r == nil || rawptr(enc) == nil || term == nil || rawptr(target_view) == nil || text_atlas == nil do return
 
@@ -862,13 +863,13 @@ terminal_renderer_encode :: proc(
 
 	pane_bg := contract.Instance_Record{
 		pos_size = pane_rect,
-		uv_rect  = {0, 0, 0, 0},
+		uv_rect  = {pane_rect[2], pane_rect[3], border_radius, 1.0 if border_radius > 0.0 else 0.0},
 		fg_color = {0, 0, 0, 0},
 		bg_color = active_bg,
 	}
 	instance.instance_renderer_push(&r.inst_rend, pane_bg)
 
-	clear_col := [4]f64{f64(active_bg[0]), f64(active_bg[1]), f64(active_bg[2]), 1.0}
+	clear_col: [4]f64 = {0.0, 0.0, 0.0, 0.0}
 
 	// 4. Execute Strategy-Specific Cell Preparation & Encoding
 	switch chosen_strat {
@@ -1092,18 +1093,23 @@ terminal_renderer_encode :: proc(
 		contract.write_buffer(r.queue, r.fs_color_buffer, 0, raw_data(r.direct_colors[:]), u64(total_cells * 2 * size_of(u32)))
 
 		fs_params := fullscreen.Fullscreen_Params{
-			screen_w     = screen_w,
-			screen_h     = screen_h,
-			cols         = u32(cols),
-			rows         = u32(rows),
-			cell_w       = cell_w,
-			cell_h       = cell_h,
-			pad_x        = pane_rect[0] + pad_x,
-			pad_y        = pane_rect[1] + pad_y,
-			atlas_w      = atlas.ATLAS_WIDTH,
-			atlas_h      = atlas.ATLAS_HEIGHT,
-			bg_opacity   = 1.0,
-			cell_opacity = 1.0,
+			screen_w      = screen_w,
+			screen_h      = screen_h,
+			cols          = u32(cols),
+			rows          = u32(rows),
+			cell_w        = cell_w,
+			cell_h        = cell_h,
+			pad_x         = pane_rect[0] + pad_x,
+			pad_y         = pane_rect[1] + pad_y,
+			atlas_w       = atlas.ATLAS_WIDTH,
+			atlas_h       = atlas.ATLAS_HEIGHT,
+			bg_opacity    = 1.0,
+			cell_opacity  = 1.0,
+			pane_x        = pane_rect[0],
+			pane_y        = pane_rect[1],
+			pane_w        = pane_rect[2],
+			pane_h        = pane_rect[3],
+			corner_radius = border_radius,
 		}
 		contract.write_buffer(r.queue, r.fs_rend.params_buffer, 0, &fs_params, size_of(fullscreen.Fullscreen_Params))
 
@@ -1153,6 +1159,7 @@ terminal_renderer_render :: proc(
 	selected_logical_r_end: int = -1,
 	selected_c_end: int = -1,
 	selection_active: bool = false,
+	border_radius: f32 = 0.0,
 ) {
 	if r == nil || term == nil || rawptr(target_view) == nil || text_atlas == nil do return
 	enc := contract.create_command_encoder(r.device)
@@ -1163,7 +1170,7 @@ terminal_renderer_render :: proc(
 		r, enc, term, target_view, text_atlas, pane_rect, cell_w, cell_h, pad_x, pad_y,
 		scroll_offset, screen_w, screen_h, has_custom_bg, custom_bg,
 		selected_logical_r_start, selected_c_start, selected_logical_r_end, selected_c_end,
-		selection_active, .Load,
+		selection_active, .Load, border_radius,
 	)
 
 	cmd := contract.finish_command_buffer(enc)

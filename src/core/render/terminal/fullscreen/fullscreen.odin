@@ -13,7 +13,7 @@ import "base:runtime"
 import "core:mem"
 import contract "../../contract"
 
-FULLSCREEN_PARAMS_SIZE :: 64
+FULLSCREEN_PARAMS_SIZE :: 80
 FULLSCREEN_CELL_BYTES :: 8
 FULLSCREEN_LUT_WORDS :: 1025
 FULLSCREEN_LUT_BYTES :: FULLSCREEN_LUT_WORDS * size_of(u32)
@@ -26,20 +26,28 @@ FULLSCREEN_FRAGMENT_ENTRY :: "fullscreen_fs_main"
 
 // Fullscreen_Params mirrors the WGSL/MSL Fullscreen_Params struct.
 Fullscreen_Params :: struct {
-	screen_w:     f32,
-	screen_h:     f32,
-	cols:         u32,
-	rows:         u32,
-	cell_w:       f32,
-	cell_h:       f32,
-	pad_x:        f32,
-	pad_y:        f32,
-	atlas_w:      u32,
-	atlas_h:      u32,
-	bg_opacity:   f32,
-	cell_opacity: f32,
+	screen_w:      f32,
+	screen_h:      f32,
+	cols:          u32,
+	rows:          u32,
+	cell_w:        f32,
+	cell_h:        f32,
+	pad_x:         f32,
+	pad_y:         f32,
+	atlas_w:       u32,
+	atlas_h:       u32,
+	bg_opacity:    f32,
+	cell_opacity:  f32,
+	pane_x:        f32,
+	pane_y:        f32,
+	pane_w:        f32,
+	pane_h:        f32,
+	corner_radius: f32,
+	_pad0:         f32,
+	_pad1:         f32,
+	_pad2:         f32,
 }
-#assert(size_of(Fullscreen_Params) == 48)
+#assert(size_of(Fullscreen_Params) == 80)
 
 // Fullscreen_Renderer holds the fullscreen direct pass GPU state.
 Fullscreen_Renderer :: struct {

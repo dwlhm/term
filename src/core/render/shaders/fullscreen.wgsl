@@ -37,6 +37,14 @@ struct Fullscreen_Params {
     atlas_h: u32,
     bg_opacity: f32,
     cell_opacity: f32,
+    pane_x: f32,
+    pane_y: f32,
+    pane_w: f32,
+    pane_h: f32,
+    corner_radius: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
 };
 
 @group(0) @binding(0) var<uniform> params: Fullscreen_Params;
@@ -176,19 +184,35 @@ fn fullscreen_vs_main(@builtin(vertex_index) vertex_index: u32) -> Fullscreen_Ou
 
 @fragment
 fn fullscreen_fs_main(input: Fullscreen_Output) -> @location(0) vec4<f32> {
-    let px = i32(input.clip_position.x);
-    let py = i32(input.clip_position.y);
-    if (f32(px) < params.pad_x || f32(py) < params.pad_y ||
-        f32(px) >= params.pad_x + f32(params.cols) * params.cell_w ||
-        f32(py) >= params.pad_y + f32(params.rows) * params.cell_h) {
-        return vec4<f32>(r5g6b5_to_rgb(lut_bg(0u)) * params.bg_opacity, params.bg_opacity);
+    let px = input.clip_position.x;
+    let py = input.clip_position.y;
+
+    var fill_alpha: f32 = 1.0;
+    if (params.corner_radius > 0.0) {
+        let size = vec2<f32>(params.pane_w, params.pane_h);
+        let b = size * 0.5;
+        let center = vec2<f32>(params.pane_x, params.pane_y) + b;
+        let p = vec2<f32>(px, py) - center;
+        let r = clamp(params.corner_radius, 0.0, min(b.x, b.y));
+        let q = abs(p) - b + vec2<f32>(r, r);
+        let d = length(max(q, vec2<f32>(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - r;
+        fill_alpha = 1.0 - smoothstep(-0.5, 0.5, d);
+        if (fill_alpha <= 0.001) {
+            discard;
+        }
     }
-    let content_px = f32(px) - params.pad_x;
-    let content_py = f32(py) - params.pad_y;
+
+    if (px < params.pad_x || py < params.pad_y ||
+        px >= params.pad_x + f32(params.cols) * params.cell_w ||
+        py >= params.pad_y + f32(params.rows) * params.cell_h) {
+        return vec4<f32>(r5g6b5_to_rgb(lut_bg(0u)) * params.bg_opacity, params.bg_opacity * fill_alpha);
+    }
+    let content_px = px - params.pad_x;
+    let content_py = py - params.pad_y;
     let lc = u32(content_px / params.cell_w);
     let lr = u32(content_py / params.cell_h);
     if (lc >= params.cols || lr >= params.rows) {
-        return vec4<f32>(r5g6b5_to_rgb(lut_bg(0u)) * params.bg_opacity, params.bg_opacity);
+        return vec4<f32>(r5g6b5_to_rgb(lut_bg(0u)) * params.bg_opacity, params.bg_opacity * fill_alpha);
     }
     let ci = lr * params.cols + lc;
     let lo = cells[ci * 2u];
@@ -288,7 +312,7 @@ fn fullscreen_fs_main(input: Fullscreen_Output) -> @location(0) vec4<f32> {
                 }
             }
         }
-        return vec4<f32>(col, composited_alpha(background_alpha, glyph_coverage));
+        return vec4<f32>(col, composited_alpha(background_alpha, glyph_coverage) * fill_alpha);
     }
 
     // Regular cell: LUT background fill, glyph overlay when present.
@@ -321,5 +345,5 @@ fn fullscreen_fs_main(input: Fullscreen_Output) -> @location(0) vec4<f32> {
             }
         }
     }
-    return vec4<f32>(col, composited_alpha(background_alpha, glyph_coverage));
+    return vec4<f32>(col, composited_alpha(background_alpha, glyph_coverage) * fill_alpha);
 }

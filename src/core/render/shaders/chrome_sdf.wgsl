@@ -36,7 +36,8 @@ var<private> quad_corners: array<vec2<f32>, 6> = array<vec2<f32>, 6>(
 fn vs_main(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -> VertexOutput {
     let params = instances[iid];
     let corner = quad_corners[vid % 6u];
-    let world_pos = params.rect_pos - vec2<f32>(2.0, 2.0) + corner * (params.rect_size + vec2<f32>(4.0, 4.0));
+    let pad = max(2.0, -params.border_width + 2.0);
+    let world_pos = params.rect_pos - vec2<f32>(pad, pad) + corner * (params.rect_size + vec2<f32>(pad * 2.0, pad * 2.0));
 
     let clip_x = (world_pos.x / params.screen_size.x) * 2.0 - 1.0;
     let clip_y = 1.0 - (world_pos.y / params.screen_size.y) * 2.0;
@@ -64,6 +65,21 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let q = abs(p) - b + vec2<f32>(r, r);
     let d = length(max(q, vec2<f32>(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - r;
+
+    // Soft ambient drop shadow mode (border_width < 0.0 indicates negative blur radius)
+    if (in.border_width < 0.0) {
+        let blur = -in.border_width;
+        if (d < 0.0) {
+            discard; // Keep the pane content and background untouched
+        }
+        let shadow_alpha = 1.0 - smoothstep(0.0, blur, d);
+        if (shadow_alpha <= 0.001) {
+            discard;
+        }
+        var out_col = in.color;
+        out_col.a = out_col.a * shadow_alpha;
+        return out_col;
+    }
 
     let fill_alpha = 1.0 - smoothstep(-0.5, 0.5, d);
     if (fill_alpha <= 0.001) {

@@ -133,6 +133,21 @@ fn ripple_profile(offset: f32, width: f32) -> vec2<f32> {
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    // Rounded rect path (params.w == 1.0: params.x = width, params.y = height, params.z = corner_radius)
+    if (input.params.w == 1.0) {
+        let size = input.params.xy;
+        let r = clamp(input.params.z, 0.0, min(size.x, size.y) * 0.5);
+        let b = size * 0.5;
+        let p = (input.uv - vec2<f32>(0.5, 0.5)) * size;
+        let q = abs(p) - b + vec2<f32>(r, r);
+        let d = length(max(q, vec2<f32>(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - r;
+        let alpha = 1.0 - smoothstep(-0.5, 0.5, d);
+        if (alpha <= 0.001) {
+            discard;
+        }
+        return vec4<f32>(input.color.rgb, input.color.a * alpha);
+    }
+
     // Fast path: ordinary background cell or standard UI quad
     if (input.params.w == 0.0) {
         return input.color;
