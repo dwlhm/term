@@ -129,28 +129,94 @@ _is_prompt_start_row :: proc(row: ^Row, is_continuation: bool, is_cursor_row: bo
 		ch := row.cells[c].char
 		if ch == 0 || ch == ' ' do continue
 
-		// Multi-line prompt frame corners: '╭', '╰', '┌', '└'
+		// Multi-line prompt frame corners and bars: '╭', '╰', '┌', '└', '─', '│'
 		switch ch {
-		case 0x256D, 0x2570, 0x250C, 0x2514:
+		case 0x256D, 0x2570, 0x250C, 0x2514, 0x2500, 0x2502:
 			return true
-		}
-
-		// Single-char prompt markers: only detect on active cursor row to avoid false positives on static output
-		if is_cursor_row {
-			switch ch {
-			case 0x276F, 0x203A, 0x279C: // '❯', '›', '➜'
-				if c + 1 < n && (row.cells[c + 1].char == ' ' || row.cells[c + 1].char == 0) {
-					return true
-				}
-			case '$', '#', '%':
-				if c + 1 < n && (row.cells[c + 1].char == ' ' || row.cells[c + 1].char == 0) {
-					return true
-				}
+		// Powerline symbols and git branch icons
+		case 0xE0A0, 0xE0B0, 0xE0B1, 0xE0B2, 0xE0B3:
+			return true
+		// Prompt markers: '❯', '›', '➜', '▶', '»', '→'
+		case 0x276F, 0x203A, 0x279C, 0x25B6, 0x00BB, 0x2192:
+			return true
+		case '$', '#', '%':
+			if c + 1 < n && (row.cells[c + 1].char == ' ' || row.cells[c + 1].char == 0) {
+				return true
 			}
+		}
+	}
+	return false
+}
+
+_detect_active_prompt_start :: proc(g: ^Grid, cur_r: int) -> int {
+	if g == nil || cur_r < 0 || cur_r >= g.row_count do return -1
+
+	// Check if cursor row has a prompt
+	cur_phys := grid_physical_row(g, cur_r)
+	cur_row := &g.rows[cur_phys]
+	if cur_row == nil do return -1
+
+	has_cur_prompt := cur_row.is_prompt || _is_prompt_start_row(cur_row, false, true)
+	if !has_cur_prompt do return -1
+
+	prompt_start := cur_r
+
+	// Check if cursor row has a multi-line bottom frame: '╰' (0x2570) or '└' (0x2514)
+	is_bottom_frame := false
+	for c in 0..<len(cur_row.cells) {
+		ch := cur_row.cells[c].char
+		if ch == 0 || ch == ' ' do continue
+		if ch == 0x2570 || ch == 0x2514 {
+			is_bottom_frame = true
 		}
 		break
 	}
-	return false
+
+	// Only scan upwards if cursor row is bottom frame of a multi-line prompt OR row.is_prompt
+	if !is_bottom_frame && !cur_row.is_prompt {
+		return prompt_start
+	}
+
+	// Scan up to 4 rows above cursor to find prompt start frame ('╭' or '┌')
+	for r := cur_r - 1; r >= max(0, cur_r - 4); r -= 1 {
+		phys := grid_physical_row(g, r)
+		row := &g.rows[phys]
+		if row == nil do break
+
+		// Empty row cannot be part of contiguous prompt frame
+		if _row_content_len(row) == 0 do break
+
+		// Check first non-space character
+		first_ch: rune = 0
+		first_col := -1
+		for c in 0..<len(row.cells) {
+			ch := row.cells[c].char
+			if ch == 0 || ch == ' ' do continue
+			first_ch = ch
+			first_col = c
+			break
+		}
+
+		if first_ch == 0x256D || first_ch == 0x250C { // '╭', '┌'
+			prompt_start = r
+			break
+		}
+
+		if row.is_prompt {
+			prompt_start = r
+			continue
+		}
+
+		// Continuation line of multi-line frame: must start with '│' (0x2502) or be indented (first_col > 0)
+		if first_ch == 0x2502 || first_col > 0 {
+			continue
+		}
+
+		// Hit a line starting at col 0 with non-frame character: cannot be part of prompt frame!
+		break
+	}
+
+	return prompt_start
 }
 
 _extract_logical_lines :: proc(
@@ -161,6 +227,7 @@ _extract_logical_lines :: proc(
 	seam_cells: []cell.Semantic_Cell = nil,
 	seam_colors: []cell.Direct_Color = nil,
 	seam_has_prompt: bool = false,
+	prompt_start_r: int = -1,
 	allocator: runtime.Allocator = context.allocator,
 ) -> [dynamic]_Logical_Line {
 	logical_lines := make([dynamic]_Logical_Line, allocator)
@@ -190,13 +257,49 @@ _extract_logical_lines :: proc(
 			is_continuation = true
 		}
 
+		// Prompt boundary protection: if inside active prompt block, extract each row individually with truncate
+		if prompt_start_r >= 0 && r >= prompt_start_r && r <= cur_r {
+			row_phys := grid_physical_row(old, r)
+			cur_row := &old.rows[row_phys]
+			ll.phys_rows = 1
+			ll.is_prompt = true
+			ll.truncate = true
+			ll.wrapped = false
+
+			if r == cur_r {
+				ll.has_cursor = true
+				ll.cursor_offset = cur_c
+			}
+
+			c_len := _row_content_len(cur_row)
+			take_cols := max(c_len, cur_c + 1) if (r == cur_r) else c_len
+			take_cols = clamp(take_cols, 0, old.col_count)
+
+			for c in 0..<take_cols {
+				append(&ll.cells, cur_row.cells[c])
+				clr := cur_row.direct_colors[c] if c < len(cur_row.direct_colors) else cell.Direct_Color{}
+				append(&ll.direct_colors, clr)
+			}
+
+			append(&logical_lines, ll)
+			r += 1
+			is_continuation = false
+			continue
+		}
+
 		phys := grid_physical_row(old, r)
 		first_row := &old.rows[phys]
-		if _is_prompt_start_row(first_row, is_continuation, r == cur_r) {
+		is_p := _is_prompt_start_row(first_row, is_continuation, r == cur_r)
+		if is_p {
 			ll.is_prompt = true
 		}
 
 		for r <= end_r {
+			// Do not wrap into active prompt block
+			if prompt_start_r >= 0 && r >= prompt_start_r {
+				break
+			}
+
 			row_phys := grid_physical_row(old, r)
 			cur_row := &old.rows[row_phys]
 			ll.phys_rows += 1
@@ -561,26 +664,22 @@ grid_resize_reflow :: proc(
 		}
 	}
 
-	// 2. Extract VISIBLE lines (0..=max_active_row)
-	vis_lines := _extract_logical_lines(&old, 0, max_active_row, cur_r, cur_c, is_wrap, seam_cells[:], seam_colors[:], seam_has_prompt, scratch_alloc)
-	defer _destroy_logical_lines(vis_lines)
+	// 2. Reflow scrollback history rows (-old.history_count ..= hist_end)
+	hist_reflowed: [dynamic]_Reflow_Row
+	defer _destroy_reflow_rows(hist_reflowed)
+	if hist_end >= -old.history_count {
+		dummy_cr, dummy_cc := -999, -999
+		dummy_wrap, dummy_found := false, true
+		hist_lines := _extract_logical_lines(&old, -old.history_count, hist_end, -999, -999, false, nil, nil, false, -1, scratch_alloc)
+		hist_reflowed = _reflow_logical_lines(hist_lines[:], target_cols, &dummy_cr, &dummy_cc, &dummy_wrap, &dummy_found, scratch_alloc)
+		_destroy_logical_lines(hist_lines)
+	}
+	n_hist := len(hist_reflowed)
 
-	// Identify active prompt block (1-row prompt lines contiguous to cursor line) to truncate on shrink
-	cursor_li := -1
-	for i in 0..<len(vis_lines) {
-		if vis_lines[i].has_cursor {
-			cursor_li = i
-			break
-		}
-	}
-	if cursor_li >= 0 {
-		if vis_lines[cursor_li].is_prompt && vis_lines[cursor_li].phys_rows == 1 {
-			vis_lines[cursor_li].truncate = true
-		}
-		for j := cursor_li - 1; j >= 0 && vis_lines[j].is_prompt && vis_lines[j].phys_rows == 1; j -= 1 {
-			vis_lines[j].truncate = true
-		}
-	}
+	// 3. Detect active prompt start row and extract VISIBLE lines (0..=max_active_row)
+	prompt_start_r := _detect_active_prompt_start(&old, cur_r)
+	vis_lines := _extract_logical_lines(&old, 0, max_active_row, cur_r, cur_c, is_wrap, seam_cells[:], seam_colors[:], seam_has_prompt, prompt_start_r, scratch_alloc)
+	defer _destroy_logical_lines(vis_lines)
 
 	new_cursor_row := 0
 	new_cursor_col := 0
@@ -590,7 +689,7 @@ grid_resize_reflow :: proc(
 	vis_reflowed := _reflow_logical_lines(vis_lines[:], target_cols, &new_cursor_row, &new_cursor_col, &new_cursor_pending_wrap, &cursor_found, scratch_alloc)
 	defer _destroy_reflow_rows(vis_reflowed)
 
-	// 3. Initialize target Grid with new capacity
+	// 4. Initialize target Grid with new capacity
 	grid_init(g, target_rows, target_cols, old.allocator)
 	max_hist := max(0, g.capacity - target_rows)
 	num_vis := len(vis_reflowed)
@@ -599,41 +698,11 @@ grid_resize_reflow :: proc(
 		delta_rows := max(0, target_rows - old.row_count)
 		free_rows := target_rows - num_vis
 		max_pull := min(delta_rows, free_rows)
-
-		pull_start_r := hist_end + 1
-		if max_pull > 0 && hist_end >= -old.history_count {
-			lines_collected := 0
-			for pull_start_r > -old.history_count && lines_collected < max_pull {
-				pull_start_r -= 1
-				for pull_start_r > -old.history_count {
-					prev_phys := grid_physical_row(&old, pull_start_r - 1)
-					if old.rows[prev_phys].wrap {
-						pull_start_r -= 1
-					} else {
-						break
-					}
-				}
-				lines_collected += 1
-			}
-		}
-
-		pulled_reflowed: [dynamic]_Reflow_Row
-		defer _destroy_reflow_rows(pulled_reflowed)
-		if pull_start_r <= hist_end {
-			dummy_cr, dummy_cc := 0, 0
-			dummy_wrap, dummy_found := false, true
-			pull_lines := _extract_logical_lines(&old, pull_start_r, hist_end, -999, -999, false, nil, nil, false, scratch_alloc)
-			pulled_reflowed = _reflow_logical_lines(pull_lines[:], target_cols, &dummy_cr, &dummy_cc, &dummy_wrap, &dummy_found, scratch_alloc)
-			_destroy_logical_lines(pull_lines)
-		}
-
-		n_pulled_reflowed := len(pulled_reflowed)
-		actual_pull := min(n_pulled_reflowed, max_pull)
-		leftover_reflowed := n_pulled_reflowed - actual_pull
+		actual_pull := min(n_hist, max_pull)
 
 		// Copy pulled history rows into top of visible viewport (0..<actual_pull)
 		for i in 0..<actual_pull {
-			src_r := &pulled_reflowed[leftover_reflowed + i]
+			src_r := &hist_reflowed[(n_hist - actual_pull) + i]
 			_copy_row_into(g, i, src_r.cells[:], src_r.direct_colors[:], src_r.wrap, src_r.is_prompt)
 		}
 
@@ -643,21 +712,14 @@ grid_resize_reflow :: proc(
 			_copy_row_into(g, actual_pull + i, src_r.cells[:], src_r.direct_colors[:], src_r.wrap, src_r.is_prompt)
 		}
 
-		// Preserve remaining history: older raw rows (-old.history_count..<pull_start_r) + leftover_reflowed
-		raw_hist_count := max(0, pull_start_r - (-old.history_count))
-		g.history_count = min(max_hist, raw_hist_count + leftover_reflowed)
-
-		keep_leftover := min(leftover_reflowed, g.history_count)
-		for i in 0..<keep_leftover {
-			src_r := &pulled_reflowed[leftover_reflowed - keep_leftover + i]
-			_copy_row_into(g, -keep_leftover + i, src_r.cells[:], src_r.direct_colors[:], src_r.wrap, src_r.is_prompt)
-		}
-
-		keep_raw := g.history_count - keep_leftover
-		for i in 0..<keep_raw {
-			src_phys := grid_physical_row(&old, (pull_start_r - keep_raw) + i)
-			dst_row := &old.rows[src_phys]
-			_copy_row_into(g, i - g.history_count, dst_row.cells, dst_row.direct_colors, dst_row.wrap, dst_row.is_prompt)
+		// Remaining reflowed history rows stay in history (-g.history_count..<0)
+		rem_hist := n_hist - actual_pull
+		g.history_count = min(max_hist, rem_hist)
+		keep_hist := g.history_count
+		start_idx := rem_hist - keep_hist
+		for i in 0..<keep_hist {
+			src_r := &hist_reflowed[start_idx + i]
+			_copy_row_into(g, i - keep_hist, src_r.cells[:], src_r.direct_colors[:], src_r.wrap, src_r.is_prompt)
 		}
 
 		new_cursor_row = clamp(new_cursor_row + actual_pull, 0, target_rows - 1)
@@ -672,22 +734,27 @@ grid_resize_reflow :: proc(
 		new_cursor_row -= overflow
 		new_cursor_row = clamp(new_cursor_row, 0, target_rows - 1)
 
-		// Overflow rows (from top of visible) become the newest history; older history copied directly without reflow
-		raw_hist_count := max(0, (hist_end + 1) - (-old.history_count))
-		total_hist := raw_hist_count + overflow
+		// Total history = all reflowed history rows + overflow rows from visible
+		total_hist := n_hist + overflow
 		g.history_count = min(max_hist, total_hist)
 
+		// We need the newest g.history_count rows out of (hist_reflowed followed by vis_reflowed[0..<overflow]).
 		keep_overflow := min(overflow, g.history_count)
-		for i in 0..<keep_overflow {
-			src_r := &vis_reflowed[overflow - keep_overflow + i]
-			_copy_row_into(g, -keep_overflow + i, src_r.cells[:], src_r.direct_colors[:], src_r.wrap, src_r.is_prompt)
+		keep_hist := g.history_count - keep_overflow
+
+		// Copy keep_hist from end of hist_reflowed into (-g.history_count .. -keep_overflow)
+		if keep_hist > 0 {
+			hist_start := n_hist - keep_hist
+			for i in 0..<keep_hist {
+				src_r := &hist_reflowed[hist_start + i]
+				_copy_row_into(g, i - g.history_count, src_r.cells[:], src_r.direct_colors[:], src_r.wrap, src_r.is_prompt)
+			}
 		}
 
-		keep_raw := g.history_count - keep_overflow
-		for i in 0..<keep_raw {
-			src_phys := grid_physical_row(&old, (hist_end + 1 - keep_raw) + i)
-			dst_row := &old.rows[src_phys]
-			_copy_row_into(g, i - g.history_count, dst_row.cells, dst_row.direct_colors, dst_row.wrap, dst_row.is_prompt)
+		// Copy keep_overflow from vis_reflowed into (-keep_overflow .. 0)
+		for i in 0..<keep_overflow {
+			src_r := &vis_reflowed[(overflow - keep_overflow) + i]
+			_copy_row_into(g, -keep_overflow + i, src_r.cells[:], src_r.direct_colors[:], src_r.wrap, src_r.is_prompt)
 		}
 	}
 

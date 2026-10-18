@@ -453,3 +453,94 @@ test_terminal_resize_temp_allocator_self_cleaning :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(temp_track.allocation_map), 0)
 	testing.expect_value(t, temp_track.current_memory_allocated, 0)
 }
+
+@test
+test_terminal_resize_starship_multiline_prompt_protection :: proc(t: ^testing.T) {
+	terminal: term.Terminal
+	term.terminal_init(&terminal, 5, 60)
+	defer term.terminal_destroy(&terminal)
+
+	// Output line followed by 2-line prompt
+	term.terminal_feed_string(&terminal, "output row 0\r\n\u256D\u2500 \uF179 ~/project/term on git:main at 12:00:00\r\n\u2570\u2500\u276F ")
+
+	testing.expect_value(t, terminal.parser.cursor.row, 2)
+
+	// Resize down to 25 cols:
+	// Output row 0 wraps, but prompt banner and input line must stay exactly 1 row each!
+	term.terminal_resize(&terminal, 6, 25)
+
+	testing.expect_value(t, terminal.parser.cursor.row, 2)
+	row1 := term.terminal_get_row(&terminal, 1)
+	row2 := term.terminal_get_row(&terminal, 2)
+	testing.expect(t, row1 != nil && !row1.wrap, "Banner line must not wrap")
+	testing.expect(t, row2 != nil && !row2.wrap, "Input line must not wrap")
+
+	// Resize back up to 60 cols
+	term.terminal_resize(&terminal, 5, 60)
+	testing.expect_value(t, terminal.parser.cursor.row, 2)
+}
+
+@test
+test_terminal_resize_standard_bash_prompt_protection :: proc(t: ^testing.T) {
+	terminal: term.Terminal
+	term.terminal_init(&terminal, 5, 60)
+	defer term.terminal_destroy(&terminal)
+
+	term.terminal_feed_string(&terminal, "first output\r\nuser@hostname:~/project$ ")
+	testing.expect_value(t, terminal.parser.cursor.row, 1)
+
+	// Resize down to 15 cols: cursor row with prompt must be protected
+	term.terminal_resize(&terminal, 5, 15)
+	testing.expect_value(t, terminal.parser.cursor.row, 1)
+
+	// Resize back to 60 cols
+	term.terminal_resize(&terminal, 5, 60)
+	testing.expect_value(t, terminal.parser.cursor.row, 1)
+}
+
+@test
+test_terminal_resize_scrollback_history_reflows_on_widen_and_narrow :: proc(t: ^testing.T) {
+	terminal: term.Terminal
+	term.terminal_init(&terminal, 3, 20)
+	defer term.terminal_destroy(&terminal)
+
+	// Feed 40 chars that wrap into 2 rows at 20 cols:
+	// "0123456789abcdefghij" (20) + "0123456789abcdefghij" (20)
+	term.terminal_feed_string(&terminal, "0123456789abcdefghij0123456789abcdefghij\r\n")
+
+	// Feed 4 lines to push the wrapped line deep into scrollback history
+	term.terminal_feed_string(&terminal, "line1\r\nline2\r\nline3\r\nline4\r\n")
+	testing.expect(t, terminal.grid.history_count >= 2, "Expected history_count >= 2")
+
+	// Widen to 50 columns:
+	// The 40-char wrapped line in history must coalesce/unwrap into 1 row!
+	term.terminal_resize(&terminal, 3, 50)
+
+	oldest := term.terminal_get_row(&terminal, -terminal.grid.history_count)
+	testing.expect(t, oldest != nil, "Oldest history row must exist")
+	testing.expect_value(t, oldest.cells[0].char, '0')
+	testing.expect_value(t, oldest.cells[19].char, 'j')
+	testing.expect_value(t, oldest.cells[20].char, '0')
+	testing.expect_value(t, oldest.cells[39].char, 'j')
+	testing.expect(t, !oldest.wrap, "Unwrapped row in scrollback must have wrap == false")
+
+	// Narrow to 10 columns:
+	// The 40-char line in history must wrap into 4 rows of 10 chars each!
+	term.terminal_resize(&terminal, 3, 10)
+
+	r0 := term.terminal_get_row(&terminal, -terminal.grid.history_count)
+	r1 := term.terminal_get_row(&terminal, -terminal.grid.history_count + 1)
+	r2 := term.terminal_get_row(&terminal, -terminal.grid.history_count + 2)
+	r3 := term.terminal_get_row(&terminal, -terminal.grid.history_count + 3)
+
+	testing.expect(t, r0 != nil && r0.wrap, "Row 0 in scrollback must wrap")
+	testing.expect(t, r1 != nil && r1.wrap, "Row 1 in scrollback must wrap")
+	testing.expect(t, r2 != nil && r2.wrap, "Row 2 in scrollback must wrap")
+	testing.expect(t, r3 != nil && !r3.wrap, "Row 3 in scrollback must not wrap")
+
+	testing.expect_value(t, r0.cells[0].char, '0')
+	testing.expect_value(t, r1.cells[0].char, 'a')
+	testing.expect_value(t, r2.cells[0].char, '0')
+	testing.expect_value(t, r3.cells[0].char, 'a')
+}
+
