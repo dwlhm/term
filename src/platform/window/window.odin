@@ -102,5 +102,14 @@ when ODIN_OS != .Darwin {
 	platform_setup_unified_titlebar :: proc(sdl_window: ^sdl3.Window) -> bool { return false }
 	platform_setup_metal_layer :: proc(sdl_window: ^sdl3.Window, is_opaque: bool = false) -> bool { return false }
 	platform_setup_window_vibrancy :: proc(sdl_window: ^sdl3.Window, enabled: bool) -> bool { return false }
+	platform_toggle_maximize :: proc(sdl_window: ^sdl3.Window) {
+		if sdl_window == nil do return
+		flags := sdl3.GetWindowFlags(sdl_window)
+		if .MAXIMIZED in flags {
+			sdl3.RestoreWindow(sdl_window)
+		} else {
+			sdl3.MaximizeWindow(sdl_window)
+		}
+	}
 }
 

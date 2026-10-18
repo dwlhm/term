@@ -65,6 +65,50 @@ when ODIN_OS == .Darwin {
 		_ = CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication)
 	}
 
+	platform_disable_system_titlebar_double_click :: proc() {
+		key_str := CFStringCreateWithCString(nil, "AppleActionOnDoubleClick", kCFStringEncodingUTF8)
+		if key_str == nil do return
+		defer CFRelease(key_str)
+
+		val_str := CFStringCreateWithCString(nil, "None", kCFStringEncodingUTF8)
+		if val_str == nil do return
+		defer CFRelease(val_str)
+
+		cls_user_defaults := objc_getClass("NSUserDefaults")
+		if cls_user_defaults != nil {
+			meta_cls := object_getClass(id(cls_user_defaults))
+			sel_standard_user_defaults := sel_registerName("standardUserDefaults")
+			sel_set_obj := sel_registerName("setObject:forKey:")
+
+			imp_standard := class_getMethodImplementation(meta_cls, sel_standard_user_defaults)
+			if imp_standard != nil {
+				Get_Defaults_Proc :: #type proc "c" (cls: Class, sel: SEL) -> id
+				defaults := (Get_Defaults_Proc(imp_standard))(cls_user_defaults, sel_standard_user_defaults)
+
+				if defaults != nil {
+					imp_set := class_getMethodImplementation(cls_user_defaults, sel_set_obj)
+					if imp_set != nil {
+						Set_Obj_Proc :: #type proc "c" (target: id, sel: SEL, value: rawptr, key: rawptr)
+						(Set_Obj_Proc(imp_set))(defaults, sel_set_obj, val_str, key_str)
+					}
+				}
+			}
+		}
+
+		CFPreferencesSetAppValue(key_str, val_str, kCFPreferencesCurrentApplication)
+		_ = CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication)
+	}
+
+	platform_toggle_maximize :: proc(sdl_window: ^sdl3.Window) {
+		if sdl_window == nil do return
+		flags := sdl3.GetWindowFlags(sdl_window)
+		if .MAXIMIZED in flags {
+			sdl3.RestoreWindow(sdl_window)
+		} else {
+			sdl3.MaximizeWindow(sdl_window)
+		}
+	}
+
 	platform_get_system_font_size :: proc() -> (size: f32, ok: bool) {
 		cls_nsfont := objc_getClass("NSFont")
 		if cls_nsfont == nil do return 0, false
@@ -251,6 +295,7 @@ when ODIN_OS == .Darwin {
 		}
 
 		platform_setup_metal_layer(sdl_window)
+		platform_disable_system_titlebar_double_click()
 		return true
 	}
 
