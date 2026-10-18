@@ -165,6 +165,11 @@ terminal_clear_history :: proc(t: ^Terminal) {
 terminal_sample_bg :: proc(t: ^Terminal, scroll_offset: int = 0) -> (dc: cell.Direct_Color, palette_idx: u8, found: bool) {
 	if t == nil || t.rows <= 0 || t.cols <= 0 do return {}, 0, false
 
+	// Only sample background when in alternate screen buffer (e.g. Neovim, Vim, Nano, TUI apps).
+	// When in standard shell buffer, preserve the uniform original terminal background
+	// so CLI commands (video player, cat, scripts) never corrupt or hijack the pane card.
+	if !t.parser.in_alt_screen do return {}, 0, false
+
 	mid_r := t.rows / 2
 	mid_c := t.cols / 2
 	probe_points := [4][2]int{

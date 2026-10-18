@@ -343,15 +343,30 @@ test_terminal_alt_screen_modes :: proc(t: ^testing.T) {
 	testing.expect(t, !terminal.parser.in_alt_screen, "Expected normal screen initially")
 	testing.expect(t, !terminal.parser.cursor_key_mode, "Expected normal cursor keys initially")
 
+	// Print cell with background color in normal screen: should NOT sample
+	term.terminal_feed_string(&terminal, "\x1b[48;2;20;30;40mX\x1b[0m")
+	_, _, found_normal := term.terminal_sample_bg(&terminal)
+	testing.expect(t, !found_normal, "Normal screen should not sample background into pane card")
+
 	// Enter alternate screen (?1049h) and set application cursor keys (?1h)
 	term.terminal_feed_string(&terminal, "\x1b[?1049h\x1b[?1h")
 	testing.expect(t, terminal.parser.in_alt_screen, "Expected in_alt_screen == true")
 	testing.expect(t, terminal.parser.cursor_key_mode, "Expected cursor_key_mode == true")
 
+	// In alternate screen (e.g. Neovim), screen is cleared and TUI draws
+	term.terminal_feed_string(&terminal, "\x1b[2J\x1b[13;41H\x1b[48;2;30;40;50m \x1b[0m")
+	dc_alt, _, found_alt := term.terminal_sample_bg(&terminal)
+	testing.expect(t, found_alt, "Alternate screen (Neovim) should sample background for seamless blending")
+	testing.expect_value(t, dc_alt.bg[0], u8(30))
+
 	// Exit alternate screen (?1049l) and reset cursor keys (?1l)
 	term.terminal_feed_string(&terminal, "\x1b[?1049l\x1b[?1l")
 	testing.expect(t, !terminal.parser.in_alt_screen, "Expected in_alt_screen == false")
 	testing.expect(t, !terminal.parser.cursor_key_mode, "Expected cursor_key_mode == false")
+
+	// Once exited, sampling immediately turns off and reverts to original background
+	_, _, found_after := term.terminal_sample_bg(&terminal)
+	testing.expect(t, !found_after, "Exiting alternate screen must revert background sampling immediately")
 }
 
 @test
