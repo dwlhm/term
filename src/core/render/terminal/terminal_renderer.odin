@@ -100,10 +100,95 @@ init_style_lut :: proc(lut: ^[1025]u32) {
 	lut[1024] = u32(sel_fg) | (u32(sel_bg) << 16)
 }
 
+Terminal_Pipelines :: struct {
+	glyph_pipeline:   contract.Gpu_RenderPipeline,
+	glyph_layout:     contract.Gpu_BindGroupLayout,
+	bg_pipeline:      contract.Gpu_RenderPipeline,
+	bg_layout:        contract.Gpu_BindGroupLayout,
+	emoji_pipeline:   contract.Gpu_RenderPipeline,
+	emoji_layout:     contract.Gpu_BindGroupLayout,
+	compute_pipeline: contract.Gpu_ComputePipeline,
+	compute_layout:   contract.Gpu_BindGroupLayout,
+	blit_pipeline:    contract.Gpu_RenderPipeline,
+	blit_layout:      contract.Gpu_BindGroupLayout,
+	fs_pipeline:      contract.Gpu_RenderPipeline,
+	fs_layout:        contract.Gpu_BindGroupLayout,
+	available:        bool,
+}
+
+terminal_pipelines_init :: proc(p: ^Terminal_Pipelines, device: contract.Gpu_Device, format: contract.Gpu_Format) -> bool {
+	if p == nil || rawptr(device) == nil do return false
+
+	glyph_attrs := []contract.Gpu_Vertex_Attribute{
+		{format = .Float32x2, offset = 0, shader_location = 0},
+		{format = .Float32x2, offset = 8, shader_location = 1},
+		{format = .Float32x4, offset = 16, shader_location = 2},
+		{format = .Float32x4, offset = 32, shader_location = 3},
+	}
+	var_glyph_ok: bool
+	p.glyph_pipeline, p.glyph_layout, var_glyph_ok = _create_instance_pipeline(device, GLYPH_WGSL, glyph_attrs, format)
+	if !var_glyph_ok do return false
+
+	bg_attrs := []contract.Gpu_Vertex_Attribute{
+		{format = .Float32x2, offset = 0, shader_location = 0},
+		{format = .Float32x2, offset = 8, shader_location = 1},
+		{format = .Float32x4, offset = 16, shader_location = 2},
+		{format = .Float32x4, offset = 48, shader_location = 3},
+	}
+	var_bg_ok: bool
+	p.bg_pipeline, p.bg_layout, var_bg_ok = _create_instance_pipeline(device, BG_WGSL, bg_attrs, format)
+	if !var_bg_ok do return false
+
+	var_emoji_ok: bool
+	p.emoji_pipeline, p.emoji_layout, var_emoji_ok = _create_instance_pipeline(device, EMOJI_WGSL, glyph_attrs, format)
+	if !var_emoji_ok do return false
+
+	compute_mod := contract.create_shader_module(device, TILE_COMPUTE_WGSL)
+	if rawptr(compute_mod) != nil {
+		p.compute_pipeline = contract.create_compute_pipeline(device, compute_mod, "cs_main")
+		if rawptr(p.compute_pipeline) != nil {
+			p.compute_layout = contract.compute_get_bind_group_layout(p.compute_pipeline, 0)
+		}
+		contract.destroy_shader_module(compute_mod)
+	}
+
+	var_blit_ok: bool
+	p.blit_pipeline, p.blit_layout, var_blit_ok = _create_triangle_pipeline(device, TILE_BLIT_WGSL, "vs_main", "fs_main", format)
+	_ = var_blit_ok
+
+	var_fs_ok: bool
+	p.fs_pipeline, p.fs_layout, var_fs_ok = _create_triangle_pipeline(device, FULLSCREEN_WGSL, "fullscreen_vs_main", "fullscreen_fs_main", format)
+	_ = var_fs_ok
+
+	p.available = true
+	return true
+}
+
+terminal_pipelines_destroy :: proc(p: ^Terminal_Pipelines) {
+	if p == nil do return
+	if rawptr(p.glyph_pipeline) != nil do contract.destroy_render_pipeline(p.glyph_pipeline)
+	if rawptr(p.bg_pipeline) != nil do contract.destroy_render_pipeline(p.bg_pipeline)
+	if rawptr(p.emoji_pipeline) != nil do contract.destroy_render_pipeline(p.emoji_pipeline)
+	if rawptr(p.blit_pipeline) != nil do contract.destroy_render_pipeline(p.blit_pipeline)
+	if rawptr(p.fs_pipeline) != nil do contract.destroy_render_pipeline(p.fs_pipeline)
+	if rawptr(p.compute_pipeline) != nil do contract.destroy_compute_pipeline(p.compute_pipeline)
+
+	if rawptr(p.glyph_layout) != nil && contract.destroy_bind_group_layout != nil do contract.destroy_bind_group_layout(p.glyph_layout)
+	if rawptr(p.bg_layout) != nil && contract.destroy_bind_group_layout != nil do contract.destroy_bind_group_layout(p.bg_layout)
+	if rawptr(p.emoji_layout) != nil && contract.destroy_bind_group_layout != nil do contract.destroy_bind_group_layout(p.emoji_layout)
+	if rawptr(p.blit_layout) != nil && contract.destroy_bind_group_layout != nil do contract.destroy_bind_group_layout(p.blit_layout)
+	if rawptr(p.fs_layout) != nil && contract.destroy_bind_group_layout != nil do contract.destroy_bind_group_layout(p.fs_layout)
+	if rawptr(p.compute_layout) != nil && contract.destroy_bind_group_layout != nil do contract.destroy_bind_group_layout(p.compute_layout)
+	p.available = false
+}
+
 Terminal_Renderer :: struct {
 	device:             contract.Gpu_Device,
 	queue:              contract.Gpu_Queue,
 	format:             contract.Gpu_Format,
+
+	pipelines:          ^Terminal_Pipelines,
+	owns_pipelines:     bool,
 
 	// Strategy A: Instanced Quad Batching
 	inst_rend:          instance.Instance_Renderer,
@@ -143,6 +228,7 @@ Terminal_Renderer :: struct {
 	bound_emoji_view:   contract.Gpu_TextureView,
 	last_term_ptr:      rawptr,
 	last_scroll_offset: int,
+	last_is_focused:    bool,
 	tile_fb_valid:      bool,
 
 	// Scratch Storage Buffers (Preallocated for zero heap allocations)
@@ -206,47 +292,44 @@ _create_triangle_pipeline :: proc(
 	return pipeline, layout, true
 }
 
-terminal_renderer_init :: proc(
+terminal_renderer_init_with_pipelines :: proc(
 	r: ^Terminal_Renderer,
 	device: contract.Gpu_Device,
 	queue: contract.Gpu_Queue,
 	format: contract.Gpu_Format,
 	atlas_view: contract.Gpu_TextureView,
 	emoji_view: contract.Gpu_TextureView,
+	pipes: ^Terminal_Pipelines,
 	allocator: runtime.Allocator = context.allocator,
 ) -> bool {
-	if r == nil || rawptr(device) == nil || rawptr(queue) == nil do return false
+	if r == nil || rawptr(device) == nil || rawptr(queue) == nil || pipes == nil || !pipes.available do return false
 	r.device = device
 	r.queue = queue
 	r.format = format
 	r.allocator = allocator
 	r.last_strategy = .Instance
 	r.last_duration_ns = 0
+	r.last_is_focused = true
+
+	r.pipelines = pipes
+	r.owns_pipelines = false
+
+	r.glyph_pipeline = pipes.glyph_pipeline
+	r.glyph_layout = pipes.glyph_layout
+	r.bg_pipeline = pipes.bg_pipeline
+	r.bg_layout = pipes.bg_layout
+	r.emoji_pipeline = pipes.emoji_pipeline
+	r.emoji_layout = pipes.emoji_layout
+	r.compute_pipeline = pipes.compute_pipeline
+	r.compute_layout = pipes.compute_layout
+	r.blit_pipeline = pipes.blit_pipeline
+	r.blit_layout = pipes.blit_layout
+	r.fs_pipeline = pipes.fs_pipeline
+	r.fs_layout = pipes.fs_layout
 
 	init_style_lut(&r.lut_words)
 
-	// 1. Initialize Strategy A (Glyph & BG Instance Batching)
-	glyph_attrs := []contract.Gpu_Vertex_Attribute{
-		{format = .Float32x2, offset = 0, shader_location = 0},
-		{format = .Float32x2, offset = 8, shader_location = 1},
-		{format = .Float32x4, offset = 16, shader_location = 2},
-		{format = .Float32x4, offset = 32, shader_location = 3},
-	}
-	var_glyph_ok: bool
-	r.glyph_pipeline, r.glyph_layout, var_glyph_ok = _create_instance_pipeline(device, GLYPH_WGSL, glyph_attrs, format)
-	if !var_glyph_ok do return false
-
-	bg_attrs := []contract.Gpu_Vertex_Attribute{
-		{format = .Float32x2, offset = 0, shader_location = 0},
-		{format = .Float32x2, offset = 8, shader_location = 1},
-		{format = .Float32x4, offset = 16, shader_location = 2},
-		{format = .Float32x4, offset = 48, shader_location = 3},
-	}
-	var_bg_ok: bool
-	r.bg_pipeline, r.bg_layout, var_bg_ok = _create_instance_pipeline(device, BG_WGSL, bg_attrs, format)
-	if !var_bg_ok do return false
-
-	if !instance.instance_renderer_init(&r.inst_rend, device, queue, 16384, atlas_view, format) {
+	if !instance.instance_renderer_init(&r.inst_rend, device, queue, 16384, atlas_view, format, allocator) {
 		return false
 	}
 
@@ -263,12 +346,7 @@ terminal_renderer_init :: proc(
 	r.inst_rend.bg_bind_group = contract.create_bind_group(device, r.bg_layout, bg_entries)
 	r.inst_rend.pipeline = r.glyph_pipeline
 
-	// 2. Initialize Dedicated Emoji Instance Batching
-	var_emoji_ok: bool
-	r.emoji_pipeline, r.emoji_layout, var_emoji_ok = _create_instance_pipeline(device, EMOJI_WGSL, glyph_attrs, format)
-	if !var_emoji_ok do return false
-
-	if !instance.instance_renderer_init(&r.emoji_rend, device, queue, 4096, emoji_view, format) {
+	if !instance.instance_renderer_init(&r.emoji_rend, device, queue, 4096, emoji_view, format, allocator) {
 		return false
 	}
 
@@ -280,36 +358,16 @@ terminal_renderer_init :: proc(
 	r.emoji_rend.bind_group = contract.create_bind_group(device, r.emoji_layout, emoji_entries)
 	r.emoji_rend.pipeline = r.emoji_pipeline
 
-	// 3. Initialize Strategy B (Compute Tile Binning)
-	compute_mod := contract.create_shader_module(device, TILE_COMPUTE_WGSL)
-	if rawptr(compute_mod) != nil {
-		r.compute_pipeline = contract.create_compute_pipeline(device, compute_mod, "cs_main")
-		if rawptr(r.compute_pipeline) != nil {
-			r.compute_layout = contract.compute_get_bind_group_layout(r.compute_pipeline, 0)
-		}
-		contract.destroy_shader_module(compute_mod)
-	}
-
-	var_blit_ok: bool
-	r.blit_pipeline, r.blit_layout, var_blit_ok = _create_triangle_pipeline(device, TILE_BLIT_WGSL, "vs_main", "fs_main", format)
-	_ = var_blit_ok
-
 	_ = tile.compute_tile_init(&r.tile_rend, device, queue, 24, 80, 10.0, 20.0, atlas_view, format, allocator)
 	r.tile_rend.compute_pipeline = r.compute_pipeline
 	r.tile_rend.compute_layout = r.compute_layout
 	r.tile_rend.blit_pipeline = r.blit_pipeline
 	r.tile_rend.blit_layout = r.blit_layout
 
-	// 4. Initialize Strategy C (Fullscreen Direct Triangle)
-	var_fs_ok: bool
-	r.fs_pipeline, r.fs_layout, var_fs_ok = _create_triangle_pipeline(device, FULLSCREEN_WGSL, "fullscreen_vs_main", "fullscreen_fs_main", format)
-	_ = var_fs_ok
-
 	_ = fullscreen.fullscreen_init(&r.fs_rend, device, queue, 24, 80, 10.0, 20.0, atlas_view, format, allocator)
 	r.fs_rend.pipeline = r.fs_pipeline
 	r.fs_rend.layout = r.fs_layout
 
-	// Upload initial LUT palette to compute and fullscreen storage buffers
 	r.last_default_bg_packed = u16(r.lut_words[512] & 0xFFFF)
 	if rawptr(r.tile_rend.lut_buffer) != nil {
 		contract.write_buffer(queue, r.tile_rend.lut_buffer, 0, &r.lut_words, size_of(r.lut_words))
@@ -318,7 +376,6 @@ terminal_renderer_init :: proc(
 		contract.write_buffer(queue, r.fs_rend.lut_buffer, 0, &r.lut_words, size_of(r.lut_words))
 	}
 
-	// Preallocate scratch arrays (up to 500 cols x 200 rows without steady-state realloc)
 	initial_capacity := 500 * 200
 	r.packed_cells = make([dynamic]u64, 80 * 24, initial_capacity, allocator)
 	r.direct_colors = make([dynamic]u32, 80 * 24 * 2, initial_capacity * 2, allocator)
@@ -332,12 +389,42 @@ terminal_renderer_init :: proc(
 	return true
 }
 
+terminal_renderer_init :: proc(
+	r: ^Terminal_Renderer,
+	device: contract.Gpu_Device,
+	queue: contract.Gpu_Queue,
+	format: contract.Gpu_Format,
+	atlas_view: contract.Gpu_TextureView,
+	emoji_view: contract.Gpu_TextureView,
+	allocator: runtime.Allocator = context.allocator,
+) -> bool {
+	pipes := new(Terminal_Pipelines, allocator)
+	if !terminal_pipelines_init(pipes, device, format) {
+		free(pipes, allocator)
+		return false
+	}
+	if !terminal_renderer_init_with_pipelines(r, device, queue, format, atlas_view, emoji_view, pipes, allocator) {
+		terminal_pipelines_destroy(pipes)
+		free(pipes, allocator)
+		return false
+	}
+	r.owns_pipelines = true
+	return true
+}
+
 terminal_renderer_destroy :: proc(r: ^Terminal_Renderer) {
 	if r == nil do return
 
-	// Prevent double-free of shared pipelines owned by Terminal_Renderer
+	// Pipelines and layouts are owned by Terminal_Pipelines (destroyed via terminal_pipelines_destroy).
+	// Nil out all shared handles across sub-renderers to prevent them from destroying shared GPU objects.
+	r.inst_rend.pipeline = contract.Gpu_RenderPipeline(nil)
+	r.inst_rend.layout = contract.Gpu_BindGroupLayout(nil)
+	r.emoji_rend.pipeline = contract.Gpu_RenderPipeline(nil)
+	r.emoji_rend.layout = contract.Gpu_BindGroupLayout(nil)
 	r.tile_rend.compute_pipeline = contract.Gpu_ComputePipeline(nil)
+	r.tile_rend.compute_layout = contract.Gpu_BindGroupLayout(nil)
 	r.tile_rend.blit_pipeline = contract.Gpu_RenderPipeline(nil)
+	r.tile_rend.blit_layout = contract.Gpu_BindGroupLayout(nil)
 	r.fs_rend.pipeline = contract.Gpu_RenderPipeline(nil)
 	r.fs_rend.layout = contract.Gpu_BindGroupLayout(nil)
 
@@ -346,20 +433,13 @@ terminal_renderer_destroy :: proc(r: ^Terminal_Renderer) {
 	tile.compute_tile_destroy(&r.tile_rend)
 	fullscreen.fullscreen_destroy(&r.fs_rend)
 
-	if rawptr(r.glyph_pipeline) != nil do contract.destroy_render_pipeline(r.glyph_pipeline)
-	if rawptr(r.bg_pipeline) != nil do contract.destroy_render_pipeline(r.bg_pipeline)
-	if rawptr(r.emoji_pipeline) != nil do contract.destroy_render_pipeline(r.emoji_pipeline)
-	if rawptr(r.blit_pipeline) != nil do contract.destroy_render_pipeline(r.blit_pipeline)
-	if rawptr(r.fs_pipeline) != nil do contract.destroy_render_pipeline(r.fs_pipeline)
-	if rawptr(r.compute_pipeline) != nil do contract.destroy_compute_pipeline(r.compute_pipeline)
 	if rawptr(r.fs_color_buffer) != nil do contract.destroy_buffer(r.fs_color_buffer)
 
-	if rawptr(r.glyph_layout) != nil && contract.destroy_bind_group_layout != nil do contract.destroy_bind_group_layout(r.glyph_layout)
-	if rawptr(r.bg_layout) != nil && contract.destroy_bind_group_layout != nil do contract.destroy_bind_group_layout(r.bg_layout)
-	if rawptr(r.emoji_layout) != nil && contract.destroy_bind_group_layout != nil do contract.destroy_bind_group_layout(r.emoji_layout)
-	if rawptr(r.blit_layout) != nil && contract.destroy_bind_group_layout != nil do contract.destroy_bind_group_layout(r.blit_layout)
-	if rawptr(r.fs_layout) != nil && contract.destroy_bind_group_layout != nil do contract.destroy_bind_group_layout(r.fs_layout)
-	if rawptr(r.compute_layout) != nil && contract.destroy_bind_group_layout != nil do contract.destroy_bind_group_layout(r.compute_layout)
+	if r.owns_pipelines && r.pipelines != nil {
+		terminal_pipelines_destroy(r.pipelines)
+		free(r.pipelines, r.allocator)
+		r.pipelines = nil
+	}
 
 	delete(r.packed_cells)
 	delete(r.direct_colors)
@@ -520,6 +600,7 @@ _terminal_renderer_resolve_colors :: #force_inline proc(
 	dc: cell.Direct_Color,
 	is_selected: bool,
 	default_bg: [4]f32,
+	is_focused: bool = true,
 ) -> (fg, bg: [4]f32) {
 	has_direct_fg := .Has_Direct_Color in cell_val.flags && dc.has_fg
 	has_direct_bg := .Has_Direct_Color in cell_val.flags && dc.has_bg
@@ -539,6 +620,18 @@ _terminal_renderer_resolve_colors :: #force_inline proc(
 	if is_selected {
 		fg = {1.0, 1.0, 1.0, 1.0}
 		bg = {0.23, 0.39, 0.70, 0.60} // Selection blue
+	} else if !is_focused {
+		fg[0] *= 0.55
+		fg[1] *= 0.55
+		fg[2] *= 0.55
+		fg[3] = 1.0
+
+		if has_direct_bg || cell_val.bg != 0 {
+			bg[0] *= 0.70
+			bg[1] *= 0.70
+			bg[2] *= 0.70
+			bg[3] = 1.0
+		}
 	}
 	return fg, bg
 }
@@ -547,6 +640,7 @@ _terminal_renderer_push_emoji_quad_only :: #force_inline proc(
 	r: ^Terminal_Renderer,
 	eg: plat_font.Emoji_Glyph,
 	x_pos, y_pos, gw, cell_h: f32,
+	is_focused: bool = true,
 ) {
 	base_h := cell_h * 0.95
 	scale := base_h / max(1.0, eg.height)
@@ -558,7 +652,7 @@ _terminal_renderer_push_emoji_quad_only :: #force_inline proc(
 	emoji_rec := contract.Instance_Record{
 		pos_size = {x_pos + offset_x, y_pos + offset_y, draw_w, draw_h},
 		uv_rect  = {eg.u0, eg.v0, eg.u1, eg.v1},
-		fg_color = {1, 1, 1, 1},
+		fg_color = {1, 1, 1, 1.0 if is_focused else 0.50},
 		bg_color = {0, 0, 0, 0},
 	}
 	instance.instance_renderer_push(&r.emoji_rend, emoji_rec)
@@ -569,6 +663,7 @@ _terminal_renderer_push_emoji :: #force_inline proc(
 	eg: plat_font.Emoji_Glyph,
 	x_pos, y_pos, gw, cell_h: f32,
 	bg: [4]f32,
+	is_focused: bool = true,
 ) {
 	bg_rec := contract.Instance_Record{
 		pos_size = {x_pos, y_pos, gw, cell_h},
@@ -577,7 +672,7 @@ _terminal_renderer_push_emoji :: #force_inline proc(
 		bg_color = bg,
 	}
 	instance.instance_renderer_push(&r.inst_rend, bg_rec)
-	_terminal_renderer_push_emoji_quad_only(r, eg, x_pos, y_pos, gw, cell_h)
+	_terminal_renderer_push_emoji_quad_only(r, eg, x_pos, y_pos, gw, cell_h, is_focused)
 }
 
 _terminal_renderer_push_glyph :: #force_inline proc(
@@ -631,6 +726,7 @@ _terminal_renderer_pack_grid :: proc(
 	active_bg: [4]f32,
 	selection_active: bool,
 	sel_r_start, sel_c_start, sel_r_end, sel_c_end: int,
+	is_focused: bool = true,
 ) {
 	blank_packed := _pack_gpu_cell(' ', 0, 1, 0, 0)
 	for r_idx in 0..<rows {
@@ -686,7 +782,7 @@ _terminal_renderer_pack_grid :: proc(
 			}
 			if dc.has_fg || dc.has_bg || .Dim in cell_val.style {
 				cflags |= 8
-				fg_col, bg_col := _terminal_renderer_resolve_colors(cell_val, dc, false, active_bg)
+				fg_col, bg_col := _terminal_renderer_resolve_colors(cell_val, dc, false, active_bg, is_focused)
 				if dc.has_fg || .Dim in cell_val.style || .Invert in cell_val.style {
 					fg_argb = _float_to_argb(fg_col)
 				}
@@ -712,7 +808,7 @@ _terminal_renderer_pack_grid :: proc(
 				if runes := core_terminal.terminal_get_egc_runes(term, ch); len(runes) > 0 {
 					if emoji_atlas != nil && plat_font.is_emoji_cluster(runes) {
 						if eg, eok := plat_font.emoji_atlas_get_runes(emoji_atlas, runes); eok {
-							_terminal_renderer_push_emoji_quad_only(r, eg, x_pos, y_pos, gw, cell_h)
+							_terminal_renderer_push_emoji_quad_only(r, eg, x_pos, y_pos, gw, cell_h, is_focused)
 						}
 						r.packed_cells[ci] = _pack_gpu_cell(' ', style_val, 1, cflags, 0)
 						continue
@@ -730,7 +826,7 @@ _terminal_renderer_pack_grid :: proc(
 
 			if emoji_atlas != nil && plat_font.is_emoji_codepoint(ch) {
 				if eg, eok := plat_font.emoji_atlas_get(emoji_atlas, ch); eok {
-					_terminal_renderer_push_emoji_quad_only(r, eg, x_pos, y_pos, gw, cell_h)
+					_terminal_renderer_push_emoji_quad_only(r, eg, x_pos, y_pos, gw, cell_h, is_focused)
 				}
 				r.packed_cells[ci] = _pack_gpu_cell(' ', style_val, 1, cflags, 0)
 				continue
@@ -769,6 +865,7 @@ terminal_renderer_encode :: proc(
 	selection_active: bool = false,
 	load_op: contract.Gpu_Load_Op = .Load,
 	border_radius: f32 = 0.0,
+	is_focused: bool = true,
 ) {
 	if r == nil || rawptr(enc) == nil || term == nil || rawptr(target_view) == nil || text_atlas == nil do return
 
@@ -815,6 +912,11 @@ terminal_renderer_encode :: proc(
 	chosen_strat := strategy_select(strat_inp, &r.strat_state, r.tile_rend.available, r.fs_rend.available)
 
 	// 2. Resolve Active Background & Sync LUT Default Background across all bg_idx == 0 entries
+	if r.last_is_focused != is_focused {
+		r.tile_fb_valid = false
+		r.last_is_focused = is_focused
+	}
+
 	active_bg: [4]f32 = {0.08, 0.09, 0.12, 1.0}
 	if has_custom_bg {
 		active_bg = custom_bg
@@ -824,6 +926,11 @@ terminal_renderer_encode :: proc(
 		} else if pal != 0 {
 			active_bg = PALETTE_PRECOMPUTED[pal & 15]
 		}
+	}
+
+	if !is_focused {
+		// Inactive pane: darker solid background, maintaining 1.0 opacity across all free space
+		active_bg = {active_bg[0] * 0.70, active_bg[1] * 0.70, active_bg[2] * 0.70, 1.0}
 	}
 
 	bg_packed := rgb_to_r5g6b5(
@@ -909,14 +1016,14 @@ terminal_renderer_encode :: proc(
 				gw := cell_w * 2.0 if is_wide else cell_w
 				x_pos := pane_rect[0] + pad_x + f32(c) * cell_w
 
-				fg, bg := _terminal_renderer_resolve_colors(cell_val, dc, is_selected, active_bg)
+				fg, bg := _terminal_renderer_resolve_colors(cell_val, dc, is_selected, active_bg, is_focused)
 
 				if .Has_Egc in cell_val.flags {
 					if runes := core_terminal.terminal_get_egc_runes(term, ch); len(runes) > 0 {
 						handled := false
 						if emoji_atlas != nil && plat_font.is_emoji_cluster(runes) {
 							if eg, eok := plat_font.emoji_atlas_get_runes(emoji_atlas, runes); eok {
-								_terminal_renderer_push_emoji(r, eg, x_pos, y_pos, gw, cell_h, bg)
+								_terminal_renderer_push_emoji(r, eg, x_pos, y_pos, gw, cell_h, bg, is_focused)
 								handled = true
 							}
 						}
@@ -935,7 +1042,7 @@ terminal_renderer_encode :: proc(
 
 				if emoji_atlas != nil && plat_font.is_emoji_codepoint(ch) {
 					if eg, eok := plat_font.emoji_atlas_get(emoji_atlas, ch); eok {
-						_terminal_renderer_push_emoji(r, eg, x_pos, y_pos, gw, cell_h, bg)
+						_terminal_renderer_push_emoji(r, eg, x_pos, y_pos, gw, cell_h, bg, is_focused)
 					}
 					continue
 				}
@@ -975,6 +1082,7 @@ terminal_renderer_encode :: proc(
 			r, term, gam, emoji_atlas, rows, cols, pane_rect, cell_w, cell_h, pad_x, pad_y,
 			scroll_offset, active_bg, selection_active,
 			selected_logical_r_start, selected_c_start, selected_logical_r_end, selected_c_end,
+			is_focused,
 		)
 		if plat_font.text_atlas_sync_gpu(text_atlas, r.device, r.queue) {
 			_terminal_renderer_ensure_resources(r, u32(cols), u32(rows), cell_w, cell_h, text_atlas.glyph_view, text_atlas.emoji_view)
@@ -1031,7 +1139,7 @@ terminal_renderer_encode :: proc(
 				atlas_w      = atlas.ATLAS_WIDTH,
 				atlas_h      = atlas.ATLAS_HEIGHT,
 				bg_opacity   = 1.0,
-				cell_opacity = 1.0,
+				cell_opacity = 1.0 if is_focused else 0.55,
 			}
 			contract.write_buffer(r.queue, r.tile_rend.params_buffer, 0, &t_params, size_of(tile.Tile_Params))
 			contract.write_buffer(r.queue, r.tile_rend.tile_list_buffer, 0, raw_data(r.dirty_tiles[:]), u64(len(r.dirty_tiles) * size_of(u32)))
@@ -1083,6 +1191,7 @@ terminal_renderer_encode :: proc(
 			r, term, gam, emoji_atlas, rows, cols, pane_rect, cell_w, cell_h, pad_x, pad_y,
 			scroll_offset, active_bg, selection_active,
 			selected_logical_r_start, selected_c_start, selected_logical_r_end, selected_c_end,
+			is_focused,
 		)
 		if plat_font.text_atlas_sync_gpu(text_atlas, r.device, r.queue) {
 			_terminal_renderer_ensure_resources(r, u32(cols), u32(rows), cell_w, cell_h, text_atlas.glyph_view, text_atlas.emoji_view)
@@ -1104,7 +1213,7 @@ terminal_renderer_encode :: proc(
 			atlas_w       = atlas.ATLAS_WIDTH,
 			atlas_h       = atlas.ATLAS_HEIGHT,
 			bg_opacity    = 1.0,
-			cell_opacity  = 1.0,
+			cell_opacity  = 1.0 if is_focused else 0.55,
 			pane_x        = pane_rect[0],
 			pane_y        = pane_rect[1],
 			pane_w        = pane_rect[2],
@@ -1160,6 +1269,7 @@ terminal_renderer_render :: proc(
 	selected_c_end: int = -1,
 	selection_active: bool = false,
 	border_radius: f32 = 0.0,
+	is_focused: bool = true,
 ) {
 	if r == nil || term == nil || rawptr(target_view) == nil || text_atlas == nil do return
 	enc := contract.create_command_encoder(r.device)
@@ -1170,7 +1280,7 @@ terminal_renderer_render :: proc(
 		r, enc, term, target_view, text_atlas, pane_rect, cell_w, cell_h, pad_x, pad_y,
 		scroll_offset, screen_w, screen_h, has_custom_bg, custom_bg,
 		selected_logical_r_start, selected_c_start, selected_logical_r_end, selected_c_end,
-		selection_active, .Load, border_radius,
+		selection_active, .Load, border_radius, is_focused,
 	)
 
 	cmd := contract.finish_command_buffer(enc)
