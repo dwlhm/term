@@ -110,6 +110,14 @@ split_tree_find_leaf :: proc(node: ^Split_Node, pane_id: u32) -> ^Split_Node {
 	return split_tree_find_leaf(node.right, pane_id)
 }
 
+// split_tree_first_leaf returns the first leaf Split_Node encountered in the tree.
+split_tree_first_leaf :: proc(node: ^Split_Node) -> ^Split_Node {
+	if node == nil do return nil
+	if node.kind == .Leaf do return node
+	if left := split_tree_first_leaf(node.left); left != nil do return left
+	return split_tree_first_leaf(node.right)
+}
+
 // split_tree_remove_pane removes a leaf pane and collapses the parent split node,
 // elevating the remaining sibling to the parent's position in the hierarchy.
 split_tree_remove_pane :: proc(root: ^^Split_Node, pane_id: u32, allocator := context.allocator) -> bool {
