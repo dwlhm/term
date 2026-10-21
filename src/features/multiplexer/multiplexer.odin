@@ -255,6 +255,13 @@ multiplexer_sync_split_rects :: proc(m: ^Multiplexer, root: ^chrome_splits.Split
 	}
 	if root == nil do return
 
+	if m.zoomed_pane_id != 0 && chrome_splits.split_tree_find_leaf(root, m.zoomed_pane_id) != nil {
+		if p := multiplexer_get_pane(m, m.zoomed_pane_id); p != nil {
+			p.rect = root.rect
+			return
+		}
+	}
+
 	_walk_splits(m, root)
 }
 
