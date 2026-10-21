@@ -14,7 +14,7 @@ Input_Encode_Result :: struct {
 	len:   int,
 }
 
-input_encode_key :: proc(key: sdl3.Keycode, mod: sdl3.Keymod) -> (res: Input_Encode_Result, ok: bool) {
+input_encode_key :: proc(key: sdl3.Keycode, mod: sdl3.Keymod, app_cursor: bool = false) -> (res: Input_Encode_Result, ok: bool) {
 	is_shift := (mod & sdl3.KMOD_SHIFT) != sdl3.KMOD_NONE
 	is_alt   := (mod & sdl3.KMOD_ALT)   != sdl3.KMOD_NONE
 	is_ctrl  := (mod & sdl3.KMOD_CTRL)  != sdl3.KMOD_NONE
@@ -92,6 +92,11 @@ input_encode_key :: proc(key: sdl3.Keycode, mod: sdl3.Keymod) -> (res: Input_Enc
 		if xterm_mod > 1 {
 			s := fmt.bprintf(res.bytes[:], "\x1b[1;%d%c", xterm_mod, arrow_suffix)
 			res.len = len(s)
+		} else if app_cursor {
+			res.bytes[0] = 0x1b
+			res.bytes[1] = 'O'
+			res.bytes[2] = arrow_suffix
+			res.len = 3
 		} else {
 			res.bytes[0] = 0x1b
 			res.bytes[1] = '['

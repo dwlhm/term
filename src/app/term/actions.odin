@@ -3,8 +3,12 @@ package term
 // Term Action Dispatcher & Pane/Tab Operations
 // Part of Tier 3 Application Shell (src/app/term/*).
 
+import "core:c/libc"
+import "core:fmt"
 import "core:os"
+import "core:strings"
 
+import plat_win "../../platform/window"
 import chrome_splits "../../core/chrome/splits"
 import tabs_feat "../../features/tabs"
 import mux_feat "../../features/multiplexer"
@@ -26,13 +30,29 @@ app_bind_session_extensions :: proc(app: ^Term_App, p_id: u32) {
 	}
 }
 
-// app_spawn_terminal_pane discovers user shell, initializes a terminal pane
-// within the multiplexer, and binds session extensions.
+// app_spawn_terminal_pane discovers user shell, inherits cwd from focused pane,
+// initializes a terminal pane within the multiplexer, and binds session extensions.
 app_spawn_terminal_pane :: proc(app: ^Term_App, rows: int = 24, cols: int = 80) -> (u32, bool) {
 	shell := os.get_env("SHELL", context.temp_allocator)
 	if len(shell) == 0 do shell = "/bin/sh"
 
-	new_p, err := mux_feat.multiplexer_create_terminal_pane(&app.mux, {shell = shell, rows = rows, cols = cols})
+	cwd := ""
+	if focused := mux_feat.multiplexer_get_focused_pane(&app.mux); focused != nil && focused.session != nil {
+		cwd = sess_feat.session_get_cwd_path(focused.session)
+	}
+
+	cw := app.layout.metrics.cell_w if app != nil && app.layout.metrics.cell_w > 0 else 19.0
+	ch := app.layout.metrics.cell_h if app != nil && app.layout.metrics.cell_h > 0 else 43.0
+	xp := int(f32(cols) * cw)
+	yp := int(f32(rows) * ch)
+	new_p, err := mux_feat.multiplexer_create_terminal_pane(&app.mux, {
+		shell  = shell,
+		cwd    = cwd,
+		rows   = rows,
+		cols   = cols,
+		xpixel = xp,
+		ypixel = yp,
+	})
 	if err != .None do return 0, false
 
 	app_bind_session_extensions(app, new_p)
@@ -45,11 +65,18 @@ app_spawn_terminal_pane :: proc(app: ^Term_App, rows: int = 24, cols: int = 80) 
 app_select_tab :: proc(app: ^Term_App, idx: int) {
 	if app == nil || idx < 0 || idx >= len(app.tabs_mgr.entries) do return
 
+	old_p := mux_feat.multiplexer_get_focused_pane(&app.mux)
 	if !tabs_feat.tabs_manager_select_tab(&app.tabs_mgr, idx) do return
 
 	_, active_tab := tabs_feat.tabs_manager_get_active(&app.tabs_mgr)
 	if active_tab != nil && active_tab.active_pane_id != 0 {
+		if old_p != nil && old_p.session != nil && old_p.id != active_tab.active_pane_id {
+			mouse_protocol_report_focus(old_p.session, false)
+		}
 		mux_feat.multiplexer_focus_pane(&app.mux, active_tab.active_pane_id)
+		if new_p := mux_feat.multiplexer_get_pane(&app.mux, active_tab.active_pane_id); new_p != nil && new_p.session != nil {
+			mouse_protocol_report_focus(new_p.session, true)
+		}
 	}
 
 	app_sync_layout_and_winsize(app)
@@ -63,7 +90,7 @@ app_select_tab :: proc(app: ^Term_App, idx: int) {
 
 	layout_tab_bar_ensure_visible(&app.layout, idx, len(app.tabs_mgr.entries), 80.0 * app.layout.metrics.scale)
 	chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
-	app.layout.tab_bar_force = true
+	app.layout.tab_bar_reveal_timer = 2.0
 }
 
 // app_close_tab releases every pane referenced by the tab's split tree before
@@ -102,7 +129,7 @@ app_close_tab :: proc(app: ^Term_App, tab_idx: int) {
 
 	layout_tab_bar_clamp_scroll(&app.layout, len(app.tabs_mgr.entries), 80.0 * app.layout.metrics.scale)
 	chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
-	app.layout.tab_bar_force = true
+	app.layout.tab_bar_reveal_timer = 2.0
 }
 
 // app_close_pane releases an individual pane, collapses the split tree,
@@ -180,14 +207,98 @@ app_reap_dead_sessions :: proc(app: ^Term_App) -> (reaped: bool) {
 	return reaped
 }
 
+// app_cycle_tab_pane moves focus forward or backward among panes in the active tab.
+app_cycle_tab_pane :: proc(app: ^Term_App, forward: bool) {
+	if app == nil do return
+	_, active_tab := tabs_feat.tabs_manager_get_active(&app.tabs_mgr)
+	if active_tab != nil && active_tab.split_tree != nil {
+		pane_ids: [dynamic]u32
+		defer delete(pane_ids)
+		chrome_splits.split_tree_collect_pane_ids(active_tab.split_tree, &pane_ids)
+		if len(pane_ids) > 1 {
+			cur_idx := 0
+			for id, i in pane_ids {
+				if id == app.mux.focused_pane_id {
+					cur_idx = i
+					break
+				}
+			}
+			step := 1 if forward else -1
+			next_id := pane_ids[(cur_idx + step + len(pane_ids)) % len(pane_ids)]
+			old_p := mux_feat.multiplexer_get_focused_pane(&app.mux)
+			if old_p != nil && old_p.session != nil && old_p.id != next_id {
+				mouse_protocol_report_focus(old_p.session, false)
+			}
+			mux_feat.multiplexer_focus_pane(&app.mux, next_id)
+			if new_p := mux_feat.multiplexer_get_pane(&app.mux, next_id); new_p != nil && new_p.session != nil {
+				mouse_protocol_report_focus(new_p.session, true)
+			}
+			active_tab.active_pane_id = next_id
+		}
+	} else {
+		mux_feat.multiplexer_cycle_focus(&app.mux, forward)
+	}
+}
+
+// app_open_in_finder reveals the working directory of the active pane in macOS Finder.
+app_open_in_finder :: proc(app: ^Term_App) {
+	if app == nil do return
+	p := mux_feat.multiplexer_get_focused_pane(&app.mux)
+	cwd := ""
+	if p != nil && p.session != nil {
+		cwd = sess_feat.session_get_cwd_path(p.session)
+	}
+	if len(cwd) == 0 {
+		cwd = os.get_env("PWD", context.temp_allocator)
+	}
+	if len(cwd) == 0 do cwd = os.get_env("HOME", context.temp_allocator)
+	if len(cwd) > 0 {
+		cmd := fmt.tprintf("open \"%s\"", cwd)
+		cstr := strings.clone_to_cstring(cmd, context.temp_allocator)
+		libc.system(cstr)
+	}
+}
+
+// app_show_pane_context_menu triggers the authentic native macOS AppKit context menu.
+app_show_pane_context_menu :: proc(app: ^Term_App, mx, my: f32) {
+	if app == nil do return
+
+	has_selection := app.mouse.selection.active
+	items := []plat_win.Platform_Menu_Item{
+		{title = "Open in Finder",   shortcut = "",  shift_mod = false, is_separator = false, enabled = true,          action_tag = 1},
+		{title = "New Tab",          shortcut = "t", shift_mod = false, is_separator = false, enabled = true,          action_tag = 2},
+		{title = "Split Pane Right", shortcut = "d", shift_mod = false, is_separator = false, enabled = true,          action_tag = 3},
+		{title = "Split Pane Down",  shortcut = "d", shift_mod = true,  is_separator = false, enabled = true,          action_tag = 4},
+		{title = "",                 shortcut = "",  shift_mod = false, is_separator = true,  enabled = false,         action_tag = 0},
+		{title = "Copy",             shortcut = "c", shift_mod = false, is_separator = false, enabled = has_selection, action_tag = 5},
+		{title = "Paste",            shortcut = "v", shift_mod = false, is_separator = false, enabled = true,          action_tag = 6},
+		{title = "",                 shortcut = "",  shift_mod = false, is_separator = true,  enabled = false,         action_tag = 0},
+		{title = "Close Pane",       shortcut = "w", shift_mod = true,  is_separator = false, enabled = true,          action_tag = 7},
+	}
+
+	logical_x := mx / app.window.pixel_ratio
+	logical_y := my / app.window.pixel_ratio
+	tag := plat_win.platform_show_context_menu(app.window.handle, logical_x, logical_y, items)
+
+	switch tag {
+	case 1: app_open_in_finder(app)
+	case 2: app_execute_action(app, .Tab_New)
+	case 3: app_execute_action(app, .Pane_Split_Right)
+	case 4: app_execute_action(app, .Pane_Split_Down)
+	case 5: app_execute_action(app, .Clipboard_Copy)
+	case 6: app_execute_action(app, .Clipboard_Paste)
+	case 7: app_execute_action(app, .Pane_Close)
+	}
+}
+
 // app_execute_action dispatches higher-level UI and workspace commands.
 app_execute_action :: proc(app: ^Term_App, act: Action_Id) {
 	#partial switch act {
 	case .Command_Center_Toggle:
-		command_center_toggle(&app.cmd_center)
+		command_center_toggle(&app.cmd_center, .Commands, &app.tabs_mgr)
 
 	case .Tab_Overview_Toggle:
-		tab_switcher_toggle(&app.tab_switcher, &app.tabs_mgr)
+		command_center_toggle(&app.cmd_center, .Tabs, &app.tabs_mgr)
 
 	case .Tab_New:
 		new_p, ok := app_spawn_terminal_pane(app, 24, 80)
@@ -255,30 +366,23 @@ app_execute_action :: proc(app: ^Term_App, act: Action_Id) {
 		}
 
 	case .Pane_Focus_Next:
-		_, active_tab := tabs_feat.tabs_manager_get_active(&app.tabs_mgr)
-		if active_tab != nil && active_tab.split_tree != nil {
-			pane_ids: [dynamic]u32
-			defer delete(pane_ids)
-			chrome_splits.split_tree_collect_pane_ids(active_tab.split_tree, &pane_ids)
-			if len(pane_ids) > 1 {
-				cur_idx := 0
-				for id, i in pane_ids {
-					if id == app.mux.focused_pane_id {
-						cur_idx = i
-						break
-					}
-				}
-				next_id := pane_ids[(cur_idx + 1) % len(pane_ids)]
-				mux_feat.multiplexer_focus_pane(&app.mux, next_id)
-				active_tab.active_pane_id = next_id
-			}
-		} else {
-			mux_feat.multiplexer_cycle_focus(&app.mux)
-		}
+		app_cycle_tab_pane(app, true)
+
+	case .Pane_Focus_Prev:
+		app_cycle_tab_pane(app, false)
 
 	case .Pane_Toggle_Zoom:
 		p := mux_feat.multiplexer_get_focused_pane(&app.mux)
-		if p != nil do mux_feat.multiplexer_toggle_zoom(&app.mux, p.id)
+		if p != nil {
+			_ = mux_feat.multiplexer_toggle_zoom(&app.mux, p.id)
+			app_sync_layout_and_winsize(app)
+			for &pane in app.mux.panes {
+				if pane.kind == .Terminal && pane.session != nil && pane.rect[2] > 0 {
+					damage.damage_mark_all(&pane.session.term.damage)
+				}
+			}
+			chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
+		}
 
 	case .Clipboard_Copy:
 		p := mux_feat.multiplexer_get_focused_pane(&app.mux)
@@ -292,7 +396,8 @@ app_execute_action :: proc(app: ^Term_App, act: Action_Id) {
 			if app.mouse.selection.active {
 				mouse_clear_selection(&app.mouse)
 			}
-			_ = clipboard_paste(&app.clipboard, p.session)
+			bracketed := p.session.term.parser.bracketed_paste
+			_ = clipboard_paste(&app.clipboard, p.session, bracketed)
 		}
 
 	case .Select_All:
@@ -363,8 +468,12 @@ app_execute_action :: proc(app: ^Term_App, act: Action_Id) {
 	case .Font_Zoom_Reset:
 		app_reset_font_size(app)
 
+	case .Toggle_Fullscreen:
+		plat_win.platform_toggle_fullscreen(app.window.handle)
+
 	case .App_Reload_Config:
 		app.config = config_load()
+		app_apply_config(app)
 
 	case .App_Quit:
 		app.running = false

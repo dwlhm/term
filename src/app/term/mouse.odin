@@ -5,6 +5,7 @@ package term
 // Uses features/interaction/selection for coordinate storage & auto-select algorithms.
 
 import "vendor:sdl3"
+import chrome_splits "../../core/chrome/splits"
 import feat_inter "../../features/interaction"
 import sess_feat "../../features/session"
 import terminal_grid "../../core/terminal/grid"
@@ -30,17 +31,21 @@ clipboard_copy_selection :: feat_inter.clipboard_copy_selection
 clipboard_paste          :: feat_inter.clipboard_paste
 
 Mouse_State :: struct {
-	pos:           [2]f32,
-	is_down:       bool,
-	button:        u8,
-	selection:     feat_inter.Selection_State,
-	cell_w:        f32,
-	cell_h:        f32,
-	pad_x:         f32,
-	pad_y:         f32,
-	pending_start: feat_inter.Cell_Pos,
-	pending_pane:  u32,
-	drag_started:  bool,
+	pos:                 [2]f32,
+	is_down:             bool,
+	button:              u8,
+	selection:           feat_inter.Selection_State,
+	cell_w:              f32,
+	cell_h:              f32,
+	pad_x:               f32,
+	pad_y:               f32,
+	pending_start:       feat_inter.Cell_Pos,
+	pending_pane:        u32,
+	drag_started:        bool,
+	is_dragging_divider: bool,
+	drag_split_node:     ^chrome_splits.Split_Node,
+	hovered_split_node:  ^chrome_splits.Split_Node,
+	hovered_is_horiz:    bool,
 }
 
 mouse_init :: proc(m: ^Mouse_State, cell_w, cell_h: f32, pad_x: f32 = 12.0, pad_y: f32 = 8.0) {
@@ -53,6 +58,10 @@ mouse_init :: proc(m: ^Mouse_State, cell_w, cell_h: f32, pad_x: f32 = 12.0, pad_
 	m.pad_x = pad_x
 	m.pad_y = pad_y
 	m.drag_started = false
+	m.is_dragging_divider = false
+	m.drag_split_node = nil
+	m.hovered_split_node = nil
+	m.hovered_is_horiz = false
 	feat_inter.selection_init(&m.selection)
 }
 

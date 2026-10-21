@@ -11,12 +11,14 @@ Cli_Options :: struct {
 	grid_dump_dir:    string, // --grid-dump: grid snapshots on SIGUSR1 and exit
 	blur_override:    int,    // 0 = no override, 1 = force disable (--no-blur), 2 = force enable (--blur)
 	opacity_override: f32,    // -1.0 = no override, >= 0.0 = override (--opacity <val>)
+	scroll_speed_override: f32, // -1.0 = no override, > 0.0 = override (--scroll-speed <val>)
 }
 
 // app_parse_cli_args parses command-line arguments.
 // Returns should_continue = false if the application handled -v or -h and should terminate.
 app_parse_cli_args :: proc(args: []string) -> (opts: Cli_Options, should_continue: bool) {
 	opts.opacity_override = -1.0
+	opts.scroll_speed_override = -1.0
 	for i := 1; i < len(args); i += 1 {
 		arg := args[i]
 		has_value := i + 1 < len(args)
@@ -47,6 +49,12 @@ app_parse_cli_args :: proc(args: []string) -> (opts: Cli_Options, should_continu
 			parsed, ok := strconv.parse_f32(args[i])
 			if ok {
 				opts.opacity_override = clamp(parsed, 0.0, 1.0)
+			}
+		case (arg == "-s" || arg == "--scroll-speed") && has_value:
+			i += 1
+			parsed, ok := strconv.parse_f32(args[i])
+			if ok && parsed > 0.0 {
+				opts.scroll_speed_override = parsed
 			}
 		case arg == "--telemetry" && has_value:
 			i += 1

@@ -5,8 +5,10 @@ package term
 
 import "base:runtime"
 import "core:math"
+import cursor "../../core/cursor"
 import contract "../../core/render/contract"
 import chrome_dl "../../core/chrome/draw_list"
+import chrome_splits "../../core/chrome/splits"
 import chrome_render "../../core/render/chrome"
 import tabs_feat "../../features/tabs"
 import mux_feat "../../features/multiplexer"
@@ -95,18 +97,29 @@ chrome_view_build_draw_list :: proc(
 	tabs: ^tabs_feat.Tabs_Manager,
 	mux: ^mux_feat.Multiplexer,
 	cmd_center: ^Command_Center_State,
-	tab_switcher: ^Tab_Switcher_State,
 	cursor_state: ^Cursor_State,
 	time_elapsed: f32,
+	hovered_divider: ^chrome_splits.Split_Node = nil,
+	dragged_divider: ^chrome_splits.Split_Node = nil,
 ) -> (dirty: bool) {
 	if cv == nil do return false
 
 	chrome_dl.ui_draw_list_clear(&cv.draw_list)
 
-	// 1. Draw Pane Components & Cursor (No borders/shadows: focus indicated by background contrast)
+	// 1. Draw Pane Components & Cursor
 	if mux != nil {
+		has_splits := len(mux.panes) > 1
 		for &pane in mux.panes {
 			if pane.rect[2] <= 0 || pane.rect[3] <= 0 do continue
+
+			// Draw focus boundary border when multiple split panes exist
+			if has_splits && layout != nil {
+				if pane.is_focused {
+					chrome_dl.ui_draw_border(&cv.draw_list, pane.rect, {0.30, 0.55, 0.90, 0.70}, layout.metrics.border_radius)
+				} else {
+					chrome_dl.ui_draw_border(&cv.draw_list, pane.rect, {0.18, 0.20, 0.26, 0.35}, layout.metrics.border_radius)
+				}
+			}
 
 			// 2. Draw Cursor for this terminal pane
 			if pane.session != nil {
@@ -128,17 +141,21 @@ chrome_view_build_draw_list :: proc(
 						// Clip cursor to pane bounds
 						if cur_rect[0] + cur_rect[2] <= pane.rect[0] + pane.rect[2] &&
 						   cur_rect[1] + cur_rect[3] <= pane.rect[1] + pane.rect[3] {
-							opacity: f32 = 1.0
-							if pane.session.term.parser.cursor.blinking {
-								opacity = cursor_compute_opacity(time_elapsed, pane.is_focused)
-							} else if !pane.is_focused {
-								opacity = 0.50
-							}
-							cur_col: [4]f32 = {COLOR_CURSOR_BLOCK[0], COLOR_CURSOR_BLOCK[1], COLOR_CURSOR_BLOCK[2], opacity}
 							if pane.is_focused {
+								opacity: f32 = 1.0
+								if pane.session.term.parser.cursor.blinking {
+									opacity = cursor_compute_opacity(time_elapsed, true)
+								}
+								cur_col: [4]f32 = {COLOR_CURSOR_BLOCK[0], COLOR_CURSOR_BLOCK[1], COLOR_CURSOR_BLOCK[2], opacity}
 								chrome_dl.ui_draw_rounded_rect(&cv.draw_list, cur_rect, cur_col, 2.0 * layout.metrics.scale)
 							} else {
-								chrome_dl.ui_draw_border(&cv.draw_list, cur_rect, {0.60, 0.65, 0.75, 0.60}, 2.0 * layout.metrics.scale)
+								// Inactive pane: non-blinking, subtle hollow outline for block or dimmed line for beam/underline
+								switch cur_shape {
+								case .Block:
+									chrome_dl.ui_draw_border(&cv.draw_list, cur_rect, {0.55, 0.60, 0.70, 0.35}, 1.0 * layout.metrics.scale)
+								case .Beam, .Underline:
+									chrome_dl.ui_draw_rounded_rect(&cv.draw_list, cur_rect, {0.55, 0.60, 0.70, 0.30}, 0.0)
+								}
 							}
 						}
 					}
@@ -159,14 +176,33 @@ chrome_view_build_draw_list :: proc(
 		}
 	}
 
+	// 2. Render Split Dividers & Center Drag Handle Grip Buttons
+	if tabs != nil {
+		_, active_tab := tabs_feat.tabs_manager_get_active(tabs)
+		if active_tab != nil && active_tab.split_tree != nil {
+			s := layout.metrics.scale if layout != nil else 1.0
+			divider_view_emit_tree(&cv.draw_list, active_tab.split_tree, hovered_divider, dragged_divider, s)
+		}
+	}
+
 	// 3. Render Modern Integrated Top Bar & Tabs
-	if layout != nil && tabs != nil {
+	if layout != nil && tabs != nil && layout.tab_bar_anim_t > 0.001 {
 		bar_h := layout.metrics.tab_bar_height
 		scale := layout.metrics.scale
 
+		anim_offset_y: f32 = -(1.0 - layout.tab_bar_anim_t) * (bar_h + 6.0 * scale) if layout.is_fullscreen else 0.0
+		alpha_factor: f32 = layout.tab_bar_anim_t if layout.is_fullscreen else 1.0
+
+		// Subtle backdrop banner when sliding down over terminal panes in fullscreen
+		if layout.is_fullscreen {
+			banner_rect: [4]f32 = {0, anim_offset_y, layout.screen_w, bar_h + 2.0 * scale}
+			banner_bg: [4]f32 = {0.08, 0.09, 0.11, 0.92 * alpha_factor}
+			chrome_dl.ui_draw_rounded_rect(&cv.draw_list, banner_rect, banner_bg, 0)
+		}
+
 		tab_h: f32 = 22.0 * scale
-		tab_y := (bar_h - tab_h) * 0.5
-		tabs_x := layout.metrics.traffic_clearance + 6.0 * scale
+		tab_y := (bar_h - tab_h) * 0.5 + anim_offset_y
+		tabs_x := (12.0 * scale) if layout.is_fullscreen else (layout.metrics.traffic_clearance + 6.0 * scale)
 		tab_w: f32 = 140.0 * scale
 		tab_gap: f32 = 6.0 * scale
 		capsule_radius := tab_h * 0.5
@@ -201,6 +237,7 @@ chrome_view_build_draw_list :: proc(
 			pill_rect: [4]f32 = {draw_x, tab_y, draw_w, tab_h}
 
 			pill_bg := COLOR_TAB_ACTIVE_BG if is_active else COLOR_TAB_INACTIVE_BG
+			pill_bg[3] *= alpha_factor
 			chrome_dl.ui_draw_rounded_rect(&cv.draw_list, pill_rect, pill_bg, capsule_radius)
 
 			// Close button [x]
@@ -214,12 +251,13 @@ chrome_view_build_draw_list :: proc(
 			if text_max_w > 8.0 * scale {
 				tab_title := string(tabs.entries[i].title_buf[:tabs.entries[i].title_len]) if tabs.entries[i].title_len > 0 else "Shell"
 				txt_col := COLOR_TAB_TEXT_ACTIVE if is_active else COLOR_TAB_TEXT_INACT
+				txt_col[3] *= alpha_factor
 				text_y := tab_y + (tab_h - 14.0 * scale) * 0.5
 				chrome_dl.ui_draw_text(&cv.draw_list, {text_x, text_y, text_max_w, 14.0 * scale}, tab_title, txt_col)
 			}
 
 			if has_close {
-				close_col: [4]f32 = {0.75, 0.80, 0.90, 0.85} if is_active else {0.40, 0.45, 0.55, 0.45}
+				close_col: [4]f32 = {0.75, 0.80, 0.90, 0.85 * alpha_factor} if is_active else {0.40, 0.45, 0.55, 0.45 * alpha_factor}
 				close_x := tab_item_x + tab_w - 18.0 * scale
 				close_y := tab_y + (tab_h - 13.0 * scale) * 0.5
 				chrome_dl.ui_draw_text(&cv.draw_list, {close_x, close_y, 10.0 * scale, 13.0 * scale}, "x", close_col)
@@ -229,11 +267,11 @@ chrome_view_build_draw_list :: proc(
 		// New Tab Button [+]
 		if btn_plus_x > tabs_x {
 			plus_rect: [4]f32 = {btn_plus_x, tab_y, btn_w, tab_h}
-			plus_bg: [4]f32 = {0.11, 0.13, 0.17, 0.50}
+			plus_bg: [4]f32 = {0.11, 0.13, 0.17, 0.50 * alpha_factor}
 			chrome_dl.ui_draw_rounded_rect(&cv.draw_list, plus_rect, plus_bg, capsule_radius)
 
 			// Plus icon
-			icon_col: [4]f32 = {0.70, 0.75, 0.85, 0.75}
+			icon_col: [4]f32 = {0.70, 0.75, 0.85, 0.75 * alpha_factor}
 			cx := btn_plus_x + (btn_w - 8.0 * scale) * 0.5
 			cy := tab_y + (tab_h - 1.5 * scale) * 0.5
 			chrome_dl.ui_draw_rounded_rect(&cv.draw_list, {cx, cy, 8.0 * scale, 1.5 * scale}, icon_col, 0.75 * scale)
@@ -245,8 +283,8 @@ chrome_view_build_draw_list :: proc(
 		// Tab Overview Button [⊞]
 		if btn_ov_x > tabs_x {
 			ov_rect: [4]f32 = {btn_ov_x, tab_y, btn_w, tab_h}
-			is_ov_open := (tab_switcher != nil && tab_switcher.visible)
-			ov_bg: [4]f32 = {0.18, 0.22, 0.30, 0.90} if is_ov_open else {0.11, 0.13, 0.17, 0.50}
+			is_ov_open := (cmd_center != nil && cmd_center.visible && cmd_center.mode == .Tabs)
+			ov_bg: [4]f32 = {0.18, 0.22, 0.30, 0.90 * alpha_factor} if is_ov_open else {0.11, 0.13, 0.17, 0.50 * alpha_factor}
 			chrome_dl.ui_draw_rounded_rect(&cv.draw_list, ov_rect, ov_bg, capsule_radius)
 
 			// Grid icon [⊞] (four small squares)
@@ -254,7 +292,7 @@ chrome_view_build_draw_list :: proc(
 			sq_gap: f32 = 1.5 * scale
 			top_left_x := btn_ov_x + (btn_w - (sq_s * 2.0 + sq_gap)) * 0.5
 			top_left_y := tab_y + (tab_h - (sq_s * 2.0 + sq_gap)) * 0.5
-			icon_col: [4]f32 = {0.80, 0.88, 1.0, 0.90} if is_ov_open else {0.70, 0.75, 0.85, 0.75}
+			icon_col: [4]f32 = {0.80, 0.88, 1.0, 0.90 * alpha_factor} if is_ov_open else {0.70, 0.75, 0.85, 0.75 * alpha_factor}
 
 			chrome_dl.ui_draw_rounded_rect(&cv.draw_list, {top_left_x, top_left_y, sq_s, sq_s}, icon_col, 0.8 * scale)
 			chrome_dl.ui_draw_rounded_rect(&cv.draw_list, {top_left_x + sq_s + sq_gap, top_left_y, sq_s, sq_s}, icon_col, 0.8 * scale)
@@ -263,14 +301,9 @@ chrome_view_build_draw_list :: proc(
 		}
 	}
 
-	// 4. Spotlight Command Center Overlay
+	// 4. Modal Overlay (Command Center or Tab Overview)
 	if cmd_center != nil && cmd_center.visible {
-		command_center_emit_draw_list(cmd_center, &cv.draw_list, layout.screen_w, layout.screen_h, layout.metrics.scale)
-	}
-
-	// 5. Tab Overview & Switcher Overlay (Top Layer)
-	if tab_switcher != nil && tab_switcher.visible {
-		tab_switcher_emit_draw_list(tab_switcher, tabs, &cv.draw_list, layout.screen_w, layout.screen_h, layout.metrics.scale)
+		command_center_emit_draw_list(cmd_center, tabs, &cv.draw_list, layout.screen_w, layout.screen_h, layout.metrics.scale)
 	}
 
 	screen_w := layout.screen_w if layout != nil else f32(cv.rend.width)
@@ -301,12 +334,83 @@ chrome_view_build_and_render :: proc(
 	tabs: ^tabs_feat.Tabs_Manager,
 	mux: ^mux_feat.Multiplexer,
 	cmd_center: ^Command_Center_State,
-	tab_switcher: ^Tab_Switcher_State,
 	cursor_state: ^Cursor_State,
 	time_elapsed: f32,
 	target_view: contract.Gpu_TextureView,
 ) {
 	if cv == nil || rawptr(target_view) == nil do return
-	_ = chrome_view_build_draw_list(cv, layout, tabs, mux, cmd_center, tab_switcher, cursor_state, time_elapsed)
+	_ = chrome_view_build_draw_list(cv, layout, tabs, mux, cmd_center, cursor_state, time_elapsed)
 	_ = chrome_render.chrome_renderer_render(&cv.rend, &cv.draw_list, target_view)
+}
+
+_cursor_for_command_center :: proc(cc: ^Command_Center_State, pt: [2]f32) -> (cursor.Mouse_Cursor, bool) {
+	if cc == nil || !cc.visible do return .Default, false
+	mx, my := pt.x, pt.y
+	if mx >= cc.modal_rect[0] && mx <= cc.modal_rect[0] + cc.modal_rect[2] &&
+	   my >= cc.modal_rect[1] && my <= cc.modal_rect[1] + cc.modal_rect[3] {
+		input_top := cc.modal_rect[1] + 16.0
+		input_bot := input_top + 36.0
+		if my >= input_top && my <= input_bot do return .Text, true
+		if my >= cc.items_start_y && cc.item_h > 0 {
+			row_idx := int((my - cc.items_start_y) / cc.item_h)
+			if row_idx >= 0 && row_idx < 8 && (cc.scroll_offset + row_idx) < cc.filtered_count {
+				return .Pointer, true
+			}
+		}
+		return .Default, true
+	}
+	return .Default, true
+}
+
+_cursor_for_tab_bar :: proc(layout: ^Layout_State, tabs: ^tabs_feat.Tabs_Manager, pt: [2]f32) -> (cursor.Mouse_Cursor, bool) {
+	if layout == nil do return .Default, false
+	scale := layout.metrics.scale
+	bar_h := layout.metrics.tab_bar_height
+	anim_offset_y: f32 = -(1.0 - layout.tab_bar_anim_t) * (bar_h + 6.0 * scale) if layout.is_fullscreen else 0.0
+	tab_bar_interactive := !layout.is_fullscreen || layout.tab_bar_anim_t > 0.5
+	if !tab_bar_interactive || pt.y < 0 || pt.y > (bar_h + anim_offset_y) {
+		return .Default, false
+	}
+
+	tab_h: f32 = 22.0 * scale
+	tab_y := (bar_h - tab_h) * 0.5 + anim_offset_y
+	tab_w: f32 = 140.0 * scale
+	tab_gap: f32 = 6.0 * scale
+	tabs_x := (12.0 * scale) if layout.is_fullscreen else (layout.metrics.traffic_clearance + 6.0 * scale)
+	btn_w: f32 = tab_h
+	btn_gap: f32 = 4.0 * scale
+	right_margin: f32 = 12.0 * scale
+	btn_ov_x := layout.screen_w - right_margin - btn_w
+	btn_plus_x := btn_ov_x - btn_gap - btn_w
+	tabs_end_x := btn_plus_x - 8.0 * scale
+
+	if pt.x >= btn_ov_x && pt.x <= btn_ov_x + btn_w && pt.y >= tab_y && pt.y <= tab_y + tab_h do return .Pointer, true
+	if pt.x >= btn_plus_x && pt.x <= btn_plus_x + btn_w && pt.y >= tab_y && pt.y <= tab_y + tab_h do return .Pointer, true
+	if tabs != nil {
+		for i in 0..<len(tabs.entries) {
+			tab_item_x := tabs_x + f32(i) * (tab_w + tab_gap) - layout.tab_scroll_offset
+			draw_x := max(tabs_x, tab_item_x)
+			draw_r := min(tabs_end_x, tab_item_x + tab_w)
+			if draw_x < draw_r && pt.x >= draw_x && pt.x <= draw_r && pt.y >= tab_y && pt.y <= tab_y + tab_h {
+				return .Pointer, true
+			}
+		}
+	}
+	return .Default, true
+}
+
+// chrome_view_cursor determines the mouse cursor shape for all chrome elements.
+chrome_view_cursor :: proc(
+	cv: ^Chrome_View,
+	layout: ^Layout_State,
+	tabs: ^tabs_feat.Tabs_Manager,
+	cmd_center: ^Command_Center_State,
+	pt: [2]f32,
+) -> (cursor_shape: cursor.Mouse_Cursor, handled: bool) {
+	if cv == nil || layout == nil do return .Default, false
+
+	if c, ok := _cursor_for_command_center(cmd_center, pt); ok do return c, true
+	if c, ok := _cursor_for_tab_bar(layout, tabs, pt); ok do return c, true
+
+	return .Default, false
 }

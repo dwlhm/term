@@ -44,11 +44,53 @@ Term_App :: struct {
 	cursor:        Cursor_State,
 	clipboard:     Clipboard_Bridge,
 	cmd_center:    Command_Center_State,
-	tab_switcher:  Tab_Switcher_State,
 
 	tabs_mgr:      tabs_feat.Tabs_Manager,
 	mux:           mux_feat.Multiplexer,
 	diag:          Diagnostics,
+	scroll_speed:  f32,
+}
+
+app_apply_config :: proc(app: ^Term_App, opts: Cli_Options = {}) {
+	if app == nil do return
+
+	app.scroll_speed = config_resolve_scroll_multiplier(&app.config)
+	if opts.scroll_speed_override > 0.0 {
+		app.scroll_speed = opts.scroll_speed_override
+	}
+
+	scale := app.window.pixel_ratio if app.window.pixel_ratio > 0 else 1.0
+	pad_x, pad_y := config_resolve_padding(&app.config)
+	app.layout.metrics.pane_pad_x = pad_x * scale
+	app.layout.metrics.pane_pad_y = pad_y * scale
+	app.mouse.pad_x = app.layout.metrics.pane_pad_x
+	app.mouse.pad_y = app.layout.metrics.pane_pad_y
+
+	blur_enabled := config_resolve_window_blur(&app.config)
+	if opts.blur_override == 1 do blur_enabled = false
+	else if opts.blur_override == 2 do blur_enabled = true
+
+	opacity := config_resolve_window_opacity(&app.config)
+	if opts.opacity_override >= 0.0 do opacity = clamp(opts.opacity_override, 0.0, 1.0)
+
+	wgpu_backend.surface_set_transparent(app.surface, blur_enabled)
+	when ODIN_OS == .Darwin {
+		plat_win.platform_setup_window_vibrancy(app.window.handle, blur_enabled)
+	}
+
+	clear_col: [4]f64
+	if blur_enabled {
+		clear_col = {0.05, 0.06, 0.08, f64(opacity)}
+	} else {
+		clear_col = {0.05, 0.06, 0.08, 1.0}
+	}
+	composer_view_set_clear_color(&app.composer, clear_col)
+
+	base_font_size := config_resolve_effective_font_size(&app.config)
+	app_apply_font_size(app, base_font_size)
+
+	app_sync_layout_and_winsize(app)
+	app.layout.tab_bar_reveal_timer = 2.0
 }
 
 app_init :: proc(app: ^Term_App, opts: Cli_Options = {}) -> bool {
@@ -74,22 +116,10 @@ app_init :: proc(app: ^Term_App, opts: Cli_Options = {}) -> bool {
 	app.instance = contract.create_instance()
 	app.surface = wgpu_backend.create_surface(app.instance, app.window.handle)
 
-	blur_enabled := config_resolve_window_blur(&app.config)
-	if opts.blur_override == 1 do blur_enabled = false
-	else if opts.blur_override == 2 do blur_enabled = true
-
-	opacity := config_resolve_window_opacity(&app.config)
-	if opts.opacity_override >= 0.0 do opacity = clamp(opts.opacity_override, 0.0, 1.0)
-
-	wgpu_backend.surface_set_transparent(app.surface, blur_enabled)
-
 	app.device, app.queue = contract.request_device(app.instance, app.surface)
 	app.format = contract.get_preferred_format(app.surface, app.device)
 
 	contract.configure_surface(app.surface, app.device, app.format, u32(app.layout.screen_w), u32(app.layout.screen_h))
-	when ODIN_OS == .Darwin {
-		plat_win.platform_setup_window_vibrancy(app.window.handle, blur_enabled)
-	}
 
 	// Initialize text atlas with DPI-scaled pixel size
 	base_font_size := config_resolve_effective_font_size(&app.config)
@@ -105,19 +135,12 @@ app_init :: proc(app: ^Term_App, opts: Cli_Options = {}) -> bool {
 	chrome_view_set_atlas(&app.chrome_view, app.text_atlas.glyph_view, app.text_atlas.cell_w, app.text_atlas.cell_h)
 	if !composer_view_init(&app.composer, app.device, app.queue, app.format, app.layout.screen_w, app.layout.screen_h) do return false
 
-	clear_col: [4]f64
-	if blur_enabled {
-		clear_col = {0.05, 0.06, 0.08, f64(opacity)}
-	} else {
-		clear_col = {0.05, 0.06, 0.08, 1.0}
-	}
-	composer_view_set_clear_color(&app.composer, clear_col)
-
 	mouse_init(&app.mouse, app.layout.metrics.cell_w, app.layout.metrics.cell_h, app.layout.metrics.pane_pad_x, app.layout.metrics.pane_pad_y)
 	cursor_init(&app.cursor)
 	clipboard_init(&app.clipboard, plat_clip.clipboard_set_text, plat_clip.clipboard_get_text, plat_clip.clipboard_has_text)
 	command_center_init(&app.cmd_center)
-	tab_switcher_init(&app.tab_switcher)
+
+	app_apply_config(app, opts)
 
 	tabs_feat.tabs_manager_init(&app.tabs_mgr, layout_compute_tab_bar_rect(&app.layout))
 	mux_feat.multiplexer_init(&app.mux)
@@ -176,6 +199,7 @@ app_destroy :: proc(app: ^Term_App) {
 	}
 
 	plat_win.window_destroy(&app.window)
+	app_cleanup_mouse_cursors()
 }
 
 app_apply_font_size :: proc(app: ^Term_App, new_size: f32) {
@@ -196,7 +220,7 @@ app_apply_font_size :: proc(app: ^Term_App, new_size: f32) {
 			damage.damage_mark_all(&pane.session.term.damage)
 		}
 	}
-	app.layout.tab_bar_force = true
+	app.layout.tab_bar_reveal_timer = 2.0
 }
 
 app_adjust_font_size :: proc(app: ^Term_App, delta: f32) {
@@ -218,10 +242,9 @@ app_run :: proc(app: ^Term_App) {
 		now := time.now()
 		dt := f32(time.duration_seconds(time.diff(last_time, now)))
 		last_time = now
-		app.time_elapsed += dt
+		term_dirty := false
 
 		layout_update(&app.layout, dt)
-		term_dirty := false
 
 		has_pending := mux_feat.multiplexer_has_pending_data(&app.mux)
 		if app_process_events(app, has_pending) {

@@ -40,6 +40,8 @@ App_Config :: struct {
 	padding:        Padding_Config `json:"padding"`,
 	blur:           bool           `json:"blur"`,
 	window_opacity: f32            `json:"window_opacity"`,
+	scroll_multiplier: f32         `json:"scroll_multiplier"`,
+	scroll_speed:      f32         `json:"scroll_speed"`,
 }
 
 config_default :: proc() -> App_Config {
@@ -53,6 +55,8 @@ config_default :: proc() -> App_Config {
 		padding        = {x = -1.0, y = -1.0},
 		blur           = default_blur,
 		window_opacity = -1.0,
+		scroll_multiplier = 1.0,
+		scroll_speed      = 1.0,
 		window         = {
 			blur    = default_blur,
 			opacity = -1.0,
@@ -121,6 +125,14 @@ config_resolve_window_opacity :: proc(cfg: ^App_Config) -> f32 {
 	if cfg.window.opacity >= 0.0 do return clamp(cfg.window.opacity, 0.0, 1.0)
 	if cfg.window_opacity >= 0.0 do return clamp(cfg.window_opacity, 0.0, 1.0)
 	return 0.0
+}
+
+// config_resolve_scroll_multiplier extracts effective scroll speed multiplier (default 1.0).
+config_resolve_scroll_multiplier :: proc(cfg: ^App_Config) -> f32 {
+	if cfg == nil do return 1.0
+	if cfg.scroll_multiplier > 0.0 do return cfg.scroll_multiplier
+	if cfg.scroll_speed > 0.0 do return cfg.scroll_speed
+	return 1.0
 }
 
 // config_parse_json5 deserializes in-memory JSON5 payload into App_Config.

@@ -9,14 +9,16 @@ import "core:math"
 import chrome_splits "../../core/chrome/splits"
 
 Layout_State :: struct {
-	screen_w:         f32,
-	screen_h:         f32,
-	mouse_y:          f32,
-	tab_bar_hovered:  bool,
-	tab_bar_force:    bool,
-	tab_bar_anim_t:    f32, // 0.0 (hidden) .. 1.0 (fully visible)
-	tab_scroll_offset: f32, // Horizontal scroll offset for tab bar
-	metrics:           Visual_Metrics,
+	screen_w:             f32,
+	screen_h:             f32,
+	mouse_y:              f32,
+	is_fullscreen:        bool,
+	tab_bar_hovered:      bool,
+	tab_bar_force:        bool,
+	tab_bar_reveal_timer: f32, // Seconds to keep tab bar visible after an action in fullscreen
+	tab_bar_anim_t:       f32, // 0.0 (hidden) .. 1.0 (fully visible)
+	tab_scroll_offset:    f32, // Horizontal scroll offset for tab bar
+	metrics:              Visual_Metrics,
 }
 
 layout_init :: proc(l: ^Layout_State, scale: f32 = 1.0, pad_x: f32 = DEFAULT_PANE_PAD_X, pad_y: f32 = DEFAULT_PANE_PAD_Y) {
@@ -25,9 +27,11 @@ layout_init :: proc(l: ^Layout_State, scale: f32 = 1.0, pad_x: f32 = DEFAULT_PAN
 	l.screen_w = f32(DEFAULT_WINDOW_WIDTH) * l.metrics.scale
 	l.screen_h = f32(DEFAULT_WINDOW_HEIGHT) * l.metrics.scale
 	l.mouse_y = 100.0 * l.metrics.scale
+	l.is_fullscreen = false
 	l.tab_bar_hovered = false
 	l.tab_bar_force = false
-	l.tab_bar_anim_t = 1.0 // Start visible, then auto-hide
+	l.tab_bar_reveal_timer = 0.0
+	l.tab_bar_anim_t = 1.0
 	l.tab_scroll_offset = 0.0
 }
 
@@ -36,7 +40,7 @@ layout_tab_bar_clamp_scroll :: proc(l: ^Layout_State, tab_count: int, right_marg
 	scale := l.metrics.scale
 	tab_w: f32 = 140.0 * scale
 	tab_gap: f32 = 6.0 * scale
-	tabs_x := l.metrics.traffic_clearance + 6.0 * scale
+	tabs_x := (12.0 * scale) if l.is_fullscreen else (l.metrics.traffic_clearance + 6.0 * scale)
 
 	total_tabs_w := f32(tab_count) * (tab_w + tab_gap)
 	avail_w := max(50.0 * scale, l.screen_w - tabs_x - right_margin)
@@ -49,7 +53,7 @@ layout_tab_bar_ensure_visible :: proc(l: ^Layout_State, tab_idx: int, tab_count:
 	scale := l.metrics.scale
 	tab_w: f32 = 140.0 * scale
 	tab_gap: f32 = 6.0 * scale
-	tabs_x := l.metrics.traffic_clearance + 6.0 * scale
+	tabs_x := (12.0 * scale) if l.is_fullscreen else (l.metrics.traffic_clearance + 6.0 * scale)
 
 	tab_left := f32(tab_idx) * (tab_w + tab_gap)
 	tab_right := tab_left + tab_w
@@ -77,11 +81,15 @@ layout_set_scale :: proc(l: ^Layout_State, scale: f32) {
 layout_update :: proc(l: ^Layout_State, dt: f32) {
 	if l == nil do return
 
-	should_show := (l.mouse_y <= l.metrics.auto_hide_trigger_y) || l.tab_bar_force || l.tab_bar_hovered
+	if l.tab_bar_reveal_timer > 0.0 {
+		l.tab_bar_reveal_timer = max(0.0, l.tab_bar_reveal_timer - dt)
+	}
+
+	should_show := !l.is_fullscreen || (l.mouse_y <= l.metrics.auto_hide_trigger_y) || l.tab_bar_force || l.tab_bar_hovered || (l.tab_bar_reveal_timer > 0.0)
 	target_t: f32 = 1.0 if should_show else 0.0
 
 	// Smooth animation interpolation
-	speed: f32 = 10.0
+	speed: f32 = 12.0
 	if l.tab_bar_anim_t < target_t {
 		l.tab_bar_anim_t = min(target_t, l.tab_bar_anim_t + speed * dt)
 	} else if l.tab_bar_anim_t > target_t {
@@ -90,10 +98,19 @@ layout_update :: proc(l: ^Layout_State, dt: f32) {
 }
 
 // layout_compute_content_area returns the outer bounding rect for terminal panes
-// Invariant: Content area strictly lives below the top tab bar.
+// Invariant: In windowed mode, content area strictly lives below the top tab bar.
+// In fullscreen mode, content area fills the entire screen so terminal panes have full height.
 layout_compute_content_area :: proc(l: ^Layout_State) -> [4]f32 {
 	if l == nil do return {0, 0, 0, 0}
 	m := l.metrics.window_margin
+	if l.is_fullscreen {
+		return {
+			m,
+			m,
+			max(1.0, l.screen_w - 2.0 * m),
+			max(1.0, l.screen_h - 2.0 * m),
+		}
+	}
 	top_y := l.metrics.tab_bar_height
 	top_gap := 4.0 * l.metrics.scale
 	y := top_y + top_gap

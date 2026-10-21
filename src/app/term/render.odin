@@ -52,9 +52,11 @@ tab_title_mask_path :: proc(title: string, allocator := context.temp_allocator) 
 	return title
 }
 
-// app_sync_tab_titles reads dynamic PTY OSC titles from active pane sessions and updates tabs
+// app_sync_tab_titles reads dynamic PTY foreground process, CWD, and OSC titles from active pane sessions and updates tabs
 app_sync_tab_titles :: proc(app: ^Term_App) -> (dirty: bool) {
 	if app == nil do return false
+
+	scratch_title: [512]u8
 
 	for i in 0..<len(app.tabs_mgr.entries) {
 		entry := &app.tabs_mgr.entries[i]
@@ -66,16 +68,20 @@ app_sync_tab_titles :: proc(app: ^Term_App) -> (dirty: bool) {
 		}
 
 		p := mux_feat.multiplexer_get_pane(&app.mux, pane_id)
-		if p != nil && p.session != nil {
-			raw_title := sess_feat.session_get_title(p.session)
-			if len(raw_title) > 0 {
-				masked := tab_title_mask_path(raw_title, context.temp_allocator)
-				current := string(entry.title_buf[:entry.title_len])
-				if current != masked {
-					tabs_feat.tabs_manager_set_title(&app.tabs_mgr, i, masked)
-					dirty = true
-				}
-			}
+		if p == nil do continue
+
+		target_title: string = "Shell"
+		if p.kind == .Three_D {
+			target_title = "3D Canvas"
+		} else if p.kind == .Terminal && p.session != nil {
+			raw := sess_feat.session_resolve_title(p.session, scratch_title[:], "Shell")
+			target_title = tab_title_mask_path(raw, context.temp_allocator)
+		}
+
+		current := string(entry.title_buf[:entry.title_len])
+		if current != target_title {
+			tabs_feat.tabs_manager_set_title(&app.tabs_mgr, i, target_title)
+			dirty = true
 		}
 	}
 	return dirty
@@ -97,10 +103,17 @@ app_sync_layout_and_winsize :: proc(app: ^Term_App) -> (dirty: bool) {
 	// Winsize PTY synchronization
 	for &pane in app.mux.panes {
 		if pane.kind == .Terminal && pane.session != nil && pane.rect[2] > 20 && pane.rect[3] > 20 {
-			cols := max(10, int((pane.rect[2] - 2.0 * app.layout.metrics.pane_pad_x) / app.layout.metrics.cell_w))
-			rows := max(4, int((pane.rect[3] - 2.0 * app.layout.metrics.pane_pad_y) / app.layout.metrics.cell_h))
-			if cols != pane.session.term.cols || rows != pane.session.term.rows {
-				sess_feat.session_resize(pane.session, u16(cols), u16(rows))
+			cw := max(1.0, app.layout.metrics.cell_w)
+			ch := max(1.0, app.layout.metrics.cell_h)
+			cols := max(10, int((pane.rect[2] - 2.0 * app.layout.metrics.pane_pad_x) / cw))
+			rows := max(4, int((pane.rect[3] - 2.0 * app.layout.metrics.pane_pad_y) / ch))
+			xpixel := u16(f32(cols) * cw)
+			ypixel := u16(f32(rows) * ch)
+			if cols != pane.session.term.cols || rows != pane.session.term.rows || pane.session.term.parser.cell_w != int(cw) || pane.session.term.parser.cell_h != int(ch) {
+				sess_feat.session_resize(pane.session, u16(cols), u16(rows), xpixel, ypixel)
+				dirty = true
+			}
+			if app.mouse.is_dragging_divider {
 				dirty = true
 			}
 		}
@@ -199,9 +212,10 @@ app_render_frame :: proc(app: ^Term_App, term_dirty: bool = true) {
 		&app.tabs_mgr,
 		&app.mux,
 		&app.cmd_center,
-		&app.tab_switcher,
 		&app.cursor,
 		app.time_elapsed,
+		app.mouse.hovered_split_node,
+		app.mouse.drag_split_node,
 	)
 
 	if term_dirty {
