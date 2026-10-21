@@ -646,7 +646,6 @@ _wgpu_create_buffer :: proc(device: contract.Gpu_Device, size: u64, usage: contr
 _wgpu_destroy_buffer :: proc(buffer: contract.Gpu_Buffer) {
 	buf := wgpu.Buffer(rawptr(buffer))
 	if buf != nil {
-		wgpu.BufferDestroy(buf)
 		wgpu.BufferRelease(buf)
 	}
 }
@@ -698,7 +697,6 @@ _wgpu_create_texture :: proc(device: contract.Gpu_Device, width, height: u32, fo
 _wgpu_destroy_texture :: proc(texture: contract.Gpu_Texture) {
 	tex := wgpu.Texture(rawptr(texture))
 	if tex != nil {
-		wgpu.TextureDestroy(tex)
 		wgpu.TextureRelease(tex)
 	}
 }
