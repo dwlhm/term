@@ -70,9 +70,14 @@ _pty_spawn_platform :: proc(config: Pty_Config) -> (handle: ^Pty_Handle, err: Pt
 	slave_path := cstring(&slave_buf[0])
 	sync.mutex_unlock(&_spawn_mutex)
 
+	xp := config.xpixel if config.xpixel > 0 else cols * 10
+	yp := config.ypixel if config.ypixel > 0 else rows * 20
+
 	ws := Winsize{
-		ws_row = c.ushort(rows),
-		ws_col = c.ushort(cols),
+		ws_row    = c.ushort(rows),
+		ws_col    = c.ushort(cols),
+		ws_xpixel = c.ushort(xp),
+		ws_ypixel = c.ushort(yp),
 	}
 
 	pid := posix.fork()
@@ -112,6 +117,9 @@ _pty_spawn_platform :: proc(config: Pty_Config) -> (handle: ^Pty_Handle, err: Pt
 		c_env: [dynamic]cstring
 		append(&c_env, strings.clone_to_cstring("TERM=xterm-256color"))
 		append(&c_env, strings.clone_to_cstring("COLORTERM=truecolor"))
+		append(&c_env, strings.clone_to_cstring("TERM_PROGRAM=term"))
+		append(&c_env, strings.clone_to_cstring("TERM_PROGRAM_VERSION=0.1.0"))
+		append(&c_env, strings.clone_to_cstring("KITTY_WINDOW_ID=1"))
 		append(&c_env, strings.clone_to_cstring("PATH=/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin"))
 		append(&c_env, strings.clone_to_cstring("LANG=en_US.UTF-8"))
 		append(&c_env, nil)
@@ -179,17 +187,23 @@ _pty_close_platform :: proc(h: ^Pty_Handle) {
 		h.drain_thread = nil
 	}
 
+	ring_destroy(&h.ring)
 	free(h)
 }
 
-_pty_resize_platform :: proc(h: ^Pty_Handle, cols, rows: u16) -> bool {
+_pty_resize_platform :: proc(h: ^Pty_Handle, cols, rows: u16, xpixel: u16 = 0, ypixel: u16 = 0) -> bool {
 	if h == nil || h.master_fd < 0 do return false
 	h.cols = int(cols)
 	h.rows = int(rows)
 
+	xp := xpixel if xpixel > 0 else cols * 10
+	yp := ypixel if ypixel > 0 else rows * 20
+
 	ws := Winsize{
-		ws_row = c.ushort(rows),
-		ws_col = c.ushort(cols),
+		ws_row    = c.ushort(rows),
+		ws_col    = c.ushort(cols),
+		ws_xpixel = c.ushort(xp),
+		ws_ypixel = c.ushort(yp),
 	}
 	res := ioctl(c.int(h.master_fd), TIOCSWINSZ, &ws)
 	return res == 0

@@ -28,6 +28,17 @@ Winsize :: struct {
 
 _spawn_mutex: sync.Mutex
 
+_is_foreign_term_env :: proc(entry: string) -> bool {
+	if strings.has_prefix(entry, "TERM=") || strings.has_prefix(entry, "COLORTERM=") do return true
+	if strings.has_prefix(entry, "TERM_PROGRAM=") || strings.has_prefix(entry, "TERM_PROGRAM_VERSION=") do return true
+	if strings.has_prefix(entry, "GHOSTTY_") || strings.has_prefix(entry, "KITTY_") do return true
+	if strings.has_prefix(entry, "WEZTERM_") || strings.has_prefix(entry, "ITERM_") do return true
+	if strings.has_prefix(entry, "ALACRITTY_") || strings.has_prefix(entry, "KONSOLE_") do return true
+	if strings.has_prefix(entry, "WARP_") || strings.has_prefix(entry, "TABBY_") do return true
+	if strings.has_prefix(entry, "WT_SESSION=") || strings.has_prefix(entry, "TERMINFO=") do return true
+	return false
+}
+
 _pty_spawn_platform :: proc(config: Pty_Config) -> (handle: ^Pty_Handle, err: Pty_Error) {
 	rows := max(1, config.rows)
 	cols := max(1, config.cols)
@@ -40,9 +51,14 @@ _pty_spawn_platform :: proc(config: Pty_Config) -> (handle: ^Pty_Handle, err: Pt
 		}
 	}
 
+	xp := config.xpixel if config.xpixel > 0 else cols * 10
+	yp := config.ypixel if config.ypixel > 0 else rows * 20
+
 	ws := Winsize{
-		ws_row = c.ushort(rows),
-		ws_col = c.ushort(cols),
+		ws_row    = c.ushort(rows),
+		ws_col    = c.ushort(cols),
+		ws_xpixel = c.ushort(xp),
+		ws_ypixel = c.ushort(yp),
 	}
 
 	master, slave: c.int
@@ -83,18 +99,21 @@ _pty_spawn_platform :: proc(config: Pty_Config) -> (handle: ^Pty_Handle, err: Pt
 		}
 		append(&c_argv, nil)
 
-		// Prepare env: inherit full user environment (HOME, USER, PATH, etc.)
+		// Prepare env: inherit user environment but scrub foreign terminal identities
 		c_env: [dynamic]cstring
 		if posix.environ != nil {
 			for i := 0; posix.environ[i] != nil; i += 1 {
 				entry := string(posix.environ[i])
-				if !strings.has_prefix(entry, "TERM=") && !strings.has_prefix(entry, "COLORTERM=") {
+				if !_is_foreign_term_env(entry) {
 					append(&c_env, posix.environ[i])
 				}
 			}
 		}
 		append(&c_env, strings.clone_to_cstring("TERM=xterm-256color"))
 		append(&c_env, strings.clone_to_cstring("COLORTERM=truecolor"))
+		append(&c_env, strings.clone_to_cstring("TERM_PROGRAM=term"))
+		append(&c_env, strings.clone_to_cstring("TERM_PROGRAM_VERSION=0.1.0"))
+		append(&c_env, strings.clone_to_cstring("KITTY_WINDOW_ID=1"))
 		append(&c_env, nil)
 
 		_ = posix.execve(c_argv[0], &c_argv[0], &c_env[0])
@@ -168,17 +187,23 @@ _pty_close_platform :: proc(h: ^Pty_Handle) {
 		h.drain_thread = nil
 	}
 
+	ring_destroy(&h.ring)
 	free(h)
 }
 
-_pty_resize_platform :: proc(h: ^Pty_Handle, cols, rows: u16) -> bool {
+_pty_resize_platform :: proc(h: ^Pty_Handle, cols, rows: u16, xpixel: u16 = 0, ypixel: u16 = 0) -> bool {
 	if h == nil || h.master_fd < 0 do return false
 	h.cols = int(cols)
 	h.rows = int(rows)
 
+	xp := xpixel if xpixel > 0 else cols * 10
+	yp := ypixel if ypixel > 0 else rows * 20
+
 	ws := Winsize{
-		ws_row = c.ushort(rows),
-		ws_col = c.ushort(cols),
+		ws_row    = c.ushort(rows),
+		ws_col    = c.ushort(cols),
+		ws_xpixel = c.ushort(xp),
+		ws_ypixel = c.ushort(yp),
 	}
 	res := ioctl(c.int(h.master_fd), TIOCSWINSZ, &ws)
 	return res == 0

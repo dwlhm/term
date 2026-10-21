@@ -1,5 +1,6 @@
 package platform_pty
 
+import "base:runtime"
 import "core:sync"
 import "core:thread"
 
@@ -15,25 +16,48 @@ Pty_Error :: enum {
 }
 
 Pty_Config :: struct {
-	shell: string,
-	argv:  []string,
-	env:   []string,
-	cwd:   string,
-	rows:  int,
-	cols:  int,
+	shell:  string,
+	argv:   []string,
+	env:    []string,
+	cwd:    string,
+	rows:   int,
+	cols:   int,
+	xpixel: int,
+	ypixel: int,
 }
 
-PTY_RING_CAPACITY :: 2 * 1024 * 1024 // 2 MiB lock-free/low-contention ring buffer
+PTY_INITIAL_RING_CAPACITY :: 256 * 1024 // 256 KiB initial buffer, grows on demand
 
 Pty_Ring_Buffer :: struct {
-	buf:   [PTY_RING_CAPACITY]u8,
-	head:  uint, // write cursor
-	tail:  uint, // read cursor
-	mutex: sync.Mutex,
+	buf:       []u8,
+	capacity:  int,
+	head:      int, // write cursor
+	tail:      int, // read cursor
+	count:     int, // bytes currently stored
+	mutex:     sync.Mutex,
+	allocator: runtime.Allocator,
 }
 
-ring_init :: proc(r: ^Pty_Ring_Buffer) {
+ring_init :: proc(r: ^Pty_Ring_Buffer, initial_capacity: int = PTY_INITIAL_RING_CAPACITY, allocator := context.allocator) {
 	if r == nil do return
+	r.allocator = allocator
+	r.capacity = max(initial_capacity, 1024)
+	r.buf = make([]u8, r.capacity, r.allocator)
+	r.head = 0
+	r.tail = 0
+	r.count = 0
+}
+
+ring_destroy :: proc(r: ^Pty_Ring_Buffer) {
+	if r == nil do return
+	sync.mutex_lock(&r.mutex)
+	defer sync.mutex_unlock(&r.mutex)
+	if len(r.buf) > 0 {
+		delete(r.buf, r.allocator)
+		r.buf = nil
+	}
+	r.capacity = 0
+	r.count = 0
 	r.head = 0
 	r.tail = 0
 }
@@ -42,13 +66,7 @@ ring_available :: proc(r: ^Pty_Ring_Buffer) -> int {
 	if r == nil do return 0
 	sync.mutex_lock(&r.mutex)
 	defer sync.mutex_unlock(&r.mutex)
-
-	h := r.head
-	t := r.tail
-	if h >= t {
-		return int(h - t)
-	}
-	return int(PTY_RING_CAPACITY - (t - h))
+	return r.count
 }
 
 ring_write :: proc(r: ^Pty_Ring_Buffer, data: []u8) -> int {
@@ -56,25 +74,38 @@ ring_write :: proc(r: ^Pty_Ring_Buffer, data: []u8) -> int {
 	sync.mutex_lock(&r.mutex)
 	defer sync.mutex_unlock(&r.mutex)
 
-	to_write := len(data)
-	if to_write >= PTY_RING_CAPACITY {
-		// If incoming chunk exceeds whole ring, only keep the newest ring capacity
-		data_slice := data[to_write - (PTY_RING_CAPACITY - 1):]
-		return _ring_write_locked(r, data_slice)
-	}
-	return _ring_write_locked(r, data)
-}
-
-@(private = "file")
-_ring_write_locked :: proc(r: ^Pty_Ring_Buffer, data: []u8) -> int {
-	for b in data {
-		next_head := (r.head + 1) % PTY_RING_CAPACITY
-		if next_head == r.tail {
-			r.tail = (r.tail + 1) % PTY_RING_CAPACITY
+	// Ensure buffer capacity grows dynamically without data loss
+	needed := r.count + len(data)
+	if needed > r.capacity {
+		new_cap := max(r.capacity * 2, needed)
+		new_buf := make([]u8, new_cap, r.allocator)
+		if r.count > 0 {
+			if r.head > r.tail {
+				copy(new_buf[:r.count], r.buf[r.tail:r.head])
+			} else {
+				part1 := r.capacity - r.tail
+				copy(new_buf[:part1], r.buf[r.tail:r.capacity])
+				copy(new_buf[part1:r.count], r.buf[:r.head])
+			}
 		}
-		r.buf[r.head] = b
-		r.head = next_head
+		if len(r.buf) > 0 do delete(r.buf, r.allocator)
+		r.buf = new_buf
+		r.capacity = new_cap
+		r.tail = 0
+		r.head = r.count
 	}
+
+	// Contiguous slice copy into circular buffer
+	if r.head + len(data) <= r.capacity {
+		copy(r.buf[r.head : r.head + len(data)], data)
+		r.head = (r.head + len(data)) % r.capacity
+	} else {
+		part1 := r.capacity - r.head
+		copy(r.buf[r.head:r.capacity], data[:part1])
+		copy(r.buf[:len(data) - part1], data[part1:])
+		r.head = len(data) - part1
+	}
+	r.count += len(data)
 	return len(data)
 }
 
@@ -83,13 +114,20 @@ ring_read :: proc(r: ^Pty_Ring_Buffer, out: []u8) -> int {
 	sync.mutex_lock(&r.mutex)
 	defer sync.mutex_unlock(&r.mutex)
 
-	read_bytes := 0
-	for read_bytes < len(out) && r.tail != r.head {
-		out[read_bytes] = r.buf[r.tail]
-		r.tail = (r.tail + 1) % PTY_RING_CAPACITY
-		read_bytes += 1
+	to_read := min(len(out), r.count)
+	if to_read <= 0 do return 0
+
+	if r.tail + to_read <= r.capacity {
+		copy(out[:to_read], r.buf[r.tail : r.tail + to_read])
+		r.tail = (r.tail + to_read) % r.capacity
+	} else {
+		part1 := r.capacity - r.tail
+		copy(out[:part1], r.buf[r.tail:r.capacity])
+		copy(out[part1:to_read], r.buf[:to_read - part1])
+		r.tail = to_read - part1
 	}
-	return read_bytes
+	r.count -= to_read
+	return to_read
 }
 
 Pty_Handle :: struct {
