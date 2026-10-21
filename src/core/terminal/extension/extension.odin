@@ -21,7 +21,11 @@ Terminal_Extension :: struct {
 	init:       proc(ext: ^Terminal_Extension, term: rawptr),
 	handle_osc: proc(ext: ^Terminal_Extension, osc_id: int, payload: string, term: rawptr) -> bool,
 	handle_csi: proc(ext: ^Terminal_Extension, cmd: rune, params: []int, term: rawptr) -> bool,
-	deinit:     proc(ext: ^Terminal_Extension),
+	handle_apc:   proc(ext: ^Terminal_Extension, payload: []u8, term: rawptr) -> bool,
+	handle_clear: proc(ext: ^Terminal_Extension, mode: int, term: rawptr),
+	handle_scroll: proc(ext: ^Terminal_Extension, n: int, top, bottom: int, term: rawptr),
+	handle_resize: proc(ext: ^Terminal_Extension, new_rows, new_cols: int, delta_y: int, term: rawptr),
+	deinit:       proc(ext: ^Terminal_Extension),
 }
 
 MAX_OSC_HANDLERS :: 16
@@ -130,4 +134,51 @@ registry_dispatch_csi :: proc(reg: ^Terminal_Extension_Registry, cmd: rune, para
 		}
 	}
 	return false
+}
+
+// registry_dispatch_apc notifies registered extensions of APC commands (e.g. Kitty Graphics Protocol).
+registry_dispatch_apc :: proc(reg: ^Terminal_Extension_Registry, payload: []u8, term: rawptr) -> bool {
+	if reg == nil do return false
+	for i in 0..<reg.ext_count {
+		ext := &reg.extensions[i]
+		if ext.handle_apc != nil {
+			if ext.handle_apc(ext, payload, term) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// registry_dispatch_clear notifies registered extensions when display erase occurs (e.g. ED 2 / ED 3).
+registry_dispatch_clear :: proc(reg: ^Terminal_Extension_Registry, mode: int, term: rawptr) {
+	if reg == nil do return
+	for i in 0..<reg.ext_count {
+		ext := &reg.extensions[i]
+		if ext.handle_clear != nil {
+			ext.handle_clear(ext, mode, term)
+		}
+	}
+}
+
+// registry_dispatch_scroll notifies registered extensions when terminal content scrolls.
+registry_dispatch_scroll :: proc(reg: ^Terminal_Extension_Registry, n: int, top, bottom: int, term: rawptr) {
+	if reg == nil do return
+	for i in 0..<reg.ext_count {
+		ext := &reg.extensions[i]
+		if ext.handle_scroll != nil {
+			ext.handle_scroll(ext, n, top, bottom, term)
+		}
+	}
+}
+
+// registry_dispatch_resize notifies registered extensions when terminal dimensions change.
+registry_dispatch_resize :: proc(reg: ^Terminal_Extension_Registry, new_rows, new_cols: int, delta_y: int, term: rawptr) {
+	if reg == nil do return
+	for i in 0..<reg.ext_count {
+		ext := &reg.extensions[i]
+		if ext.handle_resize != nil {
+			ext.handle_resize(ext, new_rows, new_cols, delta_y, term)
+		}
+	}
 }
