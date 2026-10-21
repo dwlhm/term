@@ -109,6 +109,19 @@ when ODIN_OS == .Darwin {
 		}
 	}
 
+	platform_toggle_fullscreen :: proc(sdl_window: ^sdl3.Window) {
+		if sdl_window == nil do return
+		flags := sdl3.GetWindowFlags(sdl_window)
+		is_fs := .FULLSCREEN in flags
+		_ = sdl3.SetWindowFullscreen(sdl_window, !is_fs)
+	}
+
+	platform_is_fullscreen :: proc(sdl_window: ^sdl3.Window) -> bool {
+		if sdl_window == nil do return false
+		flags := sdl3.GetWindowFlags(sdl_window)
+		return .FULLSCREEN in flags
+	}
+
 	platform_get_system_font_size :: proc() -> (size: f32, ok: bool) {
 		cls_nsfont := objc_getClass("NSFont")
 		if cls_nsfont == nil do return 0, false
@@ -274,8 +287,10 @@ when ODIN_OS == .Darwin {
 				return false
 			}
 			NSWindowStyleMaskFullSizeContentView: uint : 1 << 15
-			new_mask := current_mask | NSWindowStyleMaskFullSizeContentView
-			(Set_Mask_Proc(imp_set_style_mask))(nswindow, sel_set_style_mask, new_mask)
+			if current_mask & NSWindowStyleMaskFullSizeContentView == 0 {
+				new_mask := current_mask | NSWindowStyleMaskFullSizeContentView
+				(Set_Mask_Proc(imp_set_style_mask))(nswindow, sel_set_style_mask, new_mask)
+			}
 		}
 
 		// 2. titleVisibility = NSWindowTitleHidden (1)
