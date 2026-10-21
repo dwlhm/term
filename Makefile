@@ -150,6 +150,7 @@ check:
 	$(ODIN) check src/cmd/harness_render_chrome $(CHECK_FLAGS)
 	$(ODIN) check src/cmd/harness_render_terminal $(CHECK_FLAGS)
 	$(ODIN) check src/cmd/harness_composer $(CHECK_FLAGS)
+	$(ODIN) check src/core/cursor $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/core/composer $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/core/composer/layer $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/core/composer/blit $(CHECK_FLAGS) -no-entry-point
