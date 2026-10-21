@@ -197,7 +197,6 @@ grid_clear_all :: proc(
 	for r in 0..<g.row_count {
 		grid_clear_line(g, d, r, 0, g.col_count, fill, dc)
 	}
-	g.origin = 0
 	if d != nil {
 		damage.damage_mark_all(d, 1)
 	}
@@ -354,6 +353,7 @@ grid_resize :: proc(
 	cursor_row: ^int = nil,
 	cursor_col: ^int = nil,
 	cursor_pending_wrap: ^bool = nil,
+	displacement: ^int = nil,
 ) {
-	grid_resize_reflow(g, d, new_rows, new_cols, cursor_row, cursor_col, cursor_pending_wrap)
+	grid_resize_reflow(g, d, new_rows, new_cols, cursor_row, cursor_col, cursor_pending_wrap, displacement)
 }

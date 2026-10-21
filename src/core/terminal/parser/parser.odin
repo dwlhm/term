@@ -2,6 +2,7 @@ package terminal_parser
 
 import "core:strconv"
 import "core:strings"
+import cell "../cell"
 import damage "../damage"
 import grid "../grid"
 
@@ -53,18 +54,44 @@ parser_init :: proc(p: ^Parser, rows, cols: int) {
 	p.csi_intermediate = 0
 	p.in_alt_screen = false
 	p.cursor_key_mode = false
+	p.bracketed_paste = false
+	p.alternate_scroll_mode = false
+	p.mouse_mode = .None
+	p.mouse_format = .X10
+	p.report_focus = false
 	p.osc_len = 0
+	if p.apc_buf == nil {
+		p.apc_buf = make([dynamic]u8, 0, 131072)
+	} else {
+		clear(&p.apc_buf)
+	}
 	p.response_len = 0
 	p.utf8_state = 0
 	p.utf8_len = 0
 	p.egc_pool = nil
 	p.on_osc = nil
 	p.on_csi = nil
+	p.on_apc = nil
 	p.user_data = nil
+}
+
+parser_destroy :: proc(p: ^Parser) {
+	if p == nil do return
+	delete(p.apc_buf)
+	p.apc_buf = nil
 }
 
 parser_reset :: proc(p: ^Parser, rows, cols: int) {
 	parser_init(p, rows, cols)
+}
+
+_parser_dispatch_apc :: proc(p: ^Parser) {
+	if p == nil || len(p.apc_buf) == 0 do return
+	defer clear(&p.apc_buf)
+
+	if p.on_apc != nil {
+		p.on_apc(p.user_data, p.apc_buf[:])
+	}
 }
 
 _parser_dispatch_osc :: proc(p: ^Parser) {
@@ -126,7 +153,7 @@ parser_parse_byte :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, 
 			}
 			if p.cursor.row == p.scroll_bottom {
 				erase_c, erase_dc := _parser_erase_cell(p)
-				grid.grid_scroll_up(g, d, p.scroll_top, p.scroll_bottom, 1, erase_c, erase_dc)
+				_parser_scroll_up(p, g, d, p.scroll_top, p.scroll_bottom, 1, erase_c, erase_dc)
 			} else if p.cursor.row < g.row_count - 1 {
 				p.cursor.row += 1
 			}
@@ -165,15 +192,22 @@ parser_parse_byte :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, 
 			p.state = .Dcs_String
 		case '_': // APC - Application Program Command
 			p.state = .Apc_String
+			clear(&p.apc_buf)
 		case '^', 'X': // PM / SOS
 			p.state = .Dcs_String
 		case 'M': // Reverse Index (scroll down if at top margin)
 			if p.cursor.row == p.scroll_top {
 				erase_c, erase_dc := _parser_erase_cell(p)
-				grid.grid_scroll_down(g, d, p.scroll_top, p.scroll_bottom, 1, erase_c, erase_dc)
+				_parser_scroll_down(p, g, d, p.scroll_top, p.scroll_bottom, 1, erase_c, erase_dc)
 			} else {
 				p.cursor.row = max(0, p.cursor.row - 1)
 			}
+			p.state = .Ground
+		case 'c': // RIS - Reset to Initial State
+			parser_reset(p, g.row_count, g.col_count)
+			grid.grid_clear_all(g, d)
+			grid.grid_clear_history(g)
+			if p.on_clear != nil do p.on_clear(p.user_data, 3)
 			p.state = .Ground
 		case '7': // Save Cursor
 			p.cursor.saved_row = p.cursor.row
@@ -211,13 +245,17 @@ parser_parse_byte :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, 
 
 	case .Apc_String:
 		if b == 0x07 { // BEL terminates APC
+			_parser_dispatch_apc(p)
 			p.state = .Ground
 		} else if b == 0x1B {
 			p.state = .Esc_In_Apc
+		} else if len(p.apc_buf) < MAX_APC_BUFFER {
+			append(&p.apc_buf, b)
 		}
 
 	case .Esc_In_Apc:
 		if b == '\\' { // ST
+			_parser_dispatch_apc(p)
 			p.state = .Ground
 		} else if b == 0x1B {
 			// Stay in Esc_In_Apc
@@ -319,4 +357,26 @@ parser_parse_bytes :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 		parser_parse_byte(p, g, d, data[i])
 		i += 1
 	}
+}
+
+_parser_scroll_up :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, top, bottom, n: int, fill: cell.Semantic_Cell, dc: cell.Direct_Color) -> int {
+	scrolled := grid.grid_scroll_up(g, d, top, bottom, n, fill, dc)
+	if scrolled > 0 && p.on_scroll != nil {
+		p.on_scroll(p.user_data, scrolled, top, bottom)
+	}
+	return scrolled
+}
+
+_parser_scroll_down :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, top, bottom, n: int, fill: cell.Semantic_Cell, dc: cell.Direct_Color) -> int {
+	scrolled := grid.grid_scroll_down(g, d, top, bottom, n, fill, dc)
+	if scrolled > 0 && p.on_scroll != nil {
+		p.on_scroll(p.user_data, -scrolled, top, bottom)
+	}
+	return scrolled
+}
+
+parser_scroll_up :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, n: int) -> int {
+	if p == nil || g == nil || n <= 0 do return 0
+	erase_c, erase_dc := _parser_erase_cell(p)
+	return _parser_scroll_up(p, g, d, p.scroll_top, p.scroll_bottom, n, erase_c, erase_dc)
 }

@@ -544,3 +544,50 @@ test_terminal_resize_scrollback_history_reflows_on_widen_and_narrow :: proc(t: ^
 	testing.expect_value(t, r3.cells[0].char, 'a')
 }
 
+@test
+test_terminal_resize_starship_pure_prompt_with_input :: proc(t: ^testing.T) {
+	terminal: term.Terminal
+	term.terminal_init(&terminal, 5, 60)
+	defer term.terminal_destroy(&terminal)
+
+	// Top banner starting with '╭', bottom line starting with '❯ ' and user input
+	term.terminal_feed_string(&terminal, "\u256D\u2500 \uF179 ~/project/term on git:main at 12:00:00\r\n\u276F git status")
+	testing.expect_value(t, terminal.parser.cursor.row, 1)
+
+	// Shrink from 60 to 20 columns:
+	term.terminal_resize(&terminal, 5, 20)
+
+	// Both prompt lines must remain exactly 1 row (no wrapping), cursor stays on row 1
+	testing.expect_value(t, terminal.parser.cursor.row, 1)
+	row0 := term.terminal_get_row(&terminal, 0)
+	row1 := term.terminal_get_row(&terminal, 1)
+	testing.expect(t, row0 != nil && !row0.wrap, "Banner line must not wrap")
+	testing.expect(t, row1 != nil && !row1.wrap, "Input line must not wrap")
+	testing.expect_value(t, term.terminal_get_cell(&terminal, 0, 0).char, rune(0x256D))
+	testing.expect_value(t, term.terminal_get_cell(&terminal, 1, 0).char, rune(0x276F))
+}
+
+@test
+test_terminal_resize_rapid_narrow_widen_prompt_no_duplication :: proc(t: ^testing.T) {
+	terminal: term.Terminal
+	term.terminal_init(&terminal, 5, 60)
+	defer term.terminal_destroy(&terminal)
+
+	term.terminal_feed_string(&terminal, "\u256D\u2500 \uF179 ~/project/term on git:main\r\n\u2570\u2500\u276F ")
+	testing.expect_value(t, terminal.parser.cursor.row, 1)
+	testing.expect_value(t, terminal.grid.history_count, 0)
+
+	// Simulate rapid resize oscillations (like live mouse drag)
+	widths := [?]int{55, 45, 35, 25, 20, 25, 40, 60}
+	for w in widths {
+		term.terminal_resize(&terminal, 5, w)
+		testing.expect_value(t, terminal.parser.cursor.row, 1)
+		testing.expect_value(t, terminal.grid.history_count, 0)
+		row0 := term.terminal_get_row(&terminal, 0)
+		row1 := term.terminal_get_row(&terminal, 1)
+		testing.expect(t, row0 != nil && !row0.wrap, "Row 0 must stay 1 row without wrapping")
+		testing.expect(t, row1 != nil && !row1.wrap, "Row 1 must stay 1 row without wrapping")
+	}
+}
+
+

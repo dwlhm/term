@@ -1,5 +1,6 @@
 package terminal_parser
 
+import "core:fmt"
 import "core:strconv"
 import cell "../cell"
 import damage "../damage"
@@ -74,6 +75,8 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 			grid.grid_clear_line(g, d, p.cursor.row, 0, p.cursor.col + 1, erase_c, erase_dc)
 		case 2, 3: // Erase all
 			grid.grid_clear_all(g, d, erase_c, erase_dc)
+			if mode == 3 do grid.grid_clear_history(g)
+			if p.on_clear != nil do p.on_clear(p.user_data, mode)
 		}
 
 	case 'K': // EL - Erase in Line (BCE aware)
@@ -99,19 +102,19 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 
 	case 'L': // IL - Insert Lines (BCE aware)
 		erase_c, erase_dc := _parser_erase_cell(p)
-		grid.grid_scroll_down(g, d, p.cursor.row, p.scroll_bottom, param0, erase_c, erase_dc)
+		_parser_scroll_down(p, g, d, p.cursor.row, p.scroll_bottom, param0, erase_c, erase_dc)
 
 	case 'M': // DL - Delete Lines (BCE aware)
 		erase_c, erase_dc := _parser_erase_cell(p)
-		grid.grid_scroll_up(g, d, p.cursor.row, p.scroll_bottom, param0, erase_c, erase_dc)
+		_parser_scroll_up(p, g, d, p.cursor.row, p.scroll_bottom, param0, erase_c, erase_dc)
 
 	case 'S': // SU - Scroll Up
 		erase_c, erase_dc := _parser_erase_cell(p)
-		grid.grid_scroll_up(g, d, p.scroll_top, p.scroll_bottom, param0, erase_c, erase_dc)
+		_parser_scroll_up(p, g, d, p.scroll_top, p.scroll_bottom, param0, erase_c, erase_dc)
 
 	case 'T': // SD - Scroll Down
 		erase_c, erase_dc := _parser_erase_cell(p)
-		grid.grid_scroll_down(g, d, p.scroll_top, p.scroll_bottom, param0, erase_c, erase_dc)
+		_parser_scroll_down(p, g, d, p.scroll_top, p.scroll_bottom, param0, erase_c, erase_dc)
 
 	case 'P': // DCH - Delete Characters (BCE aware)
 		count := min(param0, g.col_count - p.cursor.col)
@@ -283,6 +286,8 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 				switch mode {
 				case 1:
 					p.cursor_key_mode = true
+				case 9:
+					p.mouse_mode = .X10
 				case 25:
 					p.cursor.visible = true
 				case 47, 1047, 1049:
@@ -291,6 +296,22 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 						p.cursor.saved_row = p.cursor.row
 						p.cursor.saved_col = p.cursor.col
 					}
+				case 1000:
+					p.mouse_mode = .Normal
+				case 1002:
+					p.mouse_mode = .Button_Event
+				case 1003:
+					p.mouse_mode = .Any_Event
+				case 1004:
+					p.report_focus = true
+				case 1006:
+					p.mouse_format = .Sgr
+				case 1007:
+					p.alternate_scroll_mode = true
+				case 1016:
+					p.mouse_format = .Sgr_Pixel
+				case 2004:
+					p.bracketed_paste = true
 				}
 			}
 		}
@@ -302,6 +323,8 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 				switch mode {
 				case 1:
 					p.cursor_key_mode = false
+				case 9, 1000, 1002, 1003:
+					p.mouse_mode = .None
 				case 25:
 					p.cursor.visible = false
 				case 47, 1047, 1049:
@@ -310,12 +333,22 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 						p.cursor.row = clamp(p.cursor.saved_row, 0, g.row_count - 1)
 						p.cursor.col = clamp(p.cursor.saved_col, 0, g.col_count - 1)
 					}
+				case 1004:
+					p.report_focus = false
+				case 1007:
+					p.alternate_scroll_mode = false
+				case 1006, 1016:
+					p.mouse_format = .X10
+				case 2004:
+					p.bracketed_paste = false
 				}
 			}
 		}
 
-	case 'q': // DECSCUSR - Set Cursor Style
-		if p.csi_intermediate == ' ' {
+	case 'q': // DECSCUSR or XTVERSION
+		if p.csi_prefix == '>' {
+			parser_emit_response(p, []u8{0x1b, 'P', '>', '|', 't', 'e', 'r', 'm', '(', '0', '.', '1', '.', '0', ')', 0x1b, '\\'})
+		} else if p.csi_intermediate == ' ' {
 			mode := p.csi_params[0] if p.csi_count > 0 else 0
 			switch mode {
 			case 0, 1:
@@ -370,6 +403,26 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 		} else if p.csi_prefix == '>' {
 			// Secondary DA
 			parser_emit_response(p, []u8{0x1b, '[', '>', '0', ';', '1', '0', ';', '1', 'c'})
+		}
+
+	case 't': // XTWINOPS - Window and cell pixel manipulation & reports
+		if p.csi_prefix == 0 && p.csi_count > 0 {
+			buf: [32]u8
+			switch p.csi_params[0] {
+			case 14: // Query window size in pixels -> \e[4;<height>;<width>t
+				cw := p.cell_w if p.cell_w > 0 else 10
+				ch := p.cell_h if p.cell_h > 0 else 20
+				resp := fmt.bprintf(buf[:], "\x1b[4;%d;%dt", g.row_count * ch, g.col_count * cw)
+				parser_emit_response(p, transmute([]u8)resp)
+			case 16: // Query cell size in pixels -> \e[6;<height>;<width>t
+				cw := p.cell_w if p.cell_w > 0 else 10
+				ch := p.cell_h if p.cell_h > 0 else 20
+				resp := fmt.bprintf(buf[:], "\x1b[6;%d;%dt", ch, cw)
+				parser_emit_response(p, transmute([]u8)resp)
+			case 18: // Query window size in characters -> \e[8;<rows>;<cols>t
+				resp := fmt.bprintf(buf[:], "\x1b[8;%d;%dt", g.row_count, g.col_count)
+				parser_emit_response(p, transmute([]u8)resp)
+			}
 		}
 
 	case:

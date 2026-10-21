@@ -151,33 +151,14 @@ _is_prompt_start_row :: proc(row: ^Row, is_continuation: bool, is_cursor_row: bo
 _detect_active_prompt_start :: proc(g: ^Grid, cur_r: int) -> int {
 	if g == nil || cur_r < 0 || cur_r >= g.row_count do return -1
 
-	// Check if cursor row has a prompt
 	cur_phys := grid_physical_row(g, cur_r)
 	cur_row := &g.rows[cur_phys]
 	if cur_row == nil do return -1
 
 	has_cur_prompt := cur_row.is_prompt || _is_prompt_start_row(cur_row, false, true)
-	if !has_cur_prompt do return -1
+	prompt_start := cur_r if has_cur_prompt else -1
 
-	prompt_start := cur_r
-
-	// Check if cursor row has a multi-line bottom frame: '╰' (0x2570) or '└' (0x2514)
-	is_bottom_frame := false
-	for c in 0..<len(cur_row.cells) {
-		ch := cur_row.cells[c].char
-		if ch == 0 || ch == ' ' do continue
-		if ch == 0x2570 || ch == 0x2514 {
-			is_bottom_frame = true
-		}
-		break
-	}
-
-	// Only scan upwards if cursor row is bottom frame of a multi-line prompt OR row.is_prompt
-	if !is_bottom_frame && !cur_row.is_prompt {
-		return prompt_start
-	}
-
-	// Scan up to 4 rows above cursor to find prompt start frame ('╭' or '┌')
+	// Scan up to 4 rows above cursor to find prompt start frame ('╭' or '┌') or row.is_prompt
 	for r := cur_r - 1; r >= max(0, cur_r - 4); r -= 1 {
 		phys := grid_physical_row(g, r)
 		row := &g.rows[phys]
@@ -257,10 +238,12 @@ _extract_logical_lines :: proc(
 			is_continuation = true
 		}
 
-		// Prompt boundary protection: if inside active prompt block, extract each row individually with truncate
+		row_phys := grid_physical_row(old, r)
+		cur_row := &old.rows[row_phys]
+
+		// Prompt boundary protection: all rows within active prompt block are isolated individually
+		// with truncate so that vertical distance to cursor never expands, regardless of prior wrap flags.
 		if prompt_start_r >= 0 && r >= prompt_start_r && r <= cur_r {
-			row_phys := grid_physical_row(old, r)
-			cur_row := &old.rows[row_phys]
 			ll.phys_rows = 1
 			ll.is_prompt = true
 			ll.truncate = true
@@ -328,6 +311,18 @@ _extract_logical_lines :: proc(
 				is_continuation = true
 				if r > end_r {
 					ll.wrapped = true
+					break
+				}
+				if prompt_start_r >= 0 && r >= prompt_start_r {
+					ll.wrapped = false
+					is_continuation = false
+					break
+				}
+				next_phys := grid_physical_row(old, r)
+				next_row := &old.rows[next_phys]
+				if next_row.is_prompt {
+					ll.wrapped = false
+					is_continuation = false
 					break
 				}
 			} else {
@@ -505,6 +500,7 @@ grid_resize_reflow :: proc(
 	cursor_row: ^int = nil,
 	cursor_col: ^int = nil,
 	cursor_pending_wrap: ^bool = nil,
+	displacement: ^int = nil,
 ) {
 	if g == nil do return
 	target_rows := max(1, new_rows)
@@ -694,11 +690,13 @@ grid_resize_reflow :: proc(
 	max_hist := max(0, g.capacity - target_rows)
 	num_vis := len(vis_reflowed)
 
+	disp := 0
 	if num_vis <= target_rows {
 		delta_rows := max(0, target_rows - old.row_count)
 		free_rows := target_rows - num_vis
 		max_pull := min(delta_rows, free_rows)
 		actual_pull := min(n_hist, max_pull)
+		disp = actual_pull
 
 		// Copy pulled history rows into top of visible viewport (0..<actual_pull)
 		for i in 0..<actual_pull {
@@ -727,6 +725,7 @@ grid_resize_reflow :: proc(
 		// Visible lines overflow target_rows.
 		// Limit overflow to new_cursor_row so cursor line is NEVER pushed into history.
 		overflow := min(num_vis - target_rows, new_cursor_row)
+		disp = -overflow
 		for i in 0..<target_rows {
 			src_r := &vis_reflowed[overflow + i]
 			_copy_row_into(g, i, src_r.cells[:], src_r.direct_colors[:], src_r.wrap, src_r.is_prompt)
@@ -757,6 +756,8 @@ grid_resize_reflow :: proc(
 			_copy_row_into(g, -keep_overflow + i, src_r.cells[:], src_r.direct_colors[:], src_r.wrap, src_r.is_prompt)
 		}
 	}
+
+	if displacement != nil do displacement^ = disp
 
 	if cursor_row != nil do cursor_row^ = new_cursor_row
 	if cursor_col != nil do cursor_col^ = clamp(new_cursor_col, 0, target_cols - 1)

@@ -1,6 +1,7 @@
 package core_terminal
 
 import "base:runtime"
+import cursor "../cursor"
 import cell "cell"
 import damage "damage"
 import egc "egc"
@@ -33,6 +34,9 @@ terminal_init :: proc(t: ^Terminal, rows, cols: int, allocator: runtime.Allocato
 	t.parser.egc_pool = &t.egc_pool
 	t.parser.on_osc = _terminal_on_osc
 	t.parser.on_csi = _terminal_on_csi
+	t.parser.on_apc = _terminal_on_apc
+	t.parser.on_clear = _terminal_on_clear
+	t.parser.on_scroll = _terminal_on_scroll
 	t.parser.user_data = rawptr(t)
 }
 
@@ -48,11 +52,30 @@ _terminal_on_csi :: proc(user_data: rawptr, cmd: rune, params: []int) -> bool {
 	return extension.registry_dispatch_csi(&t.extensions, cmd, params, user_data)
 }
 
+_terminal_on_apc :: proc(user_data: rawptr, payload: []u8) -> bool {
+	if user_data == nil do return false
+	t := (^Terminal)(user_data)
+	return extension.registry_dispatch_apc(&t.extensions, payload, user_data)
+}
+
+_terminal_on_clear :: proc(user_data: rawptr, mode: int) {
+	if user_data == nil do return
+	t := (^Terminal)(user_data)
+	extension.registry_dispatch_clear(&t.extensions, mode, user_data)
+}
+
+_terminal_on_scroll :: proc(user_data: rawptr, n: int, top, bottom: int) {
+	if user_data == nil do return
+	t := (^Terminal)(user_data)
+	extension.registry_dispatch_scroll(&t.extensions, n, top, bottom, user_data)
+}
+
 terminal_destroy :: proc(t: ^Terminal) {
 	if t == nil do return
 	grid.grid_destroy(&t.grid)
 	damage.damage_destroy(&t.damage)
 	extension.registry_destroy(&t.extensions)
+	parser.parser_destroy(&t.parser)
 	egc.egc_pool_init(&t.egc_pool)
 	t.rows = 0
 	t.cols = 0
@@ -61,8 +84,28 @@ terminal_destroy :: proc(t: ^Terminal) {
 terminal_reset :: proc(t: ^Terminal) {
 	if t == nil do return
 	grid.grid_clear_all(&t.grid, &t.damage)
+	grid.grid_clear_history(&t.grid)
 	egc.egc_pool_init(&t.egc_pool)
 	parser.parser_reset(&t.parser, t.rows, t.cols)
+	extension.registry_dispatch_clear(&t.extensions, 3, rawptr(t))
+}
+
+terminal_advance_cursor_for_image :: proc(t: ^Terminal, cols, rows: int) {
+	if t == nil do return
+	p := &t.parser
+	g := &t.grid
+	d := &t.damage
+
+	target_row := p.cursor.row + rows
+	if target_row > p.scroll_bottom {
+		overflow := target_row - p.scroll_bottom
+		parser.parser_scroll_up(p, g, d, overflow)
+		p.cursor.row = p.scroll_bottom
+	} else {
+		p.cursor.row = min(g.row_count - 1, target_row)
+	}
+	p.cursor.col = 0
+	p.cursor.pending_wrap = false
 }
 
 terminal_feed_bytes :: proc(t: ^Terminal, data: []u8) {
@@ -76,13 +119,23 @@ terminal_feed_string :: proc(t: ^Terminal, s: string) {
 
 terminal_resize :: proc(t: ^Terminal, new_rows, new_cols: int) {
 	if t == nil || (new_rows == t.rows && new_cols == t.cols) do return
+	old_cur_r := t.parser.cursor.row
 	t.rows = max(1, new_rows)
 	t.cols = max(1, new_cols)
-	grid.grid_resize(&t.grid, &t.damage, t.rows, t.cols, &t.parser.cursor.row, &t.parser.cursor.col, &t.parser.cursor.pending_wrap)
+	disp := 0
+	grid.grid_resize(&t.grid, &t.damage, t.rows, t.cols, &t.parser.cursor.row, &t.parser.cursor.col, &t.parser.cursor.pending_wrap, &disp)
 	t.parser.cursor.row = clamp(t.parser.cursor.row, 0, t.rows - 1)
 	t.parser.cursor.col = clamp(t.parser.cursor.col, 0, t.cols - 1)
 	t.parser.scroll_top = clamp(t.parser.scroll_top, 0, t.rows - 1)
 	t.parser.scroll_bottom = max(0, t.rows - 1)
+
+	// Keep saved cursor in sync with reflow displacement so DECRC (\x1b8 / CSI u) restores accurately
+	delta_r := t.parser.cursor.row - old_cur_r
+	t.parser.cursor.saved_row = clamp(t.parser.cursor.saved_row + delta_r, 0, t.rows - 1)
+	t.parser.cursor.saved_col = clamp(t.parser.cursor.saved_col, 0, t.cols - 1)
+
+	// Notify extensions of terminal resize and grid vertical displacement
+	extension.registry_dispatch_resize(&t.extensions, t.rows, t.cols, disp, rawptr(t))
 }
 
 terminal_get_cell :: proc(t: ^Terminal, row, col: int) -> cell.Semantic_Cell {
@@ -229,4 +282,38 @@ terminal_emit_response_string :: proc(term_ptr: rawptr, s: string) -> bool {
 terminal_drain_response :: proc(t: ^Terminal, out: []u8) -> int {
 	if t == nil do return 0
 	return parser.parser_drain_response(&t.parser, out)
+}
+
+terminal_set_cell_size :: proc(t: ^Terminal, cell_w, cell_h: int) {
+	if t == nil do return
+	t.parser.cell_w = cell_w
+	t.parser.cell_h = cell_h
+}
+
+// terminal_cursor maps terminal state and active mouse tracking to a platform-neutral Mouse_Cursor.
+terminal_cursor :: proc(
+	t: ^Terminal,
+	is_shift_held: bool = false,
+	osc_pointer_shape: string = "",
+) -> cursor.Mouse_Cursor {
+	if len(osc_pointer_shape) > 0 {
+		switch osc_pointer_shape {
+		case "default":                                         return .Default
+		case "pointer":                                         return .Pointer
+		case "crosshair":                                       return .Crosshair
+		case "col-resize", "ew-resize", "e-resize", "w-resize": return .Col_Resize
+		case "row-resize", "ns-resize", "n-resize", "s-resize": return .Row_Resize
+		case "move":                                            return .Move
+		case "not-allowed":                                     return .Not_Allowed
+		case "wait":                                            return .Wait
+		case "text", "ibeam":                                   return .Text
+		case:                                                   return .Default
+		}
+	}
+
+	if t != nil && t.parser.mouse_mode != .None && !is_shift_held {
+		return .Default
+	}
+
+	return .Text
 }
