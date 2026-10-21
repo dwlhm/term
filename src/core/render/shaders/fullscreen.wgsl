@@ -304,7 +304,8 @@ fn fullscreen_fs_main(input: Fullscreen_Output) -> @location(0) vec4<f32> {
                                 atlas_texture, atlas_sampler,
                                 vec2<f32>(u, v), 0.0).r;
                             if (alpha >= 0.01) {
-                                col = mix(col, n_fg_rgb, alpha);
+                                let n_fg_eff = select(n_fg_rgb * params.cell_opacity, n_fg_rgb, cell_is_selected(ncflags));
+                                col = mix(col, n_fg_eff, alpha);
                                 glyph_coverage = alpha;
                             }
                         }
@@ -340,7 +341,8 @@ fn fullscreen_fs_main(input: Fullscreen_Output) -> @location(0) vec4<f32> {
                 atlas_texture, atlas_sampler,
                 vec2<f32>(u, v), 0.0).r;
             if (alpha >= 0.01) {
-                col = mix(col, fg_rgb, alpha);
+                let fg_eff = select(fg_rgb * params.cell_opacity, fg_rgb, cell_is_selected(cflags));
+                col = mix(col, fg_eff, alpha);
                 glyph_coverage = alpha;
             }
         }

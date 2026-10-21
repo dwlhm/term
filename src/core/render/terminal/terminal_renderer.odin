@@ -19,6 +19,7 @@ import atlas "../atlas"
 import "instance"
 import "tile"
 import "fullscreen"
+import kitty "kitty"
 import core_terminal "../../terminal"
 import cell "../../terminal/cell"
 import damage "../../terminal/damage"
@@ -202,6 +203,9 @@ Terminal_Renderer :: struct {
 	emoji_pipeline:     contract.Gpu_RenderPipeline,
 	emoji_layout:       contract.Gpu_BindGroupLayout,
 
+	// Kitty Graphics Protocol Sub-Renderer
+	kitty_rend:         kitty.Kitty_Renderer,
+
 	// Strategy B: Compute Tile Binning (16x16 pixel tiles)
 	tile_rend:          tile.Compute_Tile_Renderer,
 	compute_pipeline:   contract.Gpu_ComputePipeline,
@@ -358,6 +362,8 @@ terminal_renderer_init_with_pipelines :: proc(
 	r.emoji_rend.bind_group = contract.create_bind_group(device, r.emoji_layout, emoji_entries)
 	r.emoji_rend.pipeline = r.emoji_pipeline
 
+	_ = kitty.kitty_renderer_init(&r.kitty_rend, device, queue, r.emoji_pipeline, r.emoji_layout, r.inst_rend.sampler, r.emoji_rend.uniform_buffer, allocator)
+
 	_ = tile.compute_tile_init(&r.tile_rend, device, queue, 24, 80, 10.0, 20.0, atlas_view, format, allocator)
 	r.tile_rend.compute_pipeline = r.compute_pipeline
 	r.tile_rend.compute_layout = r.compute_layout
@@ -430,6 +436,7 @@ terminal_renderer_destroy :: proc(r: ^Terminal_Renderer) {
 
 	instance.instance_renderer_destroy(&r.inst_rend)
 	instance.instance_renderer_destroy(&r.emoji_rend)
+	kitty.kitty_renderer_destroy(&r.kitty_rend)
 	tile.compute_tile_destroy(&r.tile_rend)
 	fullscreen.fullscreen_destroy(&r.fs_rend)
 
@@ -782,7 +789,7 @@ _terminal_renderer_pack_grid :: proc(
 			}
 			if dc.has_fg || dc.has_bg || .Dim in cell_val.style {
 				cflags |= 8
-				fg_col, bg_col := _terminal_renderer_resolve_colors(cell_val, dc, false, active_bg, is_focused)
+				fg_col, bg_col := _terminal_renderer_resolve_colors(cell_val, dc, false, active_bg, true)
 				if dc.has_fg || .Dim in cell_val.style || .Invert in cell_val.style {
 					fg_argb = _float_to_argb(fg_col)
 				}
@@ -806,6 +813,10 @@ _terminal_renderer_pack_grid :: proc(
 
 			if .Has_Egc in cell_val.flags {
 				if runes := core_terminal.terminal_get_egc_runes(term, ch); len(runes) > 0 {
+					if runes[0] == 0x10EEEE {
+						r.packed_cells[ci] = _pack_gpu_cell(' ', style_val, 1, cflags, 0)
+						continue
+					}
 					if emoji_atlas != nil && plat_font.is_emoji_cluster(runes) {
 						if eg, eok := plat_font.emoji_atlas_get_runes(emoji_atlas, runes); eok {
 							_terminal_renderer_push_emoji_quad_only(r, eg, x_pos, y_pos, gw, cell_h, is_focused)
@@ -822,6 +833,11 @@ _terminal_renderer_pack_grid :: proc(
 					r.packed_cells[ci] = _pack_gpu_cell(' ', style_val, 1, cflags, 0)
 					continue
 				}
+			}
+
+			if ch == 0x10EEEE {
+				r.packed_cells[ci] = _pack_gpu_cell(' ', style_val, 1, cflags, 0)
+				continue
 			}
 
 			if emoji_atlas != nil && plat_font.is_emoji_codepoint(ch) {
@@ -910,6 +926,10 @@ terminal_renderer_encode :: proc(
 
 	t_start := time.tick_now()
 	chosen_strat := strategy_select(strat_inp, &r.strat_state, r.tile_rend.available, r.fs_rend.available)
+	has_kitty := kitty.kitty_renderer_has_images(&r.kitty_rend, term)
+	if has_kitty {
+		chosen_strat = .Instance
+	}
 
 	// 2. Resolve Active Background & Sync LUT Default Background across all bg_idx == 0 entries
 	if r.last_is_focused != is_focused {
@@ -977,6 +997,7 @@ terminal_renderer_encode :: proc(
 	instance.instance_renderer_push(&r.inst_rend, pane_bg)
 
 	clear_col: [4]f64 = {0.0, 0.0, 0.0, 0.0}
+	kitty.kitty_renderer_prepare(&r.kitty_rend, term, pane_rect, cell_w, cell_h, pad_x, pad_y, scroll_offset)
 
 	// 4. Execute Strategy-Specific Cell Preparation & Encoding
 	switch chosen_strat {
@@ -1020,6 +1041,7 @@ terminal_renderer_encode :: proc(
 
 				if .Has_Egc in cell_val.flags {
 					if runes := core_terminal.terminal_get_egc_runes(term, ch); len(runes) > 0 {
+						if runes[0] == 0x10EEEE do continue
 						handled := false
 						if emoji_atlas != nil && plat_font.is_emoji_cluster(runes) {
 							if eg, eok := plat_font.emoji_atlas_get_runes(emoji_atlas, runes); eok {
@@ -1040,6 +1062,8 @@ terminal_renderer_encode :: proc(
 					}
 				}
 
+				if ch == 0x10EEEE do continue
+
 				if emoji_atlas != nil && plat_font.is_emoji_codepoint(ch) {
 					if eg, eok := plat_font.emoji_atlas_get(emoji_atlas, ch); eok {
 						_terminal_renderer_push_emoji(r, eg, x_pos, y_pos, gw, cell_h, bg, is_focused)
@@ -1059,19 +1083,32 @@ terminal_renderer_encode :: proc(
 		instance.instance_renderer_flush(&r.inst_rend)
 		instance.instance_renderer_flush(&r.emoji_rend)
 
-		if r.inst_rend.active_count > 0 || r.emoji_rend.active_count > 0 || load_op == .Clear {
+		has_kitty := kitty.kitty_renderer_has_images(&r.kitty_rend, term)
+		if r.inst_rend.active_count > 0 || r.emoji_rend.active_count > 0 || load_op == .Clear || has_kitty {
 			pass := contract.begin_render_pass(enc, target_view, clear_col, load_op)
 			if rawptr(pass) != nil {
+				sc_x := u32(clamp(pane_rect[0], 0.0, screen_w))
+				sc_y := u32(clamp(pane_rect[1], 0.0, screen_h))
+				sc_w := max(1, u32(clamp(pane_rect[2], 1.0, max(1.0, screen_w - f32(sc_x)))))
+				sc_h := max(1, u32(clamp(pane_rect[3], 1.0, max(1.0, screen_h - f32(sc_y)))))
+				if contract.render_set_scissor_rect != nil {
+					contract.render_set_scissor_rect(pass, sc_x, sc_y, sc_w, sc_h)
+				}
 				if r.inst_rend.active_count > 0 {
 					contract.render_set_pipeline(pass, r.bg_pipeline)
 					contract.render_set_bind_group(pass, 0, r.inst_rend.bg_bind_group)
 					contract.render_set_vertex_buffer(pass, 0, r.inst_rend.instance_buffer, 0)
 					contract.render_draw(pass, 6, r.inst_rend.active_count)
-
+				}
+				kitty.kitty_renderer_draw(&r.kitty_rend, pass, term)
+				if r.inst_rend.active_count > 0 {
 					instance.instance_renderer_draw(&r.inst_rend, pass)
 				}
 				if r.emoji_rend.active_count > 0 {
 					instance.instance_renderer_draw(&r.emoji_rend, pass)
+				}
+				if contract.render_set_scissor_rect != nil {
+					contract.render_set_scissor_rect(pass, 0, 0, max(1, u32(screen_w)), max(1, u32(screen_h)))
 				}
 				contract.end_render_pass(pass)
 			}
@@ -1182,6 +1219,7 @@ terminal_renderer_encode :: proc(
 			if r.emoji_rend.active_count > 0 {
 				instance.instance_renderer_draw(&r.emoji_rend, pass)
 			}
+			kitty.kitty_renderer_draw(&r.kitty_rend, pass, term)
 			contract.end_render_pass(pass)
 		}
 
@@ -1239,6 +1277,7 @@ terminal_renderer_encode :: proc(
 			if r.emoji_rend.active_count > 0 {
 				instance.instance_renderer_draw(&r.emoji_rend, pass)
 			}
+			kitty.kitty_renderer_draw(&r.kitty_rend, pass, term)
 			contract.end_render_pass(pass)
 		}
 	}

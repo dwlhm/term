@@ -235,6 +235,7 @@ fn cs_main(
             var uvs = vec4<f32>(0.0);
             var has_glyph = false;
             var gw = params.cell_w;
+            var n_is_selected = false;
             if (lc > 0u) {
                 let ni = lr * params.cols + (lc - 1u);
                 let nlo = cells[ni * 2u];
@@ -253,6 +254,7 @@ fn cs_main(
                             su = i32(nslot);
                         }
                         if (su >= 0) {
+                            n_is_selected = cell_is_selected(ncflags);
                             if ((ncflags & CELL_FLAG_DIRECT_COLOR) != 0u && !cell_is_selected(ncflags)) {
                                 let nfg_argb = colors[ni * COLOR_WORDS_PER_CELL];
                                 if (nfg_argb != 0u) {
@@ -285,7 +287,8 @@ fn cs_main(
                                 atlas_texture, atlas_sampler,
                                 vec2<f32>(u, v), 0.0).r;
                             if (alpha >= 0.01) {
-                                col = mix(col, n_fg_rgb, alpha);
+                                let n_fg_eff = select(n_fg_rgb * params.cell_opacity, n_fg_rgb, n_is_selected);
+                                col = mix(col, n_fg_eff, alpha);
                                 glyph_coverage = alpha;
                             }
                         }
@@ -327,7 +330,8 @@ fn cs_main(
                             atlas_texture, atlas_sampler,
                             vec2<f32>(u, v), 0.0).r;
                         if (alpha >= 0.01) {
-                            col = mix(col, fg_rgb, alpha);
+                            let fg_eff = select(fg_rgb * params.cell_opacity, fg_rgb, cell_is_selected(cflags));
+                            col = mix(col, fg_eff, alpha);
                             glyph_coverage = alpha;
                         }
                     }
