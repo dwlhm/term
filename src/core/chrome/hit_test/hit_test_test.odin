@@ -9,6 +9,7 @@ import "core:testing"
 import "../draw_list"
 import "../splits"
 import "../tabs"
+import cursor "../../cursor"
 
 @test
 test_point_in_rect_exact_boundaries :: proc(t: ^testing.T) {
@@ -102,14 +103,17 @@ test_split_divider_tolerance_margin :: proc(t: ^testing.T) {
 	// Exactly on the center line
 	res := chrome_hit_test(nil, root_h, {400.0, 300.0})
 	testing.expect_value(t, res.kind, Hit_Kind.Split_Divider)
+	testing.expect(t, res.split_node == root_h)
 
 	// On negative tolerance edge (-4.0px)
 	res = chrome_hit_test(nil, root_h, {396.0, 300.0})
 	testing.expect_value(t, res.kind, Hit_Kind.Split_Divider)
+	testing.expect(t, res.split_node == root_h)
 
 	// On positive tolerance edge (+4.0px)
 	res = chrome_hit_test(nil, root_h, {404.0, 300.0})
 	testing.expect_value(t, res.kind, Hit_Kind.Split_Divider)
+	testing.expect(t, res.split_node == root_h)
 
 	// Just outside negative tolerance edge
 	res = chrome_hit_test(nil, root_h, {395.999, 300.0})
@@ -300,4 +304,42 @@ test_hit_test_divider_matches_emitted_divider :: proc(t: ^testing.T) {
 		draw_list.ui_draw_list_destroy(&dl)
 		splits.split_tree_destroy(root)
 	}
+}
+
+@test
+test_chrome_hit_cursor_mapping :: proc(t: ^testing.T) {
+	// Tab Header -> Pointer
+	c, handled := chrome_hit_cursor(Hit_Result{kind = .Tab_Header})
+	testing.expect(t, handled)
+	testing.expect_value(t, c, cursor.Mouse_Cursor.Pointer)
+
+	// Tab Close -> Pointer
+	c, handled = chrome_hit_cursor(Hit_Result{kind = .Tab_Close})
+	testing.expect(t, handled)
+	testing.expect_value(t, c, cursor.Mouse_Cursor.Pointer)
+
+	// Horizontal Split Divider -> Col_Resize
+	node_h := splits.Split_Node{kind = .Horizontal}
+	c, handled = chrome_hit_cursor(Hit_Result{kind = .Split_Divider, split_node = &node_h})
+	testing.expect(t, handled)
+	testing.expect_value(t, c, cursor.Mouse_Cursor.Col_Resize)
+
+	// Vertical Split Divider -> Row_Resize
+	node_v := splits.Split_Node{kind = .Vertical}
+	c, handled = chrome_hit_cursor(Hit_Result{kind = .Split_Divider, split_node = &node_v})
+	testing.expect(t, handled)
+	testing.expect_value(t, c, cursor.Mouse_Cursor.Row_Resize)
+
+	// Modal -> Default
+	c, handled = chrome_hit_cursor(Hit_Result{kind = .Modal})
+	testing.expect(t, handled)
+	testing.expect_value(t, c, cursor.Mouse_Cursor.Default)
+
+	// Pane -> Not handled by chrome (handled = false)
+	c, handled = chrome_hit_cursor(Hit_Result{kind = .Pane})
+	testing.expect(t, !handled)
+
+	// None -> Not handled by chrome (handled = false)
+	c, handled = chrome_hit_cursor(Hit_Result{kind = .None})
+	testing.expect(t, !handled)
 }

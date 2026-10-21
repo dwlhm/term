@@ -8,6 +8,7 @@ package hit_test
 
 import "../tabs"
 import "../splits"
+import cursor "../../cursor"
 
 // Hit_Kind classifies the UI target under the cursor.
 Hit_Kind :: enum {
@@ -21,10 +22,11 @@ Hit_Kind :: enum {
 
 // Hit_Result records the hit test outcome.
 Hit_Result :: struct {
-	kind:    Hit_Kind,
-	index:   int,
-	pane_id: u32,
-	rect:    [4]f32,
+	kind:       Hit_Kind,
+	index:      int,
+	pane_id:    u32,
+	rect:       [4]f32,
+	split_node: ^splits.Split_Node,
 }
 
 // point_in_rect checks if a 2D point lies within [x, y, w, h].
@@ -41,32 +43,58 @@ _hit_test_splits :: proc(node: ^splits.Split_Node, pt: [2]f32, divider_tolerance
 
 	if node.kind == .Leaf {
 		return Hit_Result{
-			kind    = .Pane,
-			pane_id = node.pane_id,
-			rect    = node.rect,
+			kind       = .Pane,
+			pane_id    = node.pane_id,
+			rect       = node.rect,
+			split_node = node,
 		}
 	}
 
-	// Check if cursor is on split boundary
+	// 1. Check if children have internal divider hits first
+	if node.left != nil && point_in_rect(pt, node.left.rect) {
+		res := _hit_test_splits(node.left, pt, divider_tolerance)
+		if res.kind == .Split_Divider do return res
+	}
+	if node.right != nil && point_in_rect(pt, node.right.rect) {
+		res := _hit_test_splits(node.right, pt, divider_tolerance)
+		if res.kind == .Split_Divider do return res
+	}
+
+	// 2. Check if cursor is on this node's split boundary
 	ratio := splits.split_effective_ratio(node)
 	if node.kind == .Horizontal {
-		split_x := node.rect[0] + node.rect[2] * ratio
-		if pt.x >= (split_x - divider_tolerance) && pt.x <= (split_x + divider_tolerance) {
+		min_x := node.rect[0] + node.rect[2] * ratio
+		max_x := min_x
+		if node.left != nil && node.right != nil {
+			min_x = node.left.rect[0] + node.left.rect[2]
+			max_x = node.right.rect[0]
+		}
+		if pt.x >= (min_x - divider_tolerance) && pt.x <= (max_x + divider_tolerance) {
+			div_w := max(max_x - min_x, 1.0)
 			return Hit_Result{
-				kind = .Split_Divider,
-				rect = {split_x - divider_tolerance, node.rect[1], divider_tolerance * 2.0, node.rect[3]},
+				kind       = .Split_Divider,
+				rect       = {min_x - divider_tolerance, node.rect[1], div_w + divider_tolerance * 2.0, node.rect[3]},
+				split_node = node,
 			}
 		}
 	} else if node.kind == .Vertical {
-		split_y := node.rect[1] + node.rect[3] * ratio
-		if pt.y >= (split_y - divider_tolerance) && pt.y <= (split_y + divider_tolerance) {
+		min_y := node.rect[1] + node.rect[3] * ratio
+		max_y := min_y
+		if node.left != nil && node.right != nil {
+			min_y = node.left.rect[1] + node.left.rect[3]
+			max_y = node.right.rect[1]
+		}
+		if pt.y >= (min_y - divider_tolerance) && pt.y <= (max_y + divider_tolerance) {
+			div_h := max(max_y - min_y, 1.0)
 			return Hit_Result{
-				kind = .Split_Divider,
-				rect = {node.rect[0], split_y - divider_tolerance, node.rect[2], divider_tolerance * 2.0},
+				kind       = .Split_Divider,
+				rect       = {node.rect[0], min_y - divider_tolerance, node.rect[2], div_h + divider_tolerance * 2.0},
+				split_node = node,
 			}
 		}
 	}
 
+	// 3. Fall through to child panes
 	if node.left != nil && point_in_rect(pt, node.left.rect) {
 		res := _hit_test_splits(node.left, pt, divider_tolerance)
 		if res.kind != .None do return res
@@ -109,4 +137,22 @@ chrome_hit_test :: proc(t: ^tabs.Chrome_Tabs_Model, s: ^splits.Split_Node, pt: [
 	}
 
 	return {kind = .None}
+}
+
+// chrome_hit_cursor maps a Hit_Result into an autonomous platform-neutral Mouse_Cursor shape.
+chrome_hit_cursor :: proc(hit: Hit_Result) -> (cursor_shape: cursor.Mouse_Cursor, handled: bool) {
+	switch hit.kind {
+	case .Tab_Header, .Tab_Close:
+		return .Pointer, true
+	case .Split_Divider:
+		if hit.split_node != nil && hit.split_node.kind == .Vertical {
+			return .Row_Resize, true
+		}
+		return .Col_Resize, true
+	case .Modal:
+		return .Default, true
+	case .Pane, .None:
+		return .Default, false
+	}
+	return .Default, false
 }
