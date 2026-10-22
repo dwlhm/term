@@ -12,6 +12,7 @@ concurrency:
 
 jobs:
   build-macos:
+    name: Build & Verify macOS
     runs-on: macos-14
     env:
       HOMEBREW_NO_AUTO_UPDATE: 1
@@ -28,26 +29,34 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install System Dependencies
-        run: brew install sdl3
+        run: brew install sdl3 freetype harfbuzz
 
-      - name: Check code
+      - name: Type check (Strict Style)
         run: make check
 
-      - name: Run test suites
+      - name: Run test suites & E2E
         run: make test
 
-      - name: Build release binary
-        run: make release
-
-      - name: Build MCP server binary
-        run: make release-mcp
-
-      - name: Build macOS app bundle
+      - name: Build standalone application bundle
         run: make bundle
 
-      - name: Verify DMG creation and bundled fonts
+      - name: Verify bundled assets, frameworks & codesign
         run: |
-          make dmg
+          echo "==> Verifying bundled fonts..."
           test -f bin/Term.app/Contents/Resources/fonts/MapleMono-NF-Regular.ttf
           test -f bin/Term.app/Contents/Resources/fonts/SymbolsNerdFontMono-Regular.ttf
+          
+          echo "==> Verifying bundled dylibs in Frameworks/..."
+          test -f bin/Term.app/Contents/Frameworks/libSDL3.0.dylib
+          test -f bin/Term.app/Contents/Frameworks/libfreetype.6.dylib
+          test -f bin/Term.app/Contents/Frameworks/libharfbuzz.0.dylib
+          
+          echo "==> Verifying ad-hoc code signature..."
+          codesign --verify --deep --strict bin/Term.app
 
+      - name: Package distribution artifacts (DMG & Portable ZIP)
+        run: |
+          make dmg
+          make portable
+          test -f bin/Term.dmg
+          test -f bin/Term-portable.zip

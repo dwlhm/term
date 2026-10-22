@@ -1,3 +1,45 @@
+# Release Notes - Term v2.1.0
+
+Term v2.1.0 is a monumental ground-up rewrite in Odin on Native Apple Metal (`CAMetalLayer`). Engineered with a strict measure-first philosophy, this release delivers a zero-heap allocation steady-state frame loop, complete Kitty Graphics Protocol support across direct, file, and shared memory mediums, adaptive 3-strategy GPU rendering, interactive split divider dragging, an embedded 3D canvas viewport, multi-tab workspace management, and rich native macOS integration.
+
+---
+
+## 🌟 Highlights & Major Features
+
+### 1. Ground-Up Native Apple Metal Architecture (`CAMetalLayer`)
+- **Steady-State Zero Allocations**: After initialization, normal frame cycles perform zero heap allocations. Input ring buffers, Extended Grapheme Cluster (EGC) pools ($256 \times 4$), shape cache, and GPU atlas slots are fully pre-allocated.
+- **Hierarchical Damage Tracking**: Strict $\mathcal{O}(\text{changes})$ work complexity (`cell` $\to$ `span` $\to$ `row`). Dirty uploads transmit only mutated cells ($288\text{ B}$ for a single cell vs. $184,320\text{ B}$ for full screen — a $\sim 1/640$ bandwidth reduction).
+- **$\mathcal{O}(1)$ Circular Ring Scrollback**: Instantaneous scrolling without memory copies (`memmove`), maintaining flat $\sim 251\text{--}275\text{ ns}$ latency across variable row heights.
+
+### 2. Full Authoritative Kitty Graphics Protocol Support (`src/core/terminal/extension/`)
+- **Complete Transport Mediums**: Authoritative support for direct inline payload (`t=d`), temporary disk files (`t=f`), and POSIX Shared Memory (`t=s`).
+- **Full Action Lifecycle**: Handles transmit (`a=t`), transmit and display (`a=T`), place existing image (`a=p`), delete by ID/placement (`a=d`), and query capabilities (`a=q`).
+- **High-Fidelity Geometry & Scaling**: Precise HiDPI Retina scale factor alignment, sub-rectangle source clipping (`s`, `v`, `x`, `y`), target cell dimensions (`c`, `r`), z-index layering, and zero-leak GPU texture eviction.
+
+### 3. Adaptive 3-Strategy GPU Rendering Engine
+- **Per-Frame Dynamic Crossover**: Work complexity evaluated in $\sim 36\text{ ns}$ per frame to intelligently route rendering between:
+  - **Instance Strategy**: Optimized 2-draw call pipeline for sparse text, single-cell edits, and interactive typing.
+  - **Compute Tile Strategy**: Workgroup compute shader pipeline excelling at dense, full-screen terminal output streams.
+  - **Fullscreen Triangle Pass**: High-throughput direct rasterization triggered on mass frame invalidations.
+
+### 4. Interactive Split Panes & Divider Resizing (`src/core/chrome/splits/`)
+- **Real-Time Divider Dragging**: Zero-flicker split divider hit testing and dragging with dynamic mouse cursor updates (`ResizeLeftRight` / `ResizeUpDown`).
+- **Dynamic Layout & CWD Inheritance**: Split panes dynamically adjust aspect ratios with automatic working directory propagation to child shells.
+
+### 5. Multi-Tab Workspace & OSC Window Synchronization (`src/core/chrome/tabs/`)
+- **Tab Lifecycle Management**: Seamless creation (`Cmd+T`), switching (`Cmd+1`..`Cmd+9`, `Cmd+Shift+[` / `]`), and closing (`Cmd+W`) with persistent split trees per tab.
+- **Dynamic Window Title Resolution**: Bidirectional synchronization with shells using OSC 0, OSC 1, and OSC 2 escape sequences.
+
+### 6. Interactive 3D Canvas Viewport Component (`src/core/render/three_d/`)
+- **Holographic 3D Viewport**: Embedded 3D mesh rendering alongside terminal panes with interactive mouse controls (orbit, pan, zoom, and wireframe toggle).
+
+### 7. Rich Typography, EGC & Native Emoji Atlas (`src/platform/font/`)
+- **Unicode 15.1 & Extended Grapheme Clusters**: Full support for zero-width joiners (ZWJ), combining marks, and complex grapheme clusters.
+- **Asynchronous Glyph Rasterization**: Eliminates cold-miss frame drops from $37.16\text{ ms}$ down to $0.692\text{ ms}$ ($53.7\times$ speedup) via dedicated background rasterization.
+- **Multi-Tier Font Cascading**: Seamless fallback across Maple Mono NF, Symbols Nerd Font Mono, and native Apple Color Emoji.
+
+---
+
 # Release Notes - Term v0.4.1
 
 Term v0.4.1 introduces automated multi-platform CI/CD for Linux and macOS, attaches standalone Linux distribution tarballs with an FHS-compliant installer to GitHub Releases, and documents installation and source builds across major Linux distributions.

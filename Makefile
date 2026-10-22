@@ -21,7 +21,7 @@ TEST_FLAGS ?= -define:ODIN_TEST_THREADS=1
 DEBUG_FLAGS ?= -debug
 RELEASE_FLAGS ?= -o:speed -no-bounds-check
 
-.PHONY: all term run term-debug harness-features run-harness-features harness-render-chrome run-harness-render-chrome harness-render-terminal run-harness-render-terminal harness-render-composer run-harness-composer test test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-gpu check clean help bench bench-quick
+.PHONY: all term release run term-debug harness-features run-harness-features harness-render-chrome run-harness-render-chrome harness-render-terminal run-harness-render-terminal harness-render-composer run-harness-composer test test-app test-font test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-gpu check clean help bench bench-quick bundle dmg portable dist install uninstall
 
 all: term harness-features harness-render-chrome harness-render-terminal harness-composer
 
@@ -29,12 +29,63 @@ term:
 	@mkdir -p $(OUT_DIR)
 	$(ODIN) build src/app/term -out:$(OUT_DIR)/term $(RELEASE_FLAGS) $(COMMON_FLAGS)
 
+release: term
+
 term-debug:
 	@mkdir -p $(OUT_DIR)
 	$(ODIN) build src/app/term -out:$(OUT_DIR)/term $(DEBUG_FLAGS) $(COMMON_FLAGS)
 
 run: term
 	./$(OUT_DIR)/term
+
+ifeq ($(UNAME_S),Darwin)
+bundle: term
+	@mkdir -p $(OUT_DIR)/Term.app/Contents/MacOS
+	@mkdir -p $(OUT_DIR)/Term.app/Contents/Resources
+	cp $(OUT_DIR)/term $(OUT_DIR)/Term.app/Contents/MacOS/
+	cp assets/Info.plist $(OUT_DIR)/Term.app/Contents/Info.plist
+	cp assets/term.icns $(OUT_DIR)/Term.app/Contents/Resources/
+	rm -rf $(OUT_DIR)/Term.app/Contents/Resources/fonts
+	cp -R assets/fonts $(OUT_DIR)/Term.app/Contents/Resources/
+	cp THIRD_PARTY_NOTICES.md $(OUT_DIR)/Term.app/Contents/Resources/
+	@chmod +x scripts/bundle_frameworks.sh
+	scripts/bundle_frameworks.sh $(OUT_DIR)/Term.app
+
+install: bundle
+	@echo "Installing Term.app to /Applications..."
+	@rm -rf /Applications/Term.app
+	ditto $(OUT_DIR)/Term.app /Applications/Term.app
+	@echo "Installed Term.app to /Applications successfully."
+
+uninstall:
+	@echo "Uninstalling Term.app from /Applications..."
+	@rm -rf /Applications/Term.app
+	@echo "Term.app uninstalled."
+
+dmg: bundle
+	@rm -rf $(OUT_DIR)/dmg_staging
+	@rm -f $(OUT_DIR)/Term.dmg
+	@hdiutil detach "/Volumes/Term"* -force 2>/dev/null || true
+	@mkdir -p $(OUT_DIR)/dmg_staging
+	cp -R $(OUT_DIR)/Term.app $(OUT_DIR)/dmg_staging/
+	ln -s /Applications $(OUT_DIR)/dmg_staging/Applications
+	for i in 1 2 3 4 5; do \
+		hdiutil create -volname "Term" -srcfolder $(OUT_DIR)/dmg_staging -ov -format UDZO -fs HFS+ $(OUT_DIR)/Term.dmg && break || { \
+			echo "hdiutil create failed (attempt $$i), retrying in 2s..."; \
+			hdiutil detach "/Volumes/Term"* -force 2>/dev/null || true; \
+			sleep 2; \
+		}; \
+	done
+	@rm -rf $(OUT_DIR)/dmg_staging
+	@echo "Created $(OUT_DIR)/Term.dmg successfully."
+
+portable: bundle
+	@rm -f $(OUT_DIR)/Term-portable.zip
+	cd $(OUT_DIR) && zip -r -y -q Term-portable.zip Term.app
+	@echo "Created $(OUT_DIR)/Term-portable.zip successfully."
+
+dist: dmg portable
+endif
 
 harness-render-chrome:
 	@mkdir -p $(OUT_DIR)
@@ -72,13 +123,19 @@ bench-session:
 	$(ODIN) build src/cmd/bench_session -out:$(OUT_DIR)/bench_session $(RELEASE_FLAGS) $(COMMON_FLAGS)
 	./$(OUT_DIR)/bench_session
 
-test: test-terminal test-pty test-session test-tabs test-multiplexer test-interaction test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-gpu test-features test-e2e
+test: test-app test-terminal test-pty test-font test-session test-tabs test-multiplexer test-interaction test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-gpu test-features test-e2e
+
+test-app:
+	$(ODIN) test src/app/term $(TEST_FLAGS)
 
 test-terminal:
 	$(ODIN) test src/core/terminal/tests $(TEST_FLAGS)
 
 test-pty:
 	$(ODIN) test src/platform/pty/tests $(TEST_FLAGS)
+
+test-font:
+	$(ODIN) test src/platform/font/tests $(TEST_FLAGS)
 
 test-session:
 	$(ODIN) test src/features/session/tests $(TEST_FLAGS)
@@ -186,13 +243,21 @@ check:
 	$(ODIN) check src/app/term $(CHECK_FLAGS)
 
 clean:
-	rm -rf $(OUT_DIR) $(OUT_DIR)/Term.app $(OUT_DIR)/Term.dmg $(OUT_DIR)/dmg_staging build term-app app.bin *.dSYM
+	rm -rf $(OUT_DIR) $(OUT_DIR)/Term.app $(OUT_DIR)/Term.dmg $(OUT_DIR)/Term-portable.zip $(OUT_DIR)/dmg_staging build term-app app.bin *.dSYM
 
 help:
 	@echo "Usage: make [target]"
 	@echo ""
 	@echo "Targets:"
 	@echo "  all                         Build both active GUI harnesses (default)"
+	@echo "  term                        Build release terminal binary to bin/term"
+	@echo "  release                     Alias for term (build release binary)"
+	@echo "  bundle                      Create macOS self-contained application bundle (Term.app)"
+	@echo "  dmg                         Create macOS disk image installer (Term.dmg)"
+	@echo "  portable                    Create macOS portable archive (Term-portable.zip)"
+	@echo "  dist                        Create all distribution packages (dmg + portable)"
+	@echo "  install                     Install Term.app to /Applications"
+	@echo "  uninstall                   Remove Term.app from /Applications"
 	@echo "  harness-render-chrome       Build standalone GUI harness & chrome preview benchmark"
 	@echo "  harness-render-terminal     Build standalone terminal render harness"
 	@echo "  harness-render-composer     Alias for harness-render-chrome"
