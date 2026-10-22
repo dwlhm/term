@@ -28,6 +28,14 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Set up Odin Vendor Libraries (WGPU Native)
+        run: |
+          ODIN_ROOT=$(odin root)
+          WGPU_DIR="$ODIN_ROOT/vendor/wgpu/lib/wgpu-macos-aarch64-release"
+          mkdir -p "$WGPU_DIR"
+          curl -sSL "https://github.com/gfx-rs/wgpu-native/releases/download/v29.0.1.1/wgpu-macos-aarch64-release.zip" -o /tmp/wgpu.zip
+          unzip -q -o /tmp/wgpu.zip -d "$WGPU_DIR"
+
       - name: Install System Dependencies
         run: brew install sdl3 freetype harfbuzz
 
