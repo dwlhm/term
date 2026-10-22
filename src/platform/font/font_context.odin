@@ -5,6 +5,8 @@ package platform_font
 
 import "core:math"
 import "core:os"
+import "core:path/filepath"
+import "core:strings"
 import cell "../../core/terminal/cell"
 
 FONT_DISCOVERY_PATHS := []string{
@@ -43,6 +45,48 @@ Font_Context :: struct {
 	primary_baseline_px: int,
 }
 
+// resolve_font_path locates font assets across bundle resources, portable directories, or system paths.
+resolve_font_path :: proc(path: string, allocator := context.temp_allocator) -> (resolved: string, ok: bool) {
+	if os.is_file(path) {
+		return path, true
+	}
+
+	prefix :: "assets/fonts/"
+	if strings.has_prefix(path, prefix) {
+		filename := path[len(prefix):]
+		exec_path, err := os.get_executable_path(allocator)
+		if err == nil && len(exec_path) > 0 {
+			exec_dir := filepath.dir(exec_path)
+
+			// 1. macOS Application Bundle: Term.app/Contents/MacOS/../Resources/fonts/<file>
+			bundle_res, _ := filepath.join({exec_dir, "../Resources/fonts", filename}, allocator)
+			if os.is_file(bundle_res) {
+				return bundle_res, true
+			}
+
+			// 2. Relative to executable parent (portable folder or bin/../assets/fonts/<file>)
+			portable_res, _ := filepath.join({exec_dir, "../assets/fonts", filename}, allocator)
+			if os.is_file(portable_res) {
+				return portable_res, true
+			}
+
+			// 3. Adjacent fonts folder: <exec_dir>/fonts/<file>
+			adjacent_res, _ := filepath.join({exec_dir, "fonts", filename}, allocator)
+			if os.is_file(adjacent_res) {
+				return adjacent_res, true
+			}
+
+			// 4. Linux FHS prefix: <exec_dir>/../share/term/fonts/<file>
+			fhs_res, _ := filepath.join({exec_dir, "../share/term/fonts", filename}, allocator)
+			if os.is_file(fhs_res) {
+				return fhs_res, true
+			}
+		}
+	}
+
+	return "", false
+}
+
 font_context_init :: proc(fc: ^Font_Context, pixel_size: f32 = 32.0) -> bool {
 	if fc == nil do return false
 	fc.pixel_size = pixel_size
@@ -52,11 +96,11 @@ font_context_init :: proc(fc: ^Font_Context, pixel_size: f32 = 32.0) -> bool {
 
 	// 1. Discover Primary Font
 	for p in FONT_DISCOVERY_PATHS {
-		if os.is_file(p) {
+		if path, ok := resolve_font_path(p, context.temp_allocator); ok {
 			err: Font_Error
-			if font_rasterizer_init(&fc.rasterizer, p, pixel_size, &err) {
+			if font_rasterizer_init(&fc.rasterizer, path, pixel_size, &err) {
 				fc.has_font = true
-				fc.active_path = p
+				fc.active_path = strings.clone(path)
 				break
 			}
 		}
@@ -70,11 +114,11 @@ font_context_init :: proc(fc: ^Font_Context, pixel_size: f32 = 32.0) -> bool {
 	// 2. Discover Fallback Fonts (Symbols, Icons, System glyphs)
 	for p in FALLBACK_DISCOVERY_PATHS {
 		if fc.fallback_count >= MAX_FALLBACKS do break
-		if p == fc.active_path do continue
-		if os.is_file(p) {
+		if path, ok := resolve_font_path(p, context.temp_allocator); ok {
+			if path == fc.active_path do continue
 			err: Font_Error
-			if font_rasterizer_init(&fc.fallbacks[fc.fallback_count], p, pixel_size, &err) {
-				fc.fallback_paths[fc.fallback_count] = p
+			if font_rasterizer_init(&fc.fallbacks[fc.fallback_count], path, pixel_size, &err) {
+				fc.fallback_paths[fc.fallback_count] = strings.clone(path)
 				fc.fallback_count += 1
 			}
 		}
@@ -89,8 +133,16 @@ font_context_destroy :: proc(fc: ^Font_Context) {
 		font_rasterizer_destroy(&fc.rasterizer)
 		fc.has_font = false
 	}
+	if len(fc.active_path) > 0 {
+		delete(fc.active_path)
+		fc.active_path = ""
+	}
 	for i in 0..<fc.fallback_count {
 		font_rasterizer_destroy(&fc.fallbacks[i])
+		if len(fc.fallback_paths[i]) > 0 {
+			delete(fc.fallback_paths[i])
+			fc.fallback_paths[i] = ""
+		}
 	}
 	fc.fallback_count = 0
 }

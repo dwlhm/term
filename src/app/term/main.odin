@@ -49,6 +49,7 @@ Term_App :: struct {
 	mux:           mux_feat.Multiplexer,
 	diag:          Diagnostics,
 	scroll_speed:  f32,
+	default_cwd:   string,
 }
 
 app_apply_config :: proc(app: ^Term_App, opts: Cli_Options = {}) {
@@ -96,6 +97,7 @@ app_apply_config :: proc(app: ^Term_App, opts: Cli_Options = {}) {
 app_init :: proc(app: ^Term_App, opts: Cli_Options = {}) -> bool {
 	diagnostics_init(&app.diag, opts)
 	app.config = config_load()
+	app.default_cwd = app_resolve_initial_cwd(&app.config, opts)
 	win_w, win_h := config_resolve_window_dimensions(&app.config)
 
 	// First initialize window with user-configured bounds (or default 1280x800)

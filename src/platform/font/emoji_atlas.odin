@@ -48,8 +48,8 @@ emoji_atlas_init :: proc(ea: ^Emoji_Atlas_Manager, pixel_size: f32) -> bool {
 	ea.row_height = 0
 	ea.has_font = false
 
-	for path in EMOJI_FONT_CANDIDATES {
-		if os.is_file(path) {
+	for p in EMOJI_FONT_CANDIDATES {
+		if path, ok := resolve_font_path(p, context.temp_allocator); ok {
 			err: Font_Error
 			if font_rasterizer_init(&ea.face, path, pixel_size, &err) {
 				ea.has_font = true
@@ -71,8 +71,8 @@ emoji_atlas_reset :: proc(ea: ^Emoji_Atlas_Manager, pixel_size: f32) -> bool {
 		font_rasterizer_destroy(&ea.face)
 		ea.has_font = false
 	}
-	for path in EMOJI_FONT_CANDIDATES {
-		if os.is_file(path) {
+	for p in EMOJI_FONT_CANDIDATES {
+		if path, ok := resolve_font_path(p, context.temp_allocator); ok {
 			err: Font_Error
 			if font_rasterizer_init(&ea.face, path, pixel_size, &err) {
 				ea.has_font = true

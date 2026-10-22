@@ -38,8 +38,16 @@ app_spawn_terminal_pane :: proc(app: ^Term_App, rows: int = 24, cols: int = 80) 
 
 	cwd := ""
 	if focused := mux_feat.multiplexer_get_focused_pane(&app.mux); focused != nil && focused.session != nil {
-		cwd = sess_feat.session_get_cwd_path(focused.session)
+		scratch_cwd: [1024]u8
+		cwd = sess_feat.session_get_current_cwd(focused.session, scratch_cwd[:])
 	}
+	if len(cwd) == 0 && app != nil {
+		cwd = app.default_cwd
+	}
+	if len(cwd) == 0 || cwd == "/" {
+		cwd = os.get_env("HOME", context.temp_allocator)
+	}
+	cwd = config_expand_path(cwd)
 
 	cw := app.layout.metrics.cell_w if app != nil && app.layout.metrics.cell_w > 0 else 19.0
 	ch := app.layout.metrics.cell_h if app != nil && app.layout.metrics.cell_h > 0 else 43.0
@@ -246,12 +254,16 @@ app_open_in_finder :: proc(app: ^Term_App) {
 	p := mux_feat.multiplexer_get_focused_pane(&app.mux)
 	cwd := ""
 	if p != nil && p.session != nil {
-		cwd = sess_feat.session_get_cwd_path(p.session)
+		scratch_cwd: [1024]u8
+		cwd = sess_feat.session_get_current_cwd(p.session, scratch_cwd[:])
+	}
+	if len(cwd) == 0 && app != nil {
+		cwd = app.default_cwd
 	}
 	if len(cwd) == 0 {
 		cwd = os.get_env("PWD", context.temp_allocator)
 	}
-	if len(cwd) == 0 do cwd = os.get_env("HOME", context.temp_allocator)
+	if len(cwd) == 0 || cwd == "/" do cwd = os.get_env("HOME", context.temp_allocator)
 	if len(cwd) > 0 {
 		cmd := fmt.tprintf("open \"%s\"", cwd)
 		cstr := strings.clone_to_cstring(cmd, context.temp_allocator)

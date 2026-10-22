@@ -12,6 +12,7 @@ Cli_Options :: struct {
 	blur_override:    int,    // 0 = no override, 1 = force disable (--no-blur), 2 = force enable (--blur)
 	opacity_override: f32,    // -1.0 = no override, >= 0.0 = override (--opacity <val>)
 	scroll_speed_override: f32, // -1.0 = no override, > 0.0 = override (--scroll-speed <val>)
+	working_dir_override:  string, // -d, --working-directory: initial working directory
 }
 
 // app_parse_cli_args parses command-line arguments.
@@ -28,6 +29,7 @@ app_parse_cli_args :: proc(args: []string) -> (opts: Cli_Options, should_continu
 			return {}, false
 		case arg == "-h" || arg == "--help":
 			fmt.println("Usage: term [options]")
+			fmt.println("  -d, --working-directory <dir> Initial working directory")
 			fmt.println("  -e <cmd>             Execute command in initial shell")
 			fmt.println("  --blur               Enable macOS native background blur (frosted glass)")
 			fmt.println("  --no-blur            Disable background blur (opaque window)")
@@ -40,6 +42,9 @@ app_parse_cli_args :: proc(args: []string) -> (opts: Cli_Options, should_continu
 		case arg == "-e" && has_value:
 			i += 1
 			opts.initial_cmd = args[i]
+		case (arg == "-d" || arg == "--working-directory") && has_value:
+			i += 1
+			opts.working_dir_override = args[i]
 		case arg == "--blur":
 			opts.blur_override = 2
 		case arg == "--no-blur":

@@ -94,6 +94,7 @@ for dylib in "${DYLIBS[@]}"; do
 done
 
 echo "==> Updating main executable RPATH and dependencies..."
+chmod 755 "$EXEC"
 if ! otool -l "$EXEC" | grep -A 2 LC_RPATH 2>/dev/null | grep -q "@executable_path/../Frameworks"; then
     echo "  Adding @executable_path/../Frameworks to $EXEC"
     install_name_tool -add_rpath "@executable_path/../Frameworks" "$EXEC"
