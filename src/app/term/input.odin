@@ -14,7 +14,27 @@ Input_Encode_Result :: struct {
 	len:   int,
 }
 
-input_encode_key :: proc(key: sdl3.Keycode, mod: sdl3.Keymod, app_cursor: bool = false) -> (res: Input_Encode_Result, ok: bool) {
+input_encode_key :: proc(
+	key: sdl3.Keycode,
+	mod: sdl3.Keymod,
+	app_cursor: bool = false,
+	kitty_flags: u8 = 0,
+	kitty_event: u8 = INPUT_EVENT_PRESS,
+) -> (res: Input_Encode_Result, ok: bool) {
+	// Legacy byte sequences cannot express a key *release*: emitting one would
+	// duplicate the keypress, so releases only exist for enhanced encodings.
+	if kitty_event == INPUT_EVENT_RELEASE && !_kitty_should_encode(key, mod, kitty_flags) {
+		return {}, false
+	}
+
+	// Kitty keyboard protocol takes precedence for the keys it disambiguates.
+	if kitty_flags != 0 && _kitty_should_encode(key, mod, kitty_flags) {
+		if encoded, encoded_ok := input_encode_key_kitty(key, mod, kitty_flags, kitty_event);
+		   encoded_ok {
+			return encoded, true
+		}
+	}
+
 	is_shift := (mod & sdl3.KMOD_SHIFT) != sdl3.KMOD_NONE
 	is_alt   := (mod & sdl3.KMOD_ALT)   != sdl3.KMOD_NONE
 	is_ctrl  := (mod & sdl3.KMOD_CTRL)  != sdl3.KMOD_NONE
@@ -133,22 +153,52 @@ input_encode_key :: proc(key: sdl3.Keycode, mod: sdl3.Keymod, app_cursor: bool =
 		res.len = 1
 		return res, true
 	case sdl3.K_HOME:
-		res.bytes[0] = 0x1b; res.bytes[1] = '['; res.bytes[2] = 'H'; res.len = 3
+		if xterm_mod > 1 {
+			s := fmt.bprintf(res.bytes[:], "\x1b[1;%dH", xterm_mod)
+			res.len = len(s)
+		} else {
+			res.bytes[0] = 0x1b; res.bytes[1] = '['; res.bytes[2] = 'H'; res.len = 3
+		}
 		return res, true
 	case sdl3.K_END:
-		res.bytes[0] = 0x1b; res.bytes[1] = '['; res.bytes[2] = 'F'; res.len = 3
+		if xterm_mod > 1 {
+			s := fmt.bprintf(res.bytes[:], "\x1b[1;%dF", xterm_mod)
+			res.len = len(s)
+		} else {
+			res.bytes[0] = 0x1b; res.bytes[1] = '['; res.bytes[2] = 'F'; res.len = 3
+		}
 		return res, true
 	case sdl3.K_INSERT:
-		res.bytes[0] = 0x1b; res.bytes[1] = '['; res.bytes[2] = '2'; res.bytes[3] = '~'; res.len = 4
+		if xterm_mod > 1 {
+			s := fmt.bprintf(res.bytes[:], "\x1b[2;%d~", xterm_mod)
+			res.len = len(s)
+		} else {
+			res.bytes[0] = 0x1b; res.bytes[1] = '['; res.bytes[2] = '2'; res.bytes[3] = '~'; res.len = 4
+		}
 		return res, true
 	case sdl3.K_DELETE:
-		res.bytes[0] = 0x1b; res.bytes[1] = '['; res.bytes[2] = '3'; res.bytes[3] = '~'; res.len = 4
+		if xterm_mod > 1 {
+			s := fmt.bprintf(res.bytes[:], "\x1b[3;%d~", xterm_mod)
+			res.len = len(s)
+		} else {
+			res.bytes[0] = 0x1b; res.bytes[1] = '['; res.bytes[2] = '3'; res.bytes[3] = '~'; res.len = 4
+		}
 		return res, true
 	case sdl3.K_PAGEUP:
-		res.bytes[0] = 0x1b; res.bytes[1] = '['; res.bytes[2] = '5'; res.bytes[3] = '~'; res.len = 4
+		if xterm_mod > 1 {
+			s := fmt.bprintf(res.bytes[:], "\x1b[5;%d~", xterm_mod)
+			res.len = len(s)
+		} else {
+			res.bytes[0] = 0x1b; res.bytes[1] = '['; res.bytes[2] = '5'; res.bytes[3] = '~'; res.len = 4
+		}
 		return res, true
 	case sdl3.K_PAGEDOWN:
-		res.bytes[0] = 0x1b; res.bytes[1] = '['; res.bytes[2] = '6'; res.bytes[3] = '~'; res.len = 4
+		if xterm_mod > 1 {
+			s := fmt.bprintf(res.bytes[:], "\x1b[6;%d~", xterm_mod)
+			res.len = len(s)
+		} else {
+			res.bytes[0] = 0x1b; res.bytes[1] = '['; res.bytes[2] = '6'; res.bytes[3] = '~'; res.len = 4
+		}
 		return res, true
 	}
 

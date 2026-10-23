@@ -8,6 +8,7 @@ import "core:math"
 import cursor "../../core/cursor"
 import contract "../../core/render/contract"
 import chrome_dl "../../core/chrome/draw_list"
+import chrome_modals "../../core/chrome/modals"
 import chrome_splits "../../core/chrome/splits"
 import chrome_render "../../core/render/chrome"
 import tabs_feat "../../features/tabs"
@@ -97,10 +98,14 @@ chrome_view_build_draw_list :: proc(
 	tabs: ^tabs_feat.Tabs_Manager,
 	mux: ^mux_feat.Multiplexer,
 	cmd_center: ^Command_Center_State,
+	search: ^Search_State,
 	cursor_state: ^Cursor_State,
 	time_elapsed: f32,
 	hovered_divider: ^chrome_splits.Split_Node = nil,
 	dragged_divider: ^chrome_splits.Split_Node = nil,
+	hovered_scrollbar: u32 = 0,
+	dragged_scrollbar: u32 = 0,
+	session_dlg: ^chrome_modals.Session_Dialog_State = nil,
 ) -> (dirty: bool) {
 	if cv == nil do return false
 
@@ -126,7 +131,16 @@ chrome_view_build_draw_list :: proc(
 				if pane.session.term.parser.cursor.visible {
 					cur_c := pane.session.term.parser.cursor.col
 					cur_r := pane.session.term.parser.cursor.row + pane.session.scroll_offset
-					rows_visible := int((pane.rect[3] - 2.0 * layout.metrics.pane_pad_y) / layout.metrics.cell_h)
+					cur_pad_x, cur_pad_y := pane_grid_pad(
+						pane.rect,
+						pane.session.term.rows,
+						pane.session.term.cols,
+						layout.metrics.cell_w,
+						layout.metrics.cell_h,
+						layout.metrics.pane_pad_x,
+						layout.metrics.pane_pad_y,
+					)
+					rows_visible := int((pane.rect[3] - 2.0 * cur_pad_y) / layout.metrics.cell_h)
 
 					if cur_r >= 0 && cur_r < rows_visible {
 						cur_shape: Cursor_Shape = .Block
@@ -136,7 +150,7 @@ chrome_view_build_draw_list :: proc(
 						case .Underline: cur_shape = .Underline
 						}
 
-						cur_rect := cursor_compute_rect(cur_c, cur_r, pane.rect, layout.metrics.cell_w, layout.metrics.cell_h, layout.metrics.pane_pad_x, layout.metrics.pane_pad_y, cur_shape)
+						cur_rect := cursor_compute_rect(cur_c, cur_r, pane.rect, layout.metrics.cell_w, layout.metrics.cell_h, cur_pad_x, cur_pad_y, cur_shape)
 
 						// Clip cursor to pane bounds
 						if cur_rect[0] + cur_rect[2] <= pane.rect[0] + pane.rect[2] &&
@@ -161,16 +175,24 @@ chrome_view_build_draw_list :: proc(
 					}
 				}
 
-				// 2b. Draw scrollback indicator thumb if scrolled into history
-				if pane.session.term.grid.history_count > 0 && pane.session.scroll_offset > 0 {
-					hist := f32(pane.session.term.grid.history_count)
-					off := f32(pane.session.scroll_offset)
-					track_h := pane.rect[3] - 16.0
-					rows_vis := (pane.rect[3] - 2.0 * layout.metrics.pane_pad_y) / layout.metrics.cell_h
-					thumb_h := max(20.0, track_h * (rows_vis / (hist + rows_vis)))
-					thumb_y := pane.rect[1] + 8.0 + (track_h - thumb_h) * (1.0 - (off / hist))
-					thumb_x := pane.rect[0] + pane.rect[2] - 5.0
-					chrome_dl.ui_draw_rounded_rect(&cv.draw_list, {thumb_x, thumb_y, 3.0, thumb_h}, {0.6, 0.7, 0.9, 0.45}, 1.5)
+				// 2b. Scrollback thumb: always visible with history, brighter when
+				// hovered or dragged (geometry comes from scrollbar.odin so the hit
+				// test and the drawing can never disagree).
+				geometry := scrollbar_geometry_for_pane(&pane, layout.metrics.scale)
+				if geometry.valid {
+					active := dragged_scrollbar == pane.id
+					hovered := hovered_scrollbar == pane.id
+					alpha: f32 = 0.35
+					if active do alpha = 0.85
+					else if hovered do alpha = 0.60
+					width := SCROLLBAR_WIDTH * layout.metrics.scale if (active || hovered) else 3.0 * layout.metrics.scale
+					thumb_x := pane.rect[0] + pane.rect[2] - (SCROLLBAR_WIDTH + SCROLLBAR_MARGIN) * layout.metrics.scale
+					chrome_dl.ui_draw_rounded_rect(
+						&cv.draw_list,
+						{thumb_x, geometry.thumb_y, width, geometry.thumb_h},
+						{0.70, 0.78, 0.92, alpha},
+						width * 0.5,
+					)
 				}
 			}
 		}
@@ -301,9 +323,45 @@ chrome_view_build_draw_list :: proc(
 		}
 	}
 
+	// 3b. Search bar (Cmd+F)
+	if search != nil && search.active && layout != nil {
+		scale := layout.metrics.scale
+		bar_w := 340.0 * scale
+		bar_h := 28.0 * scale
+		x := layout.screen_w - bar_w - 20.0 * scale
+		y := layout.metrics.tab_bar_height + 10.0 * scale
+		chrome_dl.ui_draw_rounded_rect(&cv.draw_list, {x, y, bar_w, bar_h}, {0.10, 0.12, 0.17, 0.97}, bar_h * 0.5)
+		chrome_dl.ui_draw_border(&cv.draw_list, {x, y, bar_w, bar_h}, {0.30, 0.55, 0.90, 0.65}, bar_h * 0.5)
+
+		query := string(search.query[:search.query_len])
+		label := query if len(query) > 0 else "Find in scrollback…"
+		label_color: [4]f32 = {0.92, 0.94, 0.98, 1.0} if len(query) > 0 else {0.55, 0.58, 0.66, 1.0}
+		text_h := 14.0 * scale
+		chrome_dl.ui_draw_text(
+			&cv.draw_list,
+			{x + 12.0 * scale, y + (bar_h - text_h) * 0.5, bar_w - 70.0 * scale, text_h},
+			label,
+			label_color,
+		)
+
+		status := "0/0" if len(query) == 0 else ("1/1" if search.has_match else "0/0")
+		status_color: [4]f32 = {0.55, 0.58, 0.66, 1.0} if !search.has_match else {0.45, 0.75, 0.55, 1.0}
+		chrome_dl.ui_draw_text(
+			&cv.draw_list,
+			{x + bar_w - 52.0 * scale, y + (bar_h - text_h) * 0.5, 40.0 * scale, text_h},
+			status,
+			status_color,
+		)
+	}
+
 	// 4. Modal Overlay (Command Center or Tab Overview)
 	if cmd_center != nil && cmd_center.visible {
 		command_center_emit_draw_list(cmd_center, tabs, &cv.draw_list, layout.screen_w, layout.screen_h, layout.metrics.scale)
+	}
+
+	// 5. Session Safety Confirmation Modal Sheet
+	if session_dlg != nil && session_dlg.visible {
+		chrome_modals.session_dialog_emit_draw_list(session_dlg, &cv.draw_list, layout.screen_w, layout.screen_h, layout.metrics.scale)
 	}
 
 	screen_w := layout.screen_w if layout != nil else f32(cv.rend.width)
@@ -339,7 +397,7 @@ chrome_view_build_and_render :: proc(
 	target_view: contract.Gpu_TextureView,
 ) {
 	if cv == nil || rawptr(target_view) == nil do return
-	_ = chrome_view_build_draw_list(cv, layout, tabs, mux, cmd_center, cursor_state, time_elapsed)
+	_ = chrome_view_build_draw_list(cv, layout, tabs, mux, cmd_center, nil, cursor_state, time_elapsed)
 	_ = chrome_render.chrome_renderer_render(&cv.rend, &cv.draw_list, target_view)
 }
 

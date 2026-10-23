@@ -171,6 +171,8 @@ _app_frame_raster :: proc(user: rawptr, enc: contract.Gpu_CommandEncoder, l: ^co
 					app.layout.screen_w,
 					app.layout.screen_h,
 					load_op,
+					app.hyperlink_openable_bg,
+					app.hyperlink_blocked_bg,
 				)
 				strat_name: string
 				switch strat {
@@ -212,10 +214,14 @@ app_render_frame :: proc(app: ^Term_App, term_dirty: bool = true) {
 		&app.tabs_mgr,
 		&app.mux,
 		&app.cmd_center,
+		&app.search,
 		&app.cursor,
 		app.time_elapsed,
 		app.mouse.hovered_split_node,
 		app.mouse.drag_split_node,
+		app.mouse.hovered_scrollbar,
+		app.mouse.scrollbar_pane_id,
+		&app.session_dlg,
 	)
 
 	if term_dirty {

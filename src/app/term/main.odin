@@ -6,6 +6,7 @@ package term
 
 import "core:fmt"
 import "core:os"
+import "core:strings"
 import "core:time"
 import "vendor:sdl3"
 
@@ -14,13 +15,14 @@ import plat_clip "../../platform/clipboard"
 import plat_font "../../platform/font"
 import contract "../../core/render/contract"
 import damage "../../core/terminal/damage"
+import chrome_modals "../../core/chrome/modals"
 import wgpu_backend "../../platform/gpu/wgpu"
 import tabs_feat "../../features/tabs"
 import mux_feat "../../features/multiplexer"
 import sess_feat "../../features/session"
 import telemetry "../../features/telemetry"
 
-VERSION: string : "2.1.0"
+VERSION: string : "2.1.1"
 
 Term_App :: struct {
 	config:        App_Config,
@@ -43,13 +45,24 @@ Term_App :: struct {
 	mouse:         Mouse_State,
 	cursor:        Cursor_State,
 	clipboard:     Clipboard_Bridge,
+	search:        Search_State,
 	cmd_center:    Command_Center_State,
 
 	tabs_mgr:      tabs_feat.Tabs_Manager,
 	mux:           mux_feat.Multiplexer,
 	diag:          Diagnostics,
+	sync_output:   Sync_Output_State,
+	session_reg:   sess_feat.Session_Registry,
+	session_dlg:   chrome_modals.Session_Dialog_State,
+	menu_bar:      rawptr,
+	last_mb_sync:  time.Time,
+	// Set when a key event was already encoded byte-exactly (Alt/Option combos),
+	// so the follow-up TEXT_INPUT for the same keystroke is not sent twice.
+	suppress_text_input: bool,
 	scroll_speed:  f32,
 	default_cwd:   string,
+	hyperlink_openable_bg: [4]f32,
+	hyperlink_blocked_bg:  [4]f32,
 }
 
 app_apply_config :: proc(app: ^Term_App, opts: Cli_Options = {}) {
@@ -59,6 +72,7 @@ app_apply_config :: proc(app: ^Term_App, opts: Cli_Options = {}) {
 	if opts.scroll_speed_override > 0.0 {
 		app.scroll_speed = opts.scroll_speed_override
 	}
+	app.hyperlink_openable_bg, app.hyperlink_blocked_bg = config_resolve_hyperlink_colors(&app.config)
 
 	scale := app.window.pixel_ratio if app.window.pixel_ratio > 0 else 1.0
 	pad_x, pad_y := config_resolve_padding(&app.config)
@@ -90,8 +104,59 @@ app_apply_config :: proc(app: ^Term_App, opts: Cli_Options = {}) {
 	base_font_size := config_resolve_effective_font_size(&app.config)
 	app_apply_font_size(app, base_font_size)
 
+	// Theme Palette overrides
+	if palette, has_palette := config_resolve_theme_palette(&app.config); has_palette {
+		theme_apply_palette(palette)
+		for &pane in app.mux.panes {
+			if pane.kind == .Terminal && pane.session != nil {
+				damage.damage_mark_all(&pane.session.term.damage)
+			}
+		}
+	}
+
+	// Custom Font reload if path changed
+	if custom_font, ok := config_resolve_font_path(&app.config); ok {
+		if custom_font != app.text_atlas.font_ctx.active_path {
+			app_apply_custom_font(app, custom_font, base_font_size)
+		}
+	}
+
 	app_sync_layout_and_winsize(app)
 	app.layout.tab_bar_reveal_timer = 2.0
+}
+
+app_apply_custom_font :: proc(app: ^Term_App, font_path: string, size: f32) -> bool {
+	if app == nil || len(font_path) == 0 do return false
+	scale := app.window.pixel_ratio if app.window.pixel_ratio > 0 else 1.0
+	font_size := size * scale
+
+	err: plat_font.Font_Error
+	if !plat_font.font_rasterizer_init(&app.text_atlas.font_ctx.rasterizer, font_path, font_size, &err) {
+		return false
+	}
+	if len(app.text_atlas.font_ctx.active_path) > 0 {
+		delete(app.text_atlas.font_ctx.active_path)
+	}
+	app.text_atlas.font_ctx.active_path = strings.clone(font_path)
+	if app.text_atlas.font_ctx.rasterizer.metrics.cell_width > 0 {
+		app.text_atlas.cell_w = app.text_atlas.font_ctx.rasterizer.metrics.cell_width
+		app.text_atlas.cell_h = app.text_atlas.font_ctx.rasterizer.metrics.cell_height
+		app.layout.metrics.cell_w = app.text_atlas.cell_w
+		app.layout.metrics.cell_h = app.text_atlas.cell_h
+		app.mouse.cell_w = app.text_atlas.cell_w
+		app.mouse.cell_h = app.text_atlas.cell_h
+	}
+
+	plat_font.glyph_atlas_clear_and_prewarm(&app.text_atlas.glyph_atlas)
+	_ = plat_font.text_atlas_upload(&app.text_atlas, app.device, app.queue)
+	chrome_view_set_atlas(&app.chrome_view, app.text_atlas.glyph_view, app.text_atlas.cell_w, app.text_atlas.cell_h)
+
+	for &pane in app.mux.panes {
+		if pane.kind == .Terminal && pane.session != nil {
+			damage.damage_mark_all(&pane.session.term.damage)
+		}
+	}
+	return true
 }
 
 app_init :: proc(app: ^Term_App, opts: Cli_Options = {}) -> bool {
@@ -146,6 +211,9 @@ app_init :: proc(app: ^Term_App, opts: Cli_Options = {}) -> bool {
 
 	tabs_feat.tabs_manager_init(&app.tabs_mgr, layout_compute_tab_bar_rect(&app.layout))
 	mux_feat.multiplexer_init(&app.mux)
+	sess_feat.session_registry_init(&app.session_reg)
+	chrome_modals.session_dialog_init(&app.session_dlg)
+	app.menu_bar = plat_win.platform_menu_bar_init()
 
 	// Create initial terminal pane & tab strictly inside content_area (below top bar!)
 	content_area := layout_compute_content_area(&app.layout)
@@ -178,6 +246,12 @@ app_init :: proc(app: ^Term_App, opts: Cli_Options = {}) -> bool {
 
 app_destroy :: proc(app: ^Term_App) {
 	if app == nil do return
+	if app.menu_bar != nil {
+		plat_win.platform_menu_bar_destroy(app.menu_bar)
+		app.menu_bar = nil
+	}
+	chrome_modals.session_dialog_destroy(&app.session_dlg)
+	sess_feat.session_registry_destroy(&app.session_reg)
 	diagnostics_shutdown(app)
 	sdl3.RemoveEventWatch(app_event_watch, app)
 	mux_feat.multiplexer_destroy(&app.mux)
@@ -204,6 +278,19 @@ app_destroy :: proc(app: ^Term_App) {
 	app_cleanup_mouse_cursors()
 }
 
+// app_sync_resize_increments keeps the macOS window's live resize "magnet"
+// aligned with the current cell size (in logical points), so windowed resizing
+// snaps to exact rows/columns instead of leaving fractional leftover space.
+app_sync_resize_increments :: proc(app: ^Term_App) {
+	if app == nil || app.window.handle == nil do return
+	ratio := app.window.pixel_ratio if app.window.pixel_ratio > 0.0 else 1.0
+	plat_win.platform_set_resize_increments(
+		app.window.handle,
+		app.layout.metrics.cell_w / ratio,
+		app.layout.metrics.cell_h / ratio,
+	)
+}
+
 app_apply_font_size :: proc(app: ^Term_App, new_size: f32) {
 	if app == nil || new_size <= 0 do return
 	app.current_font_size = new_size
@@ -222,6 +309,7 @@ app_apply_font_size :: proc(app: ^Term_App, new_size: f32) {
 			damage.damage_mark_all(&pane.session.term.damage)
 		}
 	}
+	app_sync_resize_increments(app)
 	app.layout.tab_bar_reveal_timer = 2.0
 }
 
@@ -244,6 +332,7 @@ app_run :: proc(app: ^Term_App) {
 		now := time.now()
 		dt := f32(time.duration_seconds(time.diff(last_time, now)))
 		last_time = now
+		app.time_elapsed = f32(time.duration_seconds(time.diff(app.start_time, now)))
 		term_dirty := false
 
 		layout_update(&app.layout, dt)
@@ -264,8 +353,17 @@ app_run :: proc(app: ^Term_App) {
 		if app_sync_layout_and_winsize(app) do term_dirty = true
 		diagnostics_poll(app)
 
+		if tag := plat_win.platform_menu_bar_take_action(); tag > 0 {
+			app_handle_menu_bar_action(app, tag)
+			term_dirty = true
+		}
+		_ = sess_feat.session_registry_drain_all(&app.session_reg)
+		app_sync_menu_bar(app, now)
+
 		// Render only on real change or active animation; stay idle otherwise.
-		if term_dirty || app_needs_animation(app) {
+		// While a pane holds a synchronized update, presentation waits so the
+		// client's frame lands atomically.
+		if (term_dirty || app_needs_animation(app)) && !app_sync_output_hold(app, now) {
 			frame_start := time.tick_now()
 			app_render_frame(app, term_dirty)
 			telemetry.telemetry_end_frame(&app.diag.tel, u64(time.tick_since(frame_start)))

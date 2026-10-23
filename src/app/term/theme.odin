@@ -63,6 +63,10 @@ PALETTE_COLORS := [16][4]f32{
 	{0.94, 0.94, 0.96, 1.0}, // 15: Bright White
 }
 
+theme_apply_palette :: proc(palette: [16][4]f32) {
+	PALETTE_COLORS = palette
+}
+
 color_from_palette_256 :: proc(idx: u8) -> [4]f32 {
 	if idx < 16 {
 		return PALETTE_COLORS[idx]
@@ -102,3 +106,8 @@ COLOR_TAB_TEXT_INACT  := [4]f32{0.50, 0.54, 0.62, 0.70}
 // Cursor & Selection Colors
 COLOR_CURSOR_BLOCK    := [4]f32{0.28, 0.68, 1.00, 0.85}
 COLOR_SELECTION_BG    := [4]f32{0.24, 0.45, 0.78, 0.55}
+
+// Hyperlink hover highlight colors (theme tokens; overridable via config.json
+// under the "theme" object).
+COLOR_HYPERLINK_OPENABLE_BG := [4]f32{0.141, 0.322, 0.220, 1.0}
+COLOR_HYPERLINK_BLOCKED_BG  := [4]f32{0.380, 0.161, 0.149, 1.0}

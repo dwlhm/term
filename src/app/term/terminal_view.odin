@@ -87,6 +87,7 @@ terminal_view_release_pane :: proc(tv: ^Terminal_View, pane_id: u32) {
 			terminal_render.terminal_renderer_destroy(&tv.slots[i].rend)
 			tv.slots[i].active = false
 			tv.slots[i].pane_id = 0
+			tv.slots[i].rend = {}
 			break
 		}
 	}
@@ -125,6 +126,27 @@ terminal_view_resolve_active_bg :: proc(sess: ^sess_feat.Terminal_Session) -> [4
 	return COLOR_PANE_BG
 }
 
+// pane_grid_pad returns the effective horizontal/vertical padding that centers
+// the terminal cell grid within a pane's content box (rect inset by the base
+// padding). Leftover pixels (pane size not being an exact multiple of the cell
+// size) are split evenly so full-screen TUIs leave no lopsided gap at the
+// bottom/right — mirroring Kitty/Alacritty content centering.
+pane_grid_pad :: proc(
+	pane_rect: [4]f32,
+	term_rows, term_cols: int,
+	cell_w, cell_h: f32,
+	base_pad_x, base_pad_y: f32,
+) -> (pad_x, pad_y: f32) {
+	if cell_w <= 0.0 || cell_h <= 0.0 do return base_pad_x, base_pad_y
+	content_w := max(0.0, pane_rect[2] - 2.0 * base_pad_x)
+	content_h := max(0.0, pane_rect[3] - 2.0 * base_pad_y)
+	rows := max(1, min(term_rows, int(content_h / cell_h)))
+	cols := max(1, min(term_cols, int(content_w / cell_w)))
+	pad_x = base_pad_x + (content_w - f32(cols) * cell_w) * 0.5
+	pad_y = base_pad_y + (content_h - f32(rows) * cell_h) * 0.5
+	return
+}
+
 terminal_view_encode_pane :: proc(
 	tv: ^Terminal_View,
 	enc: contract.Gpu_CommandEncoder,
@@ -139,6 +161,7 @@ terminal_view_encode_pane :: proc(
 	metrics: Visual_Metrics,
 	screen_w, screen_h: f32,
 	load_op: contract.Gpu_Load_Op = .Load,
+	hover_openable_bg, hover_blocked_bg: [4]f32,
 ) -> (strat: terminal_render.Render_Strategy, dirty_cells: int) {
 	if tv == nil || rawptr(enc) == nil || sess == nil || rawptr(target_view) == nil || text_atlas == nil do return .Instance, 0
 
@@ -151,6 +174,27 @@ terminal_view_encode_pane :: proc(
 	sel_r_end := mouse.selection.end_cell.row if sel_active else -1
 	sel_c_end := mouse.selection.end_cell.col if sel_active else -1
 
+	hover := terminal_render.Hyperlink_Highlight{}
+	if mouse != nil && mouse.hover_link.active && mouse.hover_link.pane_id == pane_id {
+		hover = terminal_render.Hyperlink_Highlight{
+			active = true,
+			row = mouse.hover_link.row,
+			col_start = mouse.hover_link.col_start,
+			col_end = mouse.hover_link.col_end,
+			blocked = mouse.hover_link.blocked,
+		}
+	}
+
+	eff_pad_x, eff_pad_y := pane_grid_pad(
+		pane_rect,
+		sess.term.rows,
+		sess.term.cols,
+		metrics.cell_w,
+		metrics.cell_h,
+		metrics.pane_pad_x,
+		metrics.pane_pad_y,
+	)
+
 	terminal_render.terminal_renderer_encode(
 		rend,
 		enc,
@@ -160,8 +204,8 @@ terminal_view_encode_pane :: proc(
 		pane_rect,
 		metrics.cell_w,
 		metrics.cell_h,
-		metrics.pane_pad_x,
-		metrics.pane_pad_y,
+		eff_pad_x,
+		eff_pad_y,
 		sess.scroll_offset,
 		screen_w,
 		screen_h,
@@ -172,6 +216,9 @@ terminal_view_encode_pane :: proc(
 		sel_r_end,
 		sel_c_end,
 		sel_active,
+		hover,
+		hover_openable_bg,
+		hover_blocked_bg,
 		load_op,
 		metrics.border_radius,
 		is_focused,
@@ -192,6 +239,7 @@ terminal_view_render_pane :: proc(
 	text_atlas: ^plat_font.Text_Atlas,
 	metrics: Visual_Metrics,
 	screen_w, screen_h: f32,
+	hover_openable_bg, hover_blocked_bg: [4]f32,
 ) {
 	if tv == nil || sess == nil || rawptr(target_view) == nil || text_atlas == nil do return
 
@@ -204,6 +252,27 @@ terminal_view_render_pane :: proc(
 	sel_r_end := mouse.selection.end_cell.row if sel_active else -1
 	sel_c_end := mouse.selection.end_cell.col if sel_active else -1
 
+	hover := terminal_render.Hyperlink_Highlight{}
+	if mouse != nil && mouse.hover_link.active && mouse.hover_link.pane_id == pane_id {
+		hover = terminal_render.Hyperlink_Highlight{
+			active = true,
+			row = mouse.hover_link.row,
+			col_start = mouse.hover_link.col_start,
+			col_end = mouse.hover_link.col_end,
+			blocked = mouse.hover_link.blocked,
+		}
+	}
+
+	eff_pad_x, eff_pad_y := pane_grid_pad(
+		pane_rect,
+		sess.term.rows,
+		sess.term.cols,
+		metrics.cell_w,
+		metrics.cell_h,
+		metrics.pane_pad_x,
+		metrics.pane_pad_y,
+	)
+
 	terminal_render.terminal_renderer_render(
 		rend,
 		&sess.term,
@@ -212,8 +281,8 @@ terminal_view_render_pane :: proc(
 		pane_rect,
 		metrics.cell_w,
 		metrics.cell_h,
-		metrics.pane_pad_x,
-		metrics.pane_pad_y,
+		eff_pad_x,
+		eff_pad_y,
 		sess.scroll_offset,
 		screen_w,
 		screen_h,
@@ -224,6 +293,9 @@ terminal_view_render_pane :: proc(
 		sel_r_end,
 		sel_c_end,
 		sel_active,
+		hover,
+		hover_openable_bg,
+		hover_blocked_bg,
 		metrics.border_radius,
 		is_focused,
 	)

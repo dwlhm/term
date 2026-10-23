@@ -7,6 +7,7 @@ import "core:encoding/json"
 import "core:os"
 import "core:path/filepath"
 import "core:strings"
+import plat_font "../../platform/font"
 
 DEFAULT_WINDOW_WIDTH:  i32 : 1280
 DEFAULT_WINDOW_HEIGHT: i32 : 800
@@ -20,12 +21,24 @@ Window_Config :: struct {
 }
 
 Font_Config :: struct {
-	size: f32 `json:"size"`,
+	size:   f32    `json:"size"`,
+	family: string `json:"family"`,
+	path:   string `json:"path"`,
 }
 
 Padding_Config :: struct {
 	x: f32 `json:"x"`,
 	y: f32 `json:"y"`,
+}
+
+// Theme_Config holds color overrides driven from config.json. Colors use
+// "#RRGGBB" hex strings; empty strings keep the built-in theme defaults.
+Theme_Config :: struct {
+	background:            string     `json:"background"`,
+	foreground:            string     `json:"foreground"`,
+	palette:               [16]string `json:"palette"`,
+	hyperlink_openable_bg: string     `json:"hyperlink_openable_bg"`,
+	hyperlink_blocked_bg:  string     `json:"hyperlink_blocked_bg"`,
 }
 
 App_Config :: struct {
@@ -39,6 +52,7 @@ App_Config :: struct {
 	pad_x:          f32            `json:"pad_x"`,
 	pad_y:          f32            `json:"pad_y"`,
 	padding:        Padding_Config `json:"padding"`,
+	theme:          Theme_Config   `json:"theme"`,
 	blur:           bool           `json:"blur"`,
 	window_opacity: f32            `json:"window_opacity"`,
 	scroll_multiplier: f32         `json:"scroll_multiplier"`,
@@ -137,6 +151,95 @@ config_resolve_scroll_multiplier :: proc(cfg: ^App_Config) -> f32 {
 	return 1.0
 }
 
+_config_hex_digit :: proc(c: u8) -> (int, bool) {
+	switch c {
+	case '0'..='9': return int(c - '0'), true
+	case 'a'..='f': return int(c - 'a' + 10), true
+	case 'A'..='F': return int(c - 'A' + 10), true
+	}
+	return 0, false
+}
+
+_config_hex_byte :: proc(s: string) -> (u8, bool) {
+	if len(s) < 2 do return 0, false
+	hi, ok1 := _config_hex_digit(s[0])
+	lo, ok2 := _config_hex_digit(s[1])
+	if !ok1 || !ok2 do return 0, false
+	return u8((hi << 4) | lo), true
+}
+
+// _config_parse_hex_color parses "#RRGGBB" (or "RRGGBB") into an opaque color.
+_config_parse_hex_color :: proc(s: string) -> ([4]f32, bool) {
+	p := strings.trim_space(s)
+	if len(p) > 0 && p[0] == '#' do p = p[1:]
+	if len(p) != 6 do return {}, false
+	r, ok1 := _config_hex_byte(p[0:2])
+	g, ok2 := _config_hex_byte(p[2:4])
+	b, ok3 := _config_hex_byte(p[4:6])
+	if !ok1 || !ok2 || !ok3 do return {}, false
+	return {f32(r) / 255.0, f32(g) / 255.0, f32(b) / 255.0, 1.0}, true
+}
+
+// config_resolve_hyperlink_colors resolves the hover highlight colors, falling
+// back to the built-in theme tokens when the config omits them.
+config_resolve_hyperlink_colors :: proc(cfg: ^App_Config) -> (openable, blocked: [4]f32) {
+	openable = COLOR_HYPERLINK_OPENABLE_BG
+	blocked = COLOR_HYPERLINK_BLOCKED_BG
+	if cfg == nil do return
+	if len(cfg.theme.hyperlink_openable_bg) > 0 {
+		if c, ok := _config_parse_hex_color(cfg.theme.hyperlink_openable_bg); ok do openable = c
+	}
+	if len(cfg.theme.hyperlink_blocked_bg) > 0 {
+		if c, ok := _config_parse_hex_color(cfg.theme.hyperlink_blocked_bg); ok do blocked = c
+	}
+	return
+}
+
+// config_resolve_theme_palette resolves the 16-color ANSI palette and background
+// overrides from user configuration, returning has_palette = true if modified.
+config_resolve_theme_palette :: proc(cfg: ^App_Config) -> (palette: [16][4]f32, has_palette: bool) {
+	if cfg == nil do return PALETTE_COLORS, false
+	palette = PALETTE_COLORS
+	has_palette = false
+	for i in 0..<16 {
+		if len(cfg.theme.palette[i]) > 0 {
+			if c, ok := _config_parse_hex_color(cfg.theme.palette[i]); ok {
+				palette[i] = c
+				has_palette = true
+			}
+		}
+	}
+	if len(cfg.theme.foreground) > 0 {
+		if c, ok := _config_parse_hex_color(cfg.theme.foreground); ok {
+			palette[7] = c
+			palette[15] = c
+			has_palette = true
+		}
+	}
+	if len(cfg.theme.background) > 0 {
+		if c, ok := _config_parse_hex_color(cfg.theme.background); ok {
+			palette[0] = c
+			has_palette = true
+		}
+	}
+	return palette, has_palette
+}
+
+// config_resolve_font_path resolves custom font configuration (explicit path or family name).
+config_resolve_font_path :: proc(cfg: ^App_Config, allocator := context.temp_allocator) -> (path: string, ok: bool) {
+	if cfg == nil do return "", false
+	if len(cfg.font.path) > 0 {
+		expanded := config_expand_path(cfg.font.path, allocator)
+		if os.is_file(expanded) do return expanded, true
+	}
+	if len(cfg.font.family) > 0 {
+		if p, found := plat_font.platform_query_font_by_name(cfg.font.family, allocator); found {
+			return p, true
+		}
+	}
+	return "", false
+}
+
 // config_expand_path resolves ~ and ~/ prefixes against user's $HOME directory.
 config_expand_path :: proc(path: string, allocator := context.temp_allocator) -> string {
 	if len(path) == 0 do return ""
@@ -170,43 +273,49 @@ config_parse_json5 :: proc(data: []byte, allocator := context.temp_allocator) ->
 	return cfg, true
 }
 
+@(private = "file")
+_check_config_dir :: proc(dir: string, allocator := context.temp_allocator) -> (string, bool) {
+	for name in ([?]string{"config.json5", "config.json"}) {
+		p, _ := filepath.join({dir, name}, allocator)
+		if os.is_file(p) do return p, true
+	}
+	return "", false
+}
+
 // config_resolve_path discovers the configuration file path by priority:
 // 1. $TERM_CONFIG
-// 2. Portable next to executable (<exec_dir>/config.json)
-// 3. Portable next to .app bundle (<exec_dir>/../../../config.json)
-// 4. Current working directory (./config.json)
-// 5. $XDG_CONFIG_HOME/term/config.json
-// 6. ~/.config/term/config.json
-// 7. ~/.term/config.json
+// 2. Portable next to executable (<exec_dir>/config.json[5])
+// 3. Portable next to .app bundle (<exec_dir>/../../../config.json[5])
+// 4. Current working directory (./config.json[5])
+// 5. $XDG_CONFIG_HOME/term/config.json[5]
+// 6. ~/.config/term/config.json[5]
+// 7. ~/.term/config.json[5]
 config_resolve_path :: proc() -> (string, bool) {
 	if val := os.get_env("TERM_CONFIG", context.temp_allocator); len(val) > 0 {
-		if os.exists(val) do return val, true
+		if os.is_file(val) do return val, true
 	}
 
 	if exec_path, err := os.get_executable_path(context.temp_allocator); err == nil && len(exec_path) > 0 {
 		exec_dir := filepath.dir(exec_path)
-		p_exec, _ := filepath.join({exec_dir, "config.json"}, context.temp_allocator)
-		if os.exists(p_exec) do return p_exec, true
+		if p, ok := _check_config_dir(exec_dir); ok do return p, true
 
-		p_bundle, _ := filepath.join({exec_dir, "../../../config.json"}, context.temp_allocator)
-		if os.exists(p_bundle) do return p_bundle, true
+		bundle_root, _ := filepath.join({exec_dir, "../../.."}, context.temp_allocator)
+		if p, ok := _check_config_dir(bundle_root); ok do return p, true
 	}
 
-	if os.exists("config.json") {
-		return "config.json", true
-	}
+	if p, ok := _check_config_dir("."); ok do return p, true
 
 	if xdg := os.get_env("XDG_CONFIG_HOME", context.temp_allocator); len(xdg) > 0 {
-		p := strings.concatenate({xdg, "/term/config.json"}, context.temp_allocator)
-		if os.exists(p) do return p, true
+		dir := strings.concatenate({xdg, "/term"}, context.temp_allocator)
+		if p, ok := _check_config_dir(dir); ok do return p, true
 	}
 
 	if home := os.get_env("HOME", context.temp_allocator); len(home) > 0 {
-		p1 := strings.concatenate({home, "/.config/term/config.json"}, context.temp_allocator)
-		if os.exists(p1) do return p1, true
+		dir1 := strings.concatenate({home, "/.config/term"}, context.temp_allocator)
+		if p, ok := _check_config_dir(dir1); ok do return p, true
 
-		p2 := strings.concatenate({home, "/.term/config.json"}, context.temp_allocator)
-		if os.exists(p2) do return p2, true
+		dir2 := strings.concatenate({home, "/.term"}, context.temp_allocator)
+		if p, ok := _check_config_dir(dir2); ok do return p, true
 	}
 
 	return "", false

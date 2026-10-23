@@ -106,6 +106,12 @@ app_select_tab :: proc(app: ^Term_App, idx: int) {
 app_close_tab :: proc(app: ^Term_App, tab_idx: int) {
 	if app == nil || tab_idx < 0 || tab_idx >= len(app.tabs_mgr.entries) do return
 
+	if len(app.tabs_mgr.entries) <= 1 {
+		if app_check_and_show_safety_dialog(app) {
+			return
+		}
+	}
+
 	pane_ids: [dynamic]u32
 	defer delete(pane_ids)
 	chrome_splits.split_tree_collect_pane_ids(app.tabs_mgr.entries[tab_idx].split_tree, &pane_ids)
@@ -471,6 +477,9 @@ app_execute_action :: proc(app: ^Term_App, act: Action_Id) {
 			sess_feat.session_write_string(p.session, "\x0c") // Form feed / clear
 		}
 
+	case .Search_Toggle:
+		app_search_toggle(app)
+
 	case .Font_Zoom_In:
 		app_adjust_font_size(app, 1.0)
 
@@ -487,7 +496,15 @@ app_execute_action :: proc(app: ^Term_App, act: Action_Id) {
 		app.config = config_load()
 		app_apply_config(app)
 
+	case .Tab_Detach:
+		_ = app_detach_current_tab(app)
+
+	case .Tab_Attach_Latest:
+		_ = app_attach_latest_background_session(app)
+
 	case .App_Quit:
-		app.running = false
+		if !app_check_and_show_safety_dialog(app) {
+			app.running = false
+		}
 	}
 }

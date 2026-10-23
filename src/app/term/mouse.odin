@@ -46,6 +46,10 @@ Mouse_State :: struct {
 	drag_split_node:     ^chrome_splits.Split_Node,
 	hovered_split_node:  ^chrome_splits.Split_Node,
 	hovered_is_horiz:    bool,
+	scrollbar_pane_id:   u32, // pane whose scrollbar thumb is being dragged
+	scrollbar_drag_offset: f32, // grab offset inside the thumb, in pixels
+	hovered_scrollbar:   u32,
+	hover_link:          Hyperlink_Hover,
 }
 
 mouse_init :: proc(m: ^Mouse_State, cell_w, cell_h: f32, pad_x: f32 = 12.0, pad_y: f32 = 8.0) {
@@ -62,6 +66,7 @@ mouse_init :: proc(m: ^Mouse_State, cell_w, cell_h: f32, pad_x: f32 = 12.0, pad_
 	m.drag_split_node = nil
 	m.hovered_split_node = nil
 	m.hovered_is_horiz = false
+	m.hover_link = {}
 	feat_inter.selection_init(&m.selection)
 }
 
@@ -84,7 +89,11 @@ mouse_on_button_down :: proc(
 	m.drag_started = false
 
 	if button == sdl3.BUTTON_LEFT {
-		screen_r, cell_c := feat_inter.pixel_to_cell(pos, pane_rect, m.cell_w, m.cell_h, m.pad_x, m.pad_y)
+		eff_px, eff_py := m.pad_x, m.pad_y
+		if sess != nil {
+			eff_px, eff_py = pane_grid_pad(pane_rect, sess.term.rows, sess.term.cols, m.cell_w, m.cell_h, m.pad_x, m.pad_y)
+		}
+		screen_r, cell_c := feat_inter.pixel_to_cell(pos, pane_rect, m.cell_w, m.cell_h, eff_px, eff_py)
 		cell_r := screen_r - scroll_offset
 
 		// 1. Shift + Click: Extend existing selection
@@ -145,7 +154,11 @@ mouse_on_motion :: proc(
 	m.pos = pos
 
 	if m.is_down && m.button == sdl3.BUTTON_LEFT {
-		screen_r, cell_c := feat_inter.pixel_to_cell(pos, pane_rect, m.cell_w, m.cell_h, m.pad_x, m.pad_y)
+		eff_px, eff_py := m.pad_x, m.pad_y
+		if sess != nil {
+			eff_px, eff_py = pane_grid_pad(pane_rect, sess.term.rows, sess.term.cols, m.cell_w, m.cell_h, m.pad_x, m.pad_y)
+		}
+		screen_r, cell_c := feat_inter.pixel_to_cell(pos, pane_rect, m.cell_w, m.cell_h, eff_px, eff_py)
 		cell_r := screen_r - scroll_offset
 
 		if !m.drag_started {

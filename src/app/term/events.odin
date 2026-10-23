@@ -12,7 +12,9 @@ import contract "../../core/render/contract"
 import chrome_render "../../core/render/chrome"
 import chrome_hit "../../core/chrome/hit_test"
 import chrome_splits "../../core/chrome/splits"
+import chrome_modals "../../core/chrome/modals"
 import damage "../../core/terminal/damage"
+import core_terminal "../../core/terminal"
 import tabs_feat "../../features/tabs"
 import mux_feat "../../features/multiplexer"
 import sess_feat "../../features/session"
@@ -32,6 +34,7 @@ app_handle_window_resize :: proc(app: ^Term_App) {
 		app.layout.metrics.cell_w = app.text_atlas.cell_w
 		app.layout.metrics.cell_h = app.text_atlas.cell_h
 	}
+	app_sync_resize_increments(app)
 
 	curr_fs := plat_win.platform_is_fullscreen(app.window.handle)
 	fs_changed := app.layout.is_fullscreen != curr_fs
@@ -92,6 +95,21 @@ app_handle_mouse_button_down :: proc(app: ^Term_App, ev: sdl3.MouseButtonEvent) 
 	ratio := app.window.pixel_ratio
 	mx := f32(ev.x) * ratio
 	my := f32(ev.y) * ratio
+
+	if app.session_dlg.visible {
+		act := chrome_modals.session_dialog_handle_click(&app.session_dlg, mx, my)
+		switch act {
+		case .Repaint:
+			chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
+		case .Cancel:
+			app.session_dlg.visible = false
+			chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
+		case .Apply:
+			app_apply_safety_dialog(app)
+		case .None:
+		}
+		return
+	}
 
 	if app.cmd_center.visible {
 		res := command_center_handle_click(&app.cmd_center, mx, my)
@@ -184,7 +202,22 @@ app_handle_mouse_button_down :: proc(app: ^Term_App, ev: sdl3.MouseButtonEvent) 
 		return
 	}
 
-	// 2. Left-click on split divider or drag handle button
+	// 2. Scrollbar thumb drag (scrollback) takes precedence over selection.
+	if ev.button == sdl3.BUTTON_LEFT {
+		if pane := scrollbar_hit_pane(app, mx, my); pane != nil {
+			if scrollbar_begin_drag(app, pane, my) {
+				chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
+				return
+			}
+		}
+	}
+
+	// 3. Cmd+Click on an OSC 8 hyperlink opens it in the default browser.
+	if ev.button == sdl3.BUTTON_LEFT && (sdl3.GetModState() & sdl3.KMOD_GUI) != sdl3.KMOD_NONE {
+		if app_open_hyperlink_at(app, mx, my) do return
+	}
+
+	// 4. Left-click on split divider or drag handle button
 	if ev.button == sdl3.BUTTON_LEFT {
 		_, active_tab := tabs_feat.tabs_manager_get_active(&app.tabs_mgr)
 		if active_tab != nil && active_tab.split_tree != nil {
@@ -226,7 +259,8 @@ app_handle_mouse_button_down :: proc(app: ^Term_App, ev: sdl3.MouseButtonEvent) 
 			is_ctrl  := (mods & sdl3.KMOD_CTRL)  != sdl3.KMOD_NONE
 
 			if mouse_protocol_should_handle(p.session, is_shift) {
-				if seq, ok := mouse_protocol_encode(p.session, .Press, u8(ev.button), mx, my, p.rect, app.layout.metrics.cell_w, app.layout.metrics.cell_h, app.layout.metrics.pane_pad_x, app.layout.metrics.pane_pad_y, 0.0, is_shift, is_alt, is_ctrl); ok {
+				eff_px, eff_py := pane_grid_pad(p.rect, p.session.term.rows, p.session.term.cols, app.layout.metrics.cell_w, app.layout.metrics.cell_h, app.layout.metrics.pane_pad_x, app.layout.metrics.pane_pad_y)
+				if seq, ok := mouse_protocol_encode(p.session, .Press, u8(ev.button), mx, my, p.rect, app.layout.metrics.cell_w, app.layout.metrics.cell_h, eff_px, eff_py, 0.0, is_shift, is_alt, is_ctrl); ok {
 					sess_feat.session_write_string(p.session, seq)
 				}
 				app.mouse.pos = {mx, my}
@@ -291,7 +325,8 @@ app_handle_mouse_wheel :: proc(app: ^Term_App, ev: sdl3.MouseWheelEvent) {
 			wheel_dir: f32 = 1.0 if ticks > 0 else -1.0
 			count := abs(ticks)
 			for _ in 0..<count {
-				if seq, ok := mouse_protocol_encode(sess, .Wheel, 0, mx, my, target_pane.rect, app.layout.metrics.cell_w, app.layout.metrics.cell_h, app.layout.metrics.pane_pad_x, app.layout.metrics.pane_pad_y, wheel_dir, is_shift, is_alt, is_ctrl); ok {
+				eff_px, eff_py := pane_grid_pad(target_pane.rect, sess.term.rows, sess.term.cols, app.layout.metrics.cell_w, app.layout.metrics.cell_h, app.layout.metrics.pane_pad_x, app.layout.metrics.pane_pad_y)
+				if seq, ok := mouse_protocol_encode(sess, .Wheel, 0, mx, my, target_pane.rect, app.layout.metrics.cell_w, app.layout.metrics.cell_h, eff_px, eff_py, wheel_dir, is_shift, is_alt, is_ctrl); ok {
 					sess_feat.session_write_string(sess, seq)
 				}
 			}
@@ -323,7 +358,13 @@ app_handle_mouse_wheel :: proc(app: ^Term_App, ev: sdl3.MouseWheelEvent) {
 }
 
 app_handle_text_input :: proc(app: ^Term_App, text: string) {
-	if app.cmd_center.visible {
+	if app.suppress_text_input {
+		app.suppress_text_input = false
+		return
+	}
+	if app.search.active {
+		app_search_append(app, text)
+	} else if app.cmd_center.visible {
 		command_center_handle_text(&app.cmd_center, text, &app.tabs_mgr)
 	} else {
 		p := mux_feat.multiplexer_get_focused_pane(&app.mux)
@@ -338,6 +379,33 @@ app_handle_text_input :: proc(app: ^Term_App, text: string) {
 }
 
 app_handle_key_down :: proc(app: ^Term_App, ev: sdl3.KeyboardEvent) {
+	if app.session_dlg.visible {
+		switch ev.key {
+		case sdl3.K_ESCAPE:
+			app.session_dlg.visible = false
+			chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
+			return
+		case sdl3.K_RETURN, sdl3.K_KP_ENTER:
+			app_apply_safety_dialog(app)
+			return
+		}
+		return
+	}
+
+	if app.search.active {
+		switch ev.key {
+		case sdl3.K_ESCAPE:
+			app_search_close(app)
+			return
+		case sdl3.K_RETURN, sdl3.K_KP_ENTER:
+			app_search_step(app, (ev.mod & sdl3.KMOD_SHIFT) == sdl3.KMOD_NONE)
+			return
+		case sdl3.K_BACKSPACE:
+			app_search_backspace(app)
+			return
+		}
+	}
+
 	if app.cmd_center.visible {
 		res := command_center_handle_key(&app.cmd_center, ev.key, &app.tabs_mgr)
 		if res.handled {
@@ -375,7 +443,12 @@ app_handle_key_down :: proc(app: ^Term_App, ev: sdl3.KeyboardEvent) {
 		app_execute_action(app, act)
 	} else {
 		app_cursor := p != nil && p.session != nil && p.session.term.parser.cursor_key_mode
-		res, encoded := input_encode_key(ev.key, ev.mod, app_cursor)
+		kbd_flags: u8 = 0
+		if p != nil && p.session != nil {
+			kbd_flags = core_terminal.terminal_kitty_keyboard_flags(&p.session.term)
+		}
+		kitty_event := INPUT_EVENT_REPEAT if ev.repeat else INPUT_EVENT_PRESS
+		res, encoded := input_encode_key(ev.key, ev.mod, app_cursor, kbd_flags, kitty_event)
 		if encoded {
 			if p != nil && p.session != nil {
 				if app.mouse.selection.active {
@@ -383,9 +456,75 @@ app_handle_key_down :: proc(app: ^Term_App, ev: sdl3.KeyboardEvent) {
 				}
 				p.session.scroll_offset = 0 // Auto-scroll to bottom on input
 				_, _ = sess_feat.session_write(p.session, res.bytes[:res.len])
+				// A keystroke that SDL also reports as TEXT_INPUT must not be
+				// delivered twice: Option combos arrive as ESC+char and, under the
+				// Kitty "report all keys" flag, plain printable keys arrive as
+				// CSI u while the platform still emits the character as text.
+				if (ev.mod & sdl3.KMOD_GUI) == sdl3.KMOD_NONE &&
+				   (ev.mod & sdl3.KMOD_CTRL) == sdl3.KMOD_NONE &&
+				   _key_is_printable(ev.key) {
+					app.suppress_text_input = true
+				}
 			}
 		}
 	}
+}
+
+// app_handle_key_up reports key releases when the application enabled the Kitty
+// keyboard protocol's event-type reporting.
+app_handle_key_up :: proc(app: ^Term_App, ev: sdl3.KeyboardEvent) {
+	p := mux_feat.multiplexer_get_focused_pane(&app.mux)
+	if p == nil || p.session == nil do return
+
+	flags := core_terminal.terminal_kitty_keyboard_flags(&p.session.term)
+	if flags & KITTY_KBD_EVENT_TYPES == 0 do return
+	// Keys sent as legacy bytes must never produce a release event: the legacy
+	// sequence has no event field, so the client would see the key twice.
+	if !_kitty_should_encode(ev.key, ev.mod, flags) do return
+
+	res, encoded := input_encode_key(ev.key, ev.mod, false, flags, INPUT_EVENT_RELEASE)
+	if !encoded do return
+	_, _ = sess_feat.session_write(p.session, res.bytes[:res.len])
+}
+
+// app_update_hyperlink_hover synchronizes the OSC 8 hover highlight and mouse
+// cursor against the pointer's position and the Cmd modifier state.
+// - Background tint: shows whenever hovering over a link (plain hover OR Cmd+hover).
+// - Mouse cursor: changes to Hand (Pointer) / Not_Allowed ONLY when Cmd is held!
+app_update_hyperlink_hover :: proc(app: ^Term_App) -> bool {
+	if app == nil do return false
+	mods := sdl3.GetModState()
+	is_cmd := (mods & sdl3.KMOD_GUI) != sdl3.KMOD_NONE
+	is_shift := (mods & sdl3.KMOD_SHIFT) != sdl3.KMOD_NONE
+	mx, my := app.mouse.pos.x, app.mouse.pos.y
+
+	hovered_pane: ^mux_feat.Pane_Entry = nil
+	for &p in app.mux.panes {
+		if mouse_is_in_rect({mx, my}, p.rect) {
+			hovered_pane = &p
+			break
+		}
+	}
+
+	new_hover: Hyperlink_Hover
+	if !app.mouse.is_down && hovered_pane != nil && hovered_pane.kind == .Terminal && hovered_pane.session != nil {
+		new_hover = app_hyperlink_highlight(app, mx, my)
+	}
+
+	changed := (app.mouse.hover_link != new_hover)
+	app.mouse.hover_link = new_hover
+
+	if hovered_pane != nil && hovered_pane.kind == .Terminal && hovered_pane.session != nil {
+		if is_cmd && new_hover.active {
+			app_set_mouse_cursor(.Not_Allowed if new_hover.blocked else .Pointer)
+		} else {
+			app_set_mouse_cursor(sess_feat.session_get_mouse_cursor(hovered_pane.session, is_shift))
+		}
+	} else {
+		app_set_mouse_cursor(.Default)
+	}
+
+	return changed
 }
 
 app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty: bool) {
@@ -400,8 +539,10 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 
 	for {
 		#partial switch ev.type {
-		case .QUIT:
-			app.running = false
+		case .QUIT, .WINDOW_CLOSE_REQUESTED:
+			if !app_check_and_show_safety_dialog(app) {
+				app.running = false
+			}
 		case .WINDOW_FOCUS_GAINED:
 			pane := mux_feat.multiplexer_get_focused_pane(&app.mux)
 			if pane != nil && pane.session != nil {
@@ -412,6 +553,8 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 			if pane != nil && pane.session != nil {
 				mouse_protocol_report_focus(pane.session, false)
 			}
+			app.mouse.hover_link = {}
+			app_set_mouse_cursor(.Default)
 		case .WINDOW_PIXEL_SIZE_CHANGED, .WINDOW_RESIZED, .WINDOW_EXPOSED, .WINDOW_LEAVE_FULLSCREEN, .WINDOW_ENTER_FULLSCREEN, .WINDOW_RESTORED:
 			sdl3.FlushEvents(sdl3.EventType.WINDOW_RESIZED, sdl3.EventType.WINDOW_PIXEL_SIZE_CHANGED)
 			app_handle_window_resize(app)
@@ -420,6 +563,17 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 			mx := f32(ev.motion.x) * ratio
 			my := f32(ev.motion.y) * ratio
 			app.layout.mouse_y = my
+			app.mouse.pos = {mx, my}
+
+			// A0. Dragging the scrollback thumb
+			if scrollbar_drag_active(app) {
+				if pane := mux_feat.multiplexer_get_pane(&app.mux, app.mouse.scrollbar_pane_id); pane != nil {
+					scrollbar_update_drag(app, pane, my)
+					chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
+				}
+				if !sdl3.PollEvent(&ev) do break
+				continue
+			}
 
 			// A. If dragging split divider, dynamically update partition ratio
 			if app.mouse.is_dragging_divider && app.mouse.drag_split_node != nil {
@@ -448,6 +602,14 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 				chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
 				if !sdl3.PollEvent(&ev) do break
 				continue
+			}
+
+			// A1. Scrollbar hover highlight
+			hovered_sb: u32 = 0
+			if pane := scrollbar_hit_pane(app, mx, my); pane != nil do hovered_sb = pane.id
+			if hovered_sb != app.mouse.hovered_scrollbar {
+				app.mouse.hovered_scrollbar = hovered_sb
+				chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
 			}
 
 			// B. If not dragging, perform hover test on split dividers for cursor & grip highlight
@@ -491,17 +653,20 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 				}
 			}
 
-			// C. Autonomous Cursor Determination: Chrome View -> Terminal/Session -> Window Default
+			// C. Autonomous Cursor Determination: Chrome View -> Hyperlink (Cmd-gated) -> Terminal/Session -> Window Default
 			if !divider_cursor_handled {
 				if cur, handled := chrome_view_cursor(&app.chrome_view, &app.layout, &app.tabs_mgr, &app.cmd_center, {mx, my}); handled {
+					app.mouse.hover_link = {}
 					app_set_mouse_cursor(cur)
 				} else if hovered_pane != nil {
 					if hovered_pane.kind == .Terminal && hovered_pane.session != nil {
-						app_set_mouse_cursor(sess_feat.session_get_mouse_cursor(hovered_pane.session, is_shift))
+						app_update_hyperlink_hover(app)
 					} else {
+						app.mouse.hover_link = {}
 						app_set_mouse_cursor(.Default)
 					}
 				} else {
+					app.mouse.hover_link = {}
 					app_set_mouse_cursor(.Default)
 				}
 			}
@@ -516,7 +681,8 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 				btn := app.mouse.button if app.mouse.is_down else u8(0)
 				is_btn_down := app.mouse.is_down
 				if sess.term.parser.mouse_mode == .Any_Event || (sess.term.parser.mouse_mode == .Button_Event && is_btn_down) {
-					if seq, ok := mouse_protocol_encode(sess, .Motion, btn, mx, my, pane_rect, app.layout.metrics.cell_w, app.layout.metrics.cell_h, app.layout.metrics.pane_pad_x, app.layout.metrics.pane_pad_y, 0.0, is_shift, is_alt, is_ctrl); ok {
+					eff_px, eff_py := pane_grid_pad(pane_rect, sess.term.rows, sess.term.cols, app.layout.metrics.cell_w, app.layout.metrics.cell_h, app.layout.metrics.pane_pad_x, app.layout.metrics.pane_pad_y)
+					if seq, ok := mouse_protocol_encode(sess, .Motion, btn, mx, my, pane_rect, app.layout.metrics.cell_w, app.layout.metrics.cell_h, eff_px, eff_py, 0.0, is_shift, is_alt, is_ctrl); ok {
 						sess_feat.session_write_string(sess, seq)
 					}
 				}
@@ -526,6 +692,10 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 		case .MOUSE_BUTTON_DOWN:
 			app_handle_mouse_button_down(app, ev.button)
 		case .MOUSE_BUTTON_UP:
+			if scrollbar_drag_active(app) {
+				scrollbar_end_drag(app)
+				chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
+			}
 			if app.mouse.is_dragging_divider {
 				app.mouse.is_dragging_divider = false
 				app.mouse.drag_split_node = nil
@@ -550,7 +720,8 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 			is_alt   := (mods & sdl3.KMOD_ALT)   != sdl3.KMOD_NONE
 			is_ctrl  := (mods & sdl3.KMOD_CTRL)  != sdl3.KMOD_NONE
 			if pane != nil && mouse_protocol_should_handle(pane.session, is_shift) {
-				if seq, ok := mouse_protocol_encode(pane.session, .Release, u8(ev.button.button), mx, my, pane.rect, app.layout.metrics.cell_w, app.layout.metrics.cell_h, app.layout.metrics.pane_pad_x, app.layout.metrics.pane_pad_y, 0.0, is_shift, is_alt, is_ctrl); ok {
+				eff_px, eff_py := pane_grid_pad(pane.rect, pane.session.term.rows, pane.session.term.cols, app.layout.metrics.cell_w, app.layout.metrics.cell_h, app.layout.metrics.pane_pad_x, app.layout.metrics.pane_pad_y)
+				if seq, ok := mouse_protocol_encode(pane.session, .Release, u8(ev.button.button), mx, my, pane.rect, app.layout.metrics.cell_w, app.layout.metrics.cell_h, eff_px, eff_py, 0.0, is_shift, is_alt, is_ctrl); ok {
 					sess_feat.session_write_string(pane.session, seq)
 				}
 			}
@@ -561,6 +732,10 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 			app_handle_text_input(app, string(ev.text.text))
 		case .KEY_DOWN:
 			app_handle_key_down(app, ev.key)
+			_ = app_update_hyperlink_hover(app)
+		case .KEY_UP:
+			app_handle_key_up(app, ev.key)
+			_ = app_update_hyperlink_hover(app)
 		}
 
 		if !sdl3.PollEvent(&ev) do break
