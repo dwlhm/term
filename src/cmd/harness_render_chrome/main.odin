@@ -36,6 +36,7 @@ import scheduler "../../core/composer/scheduler"
 import transition "../../core/composer/transition"
 import frame "../../core/composer/frame"
 import chrome "../../core/render/chrome"
+import plat_font "../../platform/font"
 import chrome_sdf "../../core/render/chrome/sdf"
 import chrome_dl "../../core/chrome/draw_list"
 import chrome_tabs "../../core/chrome/tabs"
@@ -1979,6 +1980,29 @@ _run_benchmark_phase :: proc(
 	return presented_count
 }
 
+// _run_artifact_suite renders the deterministic chrome fixtures with the real
+// text atlas and dumps PNG readbacks, so UI typography can be verified without
+// a screen-recording entitlement.
+_run_artifact_suite :: proc(h: ^Harness_State) {
+	text_atlas: plat_font.Text_Atlas
+	if plat_font.text_atlas_init(&text_atlas, 32.0) {
+		defer plat_font.text_atlas_destroy(&text_atlas)
+		if plat_font.text_atlas_upload(&text_atlas, h.device, h.queue) {
+			chrome.chrome_renderer_set_atlas(
+				&h.chrome_renderer,
+				text_atlas.glyph_view,
+				text_atlas.cell_w,
+				text_atlas.cell_h,
+			)
+		}
+	}
+	if !run_correctness_suite(h) {
+		fmt.eprintln("artifact suite failed: visual readback rejected")
+		return
+	}
+	fmt.println("artifact suite: artifacts/chrome_test*.png written")
+}
+
 // _run_honest_benchmark runs 5 complete runs across 6 phases with 200-frame high-clock warmup and phase shuffling.
 _run_honest_benchmark :: proc(h: ^Harness_State) {
 	fmt.println("\n==========================================================================================================================================================================================")
@@ -3105,7 +3129,11 @@ main :: proc() {
 
 	for i := 1; i < len(os.args); i += 1 {
 		arg := os.args[i]
-		if arg == "--bench" {
+		if arg == "--artifacts" {
+			_run_artifact_suite(h)
+			h.running = false
+			return
+		} else if arg == "--bench" {
 			_run_honest_benchmark(h)
 			h.running = false
 			return

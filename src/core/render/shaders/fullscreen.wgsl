@@ -49,7 +49,7 @@ struct Fullscreen_Params {
 
 @group(0) @binding(0) var<uniform> params: Fullscreen_Params;
 @group(0) @binding(1) var<storage, read> cells: array<u32>;
-@group(0) @binding(2) var<storage, read> lut: array<u32, 1025>;
+@group(0) @binding(2) var<storage, read> lut: array<u32, 1027>;
 @group(0) @binding(3) var atlas_texture: texture_2d<f32>;
 @group(0) @binding(4) var atlas_sampler: sampler;
 @group(0) @binding(5) var<storage, read> colors: array<u32>;
@@ -95,7 +95,11 @@ fn lut_bg(s: u32) -> u32 {
 
 const CELL_FLAG_SELECTED: u32 = 2u;
 const CELL_FLAG_DIRECT_COLOR: u32 = 8u;
+const CELL_FLAG_HOVER: u32 = 16u;
+const CELL_FLAG_HOVER_BLOCKED: u32 = 32u;
 const LUT_SELECTION_WORD: u32 = 1024u;
+const LUT_HOVER_OPENABLE_WORD: u32 = 1025u;
+const LUT_HOVER_BLOCKED_WORD: u32 = 1026u;
 const OPAQUE_ALPHA: f32 = 1.0;
 const COLOR_WORDS_PER_CELL: u32 = 2u;
 const ARGB_A_SHIFT: u32 = 24u;
@@ -111,12 +115,48 @@ fn lut_selection_bg() -> u32 {
     return (lut[LUT_SELECTION_WORD] >> 16u) & 0xFFFFu;
 }
 
+const CELL_DECOR_UNDERLINE: u32 = 1u;
+const CELL_DECOR_STRIKE: u32 = 2u;
+const CELL_DECOR_ITALIC: u32 = 4u;
+
+// italic_shift shears glyph sampling to synthesise an oblique face: the glyph
+// top leans right, the baseline stays anchored.
+fn italic_shift(decor: u32, fy: f32) -> f32 {
+    if ((decor & CELL_DECOR_ITALIC) == 0u) { return 0.0; }
+    return (0.5 - fy) * 0.22;
+}
+
+// decor_hit reports whether a pixel row belongs to an underline/strike rule.
+fn decor_hit(decor: u32, y: f32, cell_y0: f32, cell_h: f32) -> bool {
+    let thickness = max(1.0, floor(cell_h * 0.06));
+    if ((decor & CELL_DECOR_UNDERLINE) != 0u) {
+        if (y >= cell_y0 + cell_h - thickness) { return true; }
+    }
+    if ((decor & CELL_DECOR_STRIKE) != 0u) {
+        let strike_y = cell_y0 + cell_h * 0.55;
+        if (y >= strike_y && y < strike_y + thickness) { return true; }
+    }
+    return false;
+}
+
 fn cell_is_selected(cflags: u32) -> bool {
     return (cflags & CELL_FLAG_SELECTED) != 0u;
 }
 
+fn cell_is_hovered(cflags: u32) -> bool {
+    return (cflags & CELL_FLAG_HOVER) != 0u;
+}
+
+// hover_bg picks the tint for the OSC 8 run under the pointer from the reserved
+// LUT words, which the renderer writes from the active theme.
+fn hover_bg(cflags: u32) -> vec3<f32> {
+    let word = select(LUT_HOVER_OPENABLE_WORD, LUT_HOVER_BLOCKED_WORD, (cflags & CELL_FLAG_HOVER_BLOCKED) != 0u);
+    return r5g6b5_to_rgb((lut[word] >> 16u) & 0xFFFFu);
+}
+
 fn cell_background(style: u32, cflags: u32, bg_rgb: vec3<f32>, has_direct_bg: bool) -> vec4<f32> {
     let has_authored_background = cell_is_selected(cflags) ||
+        cell_is_hovered(cflags) ||
         has_direct_bg ||
         lut_bg(style) != lut_bg(0u);
     let base_rgb = r5g6b5_to_rgb(lut_bg(0u)) * params.bg_opacity;
@@ -222,6 +262,8 @@ fn fullscreen_fs_main(input: Fullscreen_Output) -> @location(0) vec4<f32> {
     let width = ((lo >> 31u) & 1u) | ((hi & 1u) << 1u);
     let cflags = (hi >> 1u) & 0x7Fu;
     let slot = (hi >> 8u) & 0x1FFu;
+    let decor = (hi >> 17u) & 0x7u;
+    let cell_y0 = params.pad_y + f32(lr) * params.cell_h;
 
     // Direct-color cells read per-cell fg/bg ARGB words; a zero word falls
     // back to the LUT path (0 = unassigned). has_direct_bg marks an authored
@@ -251,6 +293,9 @@ fn fullscreen_fs_main(input: Fullscreen_Output) -> @location(0) vec4<f32> {
         let bg_packed = select(lut_bg(style), lut_selection_bg(), cell_is_selected(cflags));
         bg_rgb = r5g6b5_to_rgb(bg_packed);
     }
+    if (cell_is_hovered(cflags) && !cell_is_selected(cflags)) {
+        bg_rgb = hover_bg(cflags);
+    }
     let background = cell_background(style, cflags, bg_rgb, has_direct_bg);
     let background_alpha = background.a;
 
@@ -273,6 +318,7 @@ fn fullscreen_fs_main(input: Fullscreen_Output) -> @location(0) vec4<f32> {
                 let nstyle = (nlo >> 21u) & 0x3FFu;
                 let ncflags = (nhi >> 1u) & 0x7Fu;
                 let nslot = (nhi >> 8u) & 0x1FFu;
+                let n_decor = (nhi >> 17u) & 0x7u;
                 if (ncontent != 0x20u && ncontent != 0u) {
                     var su = -1;
                     if (nslot == 0x1FFu) {
@@ -295,8 +341,9 @@ fn fullscreen_fs_main(input: Fullscreen_Output) -> @location(0) vec4<f32> {
                         }
                         let gw = params.cell_w * 2.0;
                         let uvs = slot_uv(u32(su), gw);
-                        let fx = (input.clip_position.x - (x0 - params.cell_w)) / gw;
                         let fy = (input.clip_position.y - y0) / params.cell_h;
+                        let fx = (input.clip_position.x - (x0 - params.cell_w)) / gw
+                            + italic_shift(n_decor, fy);
                         if (fx >= 0.0 && fx < 1.0 && fy >= 0.0 && fy < 1.0) {
                             let u = uvs.x + fx * (uvs.z - uvs.x);
                             let v = uvs.y + fy * (uvs.w - uvs.y);
@@ -312,6 +359,10 @@ fn fullscreen_fs_main(input: Fullscreen_Output) -> @location(0) vec4<f32> {
                     }
                 }
             }
+        }
+        if (decor_hit(decor, py + 0.5, cell_y0, params.cell_h)) {
+            col = select(fg_rgb * params.cell_opacity, fg_rgb, cell_is_selected(cflags));
+            glyph_coverage = max(glyph_coverage, 1.0);
         }
         return vec4<f32>(col, composited_alpha(background_alpha, glyph_coverage) * fill_alpha);
     }
@@ -332,8 +383,8 @@ fn fullscreen_fs_main(input: Fullscreen_Output) -> @location(0) vec4<f32> {
             gw = params.cell_w * 2.0;
         }
         let uvs = slot_uv(u32(su), gw);
-        let fx = (input.clip_position.x - x0) / gw;
         let fy = (input.clip_position.y - y0) / params.cell_h;
+        let fx = (input.clip_position.x - x0) / gw + italic_shift(decor, fy);
         if (fx >= 0.0 && fx < 1.0 && fy >= 0.0 && fy < 1.0) {
             let u = uvs.x + fx * (uvs.z - uvs.x);
             let v = uvs.y + fy * (uvs.w - uvs.y);
@@ -346,6 +397,10 @@ fn fullscreen_fs_main(input: Fullscreen_Output) -> @location(0) vec4<f32> {
                 glyph_coverage = alpha;
             }
         }
+    }
+    if (decor_hit(decor, py + 0.5, cell_y0, params.cell_h)) {
+        col = select(fg_rgb * params.cell_opacity, fg_rgb, cell_is_selected(cflags));
+        glyph_coverage = max(glyph_coverage, 1.0);
     }
     return vec4<f32>(col, composited_alpha(background_alpha, glyph_coverage) * fill_alpha);
 }

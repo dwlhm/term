@@ -15,7 +15,7 @@ import contract "../../contract"
 
 FULLSCREEN_PARAMS_SIZE :: 80
 FULLSCREEN_CELL_BYTES :: 8
-FULLSCREEN_LUT_WORDS :: 1025
+FULLSCREEN_LUT_WORDS :: 1027
 FULLSCREEN_LUT_BYTES :: FULLSCREEN_LUT_WORDS * size_of(u32)
 
 FULLSCREEN_ATLAS_TEX_W :: 1024
@@ -115,7 +115,7 @@ fullscreen_init :: proc(
 		return false
 	}
 
-	// LUT storage buffer (1025 u32 words)
+	// LUT storage buffer (1027 u32 words)
 	l_usage := contract.Gpu_Buffer_Usage.Storage | contract.Gpu_Buffer_Usage.Copy_Dst
 	r.lut_buffer = contract.create_buffer(device, FULLSCREEN_LUT_BYTES, l_usage, false)
 	if rawptr(r.lut_buffer) == nil {

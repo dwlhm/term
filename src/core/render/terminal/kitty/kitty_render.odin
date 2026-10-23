@@ -77,8 +77,22 @@ _kitty_sync_single_image :: proc(r: ^Kitty_Renderer, img: ^ext.Kitty_Image) {
 		return
 	}
 
-	w_u32 := u32(max(1, img.width))
-	h_u32 := u32(max(1, img.height))
+	// Never hand an unvalidated geometry or a short pixel buffer to the backend:
+	// a hostile stream must not be able to create an invalid texture object and
+	// poison every subsequent render pass with it.
+	if !ext.kitty_dims_valid(img.width, img.height) {
+		img.is_active = false
+		img.gpu_dirty = false
+		return
+	}
+	if len(img.pixels) < img.width * img.height * 4 {
+		img.is_active = false
+		img.gpu_dirty = false
+		return
+	}
+
+	w_u32 := u32(img.width)
+	h_u32 := u32(img.height)
 	tex := contract.create_texture(r.device, w_u32, h_u32, .RGBA8_Unorm, .Copy_Dst | .Texture_Binding)
 	if rawptr(tex) == nil {
 		img.gpu_dirty = false
@@ -120,6 +134,7 @@ kitty_renderer_sync_images :: proc(r: ^Kitty_Renderer, term: ^core_terminal.Term
 
 kitty_renderer_has_images :: proc(r: ^Kitty_Renderer, term: ^core_terminal.Terminal) -> bool {
 	if r == nil || !r.available || term == nil do return false
+	current_screen: ext.Kitty_Screen = .Alternate if core_terminal.terminal_in_alt_screen(term) else .Primary
 	for i in 0..<term.extensions.ext_count {
 		e := &term.extensions.extensions[i]
 		if e.name != "kitty_graphics" || e.user_data == nil do continue
@@ -127,9 +142,10 @@ kitty_renderer_has_images :: proc(r: ^Kitty_Renderer, term: ^core_terminal.Termi
 		for j in 0..<ext.MAX_KITTY_IMAGES {
 			img := &kstate.images[j]
 			if img.is_active {
-				if img.is_virtual do return true
+				if img.is_virtual && img.screen == current_screen do return true
 				for k in 0..<len(kstate.placements) {
-					if kstate.placements[k].is_active && kstate.placements[k].image_id == img.id {
+					p := &kstate.placements[k]
+					if p.is_active && p.image_id == img.id && p.screen == current_screen {
 						return true
 					}
 				}
@@ -167,6 +183,7 @@ kitty_renderer_prepare :: proc(
 	clear(&r.draw_batches)
 	if active_count == 0 do return
 
+	current_screen: ext.Kitty_Screen = .Alternate if core_terminal.terminal_in_alt_screen(term) else .Primary
 	for i in 0..<term.extensions.ext_count {
 		e := &term.extensions.extensions[i]
 		if e.name != "kitty_graphics" || e.user_data == nil do continue
@@ -178,11 +195,13 @@ kitty_renderer_prepare :: proc(
 
 			start_idx := len(r.instance_data)
 			if img.is_virtual {
-				_kitty_collect_placeholder_cells(r, img, term, pane_rect, cell_w, cell_h, pad_x, pad_y, scroll_offset, active_count)
+				if img.screen == current_screen {
+					_kitty_collect_placeholder_cells(r, img, term, pane_rect, cell_w, cell_h, pad_x, pad_y, scroll_offset, active_count)
+				}
 			} else {
 				for k in 0..<len(kstate.placements) {
 					p := &kstate.placements[k]
-					if !p.is_active || p.image_id != img.id do continue
+					if !p.is_active || p.image_id != img.id || p.screen != current_screen do continue
 					if p.y_row + scroll_offset + p.rows <= 0 do continue
 					if p.y_row + scroll_offset >= term.rows do continue
 					rec := _kitty_calc_placement_record(p, img, pane_rect, cell_w, cell_h, pad_x, pad_y, scroll_offset)

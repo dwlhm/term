@@ -21,7 +21,7 @@ TEST_FLAGS ?= -define:ODIN_TEST_THREADS=1
 DEBUG_FLAGS ?= -debug
 RELEASE_FLAGS ?= -o:speed -no-bounds-check
 
-.PHONY: all term release run term-debug harness-features run-harness-features harness-render-chrome run-harness-render-chrome harness-render-terminal run-harness-render-terminal harness-render-composer run-harness-composer test test-app test-font test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-gpu check clean help bench bench-quick bundle dmg portable dist install uninstall
+.PHONY: all term release run term-debug harness-features run-harness-features harness-render-chrome run-harness-render-chrome harness-render-terminal run-harness-render-terminal harness-render-composer run-harness-composer test test-app test-font test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-selector test-gpu check clean help bench bench-quick bundle dmg portable dist install uninstall
 
 all: term harness-features harness-render-chrome harness-render-terminal harness-composer
 
@@ -123,7 +123,7 @@ bench-session:
 	$(ODIN) build src/cmd/bench_session -out:$(OUT_DIR)/bench_session $(RELEASE_FLAGS) $(COMMON_FLAGS)
 	./$(OUT_DIR)/bench_session
 
-test: test-app test-terminal test-pty test-font test-session test-tabs test-multiplexer test-interaction test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-gpu test-features test-e2e
+test: test-app test-terminal test-pty test-font test-session test-tabs test-multiplexer test-interaction test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-selector test-gpu test-features test-e2e
 
 test-app:
 	$(ODIN) test src/app/term $(TEST_FLAGS)
@@ -202,6 +202,9 @@ test-gpu: harness-render-terminal
 test-render-contract:
 	$(ODIN) test src/core/render/contract/tests $(CHECK_FLAGS) $(TEST_FLAGS)
 
+test-selector:
+	$(ODIN) test src/core/render/terminal/tests $(CHECK_FLAGS) $(TEST_FLAGS)
+
 check:
 	$(ODIN) check src/cmd/harness_helper $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/cmd/harness_render_chrome $(CHECK_FLAGS)
@@ -265,6 +268,7 @@ help:
 	@echo "  test                        Run all active core unit tests"
 	@echo "  test-composer               Run composer pipeline unit tests"
 	@echo "  test-render-contract        Run render contract & damage unit tests"
+	@echo "  test-selector               Run adaptive strategy selector unit tests"
 	@echo "  check                       Type check all active core modules and harnesses"
 	@echo "  clean                       Remove build artifacts and binaries"
 	@echo "  bench                       Run harness_composer full benchmark suite"

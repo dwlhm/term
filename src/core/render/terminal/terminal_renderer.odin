@@ -22,6 +22,7 @@ import "fullscreen"
 import kitty "kitty"
 import core_terminal "../../terminal"
 import cell "../../terminal/cell"
+import grid "../../terminal/grid"
 import damage "../../terminal/damage"
 import plat_font "../../../platform/font"
 
@@ -67,7 +68,7 @@ unpack_r5g6b5 :: #force_inline proc "contextless" (packed: u16) -> [4]f32 {
 	return {r, g, b, 1.0}
 }
 
-init_style_lut :: proc(lut: ^[1025]u32) {
+init_style_lut :: proc(lut: ^[1027]u32) {
 	for i in 0..<16 {
 		c := RAW_PALETTE_COLORS[i]
 		PALETTE_PRECOMPUTED[i] = unpack_r5g6b5(rgb_to_r5g6b5(c[0], c[1], c[2]))
@@ -220,8 +221,10 @@ Terminal_Renderer :: struct {
 	fs_color_buffer:    contract.Gpu_Buffer,
 
 	// Shared LUT & Adaptive Strategy Selector State
-	lut_words:          [1025]u32,
+	lut_words:          [1027]u32,
 	last_default_bg_packed: u16,
+	last_hover_openable_packed: u16,
+	last_hover_blocked_packed:  u16,
 	strat_state:        Strategy_State,
 	last_strategy:      Render_Strategy,
 	last_duration_ns:   u64,
@@ -234,6 +237,7 @@ Terminal_Renderer :: struct {
 	last_scroll_offset: int,
 	last_is_focused:    bool,
 	tile_fb_valid:      bool,
+	ligature_cache:     plat_font.Ligature_Cache,
 
 	// Scratch Storage Buffers (Preallocated for zero heap allocations)
 	packed_cells:       [dynamic]u64,
@@ -243,6 +247,39 @@ Terminal_Renderer :: struct {
 	available:          bool,
 	allocator:          runtime.Allocator,
 }
+
+// Decoration flags live in the spare high bits of the packed 64-bit GPU cell:
+// bit 49 = underline, bit 50 = strikethrough (hi >> 17 / hi >> 18).
+GPU_CELL_DECOR_UNDERLINE :: u64(1) << 49
+GPU_CELL_DECOR_STRIKE    :: u64(1) << 50
+GPU_CELL_DECOR_ITALIC    :: u64(1) << 51
+
+// Cell flags travel in the 7-bit cflags field of the packed cell (hi >> 1).
+GPU_CELL_FLAG_SELECTED      :: u32(2)
+GPU_CELL_FLAG_DIRECT_COLOR  :: u32(8)
+GPU_CELL_FLAG_HOVER         :: u32(16)
+GPU_CELL_FLAG_HOVER_BLOCKED :: u32(32)
+
+// Hyperlink_Highlight marks the contiguous OSC 8 run under the pointer so every
+// render strategy can tint it uniformly. `row` is a logical grid row and the
+// column range is inclusive.
+Hyperlink_Highlight :: struct {
+	active:    bool,
+	row:       int,
+	col_start: int,
+	col_end:   int,
+	blocked:   bool,
+}
+
+// Hover tint colors. The sparse instance path uses these [4]f32 values directly
+// while the tile/fullscreen shaders read the same colors from the LUT entries
+// below (written from the theme at encode time).
+HOVER_OPENABLE_BG: [4]f32 : {0.141, 0.322, 0.220, 1.0} // dark green
+HOVER_BLOCKED_BG:  [4]f32 : {0.380, 0.161, 0.149, 1.0} // dark red
+
+// LUT word indices reserved for the hover tints (selection uses 1024).
+LUT_HOVER_OPENABLE_WORD :: 1025
+LUT_HOVER_BLOCKED_WORD  :: 1026
 
 _pack_gpu_cell :: #force_inline proc "contextless" (
 	content: u32,
@@ -374,6 +411,8 @@ terminal_renderer_init_with_pipelines :: proc(
 	r.fs_rend.pipeline = r.fs_pipeline
 	r.fs_rend.layout = r.fs_layout
 
+	plat_font.ligature_cache_init(&r.ligature_cache)
+
 	r.last_default_bg_packed = u16(r.lut_words[512] & 0xFFFF)
 	if rawptr(r.tile_rend.lut_buffer) != nil {
 		contract.write_buffer(queue, r.tile_rend.lut_buffer, 0, &r.lut_words, size_of(r.lut_words))
@@ -440,7 +479,10 @@ terminal_renderer_destroy :: proc(r: ^Terminal_Renderer) {
 	tile.compute_tile_destroy(&r.tile_rend)
 	fullscreen.fullscreen_destroy(&r.fs_rend)
 
-	if rawptr(r.fs_color_buffer) != nil do contract.destroy_buffer(r.fs_color_buffer)
+	if rawptr(r.fs_color_buffer) != nil {
+		contract.destroy_buffer(r.fs_color_buffer)
+		r.fs_color_buffer = contract.Gpu_Buffer(nil)
+	}
 
 	if r.owns_pipelines && r.pipelines != nil {
 		terminal_pipelines_destroy(r.pipelines)
@@ -448,11 +490,21 @@ terminal_renderer_destroy :: proc(r: ^Terminal_Renderer) {
 		r.pipelines = nil
 	}
 
-	delete(r.packed_cells)
-	delete(r.direct_colors)
-	delete(r.dirty_tiles)
+	if len(r.packed_cells) > 0 {
+		delete(r.packed_cells)
+		r.packed_cells = nil
+	}
+	if len(r.direct_colors) > 0 {
+		delete(r.direct_colors)
+		r.direct_colors = nil
+	}
+	if len(r.dirty_tiles) > 0 {
+		delete(r.dirty_tiles)
+		r.dirty_tiles = nil
+	}
 
 	r.available = false
+	r^ = {}
 }
 
 _terminal_renderer_ensure_resources :: proc(
@@ -682,6 +734,41 @@ _terminal_renderer_push_emoji :: #force_inline proc(
 	_terminal_renderer_push_emoji_quad_only(r, eg, x_pos, y_pos, gw, cell_h, is_focused)
 }
 
+// _terminal_renderer_push_decoration paints a 1-2px rule using the background
+// instance pass: uv_rect == {0,0,0,0} means "solid fill, ignore the atlas".
+_terminal_renderer_push_decoration :: #force_inline proc(
+	r: ^Terminal_Renderer,
+	x, y, w, h: f32,
+	color: [4]f32,
+) {
+	rec := contract.Instance_Record{
+		pos_size = {x, y, w, h},
+		uv_rect  = {0, 0, 0, 0},
+		fg_color = {0, 0, 0, 0},
+		bg_color = color,
+	}
+	instance.instance_renderer_push(&r.inst_rend, rec)
+}
+
+// _terminal_renderer_push_decorations renders underline and strikethrough rules
+// in the foreground colour, matching the cell's own span and height.
+_terminal_renderer_push_decorations :: #force_inline proc(
+	r: ^Terminal_Renderer,
+	style: cell.Style_Flags,
+	x, y, w, cell_h: f32,
+	fg: [4]f32,
+) {
+	// Geometry matches decor_hit() in the cell shaders exactly, so the sparse
+	// instance path and the tiled paths produce identical pixels.
+	thickness := max(1.0, math.floor(cell_h * 0.06))
+	if .Underline in style {
+		_terminal_renderer_push_decoration(r, x, y + cell_h - thickness, w, thickness, fg)
+	}
+	if .Strike in style {
+		_terminal_renderer_push_decoration(r, x, y + cell_h * 0.55, w, thickness, fg)
+	}
+}
+
 _terminal_renderer_push_glyph :: #force_inline proc(
 	r: ^Terminal_Renderer,
 	gam: ^plat_font.Glyph_Atlas_Manager,
@@ -699,6 +786,24 @@ _terminal_renderer_push_glyph :: #force_inline proc(
 	instance.instance_renderer_push(&r.inst_rend, rec)
 }
 
+// _terminal_renderer_grid_has_italic reports whether any visible cell requests a
+// synthetic italic, so the sparse instance path can defer to the cell shaders.
+_terminal_renderer_grid_has_italic :: proc(
+	term: ^core_terminal.Terminal,
+	rows, cols: int,
+	scroll_offset: int,
+) -> bool {
+	for r_idx in 0..<rows {
+		row := core_terminal.terminal_get_row(term, r_idx - scroll_offset)
+		if row == nil do continue
+		limit := min(cols, len(row.cells))
+		for c in 0..<limit {
+			if .Italic in row.cells[c].style do return true
+		}
+	}
+	return false
+}
+
 _terminal_renderer_is_cell_selected :: #force_inline proc "contextless" (
 	logical_r, c: int,
 	selection_active: bool,
@@ -713,11 +818,89 @@ _terminal_renderer_is_cell_selected :: #force_inline proc "contextless" (
 	return true
 }
 
+_terminal_renderer_is_cell_hovered :: #force_inline proc "contextless" (
+	logical_r, c: int,
+	hover: Hyperlink_Highlight,
+) -> bool {
+	if !hover.active || logical_r != hover.row do return false
+	return c >= hover.col_start && c <= hover.col_end
+}
+
 _float_to_argb :: #force_inline proc "contextless" (col: [4]f32) -> u32 {
 	r := u32(clamp(col[0] * 255.0 + 0.5, 0.0, 255.0))
 	g := u32(clamp(col[1] * 255.0 + 0.5, 0.0, 255.0))
 	b := u32(clamp(col[2] * 255.0 + 0.5, 0.0, 255.0))
 	return 0xFF000000 | (r << 16) | (g << 8) | b
+}
+
+@(private = "file")
+_probe_ligature_run :: proc(
+	cache: ^plat_font.Ligature_Cache,
+	r: ^plat_font.Font_Rasterizer,
+	buf: []u8,
+) -> ([]u32, int) {
+	for try_len := min(len(buf), plat_font.LIGATURE_MAX_LEN); try_len >= 2; try_len -= 1 {
+		if glyphs, is_lig := plat_font.ligature_cache_lookup(cache, r, buf[:try_len]); is_lig && len(glyphs) > 0 {
+			return glyphs, try_len
+		}
+	}
+	return nil, 0
+}
+
+@(private = "file")
+_apply_row_ligatures :: proc(
+	cache: ^plat_font.Ligature_Cache,
+	r: ^plat_font.Font_Rasterizer,
+	row: ^grid.Row,
+	cols: int,
+	out_chars: []u32,
+) {
+	limit := min(cols, len(row.cells))
+	for c in 0..<limit {
+		out_chars[c] = u32(row.cells[c].char)
+	}
+	if cache == nil || r == nil || r.hb_font == nil do return
+
+	col := 0
+	for col < limit {
+		ch := row.cells[col].char
+		if ch >= 128 || !plat_font.is_ligature_candidate(u8(ch)) {
+			col += 1
+			continue
+		}
+
+		run_len := 0
+		run_buf: [plat_font.LIGATURE_MAX_LEN]u8
+		for col + run_len < limit && run_len < plat_font.LIGATURE_MAX_LEN {
+			next_ch := row.cells[col + run_len].char
+			if next_ch < 128 && plat_font.is_ligature_candidate(u8(next_ch)) {
+				run_buf[run_len] = u8(next_ch)
+				run_len += 1
+			} else {
+				break
+			}
+		}
+
+		if run_len >= 2 {
+			if glyphs, matched_len := _probe_ligature_run(cache, r, run_buf[:run_len]); matched_len > 0 {
+				for i in 0..<matched_len {
+					g_id := glyphs[i] if i < len(glyphs) else glyphs[len(glyphs) - 1]
+					out_chars[col + i] = plat_font.CONTENT_LIGATURE_BASE + g_id
+				}
+				col += matched_len
+				continue
+			}
+		}
+		col += 1
+	}
+}
+
+_pack_f32_to_r5g6b5 :: #force_inline proc "contextless" (col: [4]f32) -> u16 {
+	return rgb_to_r5g6b5(
+		u8(clamp(col[0] * 255.0 + 0.5, 0.0, 255.0)),
+		u8(clamp(col[1] * 255.0 + 0.5, 0.0, 255.0)),
+		u8(clamp(col[2] * 255.0 + 0.5, 0.0, 255.0)),
+	)
 }
 
 _terminal_renderer_pack_grid :: proc(
@@ -733,9 +916,11 @@ _terminal_renderer_pack_grid :: proc(
 	active_bg: [4]f32,
 	selection_active: bool,
 	sel_r_start, sel_c_start, sel_r_end, sel_c_end: int,
+	hover: Hyperlink_Highlight = {},
 	is_focused: bool = true,
 ) {
 	blank_packed := _pack_gpu_cell(' ', 0, 1, 0, 0)
+	row_chars: [512]u32
 	for r_idx in 0..<rows {
 		logical_r := r_idx - scroll_offset
 		row := core_terminal.terminal_get_row(term, logical_r)
@@ -752,6 +937,13 @@ _terminal_renderer_pack_grid :: proc(
 			continue
 		}
 
+		if gam != nil && gam.fc != nil {
+			_apply_row_ligatures(&r.ligature_cache, &gam.fc.rasterizer, row, cols, row_chars[:min(cols, 512)])
+		} else {
+			limit := min(cols, min(512, len(row.cells)))
+			for c in 0..<limit do row_chars[c] = u32(row.cells[c].char)
+		}
+
 		for c in 0..<cols {
 			ci := row_base + c
 			if c >= len(row.cells) {
@@ -765,6 +957,7 @@ _terminal_renderer_pack_grid :: proc(
 			is_selected := _terminal_renderer_is_cell_selected(
 				logical_r, c, selection_active, sel_r_start, sel_c_start, sel_r_end, sel_c_end,
 			)
+			is_hovered := !is_selected && _terminal_renderer_is_cell_hovered(logical_r, c, hover)
 
 			fg_idx := u32(cell_val.fg & 15)
 			bg_idx := u32(cell_val.bg & 15)
@@ -774,12 +967,23 @@ _terminal_renderer_pack_grid :: proc(
 			if .Invert in cell_val.style {
 				fg_idx, bg_idx = bg_idx, fg_idx
 			}
+			// OSC 8 hyperlinks are underlined by default, matching every other
+			// terminal that implements the protocol.
+			cell_style := cell_val.style
+			if .Has_Hyperlink in cell_val.flags do cell_style += {.Underline}
 			style_val := fg_idx | (bg_idx << 4)
+			decor: u64 = 0
+			if .Underline in cell_style do decor |= GPU_CELL_DECOR_UNDERLINE
+			if .Strike in cell_style do decor |= GPU_CELL_DECOR_STRIKE
 			if style_val == 0 && (.Invert in cell_val.style || (cell_val.fg == 0 && cell_val.char > ' ')) {
 				style_val |= 256
 			}
 
-			cflags: u32 = 2 if is_selected else 0
+			cflags: u32 = GPU_CELL_FLAG_SELECTED if is_selected else 0
+			if is_hovered {
+				cflags |= GPU_CELL_FLAG_HOVER
+				if hover.blocked do cflags |= GPU_CELL_FLAG_HOVER_BLOCKED
+			}
 			fg_argb: u32 = 0
 			bg_argb: u32 = 0
 
@@ -788,7 +992,7 @@ _terminal_renderer_pack_grid :: proc(
 				dc = row.direct_colors[c]
 			}
 			if dc.has_fg || dc.has_bg || .Dim in cell_val.style {
-				cflags |= 8
+				cflags |= GPU_CELL_FLAG_DIRECT_COLOR
 				fg_col, bg_col := _terminal_renderer_resolve_colors(cell_val, dc, false, active_bg, true)
 				if dc.has_fg || .Dim in cell_val.style || .Invert in cell_val.style {
 					fg_argb = _float_to_argb(fg_col)
@@ -802,6 +1006,15 @@ _terminal_renderer_pack_grid :: proc(
 
 			if .Wide_Continuation in cell_val.flags && c > 0 && .Wide_Lead in row.cells[c - 1].flags {
 				r.packed_cells[ci] = _pack_gpu_cell(' ', style_val, 0, cflags, 0)
+				continue
+			}
+
+			// If cell is part of an OpenType programming ligature run
+			if c < 512 && row_chars[c] >= plat_font.CONTENT_LIGATURE_BASE {
+				lig_cp := row_chars[c]
+				slot, ok := plat_font.glyph_atlas_get_or_rasterize(gam, rune(lig_cp), false)
+				if !ok do slot = 0
+				r.packed_cells[ci] = _pack_gpu_cell(lig_cp, style_val, 1, cflags, slot)
 				continue
 			}
 
@@ -857,6 +1070,25 @@ _terminal_renderer_pack_grid :: proc(
 			if !ok do slot = 0
 			r.packed_cells[ci] = _pack_gpu_cell(u32(ch), style_val, width_val, cflags, slot)
 		}
+
+		// Apply decorations and concealment once per row so every early-exit cell
+		// (blank, wide continuation, emoji placeholder) is covered uniformly.
+		for c in 0..<min(cols, len(row.cells)) {
+			style := row.cells[c].style
+			if .Has_Hyperlink in row.cells[c].flags do style += {.Underline}
+			// A wide glyph's right half must inherit its lead's rules so the
+			// underline is continuous across both cells.
+			if .Wide_Continuation in row.cells[c].flags && c > 0 {
+				style = row.cells[c - 1].style
+			}
+			ci := row_base + c
+			if .Underline in style do r.packed_cells[ci] |= GPU_CELL_DECOR_UNDERLINE
+			if .Strike in style do r.packed_cells[ci] |= GPU_CELL_DECOR_STRIKE
+			if .Italic in style do r.packed_cells[ci] |= GPU_CELL_DECOR_ITALIC
+			if .Hidden in style {
+				r.packed_cells[ci] = (r.packed_cells[ci] & ~u64(0x1FFFFF)) | u64(' ')
+			}
+		}
 	}
 }
 
@@ -879,6 +1111,9 @@ terminal_renderer_encode :: proc(
 	selected_logical_r_end: int = -1,
 	selected_c_end: int = -1,
 	selection_active: bool = false,
+	hover: Hyperlink_Highlight = {},
+	hover_openable_bg: [4]f32 = HOVER_OPENABLE_BG,
+	hover_blocked_bg:  [4]f32 = HOVER_BLOCKED_BG,
 	load_op: contract.Gpu_Load_Op = .Load,
 	border_radius: f32 = 0.0,
 	is_focused: bool = true,
@@ -929,6 +1164,14 @@ terminal_renderer_encode :: proc(
 	has_kitty := kitty.kitty_renderer_has_images(&r.kitty_rend, term)
 	if has_kitty {
 		chosen_strat = .Instance
+	}
+	// Synthetic italics are sheared in the cell shaders (tile/fullscreen). When
+	// the visible grid contains italic text, stay on a path that can render it
+	// instead of silently dropping the slant in the sparse-instance strategy.
+	if chosen_strat == .Instance && !has_kitty &&
+	   _terminal_renderer_grid_has_italic(term, rows, cols, scroll_offset) &&
+	   r.tile_rend.available {
+		chosen_strat = .Compute_Tiles
 	}
 
 	// 2. Resolve Active Background & Sync LUT Default Background across all bg_idx == 0 entries
@@ -981,6 +1224,25 @@ terminal_renderer_encode :: proc(
 		r.tile_fb_valid = false
 	}
 
+	// Hover tints live in the reserved LUT words (1025/1026) so every strategy
+	// shades them identically. Write only when the theme color changes.
+	hover_openable_packed := _pack_f32_to_r5g6b5(hover_openable_bg)
+	hover_blocked_packed := _pack_f32_to_r5g6b5(hover_blocked_bg)
+	if hover_openable_packed != r.last_hover_openable_packed || hover_blocked_packed != r.last_hover_blocked_packed {
+		r.last_hover_openable_packed = hover_openable_packed
+		r.last_hover_blocked_packed = hover_blocked_packed
+		r.lut_words[LUT_HOVER_OPENABLE_WORD] = u32(hover_openable_packed) << 16
+		r.lut_words[LUT_HOVER_BLOCKED_WORD] = u32(hover_blocked_packed) << 16
+		word_offset := u64(LUT_HOVER_OPENABLE_WORD) * size_of(u32)
+		if rawptr(r.tile_rend.lut_buffer) != nil {
+			contract.write_buffer(r.queue, r.tile_rend.lut_buffer, word_offset, &r.lut_words[LUT_HOVER_OPENABLE_WORD], 2 * size_of(u32))
+		}
+		if rawptr(r.fs_rend.lut_buffer) != nil {
+			contract.write_buffer(r.queue, r.fs_rend.lut_buffer, word_offset, &r.lut_words[LUT_HOVER_OPENABLE_WORD], 2 * size_of(u32))
+		}
+		r.tile_fb_valid = false
+	}
+
 	// 3. Prepare Instance & Emoji Uniforms + Pane Background Quad
 	instance.instance_renderer_begin(&r.inst_rend)
 	instance.instance_renderer_begin(&r.emoji_rend)
@@ -1003,12 +1265,19 @@ terminal_renderer_encode :: proc(
 	switch chosen_strat {
 	case .Instance:
 		r.tile_fb_valid = false
+		row_chars: [512]u32
 		for r_idx in 0..<rows {
 			logical_r := r_idx - scroll_offset
 			row := core_terminal.terminal_get_row(term, logical_r)
 			if row == nil do continue
 
 			y_pos := pane_rect[1] + pad_y + f32(r_idx) * cell_h
+			if gam != nil && gam.fc != nil {
+				_apply_row_ligatures(&r.ligature_cache, &gam.fc.rasterizer, row, cols, row_chars[:min(cols, 512)])
+			} else {
+				limit := min(cols, min(512, len(row.cells)))
+				for c in 0..<limit do row_chars[c] = u32(row.cells[c].char)
+			}
 
 			for c in 0..<cols {
 				if c >= len(row.cells) do break
@@ -1027,8 +1296,9 @@ terminal_renderer_encode :: proc(
 					logical_r, c, selection_active,
 					selected_logical_r_start, selected_c_start, selected_logical_r_end, selected_c_end,
 				)
+				is_hovered := !is_selected && _terminal_renderer_is_cell_hovered(logical_r, c, hover)
 
-				if !is_selected && (cell_val.char == 0 || cell_val.char == ' ') && cell_val.bg == 0 && cell_val.style == {} && !dc.has_bg {
+				if !is_selected && (cell_val.char == 0 || cell_val.char == ' ') && cell_val.bg == 0 && cell_val.style == {} && .Has_Hyperlink not_in cell_val.flags && !dc.has_bg {
 					continue
 				}
 
@@ -1038,6 +1308,26 @@ terminal_renderer_encode :: proc(
 				x_pos := pane_rect[0] + pad_x + f32(c) * cell_w
 
 				fg, bg := _terminal_renderer_resolve_colors(cell_val, dc, is_selected, active_bg, is_focused)
+				if is_hovered {
+					bg = hover_blocked_bg if hover.blocked else hover_openable_bg
+				}
+				// Concealed text keeps its cell footprint but never shows glyphs.
+				if .Hidden in cell_val.style do fg = bg
+
+				// If cell is part of an OpenType programming ligature run
+				if c < 512 && row_chars[c] >= plat_font.CONTENT_LIGATURE_BASE {
+					lig_cp := row_chars[c]
+					slot, ok := plat_font.glyph_atlas_get_or_rasterize(gam, rune(lig_cp), false)
+					if !ok do slot = 0
+					_terminal_renderer_push_glyph(r, gam, slot, x_pos, y_pos, cell_h, fg, bg)
+					cell_style := cell_val.style
+					if is_hovered do cell_style += {.Underline}
+					if .Has_Hyperlink in cell_val.flags do cell_style += {.Underline}
+					if .Underline in cell_style || .Strike in cell_style {
+						_terminal_renderer_push_decorations(r, cell_style, x_pos, y_pos, gw, cell_h, fg)
+					}
+					continue
+				}
 
 				if .Has_Egc in cell_val.flags {
 					if runes := core_terminal.terminal_get_egc_runes(term, ch); len(runes) > 0 {
@@ -1052,6 +1342,7 @@ terminal_renderer_encode :: proc(
 						if !handled {
 							if slot, sok := plat_font.glyph_atlas_get_or_rasterize_cluster(gam, runes, is_wide); sok {
 								_terminal_renderer_push_glyph(r, gam, slot, x_pos, y_pos, cell_h, fg, bg)
+								_terminal_renderer_push_decorations(r, cell_val.style, x_pos, y_pos, gw, cell_h, fg)
 								handled = true
 							}
 						}
@@ -1074,6 +1365,11 @@ terminal_renderer_encode :: proc(
 				slot, ok := plat_font.glyph_atlas_get_or_rasterize(gam, ch, is_wide)
 				if !ok do slot = 0
 				_terminal_renderer_push_glyph(r, gam, slot, x_pos, y_pos, cell_h, fg, bg)
+				cell_style := cell_val.style
+				if .Has_Hyperlink in cell_val.flags do cell_style += {.Underline}
+				if .Underline in cell_style || .Strike in cell_style {
+					_terminal_renderer_push_decorations(r, cell_style, x_pos, y_pos, gw, cell_h, fg)
+				}
 			}
 		}
 
@@ -1119,7 +1415,7 @@ terminal_renderer_encode :: proc(
 			r, term, gam, emoji_atlas, rows, cols, pane_rect, cell_w, cell_h, pad_x, pad_y,
 			scroll_offset, active_bg, selection_active,
 			selected_logical_r_start, selected_c_start, selected_logical_r_end, selected_c_end,
-			is_focused,
+			hover, is_focused,
 		)
 		if plat_font.text_atlas_sync_gpu(text_atlas, r.device, r.queue) {
 			_terminal_renderer_ensure_resources(r, u32(cols), u32(rows), cell_w, cell_h, text_atlas.glyph_view, text_atlas.emoji_view)
@@ -1229,7 +1525,7 @@ terminal_renderer_encode :: proc(
 			r, term, gam, emoji_atlas, rows, cols, pane_rect, cell_w, cell_h, pad_x, pad_y,
 			scroll_offset, active_bg, selection_active,
 			selected_logical_r_start, selected_c_start, selected_logical_r_end, selected_c_end,
-			is_focused,
+			hover, is_focused,
 		)
 		if plat_font.text_atlas_sync_gpu(text_atlas, r.device, r.queue) {
 			_terminal_renderer_ensure_resources(r, u32(cols), u32(rows), cell_w, cell_h, text_atlas.glyph_view, text_atlas.emoji_view)
@@ -1307,6 +1603,9 @@ terminal_renderer_render :: proc(
 	selected_logical_r_end: int = -1,
 	selected_c_end: int = -1,
 	selection_active: bool = false,
+	hover: Hyperlink_Highlight = {},
+	hover_openable_bg: [4]f32 = HOVER_OPENABLE_BG,
+	hover_blocked_bg:  [4]f32 = HOVER_BLOCKED_BG,
 	border_radius: f32 = 0.0,
 	is_focused: bool = true,
 ) {
@@ -1319,7 +1618,7 @@ terminal_renderer_render :: proc(
 		r, enc, term, target_view, text_atlas, pane_rect, cell_w, cell_h, pad_x, pad_y,
 		scroll_offset, screen_w, screen_h, has_custom_bg, custom_bg,
 		selected_logical_r_start, selected_c_start, selected_logical_r_end, selected_c_end,
-		selection_active, .Load, border_radius, is_focused,
+		selection_active, hover, hover_openable_bg, hover_blocked_bg, .Load, border_radius, is_focused,
 	)
 
 	cmd := contract.finish_command_buffer(enc)

@@ -2,18 +2,22 @@ package render_terminal
 
 // Terminal Content Pillar - Online Adaptive Strategy Selector.
 //
-// Evaluates damage metrics and hardware latency history to select the optimal
-// terminal render strategy (Instance, Compute_Tiles, Fullscreen) in ~35.9 nanoseconds.
+// Evaluates damage metrics to select the optimal terminal render strategy
+// (Instance, Compute_Tiles, Fullscreen) in ~35.9 nanoseconds.
 //
 // Decision Bounds:
 //   - Dirty ratio < 3.0%: Instance Quad Batching (minimal vertex/compute overhead).
 //   - Dirty ratio 3.0% - 65.0%: Compute Tile Binning (shades 16x16 dirty tiles).
 //   - Dirty ratio >= 65.0%: Fullscreen Quad Direct (saturates fragment rasterizer).
 //
-// Online Override:
-//   - Ring buffer of 16 execution durations per strategy.
-//   - After warmup (>= 4 samples), flips static candidate if empirical submit latency is faster.
-//   - Structural carve-outs: scroll operations and 1-cell updates lock strictly to Instance.
+// Sticky Hysteresis Gate:
+//   - A different strategy must remain the static candidate for
+//     STRATEGY_STICKY_FRAMES consecutive frames before it is committed.
+//   - This damps per-frame oscillation between pipelines (Instance <->
+//     Compute_Tiles <-> Fullscreen), the primary source of visible flashing
+//     while damage-heavy activity streams in.
+//   - Structural carve-outs: scroll operations and 1-cell updates lock strictly
+//     to Instance and answer immediately without perturbing the committed choice.
 //
 // Invariant: ZERO Horizontal Dependencies, ZERO dynamic allocations in decision loop.
 
@@ -30,7 +34,7 @@ Render_Strategy :: enum int {
 }
 
 STRATEGY_HISTORY_N :: 16
-STRATEGY_WARMUP_FRAMES :: 4
+STRATEGY_STICKY_FRAMES :: 3
 STRATEGY_INSTANCE_MAX_RATIO: f32 : 0.03
 STRATEGY_FULLSCREEN_MIN_RATIO: f32 : 0.65
 
@@ -56,6 +60,13 @@ Strategy_State :: struct {
 	pin:     Render_Strategy,
 	last:    Render_Strategy,
 	last_ns: u64,
+
+	// Sticky hysteresis state. `committed` is the strategy currently in effect;
+	// `candidate` is a pending alternative that must hold for `candidate_run`
+	// consecutive frames before it replaces `committed`.
+	committed:     Render_Strategy,
+	candidate:     Render_Strategy,
+	candidate_run: int,
 }
 
 // ============================================================================
@@ -78,13 +89,8 @@ strategy_select_static :: #force_inline proc "contextless" (inp: Strategy_Inputs
 	return .Compute_Tiles
 }
 
-// strategy_avg returns the mean submit duration in nanoseconds and warm state.
-strategy_avg :: #force_inline proc "contextless" (cost: ^Strategy_Cost) -> (avg: u64, warm: bool) {
-	if cost.count <= 0 do return 0, false
-	return cost.sum / u64(cost.count), cost.count >= STRATEGY_WARMUP_FRAMES
-}
-
-// strategy_select evaluates the optimal strategy considering availability and hardware history.
+// strategy_select evaluates the optimal strategy considering availability and a
+// sticky hysteresis gate.
 strategy_select :: proc "contextless" (
 	inp: Strategy_Inputs,
 	st: ^Strategy_State,
@@ -120,34 +126,35 @@ strategy_select :: proc "contextless" (
 		}
 	}
 
-	// Structural invariants: small localized scroll and single-cell updates are non-negotiable
+	// Structural invariants: small localized scroll and single-cell updates are
+	// non-negotiable and answer immediately. They deliberately do NOT rewrite
+	// `committed`/`candidate` so a lone keystroke cannot reset the selection of
+	// the dominant workload surrounding it.
 	if inp.scroll && inp.ratio < STRATEGY_FULLSCREEN_MIN_RATIO do return gated
 	if inp.full_rows == 0 && inp.span_count == 1 && inp.dirty_cells == 1 {
 		return gated
 	}
 
-	// Online latency override
-	avg_in, warm_in := strategy_avg(&st.costs[int(Render_Strategy.Instance)])
-	avg_ct, warm_ct := strategy_avg(&st.costs[int(Render_Strategy.Compute_Tiles)])
-	avg_fs, warm_fs := strategy_avg(&st.costs[int(Render_Strategy.Fullscreen)])
-
-	switch gated {
-	case .Compute_Tiles:
-		if warm_ct && warm_fs && fullscreen_avail && avg_fs < avg_ct {
-			return .Fullscreen
-		}
-	case .Fullscreen:
-		if warm_ct && warm_fs && compute_avail && avg_ct < avg_fs {
-			return .Compute_Tiles
-		}
-	case .Instance:
-		if warm_in && warm_fs && fullscreen_avail && avg_fs < avg_in {
-			return .Fullscreen
-		} else if warm_in && warm_ct && compute_avail && avg_ct < avg_in {
-			return .Compute_Tiles
-		}
+	// Sticky hysteresis gate. A different strategy must remain the static
+	// candidate for STRATEGY_STICKY_FRAMES consecutive frames before it is
+	// committed. This prevents the damage ratio crossing 3% or 65% from flipping
+	// pipelines every frame and producing a visible flash.
+	if gated == st.committed {
+		st.candidate = gated
+		st.candidate_run = 0
+		return st.committed
 	}
-	return gated
+	if gated == st.candidate {
+		st.candidate_run += 1
+	} else {
+		st.candidate = gated
+		st.candidate_run = 1
+	}
+	if st.candidate_run >= STRATEGY_STICKY_FRAMES {
+		st.committed = st.candidate
+		st.candidate_run = 0
+	}
+	return st.committed
 }
 
 // strategy_record records execution latency of the executed strategy into the ring buffer.

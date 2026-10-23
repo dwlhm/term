@@ -18,7 +18,7 @@ TILE_DEFAULT_H :: 16
 
 TILE_PARAMS_SIZE :: 64
 TILE_CELL_BYTES :: 8
-TILE_LUT_WORDS :: 1025
+TILE_LUT_WORDS :: 1027
 TILE_LUT_BYTES :: TILE_LUT_WORDS * size_of(u32)
 
 TILE_ATLAS_TEX_W :: 1024
@@ -124,7 +124,7 @@ compute_tile_init :: proc(
 		return false
 	}
 
-	// LUT storage buffer (1025 u32 words)
+	// LUT storage buffer (1027 u32 words)
 	l_usage := contract.Gpu_Buffer_Usage.Storage | contract.Gpu_Buffer_Usage.Copy_Dst
 	r.lut_buffer = contract.create_buffer(device, TILE_LUT_BYTES, l_usage, false)
 	if rawptr(r.lut_buffer) == nil {
