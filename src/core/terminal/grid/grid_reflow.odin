@@ -511,7 +511,7 @@ grid_resize_reflow :: proc(
 	if old.row_count <= 0 || old.col_count <= 0 || len(old.rows) == 0 {
 		alloc := old.allocator
 		grid_destroy(&old)
-		grid_init(g, target_rows, target_cols, alloc)
+		grid_init(g, target_rows, target_cols, alloc, old.history_limit)
 		if d != nil {
 			damage.damage_destroy(d)
 			damage.damage_init(d, target_rows, target_cols, g.allocator)
@@ -547,8 +547,8 @@ grid_resize_reflow :: proc(
 
 	// Fast path: width did not change, only height changed!
 	if target_cols == old.col_count {
-		grid_init(g, target_rows, target_cols, old.allocator)
-		max_hist := max(0, g.capacity - target_rows)
+		grid_init(g, target_rows, target_cols, old.allocator, old.history_limit)
+		max_hist := g.history_limit
 
 		new_cur_r := cur_r
 		if cur_r >= target_rows {
@@ -686,8 +686,8 @@ grid_resize_reflow :: proc(
 	defer _destroy_reflow_rows(vis_reflowed)
 
 	// 4. Initialize target Grid with new capacity
-	grid_init(g, target_rows, target_cols, old.allocator)
-	max_hist := max(0, g.capacity - target_rows)
+	grid_init(g, target_rows, target_cols, old.allocator, old.history_limit)
+	max_hist := g.history_limit
 	num_vis := len(vis_reflowed)
 
 	disp := 0

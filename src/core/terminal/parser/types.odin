@@ -40,8 +40,10 @@ Mouse_Format :: enum u8 {
 Cursor :: struct {
 	row:          int,
 	col:          int,
-	saved_row:    int,
-	saved_col:    int,
+	saved_row:         int,
+	saved_col:         int,
+	saved_origin_mode: bool,
+	saved_autowrap:    bool,
 	active_fg:    u8,
 	active_bg:    u8,
 	active_style: cell.Style_Flags,
@@ -54,14 +56,21 @@ Cursor :: struct {
 }
 
 MAX_CSI_PARAMS      :: 16
-MAX_OSC_BUFFER      :: 512
+// OSC payloads (clipboard OSC 52, OSC 8 hyperlinks, shell integration) are
+// allowed to grow well past a single cell row, but never without a ceiling.
+MAX_OSC_BUFFER      :: 1 * 1024 * 1024
 MAX_APC_BUFFER      :: 16777216
+MAX_DCS_BUFFER      :: 16777216
 MAX_RESPONSE_BUFFER :: 256
 
 Osc_Callback    :: #type proc(user_data: rawptr, osc_id: int, payload: string) -> bool
 Csi_Callback    :: #type proc(user_data: rawptr, cmd: rune, params: []int) -> bool
 Apc_Callback    :: #type proc(user_data: rawptr, payload: []u8) -> bool
+Dcs_Callback    :: #type proc(user_data: rawptr, payload: []u8) -> bool
 Clear_Callback  :: #type proc(user_data: rawptr, mode: int)
+// Alt_Screen_Callback is raised when the alternate screen buffer is entered or
+// left. `mode` carries the original DEC private mode number (47/1047/1049).
+Alt_Screen_Callback :: #type proc(user_data: rawptr, enter: bool, mode: int)
 Scroll_Callback :: #type proc(user_data: rawptr, n: int, top, bottom: int)
 
 Parser :: struct {
@@ -71,22 +80,46 @@ Parser :: struct {
 	scroll_bottom:    int,
 
 	csi_params:       [MAX_CSI_PARAMS]int,
+	// csi_sep[i] is the byte that terminated parameter i (';' or ':'), 0 when it
+	// was the last parameter. Needed to tell `38;2;r;g;b` from `38:2:cs:r:g:b`.
+	csi_sep:          [MAX_CSI_PARAMS]u8,
 	csi_count:        int,
 	csi_prefix:       u8, // e.g. '?'
 	csi_intermediate: u8, // e.g. ' ' (0x20) for DECSCUSR
 
+	// ISO-2022 character sets mapped onto GL, plus any pending one-shot shift.
+	charsets:         [4]u8,
+	gl:               u8,
+	gl_single:        u8, // 2 = SS2 pending, 3 = SS3 pending, 0 = none
+	esc_charset_slot: u8,
+
 	in_alt_screen:    bool,
+	sync_output:      bool, // (?2026) synchronized update: hold presentation
+	// OSC 8 hyperlink currently in effect for newly written cells.
+	active_link:      u16,
+	// Kitty keyboard protocol: a small stack of progressive-enhancement flags.
+	// The top of the stack is what key encoding must honour.
+	kbd_flags:        [16]u8,
+	kbd_depth:        u8,
+	tab_stops:        [256]bool,
+	last_print:       rune,
 	cursor_key_mode:  bool, // DECCKM (?1)
+	origin_mode:      bool, // DECOM (?6) - Origin Mode
+	autowrap:         bool, // DECAWM (?7) - Auto-wrap Mode
 	bracketed_paste:       bool, // Bracketed Paste (?2004)
 	alternate_scroll_mode: bool, // Alternate Scroll (?1007)
 	mouse_mode:            Mouse_Tracking_Mode,
 	mouse_format:     Mouse_Format,
 	report_focus:     bool, // Focus In/Out (?1004)
 
-	osc_buf:          [MAX_OSC_BUFFER]u8,
-	osc_len:          int,
+	osc_buf:          [dynamic]u8,
+	osc_overflow:     bool,
 
 	apc_buf:          [dynamic]u8,
+	apc_overflow:     bool,
+
+	dcs_buf:          [dynamic]u8,
+	dcs_overflow:     bool,
 
 	response_buf:     [MAX_RESPONSE_BUFFER]u8,
 	response_len:     int,
@@ -100,8 +133,10 @@ Parser :: struct {
 	on_osc:           Osc_Callback,
 	on_csi:           Csi_Callback,
 	on_apc:           Apc_Callback,
+	on_dcs:           Dcs_Callback,
 	on_clear:         Clear_Callback,
 	on_scroll:        Scroll_Callback,
+	on_alt_screen:    Alt_Screen_Callback,
 	cell_w:           int,
 	cell_h:           int,
 	user_data:        rawptr,

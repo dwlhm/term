@@ -40,6 +40,7 @@ Direct_Color :: struct {
 	bg:     [3]u8, // R, G, B
 	has_fg: bool,
 	has_bg: bool,
+	link_id: u16, // OSC 8 hyperlink id (0 = none), stored beside the cell
 }
 
 // CELL_DEFAULT represents a blank terminal cell with default attributes.

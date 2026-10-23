@@ -20,8 +20,9 @@ Terminal_Extension :: struct {
 	user_data:  rawptr,
 	init:       proc(ext: ^Terminal_Extension, term: rawptr),
 	handle_osc: proc(ext: ^Terminal_Extension, osc_id: int, payload: string, term: rawptr) -> bool,
-	handle_csi: proc(ext: ^Terminal_Extension, cmd: rune, params: []int, term: rawptr) -> bool,
+	handle_csi:   proc(ext: ^Terminal_Extension, cmd: rune, params: []int, term: rawptr) -> bool,
 	handle_apc:   proc(ext: ^Terminal_Extension, payload: []u8, term: rawptr) -> bool,
+	handle_dcs:   proc(ext: ^Terminal_Extension, payload: []u8, term: rawptr) -> bool,
 	handle_clear: proc(ext: ^Terminal_Extension, mode: int, term: rawptr),
 	handle_scroll: proc(ext: ^Terminal_Extension, n: int, top, bottom: int, term: rawptr),
 	handle_resize: proc(ext: ^Terminal_Extension, new_rows, new_cols: int, delta_y: int, term: rawptr),
@@ -143,6 +144,20 @@ registry_dispatch_apc :: proc(reg: ^Terminal_Extension_Registry, payload: []u8, 
 		ext := &reg.extensions[i]
 		if ext.handle_apc != nil {
 			if ext.handle_apc(ext, payload, term) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// registry_dispatch_dcs notifies registered extensions of DCS commands (e.g. Sixel Graphics Protocol).
+registry_dispatch_dcs :: proc(reg: ^Terminal_Extension_Registry, payload: []u8, term: rawptr) -> bool {
+	if reg == nil do return false
+	for i in 0..<reg.ext_count {
+		ext := &reg.extensions[i]
+		if ext.handle_dcs != nil {
+			if ext.handle_dcs(ext, payload, term) {
 				return true
 			}
 		}

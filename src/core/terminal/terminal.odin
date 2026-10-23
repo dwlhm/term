@@ -10,9 +10,14 @@ import grid "grid"
 import parser "parser"
 
 Terminal :: struct {
+	// `alt_grid` holds the inactive buffer (primary while the alternate screen is
+	// active); `grid` is always the buffer the parser writes into.
+	alt_grid:   grid.Grid,
 	grid:       grid.Grid,
+	alt_damage: damage.Damage_Tracker,
 	damage:     damage.Damage_Tracker,
 	egc_pool:   egc.Egc_Pool,
+	hyperlinks: extension.Hyperlink_Table,
 	extensions: extension.Terminal_Extension_Registry,
 	parser:     parser.Parser,
 	rows:       int,
@@ -27,17 +32,71 @@ terminal_init :: proc(t: ^Terminal, rows, cols: int, allocator: runtime.Allocato
 	t.allocator = allocator
 
 	grid.grid_init(&t.grid, t.rows, t.cols, allocator)
+	// The alternate screen never contributes scrollback.
+	grid.grid_init(&t.alt_grid, t.rows, t.cols, allocator, 0)
 	damage.damage_init(&t.damage, t.rows, t.cols, allocator)
+	damage.damage_init(&t.alt_damage, t.rows, t.cols, allocator)
 	egc.egc_pool_init(&t.egc_pool)
 	extension.registry_init(&t.extensions)
+	extension.hyperlinks_init(&t.hyperlinks, _terminal_set_active_link)
 	parser.parser_init(&t.parser, t.rows, t.cols)
 	t.parser.egc_pool = &t.egc_pool
 	t.parser.on_osc = _terminal_on_osc
 	t.parser.on_csi = _terminal_on_csi
 	t.parser.on_apc = _terminal_on_apc
+	t.parser.on_dcs = _terminal_on_dcs
 	t.parser.on_clear = _terminal_on_clear
 	t.parser.on_scroll = _terminal_on_scroll
+	t.parser.on_alt_screen = _terminal_on_alt_screen
+	_ = extension.registry_register_osc(&t.extensions, 8, extension.osc_8_handler, rawptr(&t.hyperlinks))
 	t.parser.user_data = rawptr(t)
+}
+
+_terminal_set_active_link :: proc(term: rawptr, link_id: u16) {
+	if term == nil do return
+	t := (^Terminal)(term)
+	t.parser.active_link = link_id
+}
+
+// terminal_link_uri resolves an OSC 8 link id to its URI ("" when unknown).
+terminal_link_uri :: proc(t: ^Terminal, link_id: u16) -> string {
+	if t == nil do return ""
+	return extension.hyperlinks_uri(&t.hyperlinks, link_id)
+}
+
+terminal_cell_hyperlink :: proc(t: ^Terminal, row, col: int) -> (link_id: u16, uri: string) {
+	id := terminal_cell_link_id(t, row, col)
+	if id == 0 do return 0, ""
+	return id, terminal_link_uri(t, id)
+}
+
+// terminal_cell_link_id returns the OSC 8 link id stored beside a cell (0 when
+// none), without resolving the URI string.
+terminal_cell_link_id :: proc(t: ^Terminal, row, col: int) -> u16 {
+	if t == nil do return 0
+	cell_value := terminal_get_cell(t, row, col)
+	if .Has_Hyperlink not_in cell_value.flags do return 0
+	dc := terminal_get_direct_color(t, row, col)
+	return dc.link_id
+}
+
+// terminal_hyperlink_span returns the contiguous run of cells on `row` that
+// share the OSC 8 link under `col` (inclusive). It expands across spaces so
+// hover highlighting and underlines stay continuous.
+terminal_hyperlink_span :: proc(t: ^Terminal, row, col: int) -> (col_start, col_end: int, ok: bool) {
+	if t == nil do return 0, 0, false
+	link_id := terminal_cell_link_id(t, row, col)
+	if link_id == 0 do return 0, 0, false
+
+	col_start = col
+	for col_start > 0 && terminal_cell_link_id(t, row, col_start - 1) == link_id {
+		col_start -= 1
+	}
+	col_end = col
+	for col_end < t.cols - 1 && terminal_cell_link_id(t, row, col_end + 1) == link_id {
+		col_end += 1
+	}
+	return col_start, col_end, true
 }
 
 _terminal_on_osc :: proc(user_data: rawptr, osc_id: int, payload: string) -> bool {
@@ -58,10 +117,39 @@ _terminal_on_apc :: proc(user_data: rawptr, payload: []u8) -> bool {
 	return extension.registry_dispatch_apc(&t.extensions, payload, user_data)
 }
 
+_terminal_on_dcs :: proc(user_data: rawptr, payload: []u8) -> bool {
+	if user_data == nil do return false
+	t := (^Terminal)(user_data)
+	return extension.registry_dispatch_dcs(&t.extensions, payload, user_data)
+}
+
 _terminal_on_clear :: proc(user_data: rawptr, mode: int) {
 	if user_data == nil do return
 	t := (^Terminal)(user_data)
 	extension.registry_dispatch_clear(&t.extensions, mode, user_data)
+}
+
+// _terminal_on_alt_screen swaps the visible buffer. Both grids share the same
+// geometry, so the swap is O(1) and the parser's grid pointer stays valid.
+_terminal_on_alt_screen :: proc(user_data: rawptr, enter: bool, mode: int) {
+	if user_data == nil do return
+	t := (^Terminal)(user_data)
+
+	// When leaving alternate screen: clear its grid and alternate screen placements (mode 47 preserves)
+	if !enter && mode != 47 {
+		grid.grid_clear_all(&t.grid, &t.damage)
+		extension.registry_dispatch_clear(&t.extensions, 3, rawptr(t))
+	}
+
+	t.grid, t.alt_grid = t.alt_grid, t.grid
+
+	if enter && mode != 47 {
+		grid.grid_clear_all(&t.grid, &t.damage)
+	}
+
+	t.parser.scroll_top = 0
+	t.parser.scroll_bottom = max(0, t.rows - 1)
+	damage.damage_mark_all(&t.damage, 1)
 }
 
 _terminal_on_scroll :: proc(user_data: rawptr, n: int, top, bottom: int) {
@@ -73,7 +161,9 @@ _terminal_on_scroll :: proc(user_data: rawptr, n: int, top, bottom: int) {
 terminal_destroy :: proc(t: ^Terminal) {
 	if t == nil do return
 	grid.grid_destroy(&t.grid)
+	grid.grid_destroy(&t.alt_grid)
 	damage.damage_destroy(&t.damage)
+	damage.damage_destroy(&t.alt_damage)
 	extension.registry_destroy(&t.extensions)
 	parser.parser_destroy(&t.parser)
 	egc.egc_pool_init(&t.egc_pool)
@@ -124,6 +214,10 @@ terminal_resize :: proc(t: ^Terminal, new_rows, new_cols: int) {
 	t.cols = max(1, new_cols)
 	disp := 0
 	grid.grid_resize(&t.grid, &t.damage, t.rows, t.cols, &t.parser.cursor.row, &t.parser.cursor.col, &t.parser.cursor.pending_wrap, &disp)
+	// Keep the hidden buffer in sync without letting its damage leak into the
+	// visible one (its rows are marked on the next screen switch anyway).
+	hidden_disp := 0
+	grid.grid_resize(&t.alt_grid, &t.alt_damage, t.rows, t.cols, nil, nil, nil, &hidden_disp)
 	t.parser.cursor.row = clamp(t.parser.cursor.row, 0, t.rows - 1)
 	t.parser.cursor.col = clamp(t.parser.cursor.col, 0, t.cols - 1)
 	t.parser.scroll_top = clamp(t.parser.scroll_top, 0, t.rows - 1)
@@ -200,9 +294,31 @@ terminal_in_alt_screen :: proc(t: ^Terminal) -> bool {
 	return t.parser.in_alt_screen
 }
 
+// terminal_kitty_keyboard_flags returns the active Kitty keyboard enhancement
+// flags, which the input encoder must honour for this session.
+terminal_kitty_keyboard_flags :: proc(t: ^Terminal) -> u8 {
+	if t == nil do return 0
+	return parser.parser_kitty_keyboard_flags(&t.parser)
+}
+
+terminal_sync_output :: proc(t: ^Terminal) -> bool {
+	if t == nil do return false
+	return t.parser.sync_output
+}
+
 terminal_cursor_key_mode :: proc(t: ^Terminal) -> bool {
 	if t == nil do return false
 	return t.parser.cursor_key_mode
+}
+
+terminal_origin_mode :: proc(t: ^Terminal) -> bool {
+	if t == nil do return false
+	return t.parser.origin_mode
+}
+
+terminal_autowrap :: proc(t: ^Terminal) -> bool {
+	if t == nil do return true
+	return t.parser.autowrap
 }
 
 terminal_history_count :: proc(t: ^Terminal) -> int {
@@ -223,37 +339,65 @@ terminal_sample_bg :: proc(t: ^Terminal, scroll_offset: int = 0) -> (dc: cell.Di
 	// so CLI commands (video player, cat, scripts) never corrupt or hijack the pane card.
 	if !t.parser.in_alt_screen do return {}, 0, false
 
-	mid_r := t.rows / 2
-	mid_c := t.cols / 2
-	probe_points := [4][2]int{
-		{mid_r, mid_c},  // Dead center of TUI canvas
-		{0, 0},          // Top left
-		{1, 0},          // Second row left (below header)
-		{t.rows - 1, 0}, // Bottom row left (statusline or command line)
-	}
+	// A full-screen TUI paints every cell, so a sparse lattice majority vote
+	// reliably recovers its background. A transient centered widget (e.g. pi's
+	// green command-success card) only covers a minority of samples and can
+	// never leak into the pane background.
+	keys: [16]u32
+	counts: [16]int
+	total := 0
+	color_count := 0
 
-	for pt in probe_points {
-		r := pt[0]
-		c := pt[1]
-		if r < 0 || r >= t.rows || c < 0 || c >= t.cols do continue
-		row := terminal_get_row(t, r - scroll_offset)
-		if row == nil || c >= len(row.cells) do continue
+	row_pos := [4]int{0, max(1, t.rows / 3), max(1, 2 * t.rows / 3), t.rows - 1}
+	col_pos := [4]int{0, max(1, t.cols / 3), max(1, 2 * t.cols / 3), t.cols - 1}
 
-		cell_val := row.cells[c]
-		if .Has_Direct_Color in cell_val.flags && c < len(row.direct_colors) && row.direct_colors[c].has_bg {
-			return row.direct_colors[c], 0, true
+	for rr in row_pos {
+		for cc in col_pos {
+			row := terminal_get_row(t, rr - scroll_offset)
+			if row == nil || cc >= len(row.cells) do continue
+			total += 1
+
+			cell_val := row.cells[cc]
+			key: u32
+			ok := false
+			if .Has_Direct_Color in cell_val.flags && cc < len(row.direct_colors) && row.direct_colors[cc].has_bg {
+				key = 0x01000000 | (u32(row.direct_colors[cc].bg[0]) << 16) | (u32(row.direct_colors[cc].bg[1]) << 8) | u32(row.direct_colors[cc].bg[2])
+				ok = true
+			} else if cell_val.bg != 0 {
+				key = 0x02000000 | u32(cell_val.bg)
+				ok = true
+			}
+			if !ok do continue
+
+			idx := -1
+			for i in 0..<color_count {
+				if keys[i] == key {
+					idx = i
+					break
+				}
+			}
+			if idx < 0 && color_count < len(keys) {
+				idx = color_count
+				keys[idx] = key
+				color_count += 1
+			}
+			if idx >= 0 {
+				counts[idx] += 1
+			}
 		}
-		if cell_val.bg != 0 {
-			return {}, cell_val.bg, true
-		}
 	}
 
-	// Parser active background if cursor has bg
-	if t.parser.cursor.direct_color.has_bg {
-		return t.parser.cursor.direct_color, 0, true
-	}
-	if t.parser.cursor.active_bg != 0 {
-		return {}, t.parser.cursor.active_bg, true
+	// Require a clear majority (>= 60%) before adopting a colour as the pane background.
+	for i in 0..<color_count {
+		if total > 0 && counts[i] * 5 >= total * 3 {
+			key := keys[i]
+			if (key & 0xFF000000) == 0x01000000 {
+				dc.bg = [3]u8{u8((key >> 16) & 0xFF), u8((key >> 8) & 0xFF), u8(key & 0xFF)}
+				dc.has_bg = true
+				return dc, 0, true
+			}
+			return {}, u8(key & 0xFF), true
+		}
 	}
 
 	return {}, 0, false
@@ -266,7 +410,66 @@ terminal_register_osc :: proc(t: ^Terminal, osc_id: int, handler: extension.Osc_
 
 terminal_register_extension :: proc(t: ^Terminal, ext: extension.Terminal_Extension) -> bool {
 	if t == nil do return false
-	return extension.registry_register_extension(&t.extensions, ext, rawptr(t))
+	ok := extension.registry_register_extension(&t.extensions, ext, rawptr(t))
+	if ok {
+		for i in 0..<t.extensions.ext_count {
+			e := &t.extensions.extensions[i]
+			if e.name == "kitty_graphics" && e.user_data != nil {
+				kstate := (^extension.Kitty_Extension)(e.user_data)
+				if kstate.screen_provider == nil {
+					kstate.screen_provider = proc(term_ptr: rawptr) -> extension.Kitty_Screen {
+						if term_ptr == nil do return .Primary
+						term := (^Terminal)(term_ptr)
+						return .Alternate if terminal_in_alt_screen(term) else .Primary
+					}
+				}
+				if kstate.cursor_provider == nil {
+					kstate.cursor_provider = proc(term_ptr: rawptr) -> (int, int) {
+						if term_ptr == nil do return 0, 0
+						term := (^Terminal)(term_ptr)
+						return term.parser.cursor.row, term.parser.cursor.col
+					}
+				}
+				if kstate.grid_size_provider == nil {
+					kstate.grid_size_provider = proc(term_ptr: rawptr) -> (int, int) {
+						if term_ptr == nil do return 0, 0
+						term := (^Terminal)(term_ptr)
+						return term.cols, term.rows
+					}
+				}
+				if kstate.cell_size_provider == nil {
+					kstate.cell_size_provider = proc(term_ptr: rawptr) -> (int, int) {
+						if term_ptr == nil do return 19, 43
+						term := (^Terminal)(term_ptr)
+						return term.parser.cell_w if term.parser.cell_w > 0 else 19, term.parser.cell_h if term.parser.cell_h > 0 else 43
+					}
+				}
+				if kstate.cursor_advancer == nil {
+					kstate.cursor_advancer = proc(term_ptr: rawptr, cols, rows: int) {
+						if term_ptr == nil do return
+						term := (^Terminal)(term_ptr)
+						terminal_advance_cursor_for_image(term, cols, rows)
+					}
+				}
+				if kstate.damage_notifier == nil {
+					kstate.damage_notifier = proc(term_ptr: rawptr, start_row, row_count: int) {
+						if term_ptr == nil do return
+						term := (^Terminal)(term_ptr)
+						for r := start_row; r < start_row + row_count && r < term.rows; r += 1 {
+							if r >= 0 do damage.damage_mark_row(&term.damage, r, 1)
+						}
+					}
+				}
+				if kstate.responder == nil {
+					kstate.responder = proc(term_ptr: rawptr, response: []u8) -> bool {
+						return terminal_emit_response(term_ptr, response)
+					}
+				}
+				break
+			}
+		}
+	}
+	return ok
 }
 
 terminal_emit_response :: proc(term_ptr: rawptr, data: []u8) -> bool {

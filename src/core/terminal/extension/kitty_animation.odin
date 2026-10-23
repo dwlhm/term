@@ -39,11 +39,12 @@ kitty_animation_destroy :: proc(anim: ^Kitty_Animation, allocator: runtime.Alloc
 	anim^ = {}
 }
 
-_kitty_ensure_anim_initialized :: proc(img: ^Kitty_Image, allocator: runtime.Allocator) {
+_kitty_ensure_anim_initialized :: proc(state: ^Kitty_Extension, img: ^Kitty_Image) {
 	if img.animation.frames == nil {
-		img.animation.frames = make([dynamic]Kitty_Frame, 0, 8, allocator)
-		if len(img.pixels) > 0 {
-			base_px := make([]u8, len(img.pixels), allocator)
+		img.animation.frames = make([dynamic]Kitty_Frame, 0, 8, state.allocator)
+		if len(img.pixels) > 0 && _kitty_reclaim_pixels(state, len(img.pixels)) &&
+		   _kitty_account_reserve(state, len(img.pixels)) {
+			base_px := make([]u8, len(img.pixels), state.allocator)
 			copy(base_px, img.pixels)
 			append(&img.animation.frames, Kitty_Frame{
 				frame_num   = 1,
@@ -59,13 +60,20 @@ _kitty_ensure_anim_initialized :: proc(img: ^Kitty_Image, allocator: runtime.All
 
 _kitty_handle_frame :: proc(
 	state: ^Kitty_Extension,
+	term: rawptr,
 	img: ^Kitty_Image,
 	pixels: []u8,
 	w, h: int,
 ) {
 	if state == nil || img == nil || len(pixels) == 0 do return
-	_kitty_ensure_anim_initialized(img, state.allocator)
+	_kitty_ensure_anim_initialized(state, img)
 
+	if len(img.animation.frames) >= KITTY_MAX_ANIM_FRAMES || !_kitty_reclaim_pixels(state, len(pixels)) ||
+	   !_kitty_account_reserve(state, len(pixels)) {
+		delete(pixels, state.allocator)
+		_kitty_respond_error(state, term, img.id, .Out_Of_Space)
+		return
+	}
 	frame_num := state.current_frame_num if state.current_frame_num > 0 else len(img.animation.frames) + 1
 	gap := state.current_gap if state.current_gap > 0 else 40
 
@@ -94,7 +102,10 @@ _kitty_handle_frame :: proc(
 
 	if found_idx >= 0 {
 		old_f := &img.animation.frames[found_idx]
-		if len(old_f.pixels) > 0 do delete(old_f.pixels, state.allocator)
+		if len(old_f.pixels) > 0 {
+			_kitty_account_release(state, len(old_f.pixels))
+			delete(old_f.pixels, state.allocator)
+		}
 		img.animation.frames[found_idx] = new_frame
 	} else {
 		append(&img.animation.frames, new_frame)

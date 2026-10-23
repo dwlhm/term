@@ -37,9 +37,11 @@ parser_init :: proc(p: ^Parser, rows, cols: int) {
 	p.cursor = Cursor{
 		row          = 0,
 		col          = 0,
-		saved_row    = 0,
-		saved_col    = 0,
-		active_fg    = 7,
+		saved_row         = 0,
+		saved_col         = 0,
+		saved_origin_mode = false,
+		saved_autowrap    = true,
+		active_fg         = 7,
 		active_bg    = 0,
 		active_style = {},
 		active_flags = {},
@@ -53,17 +55,41 @@ parser_init :: proc(p: ^Parser, rows, cols: int) {
 	p.csi_prefix = 0
 	p.csi_intermediate = 0
 	p.in_alt_screen = false
+	p.sync_output = false
+	p.active_link = 0
+	p.kbd_depth = 0
+	for i in 0..<len(p.kbd_flags) do p.kbd_flags[i] = 0
+	p.last_print = 0
+	for i in 0..<len(p.tab_stops) do p.tab_stops[i] = (i % 8 == 0)
+	p.charsets = [4]u8{CHARSET_ASCII, CHARSET_ASCII, CHARSET_ASCII, CHARSET_ASCII}
+	p.gl = 0
+	p.gl_single = 0
+	p.esc_charset_slot = 0
 	p.cursor_key_mode = false
+	p.origin_mode = false
+	p.autowrap = true
 	p.bracketed_paste = false
 	p.alternate_scroll_mode = false
 	p.mouse_mode = .None
 	p.mouse_format = .X10
 	p.report_focus = false
-	p.osc_len = 0
+	p.osc_overflow = false
+	if p.osc_buf == nil {
+		p.osc_buf = make([dynamic]u8, 0, 1024)
+	} else {
+		clear(&p.osc_buf)
+	}
+	p.apc_overflow = false
 	if p.apc_buf == nil {
 		p.apc_buf = make([dynamic]u8, 0, 131072)
 	} else {
 		clear(&p.apc_buf)
+	}
+	p.dcs_overflow = false
+	if p.dcs_buf == nil {
+		p.dcs_buf = make([dynamic]u8, 0, 131072)
+	} else {
+		clear(&p.dcs_buf)
 	}
 	p.response_len = 0
 	p.utf8_state = 0
@@ -72,13 +98,18 @@ parser_init :: proc(p: ^Parser, rows, cols: int) {
 	p.on_osc = nil
 	p.on_csi = nil
 	p.on_apc = nil
+	p.on_dcs = nil
 	p.user_data = nil
 }
 
 parser_destroy :: proc(p: ^Parser) {
 	if p == nil do return
+	delete(p.osc_buf)
+	p.osc_buf = nil
 	delete(p.apc_buf)
 	p.apc_buf = nil
+	delete(p.dcs_buf)
+	p.dcs_buf = nil
 }
 
 parser_reset :: proc(p: ^Parser, rows, cols: int) {
@@ -86,19 +117,44 @@ parser_reset :: proc(p: ^Parser, rows, cols: int) {
 }
 
 _parser_dispatch_apc :: proc(p: ^Parser) {
-	if p == nil || len(p.apc_buf) == 0 do return
-	defer clear(&p.apc_buf)
+	if p == nil do return
+	defer {
+		clear(&p.apc_buf)
+		p.apc_overflow = false
+	}
+	// A truncated APC payload is never a valid protocol frame: drop it whole
+	// instead of handing a half-decoded image or query to the extension.
+	if p.apc_overflow || len(p.apc_buf) == 0 do return
 
 	if p.on_apc != nil {
 		p.on_apc(p.user_data, p.apc_buf[:])
 	}
 }
 
-_parser_dispatch_osc :: proc(p: ^Parser) {
-	if p == nil || p.osc_len == 0 do return
-	defer p.osc_len = 0
+_parser_dispatch_dcs :: proc(p: ^Parser) {
+	if p == nil do return
+	defer {
+		clear(&p.dcs_buf)
+		p.dcs_overflow = false
+	}
+	if p.dcs_overflow || len(p.dcs_buf) == 0 do return
 
-	s := string(p.osc_buf[:p.osc_len])
+	if p.on_dcs != nil {
+		p.on_dcs(p.user_data, p.dcs_buf[:])
+	}
+}
+
+_parser_dispatch_osc :: proc(p: ^Parser) {
+	if p == nil do return
+	defer {
+		clear(&p.osc_buf)
+		p.osc_overflow = false
+	}
+	// Oversized/truncated OSC sequences are dropped whole so a clipboard or
+	// hyperlink payload can never be silently cut in half.
+	if p.osc_overflow || len(p.osc_buf) == 0 do return
+
+	s := string(p.osc_buf[:])
 	semi_idx := strings.index_byte(s, ';')
 
 	osc_id := 0
@@ -158,17 +214,25 @@ parser_parse_byte :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, 
 				p.cursor.row += 1
 			}
 			p.cursor.pending_wrap = false
-		case '\t': // Tab
-			next_tab := (p.cursor.col / 8 + 1) * 8
-			p.cursor.col = min(g.col_count - 1, next_tab)
+		case '\t': // Tab - advance to the next programmed stop
+			p.cursor.col = _parser_next_tab_stop(p, g.col_count, p.cursor.col)
 			p.cursor.pending_wrap = false
 		case 0x08: // Backspace
 			p.cursor.col = max(0, p.cursor.col - 1)
 			p.cursor.pending_wrap = false
 		case 0x07: // BEL
 			// Bell ignored in core
+		case 0x0E: // SO - lock shift G1 into GL
+			p.gl = 1
+		case 0x0F: // SI - lock shift G0 into GL
+			p.gl = 0
 		case 0x20..=0x7E: // Printable ASCII Fast Path
-			_parser_put_char(p, g, d, rune(b))
+			if _parser_graphics_active(p) {
+				ch, _ := _parser_map_gl_byte(p, b)
+				if ch != 0 do _parser_put_char(p, g, d, ch)
+			} else {
+				_parser_put_char(p, g, d, rune(b))
+			}
 		}
 
 	case .Escape:
@@ -182,14 +246,73 @@ parser_parse_byte :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, 
 			p.csi_intermediate = 0
 			for i in 0..<MAX_CSI_PARAMS {
 				p.csi_params[i] = 0
+				p.csi_sep[i] = 0
 			}
 		case ']':
 			p.state = .Osc_String
-			p.osc_len = 0
-		case '(', ')', '*', '+', '-', '.', '/':
+			clear(&p.osc_buf)
+			p.osc_overflow = false
+		case '(':
+			p.esc_charset_slot = 0
 			p.state = .Esc_Charset
+		case ')':
+			p.esc_charset_slot = 1
+			p.state = .Esc_Charset
+		case '*':
+			p.esc_charset_slot = 2
+			p.state = .Esc_Charset
+		case '+':
+			p.esc_charset_slot = 3
+			p.state = .Esc_Charset
+		case '-':
+			p.esc_charset_slot = 1
+			p.state = .Esc_Charset
+		case '.':
+			p.esc_charset_slot = 2
+			p.state = .Esc_Charset
+		case '/':
+			p.esc_charset_slot = 3
+			p.state = .Esc_Charset
+		case 'N': // SS2 - single shift G2 for the next character
+			p.gl_single = 2
+			p.state = .Ground
+		case 'O': // SS3 - single shift G3 for the next character
+			p.gl_single = 3
+			p.state = .Ground
+		case 'n': // LS2 - lock shift G2 into GL
+			p.gl = 2
+			p.state = .Ground
+		case 'o': // LS3 - lock shift G3 into GL
+			p.gl = 3
+			p.state = .Ground
+		case 'H': // HTS - horizontal tab set at the cursor column
+			if p.cursor.col >= 0 && p.cursor.col < len(p.tab_stops) {
+				p.tab_stops[p.cursor.col] = true
+			}
+			p.state = .Ground
+		case 'D': // IND - index (down one line, keep column)
+			if p.cursor.row == p.scroll_bottom {
+				erase_c, erase_dc := _parser_erase_cell(p)
+				_parser_scroll_up(p, g, d, p.scroll_top, p.scroll_bottom, 1, erase_c, erase_dc)
+			} else if p.cursor.row < g.row_count - 1 {
+				p.cursor.row += 1
+			}
+			p.cursor.pending_wrap = false
+			p.state = .Ground
+		case 'E': // NEL - next line (CR + IND)
+			p.cursor.col = 0
+			if p.cursor.row == p.scroll_bottom {
+				erase_c, erase_dc := _parser_erase_cell(p)
+				_parser_scroll_up(p, g, d, p.scroll_top, p.scroll_bottom, 1, erase_c, erase_dc)
+			} else if p.cursor.row < g.row_count - 1 {
+				p.cursor.row += 1
+			}
+			p.cursor.pending_wrap = false
+			p.state = .Ground
 		case 'P': // DCS - Device Control String
 			p.state = .Dcs_String
+			clear(&p.dcs_buf)
+			p.dcs_overflow = false
 		case '_': // APC - Application Program Command
 			p.state = .Apc_String
 			clear(&p.apc_buf)
@@ -212,10 +335,15 @@ parser_parse_byte :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, 
 		case '7': // Save Cursor
 			p.cursor.saved_row = p.cursor.row
 			p.cursor.saved_col = p.cursor.col
+			p.cursor.saved_origin_mode = p.origin_mode
+			p.cursor.saved_autowrap = p.autowrap
 			p.state = .Ground
 		case '8': // Restore Cursor
 			p.cursor.row = clamp(p.cursor.saved_row, 0, g.row_count - 1)
 			p.cursor.col = clamp(p.cursor.saved_col, 0, g.col_count - 1)
+			p.origin_mode = p.cursor.saved_origin_mode
+			p.autowrap = p.cursor.saved_autowrap
+			p.cursor.pending_wrap = false
 			p.state = .Ground
 		case '=', '>': // DECKPAM / DECKPNM
 			p.state = .Ground
@@ -224,23 +352,38 @@ parser_parse_byte :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, 
 		}
 
 	case .Esc_Charset:
-		// ISO 2022 Character Set Designator: consume the charset byte ('B', '0', etc.)
+		// ISO 2022 designator: 'B' US-ASCII, '0' DEC Special Graphics, 'A' UK,
+		// 'U' Null. Anything else keeps the slot unchanged.
+		if p.esc_charset_slot < 4 {
+			switch b {
+			case CHARSET_ASCII, CHARSET_DEC_ACS, CHARSET_UK, CHARSET_NULL:
+				p.charsets[p.esc_charset_slot] = b
+			}
+		}
 		p.state = .Ground
 
 	case .Dcs_String:
 		if b == 0x07 { // BEL terminates DCS
+			_parser_dispatch_dcs(p)
 			p.state = .Ground
 		} else if b == 0x1B {
 			p.state = .Esc_In_Dcs
+		} else if len(p.dcs_buf) < MAX_DCS_BUFFER {
+			append(&p.dcs_buf, b)
+		} else {
+			p.dcs_overflow = true
 		}
 
 	case .Esc_In_Dcs:
 		if b == '\\' { // String Terminator (ST)
+			_parser_dispatch_dcs(p)
 			p.state = .Ground
 		} else if b == 0x1B {
 			// Stay in Esc_In_Dcs
 		} else {
 			p.state = .Ground
+			clear(&p.dcs_buf)
+			p.dcs_overflow = false
 		}
 
 	case .Apc_String:
@@ -251,6 +394,8 @@ parser_parse_byte :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, 
 			p.state = .Esc_In_Apc
 		} else if len(p.apc_buf) < MAX_APC_BUFFER {
 			append(&p.apc_buf, b)
+		} else {
+			p.apc_overflow = true
 		}
 
 	case .Esc_In_Apc:
@@ -272,6 +417,7 @@ parser_parse_byte :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, 
 			p.csi_count = 1
 			p.state = .Csi_Param
 		} else if b == ';' || b == ':' {
+			p.csi_sep[0] = b
 			p.csi_count = 2
 			p.state = .Csi_Param
 		} else if b >= 0x20 && b <= 0x2F {
@@ -295,6 +441,7 @@ parser_parse_byte :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, 
 			p.csi_params[idx] = p.csi_params[idx] * 10 + int(b - '0')
 		} else if b == ';' || b == ':' {
 			if p.csi_count < MAX_CSI_PARAMS {
+				p.csi_sep[p.csi_count - 1] = b
 				p.csi_count += 1
 				p.csi_params[p.csi_count - 1] = 0
 			}
@@ -314,11 +461,10 @@ parser_parse_byte :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, 
 			p.state = .Ground
 		} else if b == 0x1B { // ESC inside OSC might be ST (ESC \)
 			p.state = .Esc_In_Osc
+		} else if len(p.osc_buf) < MAX_OSC_BUFFER {
+			append(&p.osc_buf, b)
 		} else {
-			if p.osc_len < MAX_OSC_BUFFER - 1 {
-				p.osc_buf[p.osc_len] = b
-				p.osc_len += 1
-			}
+			p.osc_overflow = true
 		}
 
 	case .Esc_In_Osc:
@@ -327,8 +473,9 @@ parser_parse_byte :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, 
 			p.state = .Ground
 		} else {
 			// Aborted OSC sequence
-			p.osc_len = 0
 			p.state = .Ground
+			clear(&p.osc_buf)
+			p.osc_overflow = false
 		}
 	}
 }
@@ -339,9 +486,9 @@ parser_parse_bytes :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 	i := 0
 	for i < len(data) {
 		// Fast ASCII run scanner in Ground state (only when not in middle of UTF-8 sequence)
-		if p.state == .Ground && p.utf8_state == 0 {
+		if p.state == .Ground && p.utf8_state == 0 && !_parser_graphics_active(p) {
 			start := i
-			for i < len(data) && data[i] >= 0x20 && data[i] <= 0x7E && !p.cursor.pending_wrap {
+			for i < len(data) && data[i] >= 0x20 && data[i] <= 0x7E && (!p.cursor.pending_wrap && (p.autowrap || p.cursor.col < g.col_count - 1)) {
 				_parser_put_char(p, g, d, rune(data[i]))
 				i += 1
 			}

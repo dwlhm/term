@@ -5,6 +5,20 @@ import damage "../damage"
 import egc "../egc"
 import grid "../grid"
 
+// _parser_apply_link attaches the OSC 8 hyperlink in effect to a finished cell.
+_parser_apply_link :: #force_inline proc(
+	p: ^Parser,
+	c: cell.Semantic_Cell,
+	dc: cell.Direct_Color,
+) -> (cell.Semantic_Cell, cell.Direct_Color) {
+	if p.active_link == 0 do return c, dc
+	result_cell := c
+	result_dc := dc
+	result_cell.flags += {.Has_Hyperlink}
+	result_dc.link_id = p.active_link
+	return result_cell, result_dc
+}
+
 _parser_erase_cell :: proc(p: ^Parser) -> (c: cell.Semantic_Cell, dc: cell.Direct_Color) {
 	flags: cell.Cell_Flags = {}
 	if .Has_Direct_Color in p.cursor.active_flags && p.cursor.direct_color.has_bg {
@@ -31,6 +45,10 @@ _row_is_prompt_header :: proc(g: ^grid.Grid, row_idx: int) -> bool {
 }
 
 _parser_apply_pending_wrap :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker) {
+	if !p.autowrap {
+		p.cursor.pending_wrap = false
+		return
+	}
 	if !p.cursor.pending_wrap do return
 	phys := grid.grid_physical_row(g, p.cursor.row)
 	if phys >= 0 && phys < len(g.rows) {
@@ -151,6 +169,8 @@ _parser_put_char :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, c
 		_parser_put_combining(p, g, d, ch)
 		return
 	}
+	// Remember the last graphic character for REP (CSI b).
+	p.last_print = ch
 
 	// UAX #29 stateful anchor: a non-ASCII base rune may extend the cluster in
 	// the previous cell (ZWJ emoji, regional-indicator pairs, keycaps).
@@ -175,25 +195,34 @@ _parser_put_char :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, c
 		}
 	}
 
-	if p.cursor.pending_wrap || (w == 2 && p.cursor.col >= g.col_count - 1) {
-		phys := grid.grid_physical_row(g, p.cursor.row)
-		if phys >= 0 && phys < len(g.rows) {
-			if _row_is_prompt_header(g, p.cursor.row) {
-				// Prompt header rows must not wrap onto new lines during in-flight resizes
-				p.cursor.pending_wrap = false
-				p.cursor.col = g.col_count - 1
-				return
+	if p.autowrap {
+		if p.cursor.pending_wrap || (w == 2 && p.cursor.col >= g.col_count - 1) {
+			phys := grid.grid_physical_row(g, p.cursor.row)
+			if phys >= 0 && phys < len(g.rows) {
+				if _row_is_prompt_header(g, p.cursor.row) {
+					// Prompt header rows must not wrap onto new lines during in-flight resizes
+					p.cursor.pending_wrap = false
+					p.cursor.col = g.col_count - 1
+					return
+				}
+				g.rows[phys].wrap = true
 			}
-			g.rows[phys].wrap = true
+			p.cursor.col = 0
+			if p.cursor.row == p.scroll_bottom {
+				erase_c, erase_dc := _parser_erase_cell(p)
+				_parser_scroll_up(p, g, d, p.scroll_top, p.scroll_bottom, 1, erase_c, erase_dc)
+			} else if p.cursor.row < g.row_count - 1 {
+				p.cursor.row += 1
+			}
+			p.cursor.pending_wrap = false
 		}
-		p.cursor.col = 0
-		if p.cursor.row == p.scroll_bottom {
-			erase_c, erase_dc := _parser_erase_cell(p)
-			_parser_scroll_up(p, g, d, p.scroll_top, p.scroll_bottom, 1, erase_c, erase_dc)
-		} else if p.cursor.row < g.row_count - 1 {
-			p.cursor.row += 1
-		}
+	} else {
 		p.cursor.pending_wrap = false
+		if w == 2 && p.cursor.col >= g.col_count - 1 {
+			p.cursor.col = max(0, g.col_count - 2)
+		} else if p.cursor.col >= g.col_count {
+			p.cursor.col = max(0, g.col_count - 1)
+		}
 	}
 
 	// Wide character boundary sanitization prior to overwrite
@@ -206,27 +235,34 @@ _parser_put_char :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, c
 
 		lead_flags := p.cursor.active_flags + {.Wide_Lead}
 		c_lead := cell.cell_make(ch, p.cursor.active_fg, p.cursor.active_bg, p.cursor.active_style, lead_flags)
-		grid.grid_set_cell(g, d, p.cursor.row, p.cursor.col, c_lead, p.cursor.direct_color)
+		linked_lead, lead_dc := _parser_apply_link(p, c_lead, p.cursor.direct_color)
+		grid.grid_set_cell(g, d, p.cursor.row, p.cursor.col, linked_lead, lead_dc)
 
 		if p.cursor.col + 1 < g.col_count {
 			cont_flags := p.cursor.active_flags + {.Wide_Continuation}
 			c_cont := cell.cell_make(' ', p.cursor.active_fg, p.cursor.active_bg, p.cursor.active_style, cont_flags)
-			grid.grid_set_cell(g, d, p.cursor.row, p.cursor.col + 1, c_cont, p.cursor.direct_color)
+			linked_cont, cont_dc := _parser_apply_link(p, c_cont, p.cursor.direct_color)
+			grid.grid_set_cell(g, d, p.cursor.row, p.cursor.col + 1, linked_cont, cont_dc)
 		}
 
 		if p.cursor.col + 2 < g.col_count {
 			p.cursor.col += 2
-		} else {
+		} else if p.autowrap {
 			p.cursor.pending_wrap = true
+		} else {
+			p.cursor.col = max(0, g.col_count - 2)
 		}
 	} else {
 		c := cell.cell_make(ch, p.cursor.active_fg, p.cursor.active_bg, p.cursor.active_style, p.cursor.active_flags)
-		grid.grid_set_cell(g, d, p.cursor.row, p.cursor.col, c, p.cursor.direct_color)
+		linked_cell, link_dc := _parser_apply_link(p, c, p.cursor.direct_color)
+		grid.grid_set_cell(g, d, p.cursor.row, p.cursor.col, linked_cell, link_dc)
 
 		if p.cursor.col + 1 < g.col_count {
 			p.cursor.col += 1
-		} else {
+		} else if p.autowrap {
 			p.cursor.pending_wrap = true
+		} else {
+			p.cursor.col = max(0, g.col_count - 1)
 		}
 	}
 }

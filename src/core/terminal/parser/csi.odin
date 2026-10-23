@@ -6,6 +6,49 @@ import cell "../cell"
 import damage "../damage"
 import grid "../grid"
 
+// Sgr_Extended_Color is the resolved result of an ECMA-48 extended colour
+// introducer (38/48/58) in either `;` or `:` (ITU T.416) syntax.
+Sgr_Extended_Color :: struct {
+	has_rgb:     bool,
+	rgb:         [3]u8,
+	has_palette: bool,
+	palette:     u8,
+}
+
+// _sgr_read_extended consumes the parameters of an extended colour specifier.
+// The colon form carries an optional colour-space identifier before RGB values
+// (`38:2:<cs>:<r>:<g>:<b>`), which the semicolon form does not.
+_sgr_read_extended :: proc(p: ^Parser, idx: ^int, colon_syntax: bool) -> (color: Sgr_Extended_Color, ok: bool) {
+	i := idx^
+	if i >= p.csi_count do return {}, false
+
+	mode := p.csi_params[i]
+	i += 1
+	switch mode {
+	case 5: // indexed palette entry
+		if i >= p.csi_count do return {}, false
+		value := p.csi_params[i]
+		i += 1
+		if value < 0 || value > 255 do return {}, false
+		idx^ = i
+		return Sgr_Extended_Color{has_palette = true, palette = u8(value)}, true
+	case 2: // 24-bit RGB
+		if colon_syntax && p.csi_count - i >= 4 {
+			i += 1 // skip the ITU T.416 colour-space identifier
+		}
+		if p.csi_count - i < 3 do return {}, false
+		color.has_rgb = true
+		color.rgb = [3]u8{
+			u8(clamp(p.csi_params[i], 0, 255)),
+			u8(clamp(p.csi_params[i + 1], 0, 255)),
+			u8(clamp(p.csi_params[i + 2], 0, 255)),
+		}
+		idx^ = i + 3
+		return color, true
+	}
+	return {}, false
+}
+
 _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, cmd: u8) {
 	if g == nil do return
 
@@ -13,11 +56,13 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 
 	switch cmd {
 	case 'A': // CUU - Cursor Up
-		p.cursor.row = max(p.scroll_top, p.cursor.row - param0)
+		min_row := p.scroll_top if (p.origin_mode || p.cursor.row >= p.scroll_top) else 0
+		p.cursor.row = max(min_row, p.cursor.row - param0)
 		p.cursor.pending_wrap = false
 
 	case 'B': // CUD - Cursor Down
-		p.cursor.row = min(p.scroll_bottom, p.cursor.row + param0)
+		max_row := p.scroll_bottom if (p.origin_mode || p.cursor.row <= p.scroll_bottom) else g.row_count - 1
+		p.cursor.row = min(max_row, p.cursor.row + param0)
 		p.cursor.pending_wrap = false
 
 	case 'C': // CUF - Cursor Forward
@@ -33,8 +78,35 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 		c := 1
 		if p.csi_count >= 1 && p.csi_params[0] > 0 do r = p.csi_params[0]
 		if p.csi_count >= 2 && p.csi_params[1] > 0 do c = p.csi_params[1]
-		p.cursor.row = clamp(r - 1, 0, g.row_count - 1)
+		if p.origin_mode {
+			top := p.scroll_top
+			bot := p.scroll_bottom
+			p.cursor.row = clamp(top + r - 1, top, bot)
+		} else {
+			p.cursor.row = clamp(r - 1, 0, g.row_count - 1)
+		}
 		p.cursor.col = clamp(c - 1, 0, g.col_count - 1)
+		p.cursor.pending_wrap = false
+
+	case 'I': // CHT - Cursor Forward Tabulation
+		for _ in 0..<param0 {
+			p.cursor.col = _parser_next_tab_stop(p, g.col_count, p.cursor.col)
+		}
+		p.cursor.pending_wrap = false
+
+	case 'Z': // CBT - Cursor Backward Tabulation
+		for _ in 0..<param0 {
+			target := 0
+			c := p.cursor.col - 1
+			for c >= 1 {
+				if c < len(p.tab_stops) && p.tab_stops[c] {
+					target = c
+					break
+				}
+				c -= 1
+			}
+			p.cursor.col = target
+		}
 		p.cursor.pending_wrap = false
 
 	case 'G': // CHA - Cursor Horizontal Absolute (1-indexed)
@@ -46,7 +118,13 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 	case 'd': // VPA - Line Position Absolute (1-indexed)
 		r := 1
 		if p.csi_count >= 1 && p.csi_params[0] > 0 do r = p.csi_params[0]
-		p.cursor.row = clamp(r - 1, 0, g.row_count - 1)
+		if p.origin_mode {
+			top := p.scroll_top
+			bot := p.scroll_bottom
+			p.cursor.row = clamp(top + r - 1, top, bot)
+		} else {
+			p.cursor.row = clamp(r - 1, 0, g.row_count - 1)
+		}
 		p.cursor.pending_wrap = false
 
 	case 'E': // CNL - Cursor Next Line
@@ -137,6 +215,12 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 		grid.grid_clear_line(g, d, p.cursor.row, p.cursor.col, p.cursor.col + count, erase_c, erase_dc)
 
 	case 'm': // SGR - Styling & Color Attributes
+		// Private-prefixed forms are NOT SGR: `CSI > 4 ; 1 m` is xterm's
+		// XTMODKEYS (keyboard options), which clients such as OpenCode emit on
+		// startup. Treating its parameters as attributes would leave the whole
+		// screen underlined/bold.
+		if p.csi_prefix != 0 do return
+
 		if p.csi_count == 0 {
 			p.cursor.active_fg = 7
 			p.cursor.active_bg = 0
@@ -160,7 +244,6 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 			case 1: p.cursor.active_style += {.Bold}
 			case 2: p.cursor.active_style += {.Dim}
 			case 3: p.cursor.active_style += {.Italic}
-			case 4: p.cursor.active_style += {.Underline}
 			case 7: p.cursor.active_style += {.Invert}
 			case 9: p.cursor.active_style += {.Strike}
 			case 22: p.cursor.active_style -= {.Bold, .Dim}
@@ -204,57 +287,91 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 				if !p.cursor.direct_color.has_fg {
 					p.cursor.active_flags -= {.Has_Direct_Color}
 				}
-			case 38: // Extended FG (256 color or TrueColor)
-				if idx < p.csi_count && p.csi_params[idx] == 5 {
-					// 38;5;<color>
-					idx += 1
-					if idx < p.csi_count {
-						p.cursor.active_fg = u8(p.csi_params[idx] & 0xFF)
-						p.cursor.direct_color.has_fg = false
-						if !p.cursor.direct_color.has_bg {
-							p.cursor.active_flags -= {.Has_Direct_Color}
-						}
-						idx += 1
-					}
-				} else if idx < p.csi_count && p.csi_params[idx] == 2 {
-					// 38;2;<r>;<g>;<b> (TrueColor)
-					idx += 1
-					if idx + 2 < p.csi_count {
-						p.cursor.direct_color.fg = [3]u8{
-							u8(p.csi_params[idx] & 0xFF),
-							u8(p.csi_params[idx + 1] & 0xFF),
-							u8(p.csi_params[idx + 2] & 0xFF),
-						}
+			case 38: // Extended FG (256 colour or TrueColor), ';' or ':' syntax
+				colon := idx >= 1 && p.csi_sep[idx - 1] == ':'
+				if color, ok := _sgr_read_extended(p, &idx, colon); ok {
+					p.cursor.direct_color.has_fg = false
+					p.cursor.active_flags -= {.Has_Direct_Color}
+					if color.has_rgb {
+						p.cursor.direct_color.fg = color.rgb
 						p.cursor.direct_color.has_fg = true
 						p.cursor.active_flags += {.Has_Direct_Color}
-						idx += 3
+					} else if color.has_palette {
+						p.cursor.active_fg = color.palette
+					}
+					if !p.cursor.direct_color.has_bg do p.cursor.active_flags -= {.Has_Direct_Color}
+					if p.cursor.direct_color.has_fg || p.cursor.direct_color.has_bg {
+						p.cursor.active_flags += {.Has_Direct_Color}
 					}
 				}
 			case 48: // Extended BG
-				if idx < p.csi_count && p.csi_params[idx] == 5 {
-					idx += 1
-					if idx < p.csi_count {
-						p.cursor.active_bg = u8(p.csi_params[idx] & 0xFF)
-						p.cursor.direct_color.has_bg = false
-						if !p.cursor.direct_color.has_fg {
-							p.cursor.active_flags -= {.Has_Direct_Color}
-						}
-						idx += 1
-					}
-				} else if idx < p.csi_count && p.csi_params[idx] == 2 {
-					idx += 1
-					if idx + 2 < p.csi_count {
-						p.cursor.direct_color.bg = [3]u8{
-							u8(p.csi_params[idx] & 0xFF),
-							u8(p.csi_params[idx + 1] & 0xFF),
-							u8(p.csi_params[idx + 2] & 0xFF),
-						}
+				colon := idx >= 1 && p.csi_sep[idx - 1] == ':'
+				if color, ok := _sgr_read_extended(p, &idx, colon); ok {
+					p.cursor.direct_color.has_bg = false
+					if color.has_rgb {
+						p.cursor.direct_color.bg = color.rgb
 						p.cursor.direct_color.has_bg = true
+					} else if color.has_palette {
+						p.cursor.active_bg = color.palette
+					}
+					if !p.cursor.direct_color.has_fg do p.cursor.active_flags -= {.Has_Direct_Color}
+					if p.cursor.direct_color.has_fg || p.cursor.direct_color.has_bg {
 						p.cursor.active_flags += {.Has_Direct_Color}
-						idx += 3
 					}
 				}
+			case 58: // Underline colour (consumed; decoration colour is not yet rendered)
+				colon := idx >= 1 && p.csi_sep[idx - 1] == ':'
+				_, _ = _sgr_read_extended(p, &idx, colon)
+			case 59: // Default underline colour
+			case 4: // Underline, optionally with a colon sub-parameter (4:0..4:5)
+				if idx >= 1 && p.csi_sep[idx - 1] == ':' {
+					style := p.csi_params[idx] if idx < p.csi_count else 1
+					idx += 1
+					if style == 0 {
+						p.cursor.active_style -= {.Underline}
+					} else {
+						p.cursor.active_style += {.Underline}
+					}
+				} else {
+					p.cursor.active_style += {.Underline}
+				}
+			case 5: // Blink (slow)
+				p.cursor.active_style += {.Blink}
+			case 6: // Rapid blink, folded into the same flag
+				p.cursor.active_style += {.Blink}
+			case 8: // Conceal
+				p.cursor.active_style += {.Hidden}
+			case 21: // Double underline, folded into the underline flag
+				p.cursor.active_style += {.Underline}
+			case 25: // No blink
+				p.cursor.active_style -= {.Blink}
+			case 28: // Reveal
+				p.cursor.active_style -= {.Hidden}
+			case 53, 55: // Overline set/reset (no dedicated cell bit available)
 			}
+		}
+
+	case 'b': // REP - Repeat the preceding graphic character
+		if p.last_print > 0 {
+			for _ in 0..<param0 do _parser_put_char(p, g, d, p.last_print)
+		}
+
+	case 'g': // TBC - Tab Clear
+		mode := p.csi_params[0] if p.csi_count > 0 else 0
+		switch mode {
+		case 0: // clear the stop at the cursor
+			if p.cursor.col >= 0 && p.cursor.col < len(p.tab_stops) {
+				p.tab_stops[p.cursor.col] = false
+			}
+		case 3: // clear every stop
+			for i in 0..<len(p.tab_stops) do p.tab_stops[i] = false
+		}
+
+	case 'p': // DECRQM / DECSTR, distinguished by the prefix and intermediate
+		if p.csi_intermediate == '!' {
+			_parser_soft_reset(p, g)
+		} else if p.csi_intermediate == '$' {
+			_parser_report_mode(p, p.csi_params[0] if p.csi_count > 0 else 0)
 		}
 
 	case 'r': // DECSTBM - Set Top and Bottom Margins
@@ -265,7 +382,7 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 		if t < b && b <= g.row_count {
 			p.scroll_top = t - 1
 			p.scroll_bottom = b - 1
-			p.cursor.row = p.scroll_top
+			p.cursor.row = p.scroll_top if p.origin_mode else 0
 			p.cursor.col = 0
 			p.cursor.pending_wrap = false
 		}
@@ -273,11 +390,32 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 	case 's': // SCOSC - Save Cursor Position
 		p.cursor.saved_row = p.cursor.row
 		p.cursor.saved_col = p.cursor.col
+		p.cursor.saved_origin_mode = p.origin_mode
+		p.cursor.saved_autowrap = p.autowrap
 
-	case 'u': // SCOSC - Restore Cursor Position
-		p.cursor.row = clamp(p.cursor.saved_row, 0, g.row_count - 1)
-		p.cursor.col = clamp(p.cursor.saved_col, 0, g.col_count - 1)
-		p.cursor.pending_wrap = false
+	case 'u': // KitKat keyboard protocol (prefixed) or SCORC - Restore Cursor
+		switch p.csi_prefix {
+		case '>': // push flags onto the stack
+			flags := p.csi_params[0] if p.csi_count > 0 else 0
+			parser_kitty_keyboard_push(p, u8(clamp(flags, 0, 255)))
+		case '<': // pop n entries
+			count := p.csi_params[0] if p.csi_count > 0 else 1
+			parser_kitty_keyboard_pop(p, max(1, count))
+		case '=': // set flags with mode 1=set, 2=or, 3=and-not
+			flags := p.csi_params[0] if p.csi_count > 0 else 0
+			mode := p.csi_params[1] if p.csi_count > 1 else 1
+			parser_kitty_keyboard_set(p, u8(clamp(flags, 0, 255)), mode)
+		case '?': // query the current flags
+			buf: [16]u8
+			resp := fmt.bprintf(buf[:], "\x1b[?%d u", parser_kitty_keyboard_flags(p))
+			parser_emit_response(p, transmute([]u8)resp)
+		case:
+			p.cursor.row = clamp(p.cursor.saved_row, 0, g.row_count - 1)
+			p.cursor.col = clamp(p.cursor.saved_col, 0, g.col_count - 1)
+			p.origin_mode = p.cursor.saved_origin_mode
+			p.autowrap = p.cursor.saved_autowrap
+			p.cursor.pending_wrap = false
+		}
 
 	case 'h': // SM - Set Mode
 		if p.csi_prefix == '?' {
@@ -286,15 +424,26 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 				switch mode {
 				case 1:
 					p.cursor_key_mode = true
+				case 6:
+					p.origin_mode = true
+					p.cursor.row = p.scroll_top
+					p.cursor.col = 0
+					p.cursor.pending_wrap = false
+				case 7:
+					p.autowrap = true
 				case 9:
 					p.mouse_mode = .X10
 				case 25:
 					p.cursor.visible = true
 				case 47, 1047, 1049:
-					p.in_alt_screen = true
-					if mode == 1049 {
-						p.cursor.saved_row = p.cursor.row
-						p.cursor.saved_col = p.cursor.col
+					if !p.in_alt_screen {
+						if mode == 1049 {
+							p.cursor.saved_row = p.cursor.row
+							p.cursor.saved_col = p.cursor.col
+						}
+						p.in_alt_screen = true
+						p.cursor.pending_wrap = false
+						if p.on_alt_screen != nil do p.on_alt_screen(p.user_data, true, mode)
 					}
 				case 1000:
 					p.mouse_mode = .Normal
@@ -312,6 +461,8 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 					p.mouse_format = .Sgr_Pixel
 				case 2004:
 					p.bracketed_paste = true
+				case 2026:
+					p.sync_output = true
 				}
 			}
 		}
@@ -323,15 +474,26 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 				switch mode {
 				case 1:
 					p.cursor_key_mode = false
+				case 6:
+					p.origin_mode = false
+					p.cursor.row = 0
+					p.cursor.col = 0
+					p.cursor.pending_wrap = false
+				case 7:
+					p.autowrap = false
 				case 9, 1000, 1002, 1003:
 					p.mouse_mode = .None
 				case 25:
 					p.cursor.visible = false
 				case 47, 1047, 1049:
-					p.in_alt_screen = false
-					if mode == 1049 {
-						p.cursor.row = clamp(p.cursor.saved_row, 0, g.row_count - 1)
-						p.cursor.col = clamp(p.cursor.saved_col, 0, g.col_count - 1)
+					if p.in_alt_screen {
+						if p.on_alt_screen != nil do p.on_alt_screen(p.user_data, false, mode)
+						p.in_alt_screen = false
+						if mode == 1049 {
+							p.cursor.row = clamp(p.cursor.saved_row, 0, g.row_count - 1)
+							p.cursor.col = clamp(p.cursor.saved_col, 0, g.col_count - 1)
+						}
+						p.cursor.pending_wrap = false
 					}
 				case 1004:
 					p.report_focus = false
@@ -341,6 +503,8 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 					p.mouse_format = .X10
 				case 2004:
 					p.bracketed_paste = false
+				case 2026:
+					p.sync_output = false
 				}
 			}
 		}

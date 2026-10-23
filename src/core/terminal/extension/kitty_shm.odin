@@ -15,8 +15,13 @@ import stbi "vendor:stb/image"
 // _kitty_decompress_zlib inflates zlib or raw deflate compressed streams into a freshly allocated buffer.
 _kitty_decompress_zlib :: proc(data: []u8, allocator: runtime.Allocator) -> []u8 {
 	if len(data) == 0 do return nil
+	// Inflate through a bounded allocator so a compression bomb aborts at the
+	// payload ceiling instead of expanding without limit.
+	limiter: _Kitty_Bounded_Allocator
+	bounded := _kitty_make_bounded_allocator(&limiter, allocator, KITTY_MAX_PAYLOAD_BYTES)
+
 	buf: bytes.Buffer
-	bytes.buffer_init_allocator(&buf, 0, len(data) * 4, allocator)
+	bytes.buffer_init_allocator(&buf, 0, len(data) * 4, bounded)
 	defer bytes.buffer_destroy(&buf)
 
 	err := zlib.inflate(input = data, buf = &buf)
@@ -25,6 +30,7 @@ _kitty_decompress_zlib :: proc(data: []u8, allocator: runtime.Allocator) -> []u8
 		err_raw := zlib.inflate(input = data, buf = &buf, raw = true)
 		if err_raw != nil do return nil
 	}
+	if bytes.buffer_length(&buf) > KITTY_MAX_PAYLOAD_BYTES do return nil
 	res := make([]u8, bytes.buffer_length(&buf), allocator)
 	copy(res, bytes.buffer_to_bytes(&buf))
 	return res
@@ -107,6 +113,7 @@ _kitty_load_image_from_bytes :: proc(state: ^Kitty_Extension, data: []u8) -> (pi
 			defer stbi.image_free(stb_pixels)
 			w := int(w_c)
 			h := int(h_c)
+			if !kitty_dims_valid(w, h) do return nil, 0, 0
 			total_bytes := w * h * 4
 			px := make([]u8, total_bytes, state.allocator)
 			copy(px, ([^]u8)(stb_pixels)[:total_bytes])
@@ -116,33 +123,45 @@ _kitty_load_image_from_bytes :: proc(state: ^Kitty_Extension, data: []u8) -> (pi
 		// Fallback to core:image/png if stb_image failed on apple png chunks
 		img, err := _kitty_load_png(data, state.allocator)
 		if err == nil && img != nil {
+			defer image.destroy(img, state.allocator)
+			if !kitty_dims_valid(img.width, img.height) do return nil, 0, 0
 			px := make([]u8, len(img.pixels.buf), state.allocator)
 			copy(px, img.pixels.buf[:])
-			w, h := img.width, img.height
-			image.destroy(img, state.allocator)
-			return px, w, h
+			return px, img.width, img.height
 		}
 		return nil, 0, 0
 	}
 
 	w := state.current_width
 	h := state.current_height
+	// Raw transfers declare their geometry up front: reject implausible sizes
+	// before allocating, then zero-fill any short (truncated) payload so the
+	// result is always a fully initialized w*h*4 buffer.
+	if !kitty_dims_valid(w, h) do return nil, 0, 0
+	bytes_per_px := 3 if state.current_format == 24 else 4
+	required := w * h * bytes_per_px
+	if required <= 0 do return nil, 0, 0
+
 	if state.current_format == 24 {
-		return _convert_rgb_to_rgba(data, w, h, state.allocator), w, h
+		return _convert_rgb_to_rgba(data[:min(required, len(data))], w, h, state.allocator), w, h
 	}
 
-	dst := make([]u8, w * h * 4 if (w > 0 && h > 0) else len(data), state.allocator)
-	copy(dst, data[:min(len(dst), len(data))])
+	dst := make([]u8, required, state.allocator)
+	copy(dst, data[:min(required, len(data))])
 	return dst, w, h
 }
 
-// _kitty_load_file reads an image from disk (regular file 'f' or temp file 't' auto-deleted).
+// _kitty_load_file reads an image from disk (regular file 'f' or temp file 't').
+// A temp file is deleted afterwards, but only when it really lives in the
+// temporary directory: a guest program must never be able to make the terminal
+// unlink an arbitrary user file.
 _kitty_load_file :: proc(state: ^Kitty_Extension, file_path: string, is_temp: bool) -> (pixels: []u8, width, height: int) {
 	if state == nil || len(file_path) == 0 do return nil, 0, 0
-	defer if is_temp do os.remove(file_path)
+	delete_after := is_temp && kitty_path_in_temp_dir(file_path)
+	defer if delete_after do os.remove(file_path)
 
-	data, err := os.read_entire_file(file_path, state.allocator)
-	if err != nil || len(data) == 0 do return nil, 0, 0
+	data, ok := _kitty_read_regular_file(file_path, state.allocator)
+	if !ok do return nil, 0, 0
 	defer delete(data, state.allocator)
 
 	return _kitty_load_image_from_bytes(state, data)
@@ -160,11 +179,19 @@ _kitty_load_shm :: proc(state: ^Kitty_Extension, shm_name: string) -> (pixels: [
 		posix.shm_unlink(c_name)
 	}
 
+	// Clamp the mapping to the real object size and to the payload ceiling: an
+	// S= value larger than the object would otherwise SIGBUS on first touch.
+	info: posix.stat_t
+	if posix.fstat(fd, &info) != .OK do return nil, 0, 0
+	real_size := int(info.st_size)
+	if real_size <= 0 || real_size > KITTY_MAX_PAYLOAD_BYTES do return nil, 0, 0
+
 	w := state.current_width
 	h := state.current_height
 	bytes_per_px := 4 if state.current_format == 32 else 3
-	expected_bytes := state.current_shm_size if state.current_shm_size > 0 else (w * h * bytes_per_px)
-	if expected_bytes <= 0 do return nil, 0, 0
+	requested := state.current_shm_size if state.current_shm_size > 0 else (w * h * bytes_per_px)
+	if requested <= 0 do return nil, 0, 0
+	expected_bytes := min(requested, real_size)
 
 	ptr := posix.mmap(nil, uint(expected_bytes), posix.Prot_Flags{.READ}, posix.Map_Flags{.SHARED}, fd, 0)
 	if uintptr(ptr) == ~uintptr(0) do return nil, 0, 0

@@ -357,11 +357,18 @@ test_terminal_alt_screen_modes :: proc(t: ^testing.T) {
 	testing.expect(t, terminal.parser.in_alt_screen, "Expected in_alt_screen == true")
 	testing.expect(t, terminal.parser.cursor_key_mode, "Expected cursor_key_mode == true")
 
-	// In alternate screen (e.g. Neovim), screen is cleared and TUI draws
-	term.terminal_feed_string(&terminal, "\x1b[2J\x1b[13;41H\x1b[48;2;30;40;50m \x1b[0m")
+	// In alternate screen (e.g. Neovim), a full-screen background is sampled for seamless blending
+	term.terminal_feed_string(&terminal, "\x1b[48;2;30;40;50m\x1b[2J\x1b[0m")
 	dc_alt, _, found_alt := term.terminal_sample_bg(&terminal)
 	testing.expect(t, found_alt, "Alternate screen (Neovim) should sample background for seamless blending")
 	testing.expect_value(t, dc_alt.bg[0], u8(30))
+
+	// A transient centered card (e.g. pi's green command-success card) must not
+	// leak into the pane background: the surrounding cells stay default, so no
+	// colour reaches the majority threshold.
+	term.terminal_feed_string(&terminal, "\x1b[0m\x1b[2J\x1b[13;41H\x1b[42m \x1b[0m")
+	_, _, found_card := term.terminal_sample_bg(&terminal)
+	testing.expect(t, !found_card, "Centered widget colour must not leak into pane background")
 
 	// Exit alternate screen (?1049l) and reset cursor keys (?1l)
 	term.terminal_feed_string(&terminal, "\x1b[?1049l\x1b[?1l")

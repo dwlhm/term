@@ -8,6 +8,7 @@ Kitty_Placement :: struct {
 	src_x, src_y: int,
 	src_w, src_h: int,
 	z_index:      int,
+	screen:       Kitty_Screen,
 	is_active:    bool,
 }
 
@@ -99,10 +100,15 @@ _kitty_handle_put :: proc(state: ^Kitty_Extension, term: rawptr, img_id: u32) {
 		cur_r, cur_c = state.cursor_provider(term)
 	}
 
+	target_screen: Kitty_Screen = .Primary
+	if state.screen_provider != nil && term != nil {
+		target_screen = state.screen_provider(term)
+	}
+
 	slot_idx := -1
 	for i in 0..<len(state.placements) {
 		p := &state.placements[i]
-		if p.is_active && p.image_id == img.id && p.placement_id == state.current_placement {
+		if p.is_active && p.image_id == img.id && p.placement_id == state.current_placement && p.screen == target_screen {
 			slot_idx = i
 			break
 		}
@@ -121,6 +127,7 @@ _kitty_handle_put :: proc(state: ^Kitty_Extension, term: rawptr, img_id: u32) {
 		src_w        = state.current_src_w,
 		src_h        = state.current_src_h,
 		z_index      = state.current_z,
+		screen       = target_screen,
 		is_active    = true,
 	}
 
@@ -141,29 +148,32 @@ _kitty_handle_put :: proc(state: ^Kitty_Extension, term: rawptr, img_id: u32) {
 	}
 }
 
-_kitty_handle_clear_screen :: proc(state: ^Kitty_Extension, mode: int) {
+_kitty_handle_clear_screen :: proc(state: ^Kitty_Extension, mode: int, screen: Kitty_Screen = .Primary) {
 	if state == nil do return
 	if mode == 2 {
-		// Clear visible screen: deactivate placements currently visible on screen (y_row >= 0)
+		// Clear visible screen: deactivate placements currently visible on screen (y_row >= 0) in the target screen
 		for i in 0..<len(state.placements) {
 			p := &state.placements[i]
-			if p.is_active && p.y_row >= 0 {
+			if p.is_active && p.screen == screen && p.y_row >= 0 {
 				p.is_active = false
 			}
 		}
 	} else if mode == 3 {
-		// Clear visible screen AND scrollback history: deactivate all placements
+		// Clear visible screen AND scrollback history: deactivate all placements in the target screen
 		for i in 0..<len(state.placements) {
-			state.placements[i].is_active = false
+			p := &state.placements[i]
+			if p.screen == screen {
+				p.is_active = false
+			}
 		}
 	}
 }
 
-_kitty_handle_grid_scroll :: proc(state: ^Kitty_Extension, n: int, top, bottom: int) {
+_kitty_handle_grid_scroll :: proc(state: ^Kitty_Extension, n: int, top, bottom: int, screen: Kitty_Screen = .Primary) {
 	if state == nil || n == 0 do return
 	for i in 0..<len(state.placements) {
 		p := &state.placements[i]
-		if !p.is_active do continue
+		if !p.is_active || p.screen != screen do continue
 		if top == 0 {
 			p.y_row -= n
 		} else {
@@ -176,17 +186,21 @@ _kitty_handle_grid_scroll :: proc(state: ^Kitty_Extension, n: int, top, bottom: 
 
 _kitty_handle_resize :: proc(state: ^Kitty_Extension, new_rows, new_cols: int, delta_y: int, term: rawptr) {
 	if state == nil do return
+	current_screen: Kitty_Screen = .Primary
+	if state.screen_provider != nil && term != nil {
+		current_screen = state.screen_provider(term)
+	}
 	if delta_y != 0 {
 		for i in 0..<len(state.placements) {
 			p := &state.placements[i]
-			if !p.is_active do continue
+			if !p.is_active || p.screen != current_screen do continue
 			p.y_row += delta_y
 		}
 	}
 	if new_cols > 0 {
 		for i in 0..<len(state.placements) {
 			p := &state.placements[i]
-			if !p.is_active do continue
+			if !p.is_active || p.screen != current_screen do continue
 			if p.x_col + p.cols > new_cols {
 				if p.cols <= new_cols {
 					p.x_col = max(0, new_cols - p.cols)
@@ -198,12 +212,15 @@ _kitty_handle_resize :: proc(state: ^Kitty_Extension, new_rows, new_cols: int, d
 
 _kitty_delete_image_slot :: proc(state: ^Kitty_Extension, img: ^Kitty_Image) {
 	if len(img.pixels) > 0 {
+		_kitty_account_release(state, len(img.pixels))
 		delete(img.pixels, state.allocator)
 		img.pixels = nil
 	}
+	_kitty_account_release(state, _kitty_animation_bytes(&img.animation))
 	kitty_animation_destroy(&img.animation, state.allocator)
 	img.gpu_dirty = true
 	img.is_active = false
+	img.is_virtual = false
 	img.id = 0
 }
 
@@ -239,6 +256,10 @@ _kitty_handle_delete :: proc(
 
 	// 3. Delete at cursor cell: d=c or d=C
 	if del_mode == 'c' || del_mode == 'C' {
+		target_screen: Kitty_Screen = .Primary
+		if state.screen_provider != nil {
+			// Note: term pointer isn't directly passed here, but if available screen matches
+		}
 		for i in 0..<len(state.placements) {
 			p := &state.placements[i]
 			if !p.is_active do continue

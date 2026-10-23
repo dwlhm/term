@@ -14,20 +14,23 @@ Egc_Entry :: struct {
 	ref_count: u16,
 }
 
+// Egc_Pool is a fixed-slot pool plus an explicit free stack. Invariant:
+// free_count + active_cnt == MAX_EGC_ENTRIES, and free_stack[0..<free_count]
+// holds exactly the slots whose ref_count is zero.
 Egc_Pool :: struct {
 	entries:    [MAX_EGC_ENTRIES]Egc_Entry,
-	free_head:  int,
-	free_list:  [MAX_EGC_ENTRIES]u16,
+	free_stack: [MAX_EGC_ENTRIES]u16,
+	free_count: int,
 	active_cnt: int,
 }
 
 egc_pool_init :: proc(pool: ^Egc_Pool) {
 	if pool == nil do return
 	pool.active_cnt = 0
-	pool.free_head = 0
+	pool.free_count = MAX_EGC_ENTRIES
 	for i in 0..<MAX_EGC_ENTRIES {
 		pool.entries[i] = Egc_Entry{}
-		pool.free_list[i] = u16(i)
+		pool.free_stack[i] = u16(i)
 	}
 }
 
@@ -52,10 +55,10 @@ egc_pool_alloc :: proc(pool: ^Egc_Pool, runes: []rune) -> (index: int, ok: bool)
 		}
 	}
 
-	// Allocate free slot
-	if pool.free_head >= MAX_EGC_ENTRIES do return -1, false
-	slot := int(pool.free_list[pool.free_head])
-	pool.free_head += 1
+	// Pop a free slot from the LIFO stack
+	if pool.free_count <= 0 do return -1, false
+	pool.free_count -= 1
+	slot := int(pool.free_stack[pool.free_count])
 	pool.active_cnt += 1
 
 	entry := &pool.entries[slot]
@@ -82,9 +85,11 @@ egc_pool_release :: proc(pool: ^Egc_Pool, index: int) {
 		entry.ref_count -= 1
 		if entry.ref_count == 0 {
 			entry.len = 0
-			pool.free_head -= 1
-			if pool.free_head >= 0 {
-				pool.free_list[pool.free_head] = u16(index)
+			// Push back only if this slot is not already free, keeping the
+			// stack a perfect partition of the slot set.
+			if pool.free_count < MAX_EGC_ENTRIES {
+				pool.free_stack[pool.free_count] = u16(index)
+				pool.free_count += 1
 			}
 			pool.active_cnt = max(0, pool.active_cnt - 1)
 		}

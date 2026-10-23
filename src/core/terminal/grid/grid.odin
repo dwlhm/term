@@ -24,6 +24,7 @@ Grid :: struct {
 	mask:          int,
 	origin:        int,
 	history_count: int,
+	history_limit: int, // 0 for the alternate screen: scrolling never becomes scrollback
 	allocator:     runtime.Allocator,
 }
 
@@ -43,14 +44,20 @@ grid_physical_row :: proc(g: ^Grid, logical_row: int) -> int {
 	return idx
 }
 
-grid_init :: proc(g: ^Grid, rows, cols: int, allocator: runtime.Allocator = context.allocator) {
+grid_init :: proc(
+	g: ^Grid,
+	rows, cols: int,
+	allocator: runtime.Allocator = context.allocator,
+	history: int = DEFAULT_SCROLLBACK,
+) {
 	if g == nil do return
 	g.row_count = max(1, rows)
 	g.col_count = max(1, cols)
-	g.capacity = _next_pow2(max(g.row_count, 1) + DEFAULT_SCROLLBACK)
+	g.capacity = _next_pow2(max(g.row_count, 1) + max(0, history))
 	g.mask = g.capacity - 1
 	g.origin = 0
 	g.history_count = 0
+	g.history_limit = clamp(history, 0, g.capacity - g.row_count)
 	g.allocator = allocator
 
 	total_cells := g.capacity * g.col_count
@@ -92,6 +99,7 @@ grid_destroy :: proc(g: ^Grid) {
 	g.capacity = 0
 	g.origin = 0
 	g.history_count = 0
+	g.history_limit = 0
 }
 
 grid_get_row :: proc(g: ^Grid, row: int) -> ^Row {
@@ -131,9 +139,10 @@ grid_set_cell :: proc(g: ^Grid, d: ^damage.Damage_Tracker, row, col: int, c: cel
 	}
 	phys := grid_physical_row(g, row)
 	r := &g.rows[phys]
-	if r.cells[col] != c || (.Has_Direct_Color in c.flags && r.direct_colors[col] != dc) {
+	tracks_decoration := .Has_Direct_Color in c.flags || .Has_Hyperlink in c.flags
+	if r.cells[col] != c || (tracks_decoration && r.direct_colors[col] != dc) {
 		r.cells[col] = c
-		if .Has_Direct_Color in c.flags {
+		if tracks_decoration {
 			r.direct_colors[col] = dc
 		} else {
 			r.direct_colors[col] = {}
@@ -227,7 +236,7 @@ grid_scroll_up :: proc(
 	// O(1) fast path: full-screen scroll
 	if t == 0 && b == g.row_count - 1 {
 		g.origin = (g.origin + actual) & g.mask
-		g.history_count = min(g.history_count + actual, g.capacity - g.row_count)
+		g.history_count = min(g.history_count + actual, g.history_limit)
 		// Clear bottom exposed rows
 		for i in 0..<actual {
 			lr := g.row_count - actual + i

@@ -8,6 +8,11 @@ import "core:strings"
 
 MAX_KITTY_IMAGES :: 32
 
+Kitty_Screen :: enum u8 {
+	Primary   = 0,
+	Alternate = 1,
+}
+
 Kitty_Image :: struct {
 	id:                 u32,
 	width, height:      int,
@@ -17,6 +22,7 @@ Kitty_Image :: struct {
 	x_col, y_row:       int,
 	is_virtual:         bool,
 	is_active:          bool,
+	screen:             Kitty_Screen,
 	gpu_texture:        rawptr,
 	gpu_view:           rawptr,
 	gpu_group:          rawptr,
@@ -30,6 +36,7 @@ Kitty_Cell_Size_Provider :: #type proc(term: rawptr) -> (cell_w: int, cell_h: in
 Kitty_Grid_Size_Provider :: #type proc(term: rawptr) -> (cols: int, rows: int)
 Kitty_Cursor_Advancer    :: #type proc(term: rawptr, cols: int, rows: int)
 Kitty_Damage_Notifier    :: #type proc(term: rawptr, start_row, row_count: int)
+Kitty_Screen_Provider    :: #type proc(term: rawptr) -> Kitty_Screen
 
 Kitty_Extension :: struct {
 	images:              [MAX_KITTY_IMAGES]Kitty_Image,
@@ -65,7 +72,9 @@ Kitty_Extension :: struct {
 	grid_size_provider:  Kitty_Grid_Size_Provider,
 	cursor_advancer:     Kitty_Cursor_Advancer,
 	damage_notifier:     Kitty_Damage_Notifier,
+	screen_provider:     Kitty_Screen_Provider,
 	next_anon_id:        u32,
+	total_pixel_bytes:   int,
 	allocator:           runtime.Allocator,
 }
 
@@ -88,32 +97,79 @@ _kitty_handle_query :: proc(state: ^Kitty_Extension, term: rawptr, img_id: u32, 
 	return state.responder(term, transmute([]u8)resp)
 }
 
-_kitty_store_image :: proc(state: ^Kitty_Extension, img_id: u32, w, h: int, px: []u8, term: rawptr, place: bool) {
+_kitty_respond_error :: proc(state: ^Kitty_Extension, term: rawptr, img_id: u32, code: Kitty_Error_Code) -> bool {
+	if state == nil || state.responder == nil || term == nil do return false
+	name := kitty_error_name(code)
+	if len(name) == 0 do return false
+	resp := fmt.tprintf("\x1b_Gi=%d;%s\x1b\\", img_id, name)
+	return state.responder(term, transmute([]u8)resp)
+}
+
+_kitty_animation_bytes :: proc(anim: ^Kitty_Animation) -> int {
+	total := 0
+	for frame in anim.frames do total += len(frame.pixels)
+	return total
+}
+
+_kitty_account_release :: proc(state: ^Kitty_Extension, bytes: int) {
+	if bytes > 0 do state.total_pixel_bytes = max(0, state.total_pixel_bytes - bytes)
+}
+
+_kitty_account_reserve :: proc(state: ^Kitty_Extension, bytes: int) -> bool {
+	if state == nil || bytes <= 0 do return false
+	if state.total_pixel_bytes + bytes > KITTY_MAX_TOTAL_PIXEL_BYTES do return false
+	state.total_pixel_bytes += bytes
+	return true
+}
+
+// _kitty_reclaim_pixels evicts idle images (and their placements) until `needed`
+// bytes fit into the shared pixel budget.
+_kitty_reclaim_pixels :: proc(state: ^Kitty_Extension, needed: int) -> bool {
+	if state.total_pixel_bytes + needed <= KITTY_MAX_TOTAL_PIXEL_BYTES do return true
+	for i in 0..<MAX_KITTY_IMAGES {
+		if state.total_pixel_bytes + needed <= KITTY_MAX_TOTAL_PIXEL_BYTES do return true
+		img := &state.images[i]
+		if img.id == 0 || img.is_active || img.is_virtual do continue
+		_kitty_handle_delete(state, img.id, 'i', 0, 0, 0, 0)
+	}
+	return state.total_pixel_bytes + needed <= KITTY_MAX_TOTAL_PIXEL_BYTES
+}
+
+_kitty_store_image :: proc(state: ^Kitty_Extension, img_id: u32, w, h: int, px: []u8, term: rawptr, place: bool) -> bool {
+	if state == nil do return false
+	if !kitty_dims_valid(w, h) do return false
+	if len(px) < w * h * 4 do return false
+	if !_kitty_reclaim_pixels(state, len(px)) do return false
+	if !_kitty_account_reserve(state, len(px)) do return false
+
 	slot := -1
 	for i in 0..<MAX_KITTY_IMAGES {
-		if state.images[i].id == img_id && img_id > 0 { slot = i; break }
-		if slot == -1 && !state.images[i].is_active && state.images[i].id == 0 do slot = i
+		img := &state.images[i]
+		if img_id > 0 && img.id == img_id {
+			slot = i
+			break
+		}
+		if slot == -1 && img.id == 0 && !img.is_active {
+			slot = i
+		}
 	}
 	if slot == -1 do slot = 0
 
 	target := &state.images[slot]
-	if len(target.pixels) > 0 do delete(target.pixels, state.allocator)
+	if target.id != 0 do _kitty_handle_delete(state, target.id, 'i', 0, 0, 0, 0)
+	target = &state.images[slot]
 	target.id, target.width, target.height, target.channels, target.pixels = img_id, w, h, 4, px
-
-	cw, ch_px := 19, 43
-	if state.cell_size_provider != nil && term != nil {
-		pw, ph := state.cell_size_provider(term)
-		if pw > 0 do cw, ch_px = pw, ph
-	}
-	target.cols = state.current_cols
-	target.rows = state.current_rows
+	target.screen = state.screen_provider(term) if (state.screen_provider != nil && term != nil) else .Primary
 	target.is_virtual = (state.current_virtual == 1)
 	target.gpu_dirty = true
 	target.is_active = place || target.is_virtual
+	target.cols = state.current_cols
+	target.rows = state.current_rows
 
 	if place && !target.is_virtual {
 		_kitty_handle_put(state, term, img_id)
 	}
+	return true
 }
 
 _kitty_reset_ctrl_state :: proc(state: ^Kitty_Extension) {
@@ -180,22 +236,38 @@ _kitty_decode_chunk_buf :: proc(state: ^Kitty_Extension) -> (px: []u8, w, h: int
 }
 
 _kitty_finish_transmission :: proc(state: ^Kitty_Extension, term: rawptr, place: bool) {
-	if px, w, h := _kitty_decode_chunk_buf(state); len(px) > 0 && w > 0 && h > 0 {
-		img_id := state.current_id
-		if img_id == 0 {
-			state.next_anon_id += 1
-			img_id = 0x80000000 + state.next_anon_id
-		}
-		_kitty_store_image(state, img_id, w, h, px, term, place)
+	px, w, h := _kitty_decode_chunk_buf(state)
+	if len(px) == 0 || w <= 0 || h <= 0 do return
+
+	if !kitty_dims_valid(w, h) || len(px) < w * h * 4 {
+		delete(px, state.allocator)
+		_kitty_respond_error(state, term, state.current_id, .Invalid_Request)
+		return
+	}
+
+	img_id := state.current_id
+	if img_id == 0 {
+		state.next_anon_id += 1
+		img_id = 0x80000000 + state.next_anon_id
+	}
+	// Ownership of `px` transfers to the image store only on success.
+	if !_kitty_store_image(state, img_id, w, h, px, term, place) {
+		delete(px, state.allocator)
+		_kitty_respond_error(state, term, img_id, .Out_Of_Space)
 	}
 }
 
-_kitty_finish_frame_transmission :: proc(state: ^Kitty_Extension, img_id: u32) {
-	if px, w, h := _kitty_decode_chunk_buf(state); len(px) > 0 && w > 0 && h > 0 {
-		if img := _kitty_find_image(state, img_id); img != nil {
-			_kitty_handle_frame(state, img, px, w, h)
-		}
+_kitty_finish_frame_transmission :: proc(state: ^Kitty_Extension, term: rawptr, img_id: u32) {
+	px, w, h := _kitty_decode_chunk_buf(state)
+	if len(px) == 0 || w <= 0 || h <= 0 do return
+
+	img := _kitty_find_image(state, img_id)
+	if img == nil || !kitty_dims_valid(w, h) || len(px) < w * h * 4 {
+		delete(px, state.allocator)
+		_kitty_respond_error(state, term, img_id, .Invalid_Request)
+		return
 	}
+	_kitty_handle_frame(state, term, img, px, w, h)
 }
 
 kitty_graphics_handle_apc :: proc(ext: ^Terminal_Extension, payload: []u8, term: rawptr) -> bool {
@@ -246,7 +318,7 @@ kitty_graphics_handle_apc :: proc(ext: ^Terminal_Extension, payload: []u8, term:
 		state.in_chunk_transmission = (more != 0)
 		if more == 0 {
 			finish_id := state.current_id
-			_kitty_finish_frame_transmission(state, finish_id)
+			_kitty_finish_frame_transmission(state, term, finish_id)
 			if state.current_quiet == 0 && finish_id > 0 do _kitty_handle_query(state, term, finish_id)
 			_kitty_reset_ctrl_state(state)
 		}
@@ -296,13 +368,21 @@ kitty_graphics_deinit :: proc(ext: ^Terminal_Extension) {
 kitty_graphics_handle_clear :: proc(ext: ^Terminal_Extension, mode: int, term: rawptr) {
 	if ext == nil || ext.user_data == nil do return
 	state := (^Kitty_Extension)(ext.user_data)
-	_kitty_handle_clear_screen(state, mode)
+	screen: Kitty_Screen = .Primary
+	if state.screen_provider != nil && term != nil {
+		screen = state.screen_provider(term)
+	}
+	_kitty_handle_clear_screen(state, mode, screen)
 }
 
 kitty_graphics_handle_scroll :: proc(ext: ^Terminal_Extension, n: int, top, bottom: int, term: rawptr) {
 	if ext == nil || ext.user_data == nil do return
 	state := (^Kitty_Extension)(ext.user_data)
-	_kitty_handle_grid_scroll(state, n, top, bottom)
+	screen: Kitty_Screen = .Primary
+	if state.screen_provider != nil && term != nil {
+		screen = state.screen_provider(term)
+	}
+	_kitty_handle_grid_scroll(state, n, top, bottom, screen)
 }
 
 kitty_graphics_handle_resize :: proc(ext: ^Terminal_Extension, new_rows, new_cols: int, delta_y: int, term: rawptr) {
@@ -311,12 +391,39 @@ kitty_graphics_handle_resize :: proc(ext: ^Terminal_Extension, new_rows, new_col
 	_kitty_handle_resize(state, new_rows, new_cols, delta_y, term)
 }
 
+kitty_graphics_handle_dcs :: proc(ext: ^Terminal_Extension, payload: []u8, term: rawptr) -> bool {
+	if ext == nil || ext.user_data == nil || len(payload) == 0 do return false
+	state := (^Kitty_Extension)(ext.user_data)
+
+	q_found := false
+	for b in payload {
+		if b == 'q' || b == 'Q' {
+			q_found = true
+			break
+		}
+		if (b < '0' || b > '9') && b != ';' && b != '?' && b != ' ' {
+			return false
+		}
+	}
+	if !q_found do return false
+
+	px, w, h, ok := sixel_decode(payload, state.allocator)
+	if !ok || len(px) == 0 || w <= 0 || h <= 0 do return false
+
+	state.next_anon_id += 1
+	img_id := 0x82000000 + state.next_anon_id
+
+	_kitty_store_image(state, img_id, w, h, px, term, place = true)
+	return true
+}
+
 kitty_graphics_extension_make :: proc(allocator := context.allocator) -> Terminal_Extension {
 	return Terminal_Extension{
 		name          = "kitty_graphics",
 		user_data     = nil,
 		init          = kitty_graphics_init,
 		handle_apc    = kitty_graphics_handle_apc,
+		handle_dcs    = kitty_graphics_handle_dcs,
 		handle_clear  = kitty_graphics_handle_clear,
 		handle_scroll = kitty_graphics_handle_scroll,
 		handle_resize = kitty_graphics_handle_resize,
