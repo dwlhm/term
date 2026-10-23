@@ -58,3 +58,7 @@ term_test
 term_resize_repro
 test_slice.odin
 /artifacts/
+
+# Agent scratch & probe binaries
+.pi/
+/probe_*
