@@ -1,3 +1,109 @@
+# Release Notes - Term v2.1.1 (hardening)
+
+Security and protocol-correctness pass over the terminal engine. Everything below
+is covered by regression tests and was re-verified by running the real binary
+(`bin/term --grid-dump`) against live sequences and a real ncurses application.
+
+## 🔒 Security (reachable from any PTY stream)
+
+- **Arbitrary file deletion removed.** Kitty `t=t` used to `unlink()` whatever path
+  the guest program sent. Deletion is now restricted to direct children of the
+  temporary directory; all other transports only read regular, size-capped files.
+- **Unbounded memory paths removed.** Image geometry is validated (`≤ 8192 px`,
+  `≤ 16 MPx`), raw payloads must cover the declared geometry, files and shared
+  memory objects are `fstat`-capped, zlib inflates through a bounded allocator, and
+  every image (plus animation frames) shares a 128 MiB budget with `ENOSPC` replies.
+- **GPU objects can no longer be poisoned.** Dimensions and pixel lengths are
+  validated before `create_texture` / `write_texture`, so a hostile sequence cannot
+  create an invalid texture that fails every following render pass.
+
+## 🧭 Protocol correctness
+
+- **Real alternate screen buffer** (`47` / `1047` / `1049`) with xterm semantics:
+  primary content and cursor are restored, TUI output never enters scrollback, and
+  the hidden buffer survives resizes.
+- **DEC Special Graphics** (`ESC ( 0`, `SO`/`SI`, `SS2`/`SS3`, `ESC ( A`): box drawing
+  renders as ACS (`┌───┐`) instead of `lqqqk`.
+- **OSC payloads are no longer truncated at 512 bytes**: clipboard (OSC 52),
+  hyperlinks and shell integration keep their full payload up to 1 MiB, and an
+  oversized sequence is dropped whole instead of delivered half-decoded.
+- **SGR**: `:`-form truecolor (`38:2::R:G:B`, `38:2:cs:R:G:B`) resolves correctly,
+  256-colour indices are range-checked, `4:x` / `58` / `59` consume their
+  sub-parameters, and `5` / `8` / `21` / `25` / `28` map to style flags.
+- **EGC pool free-list** is a real LIFO stack: a live cluster slot can no longer be
+  handed out twice (which silently corrupted emoji/combining sequences).
+- **Tab stops** (`HTS`, `TBC`, `CHT`, `CBT`), **REP** (`CSI b`), **DECSTR**
+  (`CSI ! p`), **DECRQM** (`CSI ? Ps $ p`) and **IND/NEL** (`ESC D` / `ESC E`).
+- **Origin Mode (`DECOM`, `?6`) & Auto-wrap Mode (`DECAWM`, `?7`)**:
+  - `?6h` activates origin mode, clamping `CUP`/`VPA` relative to top/bottom margins.
+  - `?7l` disables auto-wrap, allowing full-width status lines to clip/overwrite instead of wrapping.
+  - Saved/restored properly by `DECSC` / `DECRC`.
+- **Kitty Graphics Per-Screen Isolation**:
+  - Placements and images are now tagged with their buffer (`Primary` vs `Alternate`).
+  - Switching to an alternate screen (`vim`, `less`, TUI apps) completely hides primary graphics without destroying them. Exiting the alternate screen restores primary graphics with zero visual loss.
+- **Synchronized output** (`CSI ? 2026`) holds presentation until the client closes
+  its frame, with a 150 ms safety valve.
+
+## ⌨️ Terminal features completed
+
+- **Kitty Keyboard Protocol**: flag stack (`CSI > u`, `< u`, `= u`, `? u`), disambiguated
+  encoding for modified/ambiguous keys, functional-key codes, press/repeat/release
+  event types, plus suppression of duplicate text input for Option combos.
+  Release events are only emitted for keys that use the enhanced encoding — a legacy
+  key sequence has no event field, and replaying it on release made TUI list
+  navigation (arrows in `fzf`, vim pickers, menus) move **two** items per press.
+- **OSC 8 hyperlinks**: per-cell link ids (never recycled), automatic underline, and
+  `Cmd+Click` opening restricted to `http`/`https`/`mailto`.
+- **Text decorations**: underline, double-underline (`SGR 21`), strikethrough,
+  conceal (`SGR 8`) and synthetic italics, implemented consistently in the
+  instance, compute-tile and fullscreen render paths.
+- **Private-prefixed CSI is no longer mistaken for SGR**: `CSI > 4 ; 1 m`
+  (xterm XTMODKEYS, emitted by OpenCode on startup) used to set underline+bold
+  permanently, painting a rule through every row. `SGR` now requires an
+  unprefixed `CSI … m`, matching the specification.
+- **In-terminal search (`Cmd+F`)**: case-insensitive, UTF-8-aware search across the
+  visible grid and scrollback with wraparound, match highlight and scroll-into-view.
+- **Scrollback scrollbar**: proportional thumb, hover highlight, drag-to-scroll and
+  Retina-correct geometry (unit tested).
+- **Dynamic OS Font Discovery & Cascade Fallback**:
+  - Replaces fragile static paths with native OS font queries (`CoreText` on macOS, `Fontconfig` on Linux).
+  - Automatically loads the OS default fixed-pitch font (e.g. `Menlo`) if bundled fonts are absent, and dynamically inherits the OS's official cascading fallback chain (including **Geeza Pro**, **PingFang/Hiragino**, **Noto**, and system symbols).
+- **B8 Arabic Font Fallback & Contextual Shaping**:
+  - Integrated HarfBuzz `.Arabic` script and `.RTL` direction tagging for Arabic codepoints (`0x0600..0x06FF` / Presentation Forms), properly joining connected letters without tofu or disjointed glyphs.
+- **B10 Programming Ligatures**:
+  - Zero-allocation `Ligature_Cache` (128 slots, FNV-1a hash) backed by HarfBuzz `hb_shape` on the primary coding font (`MapleMono-NF-Regular.ttf`).
+  - Seamlessly renders multi-character symbol runs (`!=`, `==`, `->`, `=>`, `===`, `<=`, `>=`) while preserving the monospace cell grid layout, cell damage tracking, and selection boundaries.
+- **B9 Asynchronous Glyph Rasterization**:
+  - Dedicated background worker thread with pre-allocated inline completion buffers (zero heap allocations in steady-state loop).
+  - Eliminates cold-miss frame spikes on mass CJK, Arabic, or symbol output by serving temporary placeholders and popping in rasterized bitmaps on the next frame top.
+- **B7 Sixel Graphics Protocol**:
+  - Full DCS lifecycle: `DCS [p1] ; [p2] ; [p3] q`, raster attributes (`" [pan; pad; ph; pv]`), DEC 16-color palette, custom RGB (`#1;2;r;g;b`) and HLS (`#2;1;h;l;s`) color definitions.
+  - RLE compression (`! count char`), 6-pixel vertical bands, CR (`$`) and LF (`-`), cursor advancing, and unified GPU texture presentation.
+- **B13 / B16 Configuration File Loader & Dynamic Reload**:
+  - JSON5 declarative configuration support (`~/.config/term/config.json5`, comments, trailing commas) with discovery precedence across XDG, Home, Portable, and Bundle locations.
+  - Custom font family (`font.family`) and explicit font paths (`font.path`) resolved natively via CoreText without hardcoded system paths.
+  - Custom color themes: canvas background, foreground, and 16-color ANSI palette overrides (`theme.background`, `theme.palette`) with on-the-fly reload via `⇧⌘R`.
+- **B12 Session Persistence & Background Monitoring Lifecycle**:
+  - Detached session registry keeping background PTYs and shells alive when closing windows or detaching tabs (`^⌘D`).
+  - Interactive Session Safety Dialog triggered when closing a window with running jobs: presents active jobs scheduled for background execution vs. a collapsible list of sessions to be killed, with instant two-way state transfer buttons (`[ Kill ]` / `[ Keep in Background ]`).
+  - Native macOS Menu Bar status item (`NSStatusItem`) showing live background tasks with direct click-to-focus navigation handoff.
+- **OSC 7501 Program Status Protocol**:
+  - Full wire format support (`\x1b]7501;key=val[:key=val]...\x1b\\`) for semantic state reporting (`working`, `blocked`, `done`, `error`), application names, and base64/plain status messages.
+  - Sits at Tier 1 of the multi-tier telemetry provider, complemented by OSC 133 shell integration, OSC 0/2 window titles, and kernel process introspection.
+
+## 🧪 Verification
+
+- `make check` + `make test` green (115 terminal-core tests, incl. 39 new
+  regression tests for the items above).
+- Real-run proof (driven through **peekaboo**: background key delivery pinned to the
+  Term window + window screenshots): ncurses TUI shows `alt=true` with an ACS border
+  mid-run and the restored primary screen afterwards; `t=t` on a `$HOME` file leaves
+  it intact; a 600-byte OSC 52 payload lands complete on the clipboard; `Cmd+A`
+  arrives as `CSI 97;5u` under the Kitty protocol; `Cmd+F` shows the search bar with
+  a highlighted match; underline/strike/conceal/italic render on screen.
+
+---
+
 # Release Notes - Term v2.1.0
 
 Term v2.1.0 is a monumental ground-up rewrite in Odin on Native Apple Metal (`CAMetalLayer`). Engineered with a strict measure-first philosophy, this release delivers a zero-heap allocation steady-state frame loop, complete Kitty Graphics Protocol support across direct, file, and shared memory mediums, adaptive 3-strategy GPU rendering, interactive split divider dragging, an embedded 3D canvas viewport, multi-tab workspace management, and rich native macOS integration.

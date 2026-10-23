@@ -47,10 +47,18 @@ Rather than forcing a single rendering method across varying terminal workloads,
 - **Asynchronous Glyph Rasterization**: Mitigates cold-miss frame spikes from $37.16\text{ ms}$ down to $0.692\text{ ms}$ ($53.7\times$ speedup) using a background worker with blank-then-pop-in display.
 
 ### 📡 Modern Terminal Protocols
-- **Kitty Keyboard Protocol**: Disambiguated escape codes, press/release event distinction, and modifier key reporting.
+- **Alternate Screen Buffer (`CSI ? 47 / 1047 / 1049`)**: A real second buffer with xterm semantics — `vim`, `less` and `htop` no longer leak into scrollback and the shell screen is restored on exit.
+- **DEC Special Graphics (`ESC ( 0`)**: Full ACS table plus `SO`/`SI` and `SS2`/`SS3` shifts, so `dialog`, `ncurses` and `tmux` borders render as box drawing instead of `lqqqk`.
+- **Complete SGR**: `;`- and `:`-form 24-bit colour (`38;2;…` and `38:2::…`), 256-colour palette, `4:x` underline styles, blink/conceal, and correct parameter consumption for underline colour (`58`/`59`).
 - **OSC 133 Shell Integration**: Complete prompt marking (`133;A`), command execution boundaries (`133;B`), command finished notifications (`133;D`), and scrollback preservation.
-- **Synchronized Output (`CSI ? 2026 h / l`)**: Atomic buffer swaps that eliminate screen tearing during high-frequency redraws (e.g. `htop`, `neovim`).
+- **Synchronized Output (`CSI ? 2026 h / l`)**: Presentation is held until the client finishes its frame (with a safety valve), removing tearing in `htop` / `neovim` redraws.
 - **Bracketed Paste Mode (`CSI ? 2004 h / l`)**: Safe terminal paste operations preventing accidental command execution.
+- **Mode queries (`DECRQM`)**: `CSI ? Ps $ p` reports the real state of mouse, paste, alt-screen, sync-output and cursor modes.
+- **Kitty Graphics Protocol**: Direct/`shm`/file transports, PNG/JPEG/RGB/RGBA payloads, zlib inflation, animations and placements — bounded by hard memory and path guards.
+- **Sixel Graphics Protocol**: Full DCS stream lifecycle, DEC 16-color palette + custom RGB & HLS color definitions, RLE repeat compression, and cursor advancing over the unified GPU texture pipeline.
+- **Kitty Keyboard Protocol**: `CSI > u` flag stack, disambiguated escape codes, event types (press/repeat/release) and `CSI ? u` queries, honoured by the input encoder.
+- **OSC 8 Hyperlinks**: Per-cell link storage with `Cmd+Click` activation (http/https/mailto only) and automatic underlining.
+- **Text Decorations**: `SGR 4` / `9` / `21` underline and strikethrough rules, `SGR 8` conceal, and synthetic italics — rendered identically by the instance, tile and fullscreen strategies.
 
 ### 🍎 Native macOS Integration
 - Robust POSIX pseudo-terminal lifecycle (`posix_openpt`, non-blocking drains, `TIOCSWINSZ` window size propagation, and zombie process cleanup).
@@ -58,7 +66,15 @@ Rather than forcing a single rendering method across varying terminal workloads,
 
 ### 📑 Native Multi-Tab UI & Interactive Selection (v0.2.0)
 - **Multi-Tab Sessions**: Concurrent independent terminal sessions with isolated PTY lifecycles, tab bar chrome, tab switching (`Cmd+1`..`Cmd+9`, `Cmd+Shift+[` / `]`), and non-blocking in-terminal search overlay (`Cmd+F`).
-- **Interactive Mouse Selection & URLs**: Linear, word, line, and rectangular block selection rendered via a zero-cost Metal overlay pipeline, with OSC 8 hyperlink detection and `Cmd+Click` opening.
+- **Interactive Mouse Selection**: Linear, word, line, and rectangular block selection rendered via a zero-cost Metal overlay pipeline, with `Cmd+C` copy support.
+
+- **In-Terminal Search**: `Cmd+F` searches the visible grid *and* scrollback (case-insensitive, UTF-8 aware, wrapping), with the match highlighted and scrolled into view.
+- **Scrollback Scrollbar**: Proportional thumb with drag-to-scroll, hover highlight and Retina-correct geometry.
+- **Session Persistence & Background Monitoring (B12)**: Keep active tasks running in the background when closing windows, complete with an interactive safety confirmation modal sheet (two-way transfer between background and killed lists), live macOS Menu Bar status (`NSStatusItem`), and navigation handoff (`^⌘D` detach, `⌘O` attach).
+- **OSC 7501 Program Status Protocol**: Explicit semantic operational reporting (`working`, `blocked`, `done`, `error`) from modern CLI tools, integrated into the multi-tier telemetry provider.
+- **Declarative Configuration (`config.json[5]`)**: JSON5 configuration file (`~/.config/term/config.json5`, comments, trailing commas) with custom font family/size, theme background/foreground/16-color ANSI palette, window vibrancy blur/opacity, and on-the-fly reload via `⇧⌘R`.
+
+> **Not implemented yet** (tracked in [`docs/BUG_BACKLOG.md`](docs/BUG_BACKLOG.md)): i18n localization. This is *not* claimed as supported.
 
 ---
 

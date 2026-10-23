@@ -4,111 +4,90 @@
 > Referensi kebenaran: `legacy/` (implementasi lama yang berfungsi sebagai acuan).
 > Target build: `make check` (type-check semua), `make test` (unit + harness + e2e), `make term` (release binary).
 
+Status terakhir diperbarui pada hardening v2.1.1. Dokumen ini **hanya berisi item yang masih terbuka**; item yang sudah selesai dipindahkan ke bagian
+"Sudah selesai" supaya tidak dikerjakan ulang.
+
 ## Baseline (sudah dikerjakan, jangan diulang)
 
 - Font fallback optical calibration (cap-height + baseline) — `src/app/term/font.odin`
 - Emoji warna: atlas RGBA8 + pipeline emoji — `src/app/term/emoji_atlas.odin`, `src/core/render/shaders/emoji.wgsl`
 - Grapheme clustering UAX #29 (combining marks, ZWJ emoji, VS16, keycap, RI) — `src/core/terminal/{cell/grapheme.odin, parser/parser.odin, egc/egc.odin}`
 - Clipboard copy UTF-8 + resolusi EGC — `src/app/term/clipboard.odin`
-- TrueColor 24-bit direct color (`38;2` / `48;2`) + VT sanitization (ISO-2022 SCS, DCS, APC, CPR, DSR, DA, OSC 10/11) — `src/core/terminal/` & `src/app/term/`
+- TrueColor 24-bit direct color (`38;2` / `48;2` / bentuk `:`), 256-color, SGR extended styles
+- Mouse reporting (1000/1002/1003/1004/1006/1016), mouse cursor sync
+- Alt-screen buffer nyata (47/1047/1049) + restore kursor
+- DEC Special Graphics (ACS) + SO/SI/SS2/SS3 + `ESC ( A` (UK)
+- OSC buffer dinamis (1 MiB) untuk OSC 52/8/133, APC cap + drop-whole + ENOSPC/EINVAL
+- Kitty graphics: transport `d`/`f`/`s`/`t`, PNG/JPEG/RGB/RGBA, zlib bounded, animasi, placement,
+  guard path (tidak boleh hapus file di luar TMPDIR), budget 128 MiB, validasi GPU
+- EGC pool free-list LIFO (slot aktif tidak pernah dipakai dua kali)
+- Tab stops (HTS/TBC/CHT/CBT), REP, DECSTR, DECRQM, IND/NEL
+- Origin Mode (`DEC 6`), Auto-wrap Mode (`DEC 7`), dan DECRC/DECSC save-restore
+- Dynamic OS Font Discovery & Cascade (CoreText on macOS / Fontconfig on Linux) — font fixed-pitch dan daftar cascade resmi OS (Geeza Pro Arab, CJK, Emoji, Symbols) dimuat secara dinamis
+- B8 Arabic font fallback & contextual shaping via HarfBuzz (`0x0600..0x06FF` / Presentation Forms)
+- B9 Asynchronous glyph rasterization worker thread (mitigates cold-miss frame spikes with zero heap allocations on hot path)
+- B10 Programming font ligatures (`!=`, `==`, `->`, `=>`, `===`, `<=`, `>=`) via HarfBuzz & Ligature_Cache
+- B7 Sixel graphics protocol (full lifecycle: DCS stream ingestion, DEC 16-color palette + custom RGB & HLS color registers, RLE decompression, 6-pixel vertical bands, CR/LF cursor positioning, bounds guards, and unified GPU texture presentation)
+- B13 / B16 Configuration file loader & dynamic reload (`~/.config/term/config.json[5]`, comments, trailing commas, custom font family / path, theme background / foreground / 16-color ANSI palette, window blur / opacity, and dynamic reload via `⇧⌘R`)
+- B12 Session persistence & background monitoring lifecycle (OSC 7501 Program Status Protocol, 4-tier telemetry provider, detached session registry, interactive safety dialog with collapsible killed list, and native macOS Menu Bar NSStatusItem)
+- Kitty graphics per-screen tagging (`Primary` vs `Alternate`), retensi gambar lintas transisi TUI/less/vim
+- Kitty keyboard protocol (flag stack, disambiguated encoding, event types, queries)
+- OSC 8 hyperlinks (per-cell ids, underline, `Cmd+Click` with scheme allowlist)
+- Text decorations: underline / double underline / strikethrough / conceal / synthetic italic
+- In-terminal search `Cmd+F` (grid + scrollback, UTF-8, wraparound, highlight)
+- Scrollback scrollbar with proportional thumb, hover and drag
+- Chrome text rendering verified on screen (tab titles, command palette)
+- Synchronized output `CSI ? 2026` (hold present + safety valve 150 ms)
+- Command/aksi UI: zoom font, fullscreen, select-all, close pane, cycle focus
+- Resize reflow + scrollback preservation; riwayat alt-screen terpisah
 
 ---
 
-## A. Bug fungsional (benar-benar salah / tidak tampil)
+## A. Bug fungsional yang masih terbuka
 
-### A1. Teks UI (chrome) tidak pernah dirender — KRITIS
-- File: `src/core/render/chrome/chrome_renderer.odin`
-- Kasus `case .Text_Run, .Icon:` di `chrome_renderer_render` hanya komentar no-op.
-- Tidak ada atlas glyph / SDF text / font di chrome renderer (hanya `sdf` untuk bentuk geometri).
-- Akibat: judul tab, isi command center, dan teks tombol TIDAK tampil.
-- Perbaikan arah: tambah atlas glyph + pipeline teks ke `Chrome_Renderer`, atau render teks via atlas yang sudah ada (`src/core/render/atlas`) + `Glyph_Atlas_Manager`.
-- Verifikasi: jalankan `make term`, buka app, pastikan judul tab & command center (Cmd+K) menampilkan teks.
-
-### A2. [RESOLVED] TrueColor 24-bit (SGR `38;2` / `48;2`)
-- Selesai diimplementasikan: RGB direct colors disimpan di row/cell grid, dirender di `terminal_view_render_pane`, dan space cell dengan direct bg tidak di-skip. Verifikasi: `test_parser_truecolor_direct_color` green.
-
-### A3. [RESOLVED] Resize scrollback & line reflow (baris baru / unwrap)
-- Selesai diimplementasikan: `grid_resize_reflow` di `src/core/terminal/grid/grid_reflow.odin`, reflow baris saat cols berubah (wrap baris baru atau unwrap), sanitasi boundary karakter lebar, tracking kursor, preservasi history scrollback, dan penanganan event resize `WINDOW_PIXEL_SIZE_CHANGED`, `WINDOW_RESIZED`, `WINDOW_EXPOSED` dengan konfigurasi surface/metal layer 1:1 tanpa distorsi/stretching. Verifikasi: 5 unit test di `test_terminal_resize_*` green.
-
-### A4. OSC 52 (set clipboard remote) tidak terpasang di session
-- File: `src/features/session/session.odin` (`session_create`) — hanya register OSC 0/2/7/133.
-- Handler 52 hanya ada di `src/cmd/bench_session/main.odin` dan test mock.
-- Perbaikan: tambah handler OSC 52 di session yang menulis ke clipboard (pakai `vendor:sdl3` SetClipboardText atau bridge).
-- Verifikasi: `printf '\e]52;c;dGVzdA==\a'` → clipboard berisi "test".
-
-### A5. Mouse reporting tidak ada
-- File: `src/core/terminal/parser/parser.odin` (`case 'h'`/`'l'`).
-- Tidak ada mode 1000/1002/1003/1004/1006/1015. TUI mouse-driven (vim/htop/tmux) tidak menerima event mouse.
-- Perbaikan: implement DECSET/DECRST mouse mode + encode SGR mouse event di `src/app/term/mouse.odin` + kirim ke PTY.
-- Verifikasi: jalankan `vim`, coba klik/drag — harus menghasilkan event mouse.
-
-### A6. Alt-screen (47/1047/1049) hanya flag, bukan buffer nyata
-- File: `src/core/terminal/parser/parser.odin` (`in_alt_screen: bool` di `Parser`).
-- Tidak ada buffer alt-screen untuk save/restore layar utama.
-- Akibat: vim/less/mc fullscreen tidak berfungsi benar.
-- Perbaikan: tambah buffer alt-screen di `Terminal` + save/restore pada `1049`.
-- Verifikasi: `vim` lalu keluar → layar shell harus kembali seperti semula.
-
-### A7. EGC pool append-only, tidak pernah di-release/reset
-- File: `src/core/terminal/egc/egc.odin`, `src/core/terminal/terminal.odin`.
-- Setelah 256 cluster unik, `egc_pool_alloc` gagal → combining mark di-drop. Tidak di-reset saat resize/clear.
-- Catatan: ini trade-off kesengajaan (aman, tanpa dangling). Perbaikan opsional: release saat cell overwrite + reset saat resize/clear.
+_(Tidak ada bug fungsional terbuka di kategori ini — lihat daftar "sudah selesai" di atas.)_
 
 ---
 
-## B. Fitur diiklankan README tetapi belum diimplementasikan
+## B. Fitur yang diiklankan README tetapi belum ada
 
-| # | Fitur (klaim README) | Status | Lokasi relevan |
+README sudah dikoreksi untuk tidak mengklaim fitur ini. Jangan tambahkan klaim sebelum selesai.
+
+| # | Fitur | Status | Lokasi relevan |
 |---|---|---|---|
-| B1 | Kitty Keyboard Protocol | belum | `src/app/term/input.odin`, `src/app/term/keymap.odin` |
-| B2 | Synchronized Output `CSI ? 2026` | belum | `src/core/terminal/parser/parser.odin` |
-| B3 | Bracketed Paste `CSI ? 2004` | belum | parser + `src/app/term/clipboard.odin` |
-| B4 | OSC 8 hyperlink + Cmd+Click buka URL | belum | flag `Has_Hyperlink` ada di `cell.odin` tapi tak terpakai |
-| B5 | Pencarian in-terminal (Cmd+F) | belum | legacy: `terminal/search.odin`, `platform/chrome/search_bar.odin` |
-| B6 | Seleksi word/line/rectangular + double-click word | hanya linear drag | `src/app/term/mouse.odin` |
-| B7 | Font zoom `⌘+ / ⌘- / ⌘0` | no-op | katalog/keymap ada, `app_execute_action` tak handle |
-| B8 | Toggle fullscreen `^⌘F` | no-op | `src/cmd/harness_helper/window.odin` tak punya set_fullscreen |
-| B9 | Reload config `⇧⌘R` + loading config file | belum | `src/app/term/config.odin` hanya konstanta |
-| B10 | Select All `⌘A` | no-op | `app_execute_action` |
-| B11 | Close pane `⇧⌘W` | no-op | `multiplexer_close_pane` ada, tak dipanggil |
-| B12 | Focus pane sebelumnya `⌘[` | no-op | `multiplexer_cycle_focus(forward=false)` ada, tak di-wire |
-| B13 | Arabic fallback + shaping/joining | belum | `src/app/term/font.odin`; legacy: `render/arabic_join.odin` |
-| B14 | Async glyph rasterization | sinkron | legacy: `render/raster_async.odin` |
-| B15 | Ligature cache/shaping | belum | legacy: `render/ligature_cache.odin` |
-| B16 | Kitty graphics protocol | belum | legacy: `graphics/*` |
-| B17 | i18n (strings id/en) | belum | legacy: `i18n/*` |
-| B18 | Session persistence/restore | belum | legacy: `app/persistence.odin` |
-| B19 | Diag/counters/metrics | belum | legacy: `diag/*` |
-| B20 | Konfigurasi tema/font dari file | belum | legacy: `config/*` |
-| B21 | Scrollbar overlay penuh + pencarian scrollback | thumb dasar saja | `src/app/term/chrome_view.odin`; legacy: `render/scrollbar_overlay.odin` |
+| B11 | i18n (strings id/en) | belum | legacy: `i18n/*` |
+| B15 | Diag/counters/metrics lengkap | sebagian (`--telemetry`, grid dump) | legacy: `diag/*` |
 
 ---
 
-## C. Bug kecil / technical debt
+## C. Technical debt
 
-1. Command center menampilkan aksi no-op (B7–B12) — UX menyesatkan. `src/app/term/command_center.odin` + `keymap.odin`.
-2. `app.cursor` (`Cursor_State`) state mati — tidak disinkronkan dengan `parser.cursor.shape`. `src/app/term/cursor.odin` + `main.odin`.
-3. Param `is_focused` di `terminal_view_render_pane` tidak dipakai. `src/app/term/terminal_view.odin`.
-4. DECSET/DECRST tidak lengkap: BCE (45), origin mode, autowrap toggle. `parser.odin`.
-5. `make test` rebuild semua harness tiap run (lambat) — bisa di-split menjadi target incremental.
-
----
+1. `app.cursor` (`Cursor_State`) belum disinkronkan penuh dengan `parser.cursor.shape`.
+2. Param `is_focused` di `terminal_view_render_pane` tidak dipakai.
+3. `make test` selalu rebuild semua harness (lambat); pertimbangkan target incremental.
+4. `Kitty_Extension.images` masih array 32 slot; belum ada eviction LRU eksplisit
+   (saat ini: slot bebas dulu, lalu slot 0 + delete placement).
+5. Terminal menyimpan pointer ke dirinya sendiri (`parser.user_data`), sehingga struct
+   `Terminal` **tidak boleh di-copy setelah `terminal_init`**. Saat ini aman karena
+   session selalu dialokasikan di heap (`session_create`) — jangan pernah menaruh
+   `Terminal` di dalam `[dynamic]` yang bisa realloc.
 
 ## Prioritas yang disarankan
 
-1. **A1** (teks UI) — seluruh chrome/command center buta teks.
-2. **A2** (TrueColor) — banyak prompt/theme modern pakai 24-bit.
-3. **A3** (resize/history) — UX dasar terminal.
-4. **A5 + A6** (mouse reporting + alt-screen) — agar vim/htop/less berfungsi.
-5. **B1–B3** (protokol modern: kitty, 2026, 2004).
+1. **B7** (Sixel) — proyek tersendiri; jangan dikerjakan setengah.
+2. **B8/B10** (Arabic shaping + ligatures) — butuh pipeline shaping terpisah.
+3. **B9** (async rasterization) — perf, gate dengan percentile.
+4. **B12** (session persistence) + **B16** (config-file theme/font) — UX harian.
+5. **B11/B15** — i18n dan metrik lanjutan.
 
 ## Cara verifikasi standar (Definition of Done)
 
 ```sh
 make check          # type-check semua paket
-make test           # unit + harness + e2e (lama; bisa per-target)
+make test           # unit + harness + e2e
 odin test src/core/terminal/tests -define:ODIN_TEST_THREADS=1   # terminal core
 make term           # build release
+./bin/term --grid-dump /tmp/grid -e '<command>'   # real-run grid snapshot (SIGUSR1)
 ```
 
-Setiap perbaikan wajib: `make check` bersih + test terkait lolos + tidak ada regresi di `make test` (atau subset yang relevan).
+Setiap perbaikan wajib: `make check` bersih + test terkait lolos + tidak ada regresi di `make test`.
