@@ -61,6 +61,9 @@ text_atlas_upload :: proc(ta: ^Text_Atlas, device: contract.Gpu_Device, queue: c
 text_atlas_sync_gpu :: proc(ta: ^Text_Atlas, device: contract.Gpu_Device, queue: contract.Gpu_Queue) -> bool {
 	if ta == nil do return false
 	synced := false
+	if glyph_atlas_drain_async(&ta.glyph_atlas) {
+		synced = true
+	}
 	if ta.glyph_atlas.atlas.gpu_dirty {
 		if glyph_atlas_upload(&ta.glyph_atlas, device, queue) {
 			ta.glyph_view = ta.glyph_atlas.atlas.gpu_view

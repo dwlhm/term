@@ -4,6 +4,7 @@ package platform_font
 // Platform Font Subsystem (src/platform/font/*).
 
 import "core:mem"
+import "core:sync"
 import core_atlas "../../core/render/atlas"
 import contract "../../core/render/contract"
 
@@ -25,6 +26,7 @@ PINNED_UI_CODEPOINTS := [12]rune{
 Glyph_Atlas_Manager :: struct {
 	atlas:            core_atlas.Atlas,
 	fc:               ^Font_Context,
+	async_worker:     ^Async_Raster_Worker,
 	dynamic_slots:    [core_atlas.FALLBACK_COUNT]rune,
 	dynamic_clusters: [core_atlas.FALLBACK_COUNT]u64,
 	dynamic_cursor:   int,
@@ -203,6 +205,9 @@ glyph_atlas_init :: proc(gam: ^Glyph_Atlas_Manager, fc: ^Font_Context) -> bool {
 	gam.cluster_cache = make(map[u64]u32, 64)
 	gam.dynamic_cursor = 0
 
+	gam.async_worker = new(Async_Raster_Worker)
+	async_raster_worker_init(gam.async_worker, fc)
+
 	_glyph_atlas_prewarm_pinned(gam)
 	return true
 }
@@ -228,9 +233,58 @@ glyph_atlas_upload :: proc(gam: ^Glyph_Atlas_Manager, device: contract.Gpu_Devic
 
 glyph_atlas_destroy :: proc(gam: ^Glyph_Atlas_Manager) {
 	if gam == nil do return
+	if gam.async_worker != nil {
+		async_raster_worker_destroy(gam.async_worker)
+		free(gam.async_worker)
+		gam.async_worker = nil
+	}
 	delete(gam.lookup_cache)
 	delete(gam.cluster_cache)
 	core_atlas.atlas_destroy(&gam.atlas)
+}
+
+// glyph_atlas_drain_async pulls completed bitmaps from the background worker and applies them to atlas slots.
+glyph_atlas_drain_async :: proc(gam: ^Glyph_Atlas_Manager) -> (drained: bool) {
+	if gam == nil || gam.async_worker == nil do return false
+	w := gam.async_worker
+
+	if !sync.mutex_try_lock(&w.mutex) do return false
+	defer sync.mutex_unlock(&w.mutex)
+
+	if w.comp_count == 0 do return false
+
+	cell_h := f32(gam.fc.rasterizer.metrics.cell_height) if gam.fc != nil && gam.fc.rasterizer.metrics.cell_height > 0 else 43.0
+
+	for w.comp_count > 0 {
+		comp := &w.comps[w.comp_head]
+		w.comp_head = (w.comp_head + 1) % ASYNC_RASTER_QUEUE_CAP
+		w.comp_count -= 1
+
+		slot_idx := comp.slot_idx
+		if slot_idx >= core_atlas.ATLAS_SLOT_COUNT do continue
+
+		px, py := core_atlas.atlas_slot_origin(slot_idx)
+		for y in 0..<core_atlas.ATLAS_GLYPH_SIZE {
+			src_start := y * core_atlas.ATLAS_GLYPH_SIZE
+			dst_start := int(py + u32(y)) * core_atlas.ATLAS_WIDTH + int(px)
+			copy(gam.atlas.pixels[dst_start : dst_start + core_atlas.ATLAS_GLYPH_SIZE], comp.pixels[src_start : src_start + core_atlas.ATLAS_GLYPH_SIZE])
+		}
+
+		u0, v0, u1, v1 := core_atlas.atlas_slot_uv(slot_idx, comp.draw_w, cell_h)
+		gam.atlas.slots[slot_idx] = core_atlas.Atlas_Slot{
+			u0       = u0,
+			v0       = v0,
+			u1       = u1,
+			v1       = v1,
+			draw_w   = comp.draw_w,
+			offset_x = comp.offset_x,
+			advance  = comp.draw_w,
+			valid    = comp.rendered,
+		}
+		gam.atlas.gpu_dirty = true
+		drained = true
+	}
+	return drained
 }
 
 // glyph_atlas_lookup_slot performs O(1) static range check for pinned glyphs.
@@ -299,7 +353,41 @@ glyph_atlas_get_or_rasterize :: proc(gam: ^Glyph_Atlas_Manager, cp: rune, is_wid
 	draw_w: f32 = gw
 	offset_x: f32 = 0.0
 
-	if gam.fc != nil && font_has_codepoint(gam.fc, u) {
+	if gam.async_worker != nil {
+		_draw_fallback_box(gam.atlas.pixels, core_atlas.ATLAS_WIDTH, int(px), int(py), u, is_wide)
+		u0, v0, u1, v1 := core_atlas.atlas_slot_uv(slot_idx, draw_w, cell_h)
+		gam.atlas.slots[slot_idx] = core_atlas.Atlas_Slot{
+			u0       = u0,
+			v0       = v0,
+			u1       = u1,
+			v1       = v1,
+			draw_w   = draw_w,
+			offset_x = offset_x,
+			advance  = gw,
+			valid    = true,
+		}
+		gam.atlas.gpu_dirty = true
+		gam.dynamic_slots[slot_idx - core_atlas.FALLBACK_BASE] = cp
+		gam.dynamic_clusters[slot_idx - core_atlas.FALLBACK_BASE] = 0
+		gam.lookup_cache[cp] = slot_idx
+
+		async_raster_enqueue(gam.async_worker, Async_Raster_Request{
+			slot_idx = slot_idx,
+			cp       = cp,
+			is_wide  = is_wide,
+		})
+		return slot_idx, true
+	}
+
+	if u >= CONTENT_LIGATURE_BASE && gam.fc != nil {
+		g_idx := u - CONTENT_LIGATURE_BASE
+		font_rasterize_glyph_index_into(
+			&gam.fc.rasterizer, g_idx, gam.atlas.pixels,
+			core_atlas.ATLAS_WIDTH, int(px), int(py),
+			core_atlas.ATLAS_GLYPH_SIZE, core_atlas.ATLAS_GLYPH_SIZE,
+		)
+		rendered = true
+	} else if gam.fc != nil && font_has_codepoint(gam.fc, u) {
 		draw_w, offset_x = font_rasterize_codepoint(
 			gam.fc, u, gam.atlas.pixels,
 			core_atlas.ATLAS_WIDTH, int(px), int(py),
@@ -369,6 +457,38 @@ glyph_atlas_get_or_rasterize_cluster :: proc(gam: ^Glyph_Atlas_Manager, runes: [
 	gw := cell_w * 2.0 if is_wide else cell_w
 	draw_w: f32 = gw
 	offset_x: f32 = 0.0
+
+	if gam.async_worker != nil {
+		_draw_fallback_box(gam.atlas.pixels, core_atlas.ATLAS_WIDTH, int(px), int(py), u32(runes[0]), is_wide)
+		u0, v0, u1, v1 := core_atlas.atlas_slot_uv(slot_idx, draw_w, cell_h)
+		gam.atlas.slots[slot_idx] = core_atlas.Atlas_Slot{
+			u0       = u0,
+			v0       = v0,
+			u1       = u1,
+			v1       = v1,
+			draw_w   = draw_w,
+			offset_x = offset_x,
+			advance  = gw,
+			valid    = true,
+		}
+		gam.atlas.gpu_dirty = true
+		gam.dynamic_slots[pos] = 0
+		gam.dynamic_clusters[pos] = key
+		gam.cluster_cache[key] = slot_idx
+
+		req := Async_Raster_Request{
+			slot_idx   = slot_idx,
+			is_wide    = is_wide,
+			is_cluster = true,
+			rune_count = u8(min(len(runes), 4)),
+		}
+		for r, i in runes {
+			if i >= 4 do break
+			req.runes[i] = r
+		}
+		async_raster_enqueue(gam.async_worker, req)
+		return slot_idx, true
+	}
 
 	if gam.fc != nil {
 		draw_w, offset_x = font_rasterize_cluster_into(

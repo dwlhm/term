@@ -723,6 +723,8 @@ _wgpu_write_texture :: proc(queue: contract.Gpu_Queue, texture: contract.Gpu_Tex
 	w := max(u32(1), width)
 	h := max(u32(1), height)
 
+	// `data` may be R8 (glyph atlas) or RGBA8 (image), so the row stride follows
+	// the supplied buffer instead of assuming a 4-byte pixel.
 	bytes_per_row := w * 4
 	if h > 0 && u32(len(data)) >= h {
 		bytes_per_row = u32(len(data)) / h
@@ -1321,6 +1323,9 @@ _wgpu_render_set_vertex_buffer :: proc(pass: contract.Gpu_RenderPassEncoder, slo
 	p := wgpu.RenderPassEncoder(rawptr(pass))
 	b := wgpu.Buffer(rawptr(buffer))
 	if p != nil && b != nil {
+		usage := wgpu.BufferGetUsage(b)
+		if .Vertex not_in usage do return
+
 		size: u64 = wgpu.WHOLE_SIZE
 		total := wgpu.BufferGetSize(b)
 		if total > offset {

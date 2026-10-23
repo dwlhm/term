@@ -265,6 +265,24 @@ font_rasterizer_has_glyph :: proc(r: ^Font_Rasterizer, codepoint: u32) -> bool {
 	return font_rasterizer_find_glyph_index(r, codepoint) != 0
 }
 
+// HB_SCRIPT_ARABIC is the ISO 15924 "Arab" tag in HarfBuzz
+HB_SCRIPT_ARABIC :: hb_script_t(0x41726162)
+
+is_arabic_codepoint :: proc "contextless" (cp: rune) -> bool {
+	return (cp >= 0x0600 && cp <= 0x06FF) || // Arabic
+	       (cp >= 0x0750 && cp <= 0x077F) || // Arabic Supplement
+	       (cp >= 0x08A0 && cp <= 0x08FF) || // Arabic Extended-A
+	       (cp >= 0xFB50 && cp <= 0xFDFF) || // Arabic Presentation Forms-A
+	       (cp >= 0xFE70 && cp <= 0xFEFF)    // Arabic Presentation Forms-B
+}
+
+has_arabic_runes :: proc "contextless" (runes: []rune) -> bool {
+	for r in runes {
+		if is_arabic_codepoint(r) do return true
+	}
+	return false
+}
+
 // font_shape_cluster shapes a cluster of runes using HarfBuzz into glyph IDs and advances.
 font_shape_cluster :: proc(
 	r: ^Font_Rasterizer,
@@ -282,7 +300,12 @@ font_shape_cluster :: proc(
 	}
 
 	hb_buffer_add_codepoints(buf, raw_data(cps), c.int(len(cps)), 0, c.int(len(cps)))
-	hb_buffer_guess_segment_properties(buf)
+	if has_arabic_runes(runes) {
+		hb_buffer_set_script(buf, HB_SCRIPT_ARABIC)
+		hb_buffer_set_direction(buf, .RTL)
+	} else {
+		hb_buffer_guess_segment_properties(buf)
+	}
 	hb_shape(r.hb_font, buf, nil, 0)
 
 	glyph_count: c.uint

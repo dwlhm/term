@@ -7,6 +7,7 @@ import "core:math"
 import "core:os"
 import "core:path/filepath"
 import "core:strings"
+import "core:sync"
 import cell "../../core/terminal/cell"
 
 FONT_DISCOVERY_PATHS := []string{
@@ -21,7 +22,7 @@ FONT_DISCOVERY_PATHS := []string{
 	"/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
 }
 
-MAX_FALLBACKS :: 8
+MAX_FALLBACKS :: 16
 
 FALLBACK_DISCOVERY_PATHS := []string{
 	"assets/fonts/SymbolsNerdFontMono-Regular.ttf",
@@ -43,6 +44,7 @@ Font_Context :: struct {
 	active_path:         string,
 	primary_cap_px:      int,
 	primary_baseline_px: int,
+	font_mutex:          sync.Mutex,
 }
 
 // resolve_font_path locates font assets across bundle resources, portable directories, or system paths.
@@ -87,6 +89,20 @@ resolve_font_path :: proc(path: string, allocator := context.temp_allocator) -> 
 	return "", false
 }
 
+@(private = "file")
+_try_append_fallback :: proc(fc: ^Font_Context, path: string, pixel_size: f32) {
+	if fc.fallback_count >= MAX_FALLBACKS || len(path) == 0 do return
+	if path == fc.active_path do return
+	for i in 0..<fc.fallback_count {
+		if fc.fallback_paths[i] == path do return
+	}
+	err: Font_Error
+	if font_rasterizer_init(&fc.fallbacks[fc.fallback_count], path, pixel_size, &err) {
+		fc.fallback_paths[fc.fallback_count] = strings.clone(path)
+		fc.fallback_count += 1
+	}
+}
+
 font_context_init :: proc(fc: ^Font_Context, pixel_size: f32 = 32.0) -> bool {
 	if fc == nil do return false
 	fc.pixel_size = pixel_size
@@ -94,7 +110,7 @@ font_context_init :: proc(fc: ^Font_Context, pixel_size: f32 = 32.0) -> bool {
 	fc.active_path = ""
 	fc.fallback_count = 0
 
-	// 1. Discover Primary Font
+	// 1. Discover Primary Font (Priority A: Bundled / User configured font)
 	for p in FONT_DISCOVERY_PATHS {
 		if path, ok := resolve_font_path(p, context.temp_allocator); ok {
 			err: Font_Error
@@ -106,21 +122,35 @@ font_context_init :: proc(fc: ^Font_Context, pixel_size: f32 = 32.0) -> bool {
 		}
 	}
 
+	// Priority B: OS default fixed-pitch font (Menlo, SF Mono, etc.)
+	if !fc.has_font {
+		if os_font, ok := platform_query_os_fixed_pitch_font(context.temp_allocator); ok {
+			err: Font_Error
+			if font_rasterizer_init(&fc.rasterizer, os_font, pixel_size, &err) {
+				fc.has_font = true
+				fc.active_path = strings.clone(os_font)
+			}
+		}
+	}
+
 	if !fc.has_font do return false
 
 	// Calibrate reference cap-height and baseline
 	fc.primary_cap_px, fc.primary_baseline_px = _calibrate_reference(&fc.rasterizer)
 
-	// 2. Discover Fallback Fonts (Symbols, Icons, System glyphs)
+	// 2. Discover Fallback Fonts (Priority A: Bundled symbol / nerd font)
 	for p in FALLBACK_DISCOVERY_PATHS {
-		if fc.fallback_count >= MAX_FALLBACKS do break
 		if path, ok := resolve_font_path(p, context.temp_allocator); ok {
-			if path == fc.active_path do continue
-			err: Font_Error
-			if font_rasterizer_init(&fc.fallbacks[fc.fallback_count], path, pixel_size, &err) {
-				fc.fallback_paths[fc.fallback_count] = strings.clone(path)
-				fc.fallback_count += 1
-			}
+			_try_append_fallback(fc, path, pixel_size)
+		}
+	}
+
+	// Priority B: Dynamic Operating System cascade list (Arabic, CJK, etc.)
+	needed := MAX_FALLBACKS - fc.fallback_count
+	if needed > 0 {
+		cascades := platform_query_os_cascade_fonts(needed, context.temp_allocator)
+		for path in cascades {
+			_try_append_fallback(fc, path, pixel_size)
 		}
 	}
 
@@ -300,6 +330,8 @@ font_rasterize_codepoint :: proc(
 	is_wide: bool = false,
 ) -> (draw_w: f32, offset_x: f32) {
 	if fc == nil do return 0, 0
+	sync.mutex_lock(&fc.font_mutex)
+	defer sync.mutex_unlock(&fc.font_mutex)
 
 	cell_w := int(fc.rasterizer.metrics.cell_width) if fc.has_font && fc.rasterizer.metrics.cell_width > 0 else 19
 	cell_h := int(fc.rasterizer.metrics.cell_height) if fc.has_font && fc.rasterizer.metrics.cell_height > 0 else 43
@@ -394,14 +426,30 @@ font_rasterize_cluster_into :: proc(
 	is_wide: bool,
 ) -> (draw_w: f32, offset_x: f32) {
 	if fc == nil || len(runes) == 0 do return 0, 0
+	sync.mutex_lock(&fc.font_mutex)
+	defer sync.mutex_unlock(&fc.font_mutex)
+
+	// 1. If cluster contains complex scripts (e.g. Arabic) or ligatures, shape via HarfBuzz
+	r := _font_face_for_codepoint(fc, u32(runes[0]))
+	if r != nil && len(runes) > 1 {
+		if shaped, ok := font_shape_cluster(r, runes); ok && shaped.glyph_count > 0 {
+			for i in 0..<int(shaped.glyph_count) {
+				g := shaped.glyphs[i]
+				font_rasterize_glyph_index_into(r, g.glyph_id, dst_pixels, pitch, px + int(g.x_offset), py + int(g.y_offset), slot_w, slot_h)
+			}
+			return f32(slot_w), 0.0
+		}
+	}
+
+	// 2. Fallback base codepoint + stacked mark blitting
 	draw_w, offset_x = font_rasterize_codepoint(fc, u32(runes[0]), dst_pixels, pitch, px, py, slot_w, slot_h, is_wide)
 	for i in 1..<len(runes) {
 		mark_cp := u32(runes[i])
-		r := _font_face_for_codepoint(fc, mark_cp)
-		if r == nil do continue
-		bmp := font_rasterize_glyph(r, mark_cp)
+		mr := _font_face_for_codepoint(fc, mark_cp)
+		if mr == nil do continue
+		bmp := font_rasterize_glyph(mr, mark_cp)
 		if bmp.pixels != nil {
-			_blit_glyph_max(&bmp, dst_pixels, pitch, px, py, slot_w, slot_h, int(math.round(r.metrics.ascent)))
+			_blit_glyph_max(&bmp, dst_pixels, pitch, px, py, slot_w, slot_h, int(math.round(mr.metrics.ascent)))
 			delete(bmp.pixels)
 		}
 	}
