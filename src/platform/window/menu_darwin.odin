@@ -37,7 +37,6 @@ when ODIN_OS == .Darwin {
 		}
 	}
 
-	@(private="file")
 	_get_menu_handler :: proc() -> id {
 		if g_menu_handler != nil do return g_menu_handler
 		cls_handler := objc_getClass("TermNativeMenuHandler")

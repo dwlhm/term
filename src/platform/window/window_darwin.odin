@@ -10,6 +10,10 @@ when ODIN_OS == .Darwin {
 	SEL :: distinct rawptr
 	Class :: distinct rawptr
 	BOOL :: bool
+	NSSize :: struct {
+		width:  f64,
+		height: f64,
+	}
 
 	kCFStringEncodingUTF8 :: 0x08000100
 	APPLE_PRESS_AND_HOLD_ENABLED_KEY :: "ApplePressAndHoldEnabled"
@@ -135,6 +139,39 @@ when ODIN_OS == .Darwin {
 		sz := (Get_Float_Proc(imp))(cls_nsfont, sel_system_size)
 		if sz > 0 do return f32(sz), true
 		return 0, false
+	}
+
+	platform_darwin_bring_to_front :: proc(sdl_window: ^sdl3.Window) {
+		if sdl_window == nil do return
+		props := sdl3.GetWindowProperties(sdl_window)
+		nswindow := id(sdl3.GetPointerProperty(props, sdl3.PROP_WINDOW_COCOA_WINDOW_POINTER, nil))
+		if nswindow != nil {
+			cls_win := object_getClass(nswindow)
+			sel_make_key := sel_registerName("makeKeyAndOrderFront:")
+			imp_make_key := class_getMethodImplementation(cls_win, sel_make_key)
+			if imp_make_key != nil {
+				Send_Nil_Proc :: #type proc "c" (target: id, sel: SEL, arg: id)
+				(Send_Nil_Proc(imp_make_key))(nswindow, sel_make_key, nil)
+			}
+		}
+
+		cls_app := objc_getClass("NSApplication")
+		if cls_app != nil {
+			sel_shared := sel_registerName("sharedApplication")
+			imp_shared := class_getMethodImplementation(object_getClass(id(cls_app)), sel_shared)
+			if imp_shared != nil {
+				Get_App_Proc :: #type proc "c" (cls: Class, sel: SEL) -> id
+				app := (Get_App_Proc(imp_shared))(cls_app, sel_shared)
+				if app != nil {
+					sel_activate := sel_registerName("activateIgnoringOtherApps:")
+					imp_activate := class_getMethodImplementation(object_getClass(app), sel_activate)
+					if imp_activate != nil {
+						Act_Proc :: #type proc "c" (target: id, sel: SEL, flag: BOOL)
+						(Act_Proc(imp_activate))(app, sel_activate, true)
+					}
+				}
+			}
+		}
 	}
 
 	_platform_configure_metal_layer :: proc(v: id, cf_top_left: rawptr, is_opaque: bool = false) {
@@ -311,6 +348,26 @@ when ODIN_OS == .Darwin {
 
 		platform_setup_metal_layer(sdl_window)
 		platform_disable_system_titlebar_double_click()
+		return true
+	}
+
+	// platform_set_resize_increments snaps live window resizing to exact cell
+	// dimensions (macOS contentResizeIncrements), so windowed usage produces no
+	// leftover fractional rows/columns. Fullscreen/maximized still rely on the
+	// pane-grid centering fallback.
+	platform_set_resize_increments :: proc(sdl_window: ^sdl3.Window, cell_w_points, cell_h_points: f32) -> bool {
+		if sdl_window == nil || cell_w_points <= 0.0 || cell_h_points <= 0.0 do return false
+		props := sdl3.GetWindowProperties(sdl_window)
+		nswindow := id(sdl3.GetPointerProperty(props, sdl3.PROP_WINDOW_COCOA_WINDOW_POINTER, nil))
+		if nswindow == nil do return false
+
+		cls_win := object_getClass(nswindow)
+		sel_set_inc := sel_registerName("setContentResizeIncrements:")
+		imp_set_inc := class_getMethodImplementation(cls_win, sel_set_inc)
+		if imp_set_inc == nil do return false
+
+		Set_Increments_Proc :: #type proc "c" (target: id, sel: SEL, size: NSSize)
+		(Set_Increments_Proc(imp_set_inc))(nswindow, sel_set_inc, NSSize{f64(cell_w_points), f64(cell_h_points)})
 		return true
 	}
 

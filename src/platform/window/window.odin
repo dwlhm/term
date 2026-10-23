@@ -25,6 +25,13 @@ Platform_Menu_Item :: struct {
 	action_tag:   int,
 }
 
+Platform_Menu_Bar_Item :: struct {
+	title:        string,
+	tag:          int,
+	is_enabled:   bool,
+	is_separator: bool,
+}
+
 // window_init initializes SDL3 and creates a window with high pixel density and transparency.
 window_init :: proc(w: ^Window, title: string, width, height: i32) -> bool {
 	if !sdl3.Init(sdl3.INIT_VIDEO) {
@@ -106,7 +113,21 @@ window_update_pixel_size :: proc(w: ^Window) {
 	}
 }
 
+platform_bring_window_to_front :: proc(sdl_window: ^sdl3.Window) {
+	if sdl_window == nil do return
+	sdl3.ShowWindow(sdl_window)
+	sdl3.RaiseWindow(sdl_window)
+
+	when ODIN_OS == .Darwin {
+		platform_darwin_bring_to_front(sdl_window)
+	}
+}
+
 when ODIN_OS != .Darwin {
+	platform_menu_bar_init :: proc() -> rawptr { return nil }
+	platform_menu_bar_update :: proc(handle: rawptr, header: string, items: []Platform_Menu_Bar_Item) {}
+	platform_menu_bar_destroy :: proc(handle: rawptr) {}
+	platform_menu_bar_take_action :: proc() -> int { return 0 }
 	platform_show_context_menu :: proc(sdl_window: ^sdl3.Window, x, y: f32, items: []Platform_Menu_Item) -> int {
 		return 0
 	}
@@ -114,6 +135,7 @@ when ODIN_OS != .Darwin {
 	platform_setup_unified_titlebar :: proc(sdl_window: ^sdl3.Window) -> bool { return false }
 	platform_setup_metal_layer :: proc(sdl_window: ^sdl3.Window, is_opaque: bool = false) -> bool { return false }
 	platform_setup_window_vibrancy :: proc(sdl_window: ^sdl3.Window, enabled: bool) -> bool { return false }
+	platform_set_resize_increments :: proc(sdl_window: ^sdl3.Window, cell_w_points, cell_h_points: f32) -> bool { return false }
 	platform_toggle_maximize :: proc(sdl_window: ^sdl3.Window) {
 		if sdl_window == nil do return
 		flags := sdl3.GetWindowFlags(sdl_window)

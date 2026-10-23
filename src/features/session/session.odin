@@ -1,8 +1,9 @@
 package feature_session
 
 import "base:runtime"
-import "core:strings"
 import "core:strconv"
+import "core:strings"
+import "core:time"
 import cursor "../../core/cursor"
 import pty "../../platform/pty"
 import terminal "../../core/terminal"
@@ -39,8 +40,11 @@ Terminal_Session :: struct {
 	pointer_shape_len: int,
 	custom_scroll_speed: f32,
 	scroll_accum:        f32,
-	osc_52_ctx:      extension.Osc_52_Context,
-	osc_color_cfg:   extension.Osc_Color_Config,
+	program_status:      extension.Program_Status,
+	osc_7501_ctx:        extension.Osc_7501_Context,
+	command_start_time:  time.Time,
+	osc_52_ctx:          extension.Osc_52_Context,
+	osc_color_cfg:       extension.Osc_Color_Config,
 	allocator:       runtime.Allocator,
 }
 
@@ -80,6 +84,12 @@ _session_damage_notifier :: proc(term_ptr: rawptr, start_row, row_count: int) {
 	}
 }
 
+_session_screen_provider :: proc(term_ptr: rawptr) -> extension.Kitty_Screen {
+	if term_ptr == nil do return .Primary
+	t := (^terminal.Terminal)(term_ptr)
+	return .Alternate if terminal.terminal_in_alt_screen(t) else .Primary
+}
+
 _osc_title_handler :: proc(user_data: rawptr, osc_id: int, payload: string, term_ptr: rawptr) -> bool {
 	sess := (^Terminal_Session)(user_data)
 	if sess == nil do return false
@@ -107,8 +117,17 @@ _osc_133_handler :: proc(user_data: rawptr, osc_id: int, payload: string, term_p
 			if phys := grid.grid_physical_row(&t.grid, t.parser.cursor.row); phys >= 0 && phys < len(t.grid.rows) do t.grid.rows[phys].is_prompt = true
 		}
 	case 'B', 'D': sess.in_prompt, sess.command_running = false, false
-	case 'C':      sess.in_prompt, sess.command_running = false, true
+	case 'C':
+		sess.in_prompt, sess.command_running = false, true
+		sess.command_start_time = time.now()
 	}
+	return true
+}
+
+_osc_7501_sink :: proc(user_data: rawptr, status: extension.Program_Status) -> bool {
+	sess := (^Terminal_Session)(user_data)
+	if sess == nil do return false
+	sess.program_status = status
 	return true
 }
 
@@ -176,6 +195,12 @@ session_create :: proc(config: Session_Config, allocator: runtime.Allocator = co
 	terminal.terminal_register_osc(&sess.term, 133, _osc_133_handler, rawptr(sess))
 	terminal.terminal_register_osc(&sess.term, 1337, _osc_1337_handler, rawptr(sess))
 
+	sess.osc_7501_ctx = extension.Osc_7501_Context{
+		sink      = _osc_7501_sink,
+		user_data = rawptr(sess),
+	}
+	terminal.terminal_register_osc(&sess.term, 7501, extension.osc_7501_handler, rawptr(&sess.osc_7501_ctx))
+
 	sess.osc_color_cfg.responder = _session_emit_responder
 	sess.osc_color_cfg.user_data = rawptr(sess)
 	sess.osc_color_cfg.on_bg_change = proc(ud: rawptr, r, g, b: f32) { if s := (^Terminal_Session)(ud); s != nil do s.custom_bg, s.has_custom_bg = {r, g, b, 1.0}, true }
@@ -193,11 +218,45 @@ session_create :: proc(config: Session_Config, allocator: runtime.Allocator = co
 			kstate.grid_size_provider = _session_grid_size_provider
 			kstate.cursor_advancer = _session_cursor_advancer
 			kstate.damage_notifier = _session_damage_notifier
+			kstate.screen_provider = _session_screen_provider
 			break
 		}
 	}
 
 	return sess, .None
+}
+
+session_program_status :: proc(sess: ^Terminal_Session) -> ^extension.Program_Status {
+	if sess == nil do return nil
+	return &sess.program_status
+}
+
+session_is_running_job :: proc(sess: ^Terminal_Session) -> bool {
+	if sess == nil do return false
+
+	if sess.program_status.state == .Working || sess.program_status.state == .Blocked {
+		return true
+	}
+	if sess.program_status.state == .Done || sess.program_status.state == .Error {
+		return false
+	}
+
+	if sess.command_running do return true
+	if sess.in_prompt do return false
+
+	if sess.pty != nil {
+		name_buf: [128]u8
+		fg_name := pty.pty_get_foreground_process_name(sess.pty, name_buf[:])
+		if len(fg_name) > 0 {
+			switch fg_name {
+			case "zsh", "bash", "sh", "fish", "tcsh", "csh", "login":
+				return false
+			case:
+				return true
+			}
+		}
+	}
+	return false
 }
 
 session_destroy :: proc(sess: ^Terminal_Session) {
