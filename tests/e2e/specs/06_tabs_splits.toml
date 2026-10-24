@@ -1,0 +1,28 @@
+name = "Workspace Multiplexer Tabs and Split Panes"
+description = "Verifies multi-tab creation, split pane partitioning, and tab closure."
+cols = 80
+rows = 24
+shell = "/bin/sh"
+
+[[steps]]
+action = "get_state"
+assert_tab_count = 1
+
+[[steps]]
+action = "tab_new"
+assert_tab_count = 2
+
+[[steps]]
+action = "split"
+direction = "horizontal"
+ratio = 0.55
+
+[[steps]]
+action = "feed"
+text = "PANE_SPLIT_OK\r\n"
+assert_contains = "PANE_SPLIT_OK"
+
+[[steps]]
+action = "tab_close"
+tab_index = 0
+assert_tab_count = 1

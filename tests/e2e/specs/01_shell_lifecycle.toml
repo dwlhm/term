@@ -1,0 +1,24 @@
+name = "Shell Lifecycle and Basic Line Editing"
+description = "Tests spawning real shell, executing commands, autowrap, and line editing."
+cols = 80
+rows = 24
+shell = "/bin/sh"
+
+[[steps]]
+action = "send"
+text = "echo 'SHELL_LIFECYCLE_OK'\n"
+
+[[steps]]
+action = "wait_for"
+text = "SHELL_LIFECYCLE_OK"
+assert_contains = "SHELL_LIFECYCLE_OK"
+assert_alt_screen = false
+
+[[steps]]
+action = "send"
+text = "echo 'AUTOWRAP_ABC_1234567890_1234567890_1234567890_1234567890_1234567890_1234567890_WRAP_END'\n"
+
+[[steps]]
+action = "wait_for"
+text = "WRAP_END"
+assert_contains = ["WRAP_END", "AUTOWRAP_ABC"]

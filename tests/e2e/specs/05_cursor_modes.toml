@@ -1,0 +1,27 @@
+name = "Cursor Addressing and Line Clearing Modes"
+description = "Verifies absolute cursor positioning (CUP), relative moves, and screen clearing."
+cols = 80
+rows = 24
+shell = "/bin/sh"
+
+[[steps]]
+action = "feed"
+text = "\u001b[2J\u001b[H" # Clear screen and move to home (0,0)
+assert_cursor = [0, 0]
+
+[[steps]]
+action = "feed"
+text = "\u001b[5;12H" # Move to row 5, col 12 (1-based -> 4, 11)
+assert_cursor = [4, 11]
+
+[[steps]]
+action = "feed"
+text = "TARGET_COORDINATES"
+assert_cursor = [4, 29]
+assert_contains = "TARGET_COORDINATES"
+
+[[steps]]
+action = "feed"
+text = "\u001b[s\u001b[1;1HHEADER_TEXT\u001b[u" # Save cursor, move to (0,0), restore
+assert_cursor = [4, 29]
+assert_contains = ["HEADER_TEXT", "TARGET_COORDINATES"]

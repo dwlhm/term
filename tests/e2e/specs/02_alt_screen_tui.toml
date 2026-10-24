@@ -1,0 +1,25 @@
+name = "Alt-Screen Switching and Buffer Restoration"
+description = "Verifies full-screen TUI buffer switching (CSI ? 1049 h/l) and clean buffer restoration."
+cols = 80
+rows = 24
+shell = "/bin/sh"
+
+[[steps]]
+action = "feed"
+text = "PRIMARY_BEFORE_TUI\r\n"
+assert_contains = "PRIMARY_BEFORE_TUI"
+assert_alt_screen = false
+
+[[steps]]
+action = "feed"
+text = "\u001b[?1049h\u001b[2J\u001b[HTUI_HEADER_ALT_SCREEN"
+assert_alt_screen = true
+assert_contains = "TUI_HEADER_ALT_SCREEN"
+assert_not_contains = "PRIMARY_BEFORE_TUI"
+
+[[steps]]
+action = "feed"
+text = "\u001b[?1049l"
+assert_alt_screen = false
+assert_contains = "PRIMARY_BEFORE_TUI"
+assert_not_contains = "TUI_HEADER_ALT_SCREEN"

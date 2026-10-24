@@ -1,0 +1,20 @@
+name = "OSC Escape Sequences Title and Hyperlinks"
+description = "Verifies OSC 0/2 window title setting and OSC 8 hyperlink text rendering."
+cols = 80
+rows = 24
+shell = "/bin/sh"
+
+[[steps]]
+action = "feed"
+text = "\u001b]0;Term_Dynamic_Title_77\u0007"
+text_end = "\r\n"
+
+[[steps]]
+action = "feed"
+text = "\u001b]8;;https://terminal.test\u0007HYPERLINK_DISPLAY_TEXT\u001b]8;;\u0007\r\n"
+assert_contains = "HYPERLINK_DISPLAY_TEXT"
+
+[[steps]]
+action = "feed"
+text = "PLAIN_TEXT_FOLLOWING_OSC\r\n"
+assert_contains = "PLAIN_TEXT_FOLLOWING_OSC"

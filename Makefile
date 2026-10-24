@@ -123,13 +123,13 @@ bench-session:
 	$(ODIN) build src/cmd/bench_session -out:$(OUT_DIR)/bench_session $(RELEASE_FLAGS) $(COMMON_FLAGS)
 	./$(OUT_DIR)/bench_session
 
+test: test-app test-terminal test-pty test-font test-window test-session test-tabs test-multiplexer test-interaction test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-selector test-gpu test-features test-e2e
+
 # VT conformance suite (esctest2) driven inside a real Term pane; requires a GUI
 # session. Extra esctest flags: make esctest ESCTEST_ARGS="--include=CUP"
 esctest: term
 	@chmod +x scripts/run_esctest.sh
 	scripts/run_esctest.sh $(ESCTEST_ARGS)
-
-test: test-app test-terminal test-pty test-font test-window test-session test-tabs test-multiplexer test-interaction test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-selector test-gpu test-features test-e2e
 
 test-app:
 	$(ODIN) test src/app/term $(TEST_FLAGS)
@@ -168,7 +168,14 @@ harness-features:
 run-harness-features: harness-features
 	./$(OUT_DIR)/harness_features
 
-test-e2e:
+term-driver:
+	@mkdir -p $(OUT_DIR)
+	$(ODIN) build src/cmd/term_driver -out:$(OUT_DIR)/term_driver $(DEBUG_FLAGS) $(COMMON_FLAGS)
+
+test-e2e: term-driver
+	python3 tests/e2e/runner.py $(SPEC)
+
+test-e2e-legacy:
 	@mkdir -p $(OUT_DIR)
 	$(ODIN) build src/cmd/test_e2e_real -out:$(OUT_DIR)/test_e2e_real $(DEBUG_FLAGS) $(COMMON_FLAGS)
 	./$(OUT_DIR)/test_e2e_real
@@ -219,6 +226,7 @@ check:
 	$(ODIN) check src/cmd/harness_render_chrome $(CHECK_FLAGS)
 	$(ODIN) check src/cmd/harness_render_terminal $(CHECK_FLAGS)
 	$(ODIN) check src/cmd/harness_composer $(CHECK_FLAGS)
+	$(ODIN) check src/cmd/term_driver $(CHECK_FLAGS)
 	$(ODIN) check src/core/cursor $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/core/composer $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/core/composer/layer $(CHECK_FLAGS) -no-entry-point

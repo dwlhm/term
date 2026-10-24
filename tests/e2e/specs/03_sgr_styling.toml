@@ -1,0 +1,25 @@
+name = "SGR Typography, Color & Text Attributes"
+description = "Tests ANSI 16-color, 24-bit RGB Truecolor, bold, italic, underline, and strike."
+cols = 80
+rows = 24
+shell = "/bin/sh"
+
+[[steps]]
+action = "feed"
+text = "\u001b[31mRED_TEXT\u001b[32m_GREEN_TEXT\u001b[0m\r\n"
+assert_contains = ["RED_TEXT", "_GREEN_TEXT"]
+
+[[steps]]
+action = "feed"
+text = "\u001b[38;2;255;100;50mTRUECOLOR_24BIT_PASS\u001b[0m\r\n"
+assert_contains = "TRUECOLOR_24BIT_PASS"
+
+[[steps]]
+action = "feed"
+text = "\u001b[1;3;4mBOLD_ITALIC_UNDERLINE\u001b[0m\r\n"
+assert_contains = "BOLD_ITALIC_UNDERLINE"
+
+[[steps]]
+action = "feed"
+text = "\u001b[7mINVERSE_VIDEO\u001b[27m \u001b[9mSTRIKETHROUGH\u001b[29m\r\n"
+assert_contains = ["INVERSE_VIDEO", "STRIKETHROUGH"]

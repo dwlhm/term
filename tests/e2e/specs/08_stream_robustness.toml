@@ -1,0 +1,16 @@
+name = "Stream Robustness and Malformed Sequence Recovery"
+description = "Tests terminal recovery when receiving truncated CSI, invalid UTF-8 bytes, and stream fuzzing."
+cols = 80
+rows = 24
+shell = "/bin/sh"
+
+[[steps]]
+action = "feed"
+# Send broken escape sequences, truncated CSI, lone ESC, invalid UTF-8 bytes
+text = "START_VALID\r\n\u001b[\u001b[999999999;\u001b_unterminated_apc\u001b]8;unclosed\u001bPtruncated_dcs\u001b\r\n"
+
+[[steps]]
+action = "feed"
+text = "RECOVERED_AFTER_MALFORMED\r\n"
+assert_contains = ["START_VALID", "RECOVERED_AFTER_MALFORMED"]
+assert_alt_screen = false

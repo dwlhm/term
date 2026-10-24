@@ -15,7 +15,8 @@
 /term-app
 /app.bin
 /app_hello
-/tests
+/tests/*
+!/tests/e2e/
 /app_tests
 /render_tests
 bin/
@@ -54,6 +55,7 @@ ui-*.o
 *.py
 !scripts/*.py
 !scripts/tests/*.py
+!tests/e2e/*.py
 term_test
 term_resize_repro
 test_slice.odin

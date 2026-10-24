@@ -1,0 +1,21 @@
+name = "Scrollback History Accumulation and Window Resize"
+description = "Verifies scrollback history growth and geometry resize handling."
+cols = 80
+rows = 10
+shell = "/bin/sh"
+
+[[steps]]
+action = "feed"
+text = "LINE_01\r\nLINE_02\r\nLINE_03\r\nLINE_04\r\nLINE_05\r\nLINE_06\r\nLINE_07\r\nLINE_08\r\nLINE_09\r\nLINE_10\r\nLINE_11\r\nLINE_12\r\nLINE_13\r\nLINE_14\r\nLINE_15\r\n"
+assert_contains = ["LINE_14", "LINE_15"]
+assert_history_min = 5
+
+[[steps]]
+action = "resize"
+cols = 100
+rows = 20
+
+[[steps]]
+action = "feed"
+text = "AFTER_RESIZE_MARKER\r\n"
+assert_contains = "AFTER_RESIZE_MARKER"
