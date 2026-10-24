@@ -227,13 +227,14 @@ chrome_renderer_encode :: proc(
 			sdf.chrome_sdf_draw(&r.sdf, pass, &params)
 
 		case .Border:
+			bw: f32 = cmd.border_width if (cmd.border_width > 0.0 || cmd.border_width <= -997.0) else 1.0
 			params := sdf.Sdf_Params{
 				screen_size  = screen_sz,
 				rect_pos     = {cmd.rect[0], cmd.rect[1]},
 				rect_size    = {cmd.rect[2], cmd.rect[3]},
 				radius       = cmd.radius,
-				border_width = 1.0,
-				color        = {0, 0, 0, 0},
+				border_width = bw,
+				color        = cmd.color,
 				border_color = cmd.border_color,
 			}
 			sdf.chrome_sdf_draw(&r.sdf, pass, &params)

@@ -1,12 +1,5 @@
 package draw_list
 
-// Pure Declarative UI Geometry Engine - Ui_Draw_List Primitives.
-// Part of core_chrome: Tier 1 Autonomous Core Primitives.
-//
-// Invariant: ZERO GPU Dependencies.
-// Depends only on `base:runtime`. Emits pure geometric records consumed
-// by `core_render/chrome`.
-
 import "base:runtime"
 
 // Ui_Cmd_Kind discriminates declarative drawing primitives.
@@ -24,6 +17,7 @@ Ui_Cmd_Kind :: enum {
 // color: [r, g, b, a] in normalized sRGB (0.0 .. 1.0)
 // border_color: [r, g, b, a] in normalized sRGB (0.0 .. 1.0)
 // radius: corner radius for rounded rect / border / shadow
+// border_width: stroke width for outline border (default 1.0)
 // text: text payload for Text_Run
 // clip_rect: [min_x, min_y, max_x, max_y] bounding scissor (all zeroes = no clip)
 Ui_Draw_Cmd :: struct {
@@ -32,6 +26,7 @@ Ui_Draw_Cmd :: struct {
 	color:        [4]f32,
 	border_color: [4]f32,
 	radius:       f32,
+	border_width: f32,
 	text:         string,
 	clip_rect:    [4]f32,
 }
@@ -88,14 +83,84 @@ ui_draw_rounded_rect :: proc(dl: ^Ui_Draw_List, rect: [4]f32, color: [4]f32, rad
 }
 
 // ui_draw_border appends an outline border command with optional corner radius.
-ui_draw_border :: proc(dl: ^Ui_Draw_List, rect: [4]f32, border_color: [4]f32, radius: f32 = 0, clip_rect: [4]f32 = {}) {
+ui_draw_border :: proc(
+	dl: ^Ui_Draw_List,
+	rect: [4]f32,
+	border_color: [4]f32,
+	radius: f32 = 0,
+	clip_rect: [4]f32 = {},
+	border_width: f32 = 1.0,
+) {
 	if dl == nil do return
 	cmd := Ui_Draw_Cmd{
 		kind         = .Border,
 		rect         = rect,
 		border_color = border_color,
 		radius       = radius,
+		border_width = border_width,
 		clip_rect    = clip_rect,
+	}
+	append(&dl.commands, cmd)
+}
+
+// ui_draw_ellipse_ring appends a 3D perspective elliptical ring command.
+ui_draw_ellipse_ring :: proc(
+	dl: ^Ui_Draw_List,
+	center: [2]f32,
+	radius_x, radius_y: f32,
+	border_color: [4]f32,
+	border_width: f32 = 1.5,
+	inner_color: [4]f32 = {},
+	clip_rect: [4]f32 = {},
+) {
+	if dl == nil || radius_x <= 0 || radius_y <= 0 do return
+	cmd := Ui_Draw_Cmd{
+		kind         = .Border,
+		rect         = {center.x - radius_x, center.y - radius_y, radius_x * 2.0, radius_y * 2.0},
+		color        = inner_color,
+		border_color = border_color,
+		radius       = -1.0,
+		border_width = border_width,
+		clip_rect    = clip_rect,
+	}
+	append(&dl.commands, cmd)
+}
+
+// ui_draw_water_surface emits the full-window water heightfield master quad.
+ui_draw_water_surface :: proc(
+	dl: ^Ui_Draw_List,
+	rect: [4]f32,
+	wave_count: int,
+	base_color: [4]f32,
+	clip_rect: [4]f32 = {},
+) {
+	if dl == nil || wave_count <= 0 do return
+	cmd := Ui_Draw_Cmd{
+		kind         = .Border,
+		rect         = rect,
+		color        = base_color,
+		border_color = {},
+		radius       = f32(wave_count),
+		border_width = -999.0,
+		clip_rect    = clip_rect,
+	}
+	append(&dl.commands, cmd)
+}
+
+// ui_draw_water_wave_record appends a wave record for multi-wave heightfield interference.
+ui_draw_water_wave_record :: proc(
+	dl: ^Ui_Draw_List,
+	x, y, time, max_t, strength: f32,
+) {
+	if dl == nil do return
+	cmd := Ui_Draw_Cmd{
+		kind         = .Border,
+		rect         = {x, y, 0, 0},
+		color        = {},
+		border_color = {max_t, strength, 0, 0},
+		radius       = time,
+		border_width = -997.0,
+		clip_rect    = {},
 	}
 	append(&dl.commands, cmd)
 }
