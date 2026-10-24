@@ -21,7 +21,7 @@ TEST_FLAGS ?= -define:ODIN_TEST_THREADS=1
 DEBUG_FLAGS ?= -debug
 RELEASE_FLAGS ?= -o:speed -no-bounds-check
 
-.PHONY: all term release run term-debug harness-features run-harness-features harness-render-chrome run-harness-render-chrome harness-render-terminal run-harness-render-terminal harness-render-composer run-harness-composer test test-app test-font test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-selector test-gpu check clean help bench bench-quick bundle dmg portable dist install uninstall
+.PHONY: all term release run term-debug harness-features run-harness-features harness-render-chrome run-harness-render-chrome harness-render-terminal run-harness-render-terminal harness-render-composer run-harness-composer test test-app test-font test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-selector test-gpu check esctest clean help bench bench-quick bundle dmg portable dist install uninstall
 
 all: term harness-features harness-render-chrome harness-render-terminal harness-composer
 
@@ -122,6 +122,12 @@ bench-session:
 	@mkdir -p $(OUT_DIR)
 	$(ODIN) build src/cmd/bench_session -out:$(OUT_DIR)/bench_session $(RELEASE_FLAGS) $(COMMON_FLAGS)
 	./$(OUT_DIR)/bench_session
+
+# VT conformance suite (esctest2) driven inside a real Term pane; requires a GUI
+# session. Extra esctest flags: make esctest ESCTEST_ARGS="--include=CUP"
+esctest: term
+	@chmod +x scripts/run_esctest.sh
+	scripts/run_esctest.sh $(ESCTEST_ARGS)
 
 test: test-app test-terminal test-pty test-font test-window test-session test-tabs test-multiplexer test-interaction test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-selector test-gpu test-features test-e2e
 
@@ -273,6 +279,7 @@ help:
 	@echo "  test-render-contract        Run render contract & damage unit tests"
 	@echo "  test-selector               Run adaptive strategy selector unit tests"
 	@echo "  check                       Type check all active core modules and harnesses"
+	@echo "  esctest                     Run the esctest2 VT conformance suite inside Term"
 	@echo "  clean                       Remove build artifacts and binaries"
 	@echo "  bench                       Run harness_composer full benchmark suite"
 	@echo "  bench-quick                 Run harness_composer quick benchmark suite"
