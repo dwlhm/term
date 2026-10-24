@@ -103,8 +103,49 @@ when ODIN_OS == .Darwin {
 		_ = CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication)
 	}
 
+	platform_is_maximized :: proc(sdl_window: ^sdl3.Window) -> bool {
+		if sdl_window == nil do return false
+		props := sdl3.GetWindowProperties(sdl_window)
+		nswindow := id(sdl3.GetPointerProperty(props, sdl3.PROP_WINDOW_COCOA_WINDOW_POINTER, nil))
+		if nswindow != nil {
+			cls_win := object_getClass(nswindow)
+			sel_is_zoomed := sel_registerName("isZoomed")
+			imp_is_zoomed := class_getMethodImplementation(cls_win, sel_is_zoomed)
+			if imp_is_zoomed != nil {
+				Is_Zoomed_Proc :: #type proc "c" (target: id, sel: SEL) -> BOOL
+				return bool((Is_Zoomed_Proc(imp_is_zoomed))(nswindow, sel_is_zoomed))
+			}
+		}
+		flags := sdl3.GetWindowFlags(sdl_window)
+		return .MAXIMIZED in flags
+	}
+
 	platform_toggle_maximize :: proc(sdl_window: ^sdl3.Window) {
 		if sdl_window == nil do return
+		props := sdl3.GetWindowProperties(sdl_window)
+		nswindow := id(sdl3.GetPointerProperty(props, sdl3.PROP_WINDOW_COCOA_WINDOW_POINTER, nil))
+		if nswindow != nil {
+			cls_win := object_getClass(nswindow)
+			sel_is_zoomed := sel_registerName("isZoomed")
+			imp_is_zoomed := class_getMethodImplementation(cls_win, sel_is_zoomed)
+			sel_zoom := sel_registerName("zoom:")
+			imp_zoom := class_getMethodImplementation(cls_win, sel_zoom)
+
+			if imp_is_zoomed != nil && imp_zoom != nil {
+				Is_Zoomed_Proc :: #type proc "c" (target: id, sel: SEL) -> BOOL
+				Send_Nil_Proc :: #type proc "c" (target: id, sel: SEL, arg: id)
+				is_zoomed := bool((Is_Zoomed_Proc(imp_is_zoomed))(nswindow, sel_is_zoomed))
+
+				if !is_zoomed {
+					// Clamping increments to (1.0, 1.0) allows standard zoom to expand fully to screen edges
+					// without triggering AppKit's division-by-zero NaN crash in _zoomToScreen.
+					platform_set_resize_increments(sdl_window, 1.0, 1.0)
+				}
+				(Send_Nil_Proc(imp_zoom))(nswindow, sel_zoom, nil)
+				return
+			}
+		}
+
 		flags := sdl3.GetWindowFlags(sdl_window)
 		if .MAXIMIZED in flags {
 			sdl3.RestoreWindow(sdl_window)
@@ -353,10 +394,11 @@ when ODIN_OS == .Darwin {
 
 	// platform_set_resize_increments snaps live window resizing to exact cell
 	// dimensions (macOS contentResizeIncrements), so windowed usage produces no
-	// leftover fractional rows/columns. Fullscreen/maximized still rely on the
-	// pane-grid centering fallback.
+	// leftover fractional rows/columns. Passing <= 1.0 clamps to (1.0, 1.0)
+	// (continuous single-pixel sizing) allowing the window to touch screen edges
+	// during maximize without causing AppKit division-by-zero NaN crashes.
 	platform_set_resize_increments :: proc(sdl_window: ^sdl3.Window, cell_w_points, cell_h_points: f32) -> bool {
-		if sdl_window == nil || cell_w_points <= 0.0 || cell_h_points <= 0.0 do return false
+		if sdl_window == nil do return false
 		props := sdl3.GetWindowProperties(sdl_window)
 		nswindow := id(sdl3.GetPointerProperty(props, sdl3.PROP_WINDOW_COCOA_WINDOW_POINTER, nil))
 		if nswindow == nil do return false
@@ -366,8 +408,11 @@ when ODIN_OS == .Darwin {
 		imp_set_inc := class_getMethodImplementation(cls_win, sel_set_inc)
 		if imp_set_inc == nil do return false
 
+		inc_w := f64(max(1.0, cell_w_points))
+		inc_h := f64(max(1.0, cell_h_points))
+
 		Set_Increments_Proc :: #type proc "c" (target: id, sel: SEL, size: NSSize)
-		(Set_Increments_Proc(imp_set_inc))(nswindow, sel_set_inc, NSSize{f64(cell_w_points), f64(cell_h_points)})
+		(Set_Increments_Proc(imp_set_inc))(nswindow, sel_set_inc, NSSize{inc_w, inc_h})
 		return true
 	}
 

@@ -294,8 +294,14 @@ app_destroy :: proc(app: ^Term_App) {
 // app_sync_resize_increments keeps the macOS window's live resize "magnet"
 // aligned with the current cell size (in logical points), so windowed resizing
 // snaps to exact rows/columns instead of leaving fractional leftover space.
+// Increments are bypassed when the window is maximized or fullscreen to allow
+// touching screen edges.
 app_sync_resize_increments :: proc(app: ^Term_App) {
 	if app == nil || app.window.handle == nil do return
+	if plat_win.platform_is_maximized(app.window.handle) || plat_win.platform_is_fullscreen(app.window.handle) {
+		plat_win.platform_set_resize_increments(app.window.handle, 1.0, 1.0)
+		return
+	}
 	ratio := app.window.pixel_ratio if app.window.pixel_ratio > 0.0 else 1.0
 	plat_win.platform_set_resize_increments(
 		app.window.handle,

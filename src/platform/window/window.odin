@@ -136,6 +136,11 @@ when ODIN_OS != .Darwin {
 	platform_setup_metal_layer :: proc(sdl_window: ^sdl3.Window, is_opaque: bool = false) -> bool { return false }
 	platform_setup_window_vibrancy :: proc(sdl_window: ^sdl3.Window, enabled: bool) -> bool { return false }
 	platform_set_resize_increments :: proc(sdl_window: ^sdl3.Window, cell_w_points, cell_h_points: f32) -> bool { return false }
+	platform_is_maximized :: proc(sdl_window: ^sdl3.Window) -> bool {
+		if sdl_window == nil do return false
+		flags := sdl3.GetWindowFlags(sdl_window)
+		return .MAXIMIZED in flags
+	}
 	platform_toggle_maximize :: proc(sdl_window: ^sdl3.Window) {
 		if sdl_window == nil do return
 		flags := sdl3.GetWindowFlags(sdl_window)
