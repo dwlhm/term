@@ -97,3 +97,43 @@ test_config_font_resolution :: proc(t: ^testing.T) {
 		testing.expect(t, len(path) > 0)
 	}
 }
+
+@test
+test_config_drop_animation_resolution :: proc(t: ^testing.T) {
+	// 1. Nil config falls back to default disabled (false)
+	testing.expect(t, !config_resolve_drop_animation(nil), "nil config must default to disabled drop animation")
+
+	// 2. Default config is disabled (false)
+	cfg_def := config_default()
+	testing.expect(t, !config_resolve_drop_animation(&cfg_def), "config_default must have drop animation disabled")
+
+	// 3. Flat drop_animation: true in JSON5
+	json_flat_true := `{ drop_animation: true }`
+	cfg_flat_true, ok1 := config_parse_json5(transmute([]byte)json_flat_true)
+	testing.expect(t, ok1, "flat JSON5 must parse")
+	testing.expect(t, config_resolve_drop_animation(&cfg_flat_true), "flat drop_animation: true must resolve enabled")
+
+	// 4. Flat drop_animation: false in JSON5
+	json_flat_false := `{ drop_animation: false }`
+	cfg_flat_false, ok2 := config_parse_json5(transmute([]byte)json_flat_false)
+	testing.expect(t, ok2, "flat JSON5 must parse")
+	testing.expect(t, !config_resolve_drop_animation(&cfg_flat_false), "flat drop_animation: false must resolve disabled")
+
+	// 5. Nested drop: { animation: true } in JSON5
+	json_nested_true := `{ drop: { animation: true } }`
+	cfg_nested_true, ok3 := config_parse_json5(transmute([]byte)json_nested_true)
+	testing.expect(t, ok3, "nested JSON5 must parse")
+	testing.expect(t, config_resolve_drop_animation(&cfg_nested_true), "nested drop.animation: true must resolve enabled")
+
+	// 6. Nested drop: { animation: false } in JSON5
+	json_nested_false := `{ drop: { animation: false } }`
+	cfg_nested_false, ok4 := config_parse_json5(transmute([]byte)json_nested_false)
+	testing.expect(t, ok4, "nested JSON5 must parse")
+	testing.expect(t, !config_resolve_drop_animation(&cfg_nested_false), "nested drop.animation: false must resolve disabled")
+
+	// 7. Empty JSON5 config
+	json_empty := `{}`
+	cfg_empty, ok5 := config_parse_json5(transmute([]byte)json_empty)
+	testing.expect(t, ok5, "empty JSON5 must parse")
+	testing.expect(t, !config_resolve_drop_animation(&cfg_empty), "empty JSON5 config must default to disabled drop animation")
+}

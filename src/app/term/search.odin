@@ -7,28 +7,27 @@ package term
 // needed and the pane scrolls to keep the match visible.
 
 import "core:strings"
+import "vendor:sdl3"
 import mux_feat "../../features/multiplexer"
 import inter_feat "../../features/interaction"
 
-MAX_SEARCH_QUERY :: 96
-
 Search_State :: struct {
 	active:    bool,
-	query:     [MAX_SEARCH_QUERY]u8,
-	query_len: int,
+	input:     Text_Input,
 	match:     inter_feat.Search_Match,
 	has_match: bool,
 	dirty:     bool,
 }
 
 app_search_query :: proc(app: ^Term_App) -> string {
-	return string(app.search.query[:app.search.query_len])
+	return text_input_as_string(&app.search.input)
 }
 
 app_search_open :: proc(app: ^Term_App) {
 	if app == nil do return
 	app.search.active = true
 	app.search.dirty = true
+	text_input_select_all(&app.search.input)
 	app_search_refresh(app, forward = true)
 }
 
@@ -51,29 +50,35 @@ app_search_toggle :: proc(app: ^Term_App) {
 }
 
 app_search_clear :: proc(app: ^Term_App) {
-	app.search.query_len = 0
+	text_input_clear(&app.search.input)
 	app.search.has_match = false
 	app.search.dirty = true
 }
 
 app_search_append :: proc(app: ^Term_App, text: string) {
 	if app == nil || len(text) == 0 do return
-	room := MAX_SEARCH_QUERY - app.search.query_len
-	copy_len := min(len(text), room)
-	copy(app.search.query[app.search.query_len:app.search.query_len + copy_len], text[:copy_len])
-	app.search.query_len += copy_len
-	app.search.dirty = true
-	app_search_refresh(app, forward = true)
+	if text_input_insert(&app.search.input, text) {
+		app.search.dirty = true
+		app_search_refresh(app, forward = true)
+	}
 }
 
 app_search_backspace :: proc(app: ^Term_App) {
-	if app == nil || app.search.query_len == 0 do return
-	// Remove one UTF-8 codepoint, not one byte.
-	index := app.search.query_len - 1
-	for index > 0 && (app.search.query[index] & 0xC0) == 0x80 do index -= 1
-	app.search.query_len = index
-	app.search.dirty = true
-	app_search_refresh(app, forward = true)
+	if app == nil do return
+	if text_input_delete_back(&app.search.input) {
+		app.search.dirty = true
+		app_search_refresh(app, forward = true)
+	}
+}
+
+app_search_handle_key :: proc(app: ^Term_App, key: sdl3.Keycode, mod: sdl3.Keymod) -> bool {
+	if app == nil || !app.search.active do return false
+	changed, handled := text_input_handle_key(&app.search.input, key, mod)
+	if changed {
+		app.search.dirty = true
+		app_search_refresh(app, forward = true)
+	}
+	return handled
 }
 
 // app_search_refresh re-runs the search from the current match (or the top of the

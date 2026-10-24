@@ -400,14 +400,14 @@ app_handle_key_down :: proc(app: ^Term_App, ev: sdl3.KeyboardEvent) {
 		case sdl3.K_RETURN, sdl3.K_KP_ENTER:
 			app_search_step(app, (ev.mod & sdl3.KMOD_SHIFT) == sdl3.KMOD_NONE)
 			return
-		case sdl3.K_BACKSPACE:
-			app_search_backspace(app)
+		}
+		if app_search_handle_key(app, ev.key, ev.mod) {
 			return
 		}
 	}
 
 	if app.cmd_center.visible {
-		res := command_center_handle_key(&app.cmd_center, ev.key, &app.tabs_mgr)
+		res := command_center_handle_key(&app.cmd_center, ev.key, ev.mod, &app.tabs_mgr)
 		if res.handled {
 			if res.action != .None do app_execute_action(app, res.action)
 			if res.target_tab >= 0 do app_select_tab(app, res.target_tab)
@@ -528,7 +528,7 @@ app_update_hyperlink_hover :: proc(app: ^Term_App) -> bool {
 }
 
 app_handle_drop_position :: proc(app: ^Term_App, drop: sdl3.DropEvent) {
-	if app == nil do return
+	if app == nil || !app.drop_effect.enabled do return
 	ratio := app.window.pixel_ratio
 	mx := f32(drop.x) * ratio
 	my := f32(drop.y) * ratio
@@ -573,7 +573,9 @@ app_handle_drop_file :: proc(app: ^Term_App, drop: sdl3.DropEvent, is_text: bool
 			sess_feat.session_write_string(target_pane.session, payload)
 		}
 	}
-	chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
+	if app.drop_effect.enabled {
+		chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
+	}
 }
 
 app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty: bool) {
@@ -787,7 +789,9 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 			_ = app_update_hyperlink_hover(app)
 		case .DROP_BEGIN:
 			drop_effect_on_drag_begin(&app.drop_effect)
-			chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
+			if app.drop_effect.enabled {
+				chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
+			}
 		case .DROP_POSITION:
 			app_handle_drop_position(app, ev.drop)
 		case .DROP_FILE:
@@ -796,7 +800,9 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 			app_handle_drop_file(app, ev.drop, true)
 		case .DROP_COMPLETE:
 			drop_effect_on_drag_complete(&app.drop_effect)
-			chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
+			if app.drop_effect.enabled {
+				chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
+			}
 		}
 
 		if !sdl3.PollEvent(&ev) do break

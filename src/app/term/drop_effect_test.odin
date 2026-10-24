@@ -125,3 +125,45 @@ test_drop_effect_emit_draw_list :: proc(t: ^testing.T) {
 	drop_effect_emit_draw_list(&state, &dl, 600.0, 400.0, 1.0)
 	testing.expect(t, len(dl.commands) >= 2, "Draw list should contain water surface master quad and wave record")
 }
+
+@test
+test_drop_effect_disabled_lifecycle :: proc(t: ^testing.T) {
+	state: Drop_Effect_State
+	drop_effect_init(&state, enabled = false)
+	testing.expect(t, !state.enabled, "State must be disabled")
+	testing.expect(t, !drop_effect_is_active(&state), "Disabled state must never report active")
+
+	pane_rect := [4]f32{0.0, 0.0, 600.0, 400.0}
+	drop_effect_on_drag_begin(&state)
+	drop_effect_on_drag_pos(&state, {150.0, 150.0}, 1, pane_rect)
+	drop_effect_on_drag_pos(&state, {300.0, 150.0}, 1, pane_rect)
+	drop_effect_on_drop(&state, {300.0, 150.0}, 1, pane_rect)
+	drop_effect_on_drag_complete(&state)
+
+	testing.expect(t, !state.is_dragging, "Disabled state must not enter dragging")
+	testing.expect(t, !state.is_exiting, "Disabled state must not enter exiting")
+	testing.expect(t, !state.impact_emitted, "Disabled state must not emit impact")
+	testing.expect(t, !drop_effect_is_active(&state), "Disabled state must remain idle")
+
+	for w in state.splashes {
+		testing.expect(t, !w.active, "No splash waves must be active when disabled")
+	}
+
+	dl: chrome_dl.Ui_Draw_List
+	chrome_dl.ui_draw_list_init(&dl)
+	defer chrome_dl.ui_draw_list_destroy(&dl)
+
+	drop_effect_emit_draw_list(&state, &dl, 600.0, 400.0, 1.0)
+	testing.expect_value(t, len(dl.commands), 0)
+
+	// Test dynamic enable and disable toggle
+	drop_effect_set_enabled(&state, true)
+	testing.expect(t, state.enabled, "State must be enabled after set_enabled(true)")
+	drop_effect_on_drag_begin(&state)
+	drop_effect_on_drag_pos(&state, {100.0, 100.0}, 1, pane_rect)
+	testing.expect(t, drop_effect_is_active(&state), "State should be active after enabled")
+
+	drop_effect_set_enabled(&state, false)
+	testing.expect(t, !state.enabled, "State must be disabled after set_enabled(false)")
+	testing.expect(t, !drop_effect_is_active(&state), "State must return to idle immediately on disable")
+}

@@ -20,6 +20,7 @@ Water_Splash_3D :: struct {
 }
 
 Drop_Effect_State :: struct {
+	enabled:        bool,
 	is_dragging:    bool,
 	is_exiting:     bool,
 	exit_fade_t:    f32,
@@ -64,14 +65,27 @@ escape_shell_path :: proc(path: string, allocator := context.allocator) -> strin
 	return string(b)
 }
 
-drop_effect_init :: proc(state: ^Drop_Effect_State) {
+drop_effect_init :: proc(state: ^Drop_Effect_State, enabled: bool = true) {
 	if state == nil do return
 	state^ = {}
+	state.enabled = enabled
 	state.exit_fade_t = 0.0
 }
 
+drop_effect_set_enabled :: proc(state: ^Drop_Effect_State, enabled: bool) {
+	if state == nil || state.enabled == enabled do return
+	state.enabled = enabled
+	if !enabled {
+		state.is_dragging = false
+		state.is_exiting = false
+		state.flush_frame = false
+		state.was_active = false
+		for &w in state.splashes do w.active = false
+	}
+}
+
 drop_effect_spawn :: proc(state: ^Drop_Effect_State, x, y, strength, lifetime: f32) {
-	if state == nil do return
+	if state == nil || !state.enabled do return
 	idx := state.next_splash
 	oldest: f32 = -1.0
 	for step in 0..<MAX_WATER_SPLASHES {
@@ -88,18 +102,13 @@ drop_effect_spawn :: proc(state: ^Drop_Effect_State, x, y, strength, lifetime: f
 		}
 	}
 	state.splashes[idx] = Water_Splash_3D{
-		x        = x,
-		y        = y,
-		time     = 0.0,
-		max_t    = lifetime,
-		strength = strength,
-		active   = true,
+		x = x, y = y, time = 0.0, max_t = lifetime, strength = strength, active = true,
 	}
 	state.next_splash = (idx + 1) % MAX_WATER_SPLASHES
 }
 
 drop_effect_on_drag_begin :: proc(state: ^Drop_Effect_State) {
-	if state == nil do return
+	if state == nil || !state.enabled do return
 	state.is_exiting = false
 	state.exit_fade_t = 1.0
 	state.flush_frame = false
@@ -110,7 +119,7 @@ drop_effect_on_drag_begin :: proc(state: ^Drop_Effect_State) {
 }
 
 drop_effect_on_drag_pos :: proc(state: ^Drop_Effect_State, pos: [2]f32, pane_id: u32, pane_rect: [4]f32) {
-	if state == nil do return
+	if state == nil || !state.enabled do return
 	_ = pane_id
 	state.is_dragging = true
 	state.is_exiting = false
@@ -147,7 +156,7 @@ drop_effect_on_drag_pos :: proc(state: ^Drop_Effect_State, pos: [2]f32, pane_id:
 }
 
 drop_effect_on_drop :: proc(state: ^Drop_Effect_State, pos: [2]f32, pane_id: u32, pane_rect: [4]f32) {
-	if state == nil do return
+	if state == nil || !state.enabled do return
 	_ = pane_id
 	state.target_rect = pane_rect
 	state.is_dragging = false
@@ -161,7 +170,7 @@ drop_effect_on_drop :: proc(state: ^Drop_Effect_State, pos: [2]f32, pane_id: u32
 }
 
 drop_effect_on_drag_complete :: proc(state: ^Drop_Effect_State) {
-	if state == nil do return
+	if state == nil || !state.enabled do return
 	state.is_dragging = false
 	state.is_exiting = true
 	state.anchor_valid = false
@@ -169,7 +178,7 @@ drop_effect_on_drag_complete :: proc(state: ^Drop_Effect_State) {
 }
 
 drop_effect_update :: proc(state: ^Drop_Effect_State, dt: f32) {
-	if state == nil || dt <= 0.0 do return
+	if state == nil || !state.enabled || dt <= 0.0 do return
 	clamped_dt := min(dt, 0.05)
 
 	if state.flush_frame {
@@ -206,7 +215,7 @@ drop_effect_update :: proc(state: ^Drop_Effect_State, dt: f32) {
 }
 
 drop_effect_is_active :: proc(state: ^Drop_Effect_State) -> bool {
-	if state == nil do return false
+	if state == nil || !state.enabled do return false
 	if state.is_dragging || state.is_exiting || state.flush_frame do return true
 	for w in state.splashes do if w.active do return true
 	return false

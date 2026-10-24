@@ -210,7 +210,7 @@ chrome_view_build_draw_list :: proc(
 	}
 
 	// 2b. Drag & Drop Tactile Feedback & Crystal 3D Water Ripple
-	if drop_effect != nil && drop_effect_is_active(drop_effect) && layout != nil {
+	if drop_effect != nil && drop_effect.enabled && drop_effect_is_active(drop_effect) && layout != nil {
 		fade := drop_effect.exit_fade_t if drop_effect.is_exiting else 1.0
 		if (drop_effect.is_dragging || drop_effect.is_exiting) && drop_effect.target_rect[2] > 20.0 && fade > 0.001 {
 			p_rect := drop_effect.target_rect
@@ -348,13 +348,27 @@ chrome_view_build_draw_list :: proc(
 		chrome_dl.ui_draw_rounded_rect(&cv.draw_list, {x, y, bar_w, bar_h}, {0.10, 0.12, 0.17, 0.97}, bar_h * 0.5)
 		chrome_dl.ui_draw_border(&cv.draw_list, {x, y, bar_w, bar_h}, {0.30, 0.55, 0.90, 0.65}, bar_h * 0.5)
 
-		query := string(search.query[:search.query_len])
-		label := query if len(query) > 0 else "Find in scrollback…"
-		label_color: [4]f32 = {0.92, 0.94, 0.98, 1.0} if len(query) > 0 else {0.55, 0.58, 0.66, 1.0}
+		query := text_input_as_string(&search.input)
+		has_query := len(query) > 0
+		label := query if has_query else "Find in scrollback…"
+		label_color: [4]f32 = {0.92, 0.94, 0.98, 1.0} if has_query else {0.55, 0.58, 0.66, 1.0}
 		text_h := 14.0 * scale
+		text_x := x + 12.0 * scale
+		text_y := y + (bar_h - text_h) * 0.5
+		if has_query {
+			char_w := 7.5 * scale
+			if s_idx, e_idx, sel_active := text_input_selection_range(&search.input); sel_active {
+				sel_x := text_x + f32(s_idx) * char_w
+				sel_w := f32(e_idx - s_idx) * char_w
+				chrome_dl.ui_draw_rounded_rect(&cv.draw_list, {sel_x, text_y, sel_w, text_h}, {0.25, 0.45, 0.85, 0.45}, 2.0 * scale)
+			} else {
+				cur_x := text_x + f32(search.input.cursor) * char_w
+				chrome_dl.ui_draw_rect(&cv.draw_list, {cur_x, text_y + 1 * scale, 1.5 * scale, text_h - 2 * scale}, {0.35, 0.65, 1.0, 0.90})
+			}
+		}
 		chrome_dl.ui_draw_text(
 			&cv.draw_list,
-			{x + 12.0 * scale, y + (bar_h - text_h) * 0.5, bar_w - 70.0 * scale, text_h},
+			{text_x, text_y, bar_w - 70.0 * scale, text_h},
 			label,
 			label_color,
 		)

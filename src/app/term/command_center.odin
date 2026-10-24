@@ -28,8 +28,7 @@ Command_Center_Result :: struct {
 Command_Center_State :: struct {
 	visible:          bool,
 	mode:             Command_Center_Mode,
-	query_buf:        [128]u8,
-	query_len:        int,
+	input:            Text_Input,
 	selected_idx:     int,
 	scroll_offset:    int,
 	accum_wheel:      f32,
@@ -45,7 +44,7 @@ command_center_init :: proc(cc: ^Command_Center_State) {
 	if cc == nil do return
 	cc.visible = false
 	cc.mode = .Commands
-	cc.query_len = 0
+	text_input_init(&cc.input)
 	cc.selected_idx = 0
 	cc.scroll_offset = 0
 	cc.accum_wheel = 0.0
@@ -56,7 +55,7 @@ command_center_open :: proc(cc: ^Command_Center_State, mode: Command_Center_Mode
 	if cc == nil do return
 	cc.visible = true
 	cc.mode = mode
-	cc.query_len = 0
+	text_input_clear(&cc.input)
 	cc.selected_idx = 0
 	cc.scroll_offset = 0
 	cc.accum_wheel = 0.0
@@ -91,7 +90,7 @@ command_center_close :: proc(cc: ^Command_Center_State) {
 
 command_center_filter :: proc(cc: ^Command_Center_State, tabs: ^tabs_feat.Tabs_Manager = nil) {
 	if cc == nil do return
-	q := strings.to_lower(string(cc.query_buf[:cc.query_len]), context.temp_allocator)
+	q := strings.to_lower(text_input_as_string(&cc.input), context.temp_allocator)
 	cc.filtered_count = 0
 
 	switch cc.mode {
@@ -147,7 +146,7 @@ command_center_handle_wheel :: proc(cc: ^Command_Center_State, dy: f32) {
 	}
 }
 
-command_center_handle_key :: proc(cc: ^Command_Center_State, key: sdl3.Keycode, tabs: ^tabs_feat.Tabs_Manager = nil) -> Command_Center_Result {
+command_center_handle_key :: proc(cc: ^Command_Center_State, key: sdl3.Keycode, mod: sdl3.Keymod = sdl3.KMOD_NONE, tabs: ^tabs_feat.Tabs_Manager = nil) -> Command_Center_Result {
 	if cc == nil || !cc.visible do return {handled = false}
 
 	switch key {
@@ -189,12 +188,13 @@ command_center_handle_key :: proc(cc: ^Command_Center_State, key: sdl3.Keycode, 
 		}
 		cc.visible = false
 		return {handled = true}
+	}
 
-	case sdl3.K_BACKSPACE:
-		if cc.query_len > 0 {
-			cc.query_len -= 1
-			command_center_filter(cc, tabs)
-		}
+	changed, handled := text_input_handle_key(&cc.input, key, mod)
+	if changed {
+		command_center_filter(cc, tabs)
+	}
+	if handled {
 		return {handled = true}
 	}
 
@@ -203,13 +203,9 @@ command_center_handle_key :: proc(cc: ^Command_Center_State, key: sdl3.Keycode, 
 
 command_center_handle_text :: proc(cc: ^Command_Center_State, text: string, tabs: ^tabs_feat.Tabs_Manager = nil) {
 	if cc == nil || !cc.visible do return
-	for ch in text {
-		if cc.query_len < len(cc.query_buf) - 1 && ch >= 32 && ch <= 126 {
-			cc.query_buf[cc.query_len] = u8(ch)
-			cc.query_len += 1
-		}
+	if text_input_insert(&cc.input, text) {
+		command_center_filter(cc, tabs)
 	}
-	command_center_filter(cc, tabs)
 }
 
 command_center_handle_click :: proc(cc: ^Command_Center_State, mx, my: f32) -> Command_Center_Result {
@@ -274,9 +270,28 @@ command_center_emit_draw_list :: proc(
 	chrome_dl.ui_draw_text(dl, {modal_x + 18 * s, modal_y + 16 * s, 20 * s, 24 * s}, prompt_icon, {0.35, 0.65, 1.0, 1.0})
 
 	placeholder := "Type a command or search action..." if cc.mode == .Commands else "Switch tab or type to filter..."
-	query_str := string(cc.query_buf[:cc.query_len]) if cc.query_len > 0 else placeholder
-	query_col: [4]f32 = {0.95, 0.96, 0.98, 1.0} if cc.query_len > 0 else {0.45, 0.50, 0.60, 0.85}
-	chrome_dl.ui_draw_text(dl, {modal_x + 38 * s, modal_y + 16 * s, modal_w - 60 * s, 24 * s}, query_str, query_col)
+	query_str := text_input_as_string(&cc.input)
+	has_query := len(query_str) > 0
+	label := query_str if has_query else placeholder
+	query_col: [4]f32 = {0.95, 0.96, 0.98, 1.0} if has_query else {0.45, 0.50, 0.60, 0.85}
+
+	input_x := modal_x + 38 * s
+	input_y := modal_y + 16 * s
+	input_w := modal_w - 60 * s
+	input_h := 24 * s
+
+	if has_query {
+		char_w := 8.5 * s
+		if s_idx, e_idx, sel_active := text_input_selection_range(&cc.input); sel_active {
+			sel_x := input_x + f32(s_idx) * char_w
+			sel_w := f32(e_idx - s_idx) * char_w
+			chrome_dl.ui_draw_rounded_rect(dl, {sel_x, input_y + 2 * s, sel_w, input_h - 4 * s}, {0.25, 0.45, 0.85, 0.45}, 2.0 * s)
+		} else {
+			cur_x := input_x + f32(cc.input.cursor) * char_w
+			chrome_dl.ui_draw_rect(dl, {cur_x, input_y + 4 * s, 1.5 * s, input_h - 8 * s}, {0.35, 0.65, 1.0, 0.90})
+		}
+	}
+	chrome_dl.ui_draw_text(dl, {input_x, input_y, input_w, input_h}, label, query_col)
 
 	// Divider
 	chrome_dl.ui_draw_rect(dl, {modal_x + 12 * s, modal_y + 48 * s, modal_w - 24 * s, 1 * s}, {0.18, 0.22, 0.30, 0.85})

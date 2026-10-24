@@ -74,6 +74,7 @@ app_apply_config :: proc(app: ^Term_App, opts: Cli_Options = {}) {
 		app.scroll_speed = opts.scroll_speed_override
 	}
 	app.hyperlink_openable_bg, app.hyperlink_blocked_bg = config_resolve_hyperlink_colors(&app.config)
+	drop_effect_set_enabled(&app.drop_effect, config_resolve_drop_animation(&app.config))
 
 	scale := app.window.pixel_ratio if app.window.pixel_ratio > 0 else 1.0
 	pad_x, pad_y := config_resolve_padding(&app.config)
@@ -207,7 +208,7 @@ app_init :: proc(app: ^Term_App, opts: Cli_Options = {}) -> bool {
 	cursor_init(&app.cursor)
 	clipboard_init(&app.clipboard, plat_clip.clipboard_set_text, plat_clip.clipboard_get_text, plat_clip.clipboard_has_text)
 	command_center_init(&app.cmd_center)
-	drop_effect_init(&app.drop_effect)
+	drop_effect_init(&app.drop_effect, config_resolve_drop_animation(&app.config))
 
 	app_apply_config(app, opts)
 

@@ -31,6 +31,10 @@ Padding_Config :: struct {
 	y: f32 `json:"y"`,
 }
 
+Drop_Config :: struct {
+	animation: bool `json:"animation"`,
+}
+
 // Theme_Config holds color overrides driven from config.json. Colors use
 // "#RRGGBB" hex strings; empty strings keep the built-in theme defaults.
 Theme_Config :: struct {
@@ -58,6 +62,8 @@ App_Config :: struct {
 	scroll_multiplier: f32         `json:"scroll_multiplier"`,
 	scroll_speed:      f32         `json:"scroll_speed"`,
 	working_directory: string      `json:"working_directory"`,
+	drop_animation:    bool        `json:"drop_animation"`,
+	drop:              Drop_Config `json:"drop"`,
 }
 
 config_default :: proc() -> App_Config {
@@ -76,6 +82,10 @@ config_default :: proc() -> App_Config {
 		window         = {
 			blur    = default_blur,
 			opacity = -1.0,
+		},
+		drop_animation = false,
+		drop           = {
+			animation = false,
 		},
 	}
 }
@@ -149,6 +159,14 @@ config_resolve_scroll_multiplier :: proc(cfg: ^App_Config) -> f32 {
 	if cfg.scroll_multiplier > 0.0 do return cfg.scroll_multiplier
 	if cfg.scroll_speed > 0.0 do return cfg.scroll_speed
 	return 1.0
+}
+
+// config_resolve_drop_animation checks whether drag & drop visual ripple & tactile animation is enabled (default false).
+config_resolve_drop_animation :: proc(cfg: ^App_Config) -> bool {
+	if cfg == nil do return false
+	if cfg.drop.animation do return true
+	if cfg.drop_animation do return true
+	return false
 }
 
 _config_hex_digit :: proc(c: u8) -> (int, bool) {
