@@ -236,6 +236,7 @@ Terminal_Renderer :: struct {
 	last_term_ptr:      rawptr,
 	last_scroll_offset: int,
 	last_is_focused:    bool,
+	last_eff_opacity:   f32,
 	tile_fb_valid:      bool,
 	ligature_cache:     plat_font.Ligature_Cache,
 
@@ -351,6 +352,7 @@ terminal_renderer_init_with_pipelines :: proc(
 	r.last_strategy = .Instance
 	r.last_duration_ns = 0
 	r.last_is_focused = true
+	r.last_eff_opacity = 0.45
 
 	r.pipelines = pipes
 	r.owns_pipelines = false
@@ -1117,6 +1119,7 @@ terminal_renderer_encode :: proc(
 	load_op: contract.Gpu_Load_Op = .Load,
 	border_radius: f32 = 0.0,
 	is_focused: bool = true,
+	pane_opacity: f32 = 0.45,
 ) {
 	if r == nil || rawptr(enc) == nil || term == nil || rawptr(target_view) == nil || text_atlas == nil do return
 
@@ -1175,25 +1178,28 @@ terminal_renderer_encode :: proc(
 	}
 
 	// 2. Resolve Active Background & Sync LUT Default Background across all bg_idx == 0 entries
-	if r.last_is_focused != is_focused {
+	eff_opacity := clamp(pane_opacity, 0.0, 1.0)
+	if r.last_is_focused != is_focused || r.last_eff_opacity != eff_opacity {
 		r.tile_fb_valid = false
 		r.last_is_focused = is_focused
+		r.last_eff_opacity = eff_opacity
 	}
 
-	active_bg: [4]f32 = {0.08, 0.09, 0.12, 1.0}
+	active_bg: [4]f32 = {0.08, 0.09, 0.12, eff_opacity}
 	if has_custom_bg {
-		active_bg = custom_bg
+		active_bg = {custom_bg[0], custom_bg[1], custom_bg[2], custom_bg[3] * eff_opacity}
 	} else if dc, pal, ok := core_terminal.terminal_sample_bg(term, scroll_offset); ok {
 		if dc.has_bg {
-			active_bg = {f32(dc.bg[0]) / 255.0, f32(dc.bg[1]) / 255.0, f32(dc.bg[2]) / 255.0, 1.0}
+			active_bg = {f32(dc.bg[0]) / 255.0, f32(dc.bg[1]) / 255.0, f32(dc.bg[2]) / 255.0, eff_opacity}
 		} else if pal != 0 {
-			active_bg = PALETTE_PRECOMPUTED[pal & 15]
+			p_col := PALETTE_PRECOMPUTED[pal & 15]
+			active_bg = {p_col[0], p_col[1], p_col[2], eff_opacity}
 		}
 	}
 
 	if !is_focused {
-		// Inactive pane: darker solid background, maintaining 1.0 opacity across all free space
-		active_bg = {active_bg[0] * 0.70, active_bg[1] * 0.70, active_bg[2] * 0.70, 1.0}
+		// Inactive pane: darker solid background, maintaining pane opacity across all free space
+		active_bg = {active_bg[0] * 0.70, active_bg[1] * 0.70, active_bg[2] * 0.70, eff_opacity}
 	}
 
 	bg_packed := rgb_to_r5g6b5(
@@ -1310,6 +1316,10 @@ terminal_renderer_encode :: proc(
 				fg, bg := _terminal_renderer_resolve_colors(cell_val, dc, is_selected, active_bg, is_focused)
 				if is_hovered {
 					bg = hover_blocked_bg if hover.blocked else hover_openable_bg
+				}
+				has_authored_bg := (.Has_Direct_Color in cell_val.flags && dc.has_bg) || cell_val.bg != 0 || is_selected || is_hovered || (.Invert in cell_val.style)
+				if !has_authored_bg {
+					bg = {0, 0, 0, 0}
 				}
 				// Concealed text keeps its cell footprint but never shows glyphs.
 				if .Hidden in cell_val.style do fg = bg
@@ -1471,7 +1481,7 @@ terminal_renderer_encode :: proc(
 				tiles_y      = r.tile_rend.tiles_y,
 				atlas_w      = atlas.ATLAS_WIDTH,
 				atlas_h      = atlas.ATLAS_HEIGHT,
-				bg_opacity   = 1.0,
+				bg_opacity   = 0.0 if eff_opacity < 1.0 else 1.0,
 				cell_opacity = 1.0 if is_focused else 0.55,
 			}
 			contract.write_buffer(r.queue, r.tile_rend.params_buffer, 0, &t_params, size_of(tile.Tile_Params))
@@ -1546,7 +1556,7 @@ terminal_renderer_encode :: proc(
 			pad_y         = pane_rect[1] + pad_y,
 			atlas_w       = atlas.ATLAS_WIDTH,
 			atlas_h       = atlas.ATLAS_HEIGHT,
-			bg_opacity    = 1.0,
+			bg_opacity    = eff_opacity,
 			cell_opacity  = 1.0 if is_focused else 0.55,
 			pane_x        = pane_rect[0],
 			pane_y        = pane_rect[1],
@@ -1608,6 +1618,7 @@ terminal_renderer_render :: proc(
 	hover_blocked_bg:  [4]f32 = HOVER_BLOCKED_BG,
 	border_radius: f32 = 0.0,
 	is_focused: bool = true,
+	pane_opacity: f32 = 0.45,
 ) {
 	if r == nil || term == nil || rawptr(target_view) == nil || text_atlas == nil do return
 	enc := contract.create_command_encoder(r.device)
@@ -1618,7 +1629,7 @@ terminal_renderer_render :: proc(
 		r, enc, term, target_view, text_atlas, pane_rect, cell_w, cell_h, pad_x, pad_y,
 		scroll_offset, screen_w, screen_h, has_custom_bg, custom_bg,
 		selected_logical_r_start, selected_c_start, selected_logical_r_end, selected_c_end,
-		selection_active, hover, hover_openable_bg, hover_blocked_bg, .Load, border_radius, is_focused,
+		selection_active, hover, hover_openable_bg, hover_blocked_bg, .Load, border_radius, is_focused, pane_opacity,
 	)
 
 	cmd := contract.finish_command_buffer(enc)

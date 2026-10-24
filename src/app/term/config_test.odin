@@ -137,3 +137,43 @@ test_config_drop_animation_resolution :: proc(t: ^testing.T) {
 	testing.expect(t, ok5, "empty JSON5 must parse")
 	testing.expect(t, !config_resolve_drop_animation(&cfg_empty), "empty JSON5 config must default to disabled drop animation")
 }
+
+@test
+test_config_pane_opacity_resolution :: proc(t: ^testing.T) {
+	// 1. Nil config falls back to default based on blur
+	testing.expect_value(t, config_resolve_pane_opacity(nil, -1.0, false), DEFAULT_PANE_OPACITY_SOLID)
+	testing.expect_value(t, config_resolve_pane_opacity(nil, -1.0, true), DEFAULT_PANE_OPACITY_BLUR)
+
+	// 2. Fall back to window_opacity if pane_opacity is unset
+	testing.expect_value(t, config_resolve_pane_opacity(nil, 0.65, false), f32(0.65))
+
+	// 3. Flat pane_opacity in JSON5
+	json_flat := `{ pane_opacity: 0.72 }`
+	cfg_flat, ok1 := config_parse_json5(transmute([]byte)json_flat)
+	testing.expect(t, ok1, "flat JSON5 must parse")
+	testing.expect(t, abs(config_resolve_pane_opacity(&cfg_flat) - 0.72) < 0.001, "flat pane_opacity must resolve to 0.72")
+
+	// 4. Nested pane: { opacity: 0.88 } in JSON5
+	json_nested := `{ pane: { opacity: 0.88 } }`
+	cfg_nested, ok2 := config_parse_json5(transmute([]byte)json_nested)
+	testing.expect(t, ok2, "nested JSON5 must parse")
+	testing.expect(t, abs(config_resolve_pane_opacity(&cfg_nested) - 0.88) < 0.001, "nested pane.opacity must resolve to 0.88")
+
+	// 5. Nested pane.opacity takes precedence over flat pane_opacity
+	json_both := `{ pane_opacity: 0.50, pane: { opacity: 0.85 } }`
+	cfg_both, ok3 := config_parse_json5(transmute([]byte)json_both)
+	testing.expect(t, ok3, "both JSON5 must parse")
+	testing.expect(t, abs(config_resolve_pane_opacity(&cfg_both) - 0.85) < 0.001, "nested pane.opacity must take precedence")
+
+	// 6. CLI argument parsing for --pane-opacity
+	args := []string{"term", "--pane-opacity", "0.78"}
+	opts, cont := app_parse_cli_args(args)
+	testing.expect(t, cont, "cli parse must continue")
+	testing.expect(t, abs(opts.pane_opacity_override - 0.78) < 0.001, "CLI --pane-opacity must parse to 0.78")
+
+	// 7. Fallback to config window.opacity when pane.opacity is unset
+	json_win := `{ window: { opacity: 0.60 } }`
+	cfg_win, ok_win := config_parse_json5(transmute([]byte)json_win)
+	testing.expect(t, ok_win, "window.opacity JSON5 must parse")
+	testing.expect(t, abs(config_resolve_pane_opacity(&cfg_win) - 0.60) < 0.001, "must fall back to window.opacity when pane.opacity unset")
+}

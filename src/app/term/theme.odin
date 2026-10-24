@@ -24,9 +24,10 @@ Visual_Metrics :: struct {
 	traffic_clearance:   f32,
 	pane_pad_x:          f32,
 	pane_pad_y:          f32,
+	pane_opacity:        f32,
 }
 
-visual_metrics_make :: proc(scale: f32 = 1.0, pad_x: f32 = DEFAULT_PANE_PAD_X, pad_y: f32 = DEFAULT_PANE_PAD_Y) -> Visual_Metrics {
+visual_metrics_make :: proc(scale: f32 = 1.0, pad_x: f32 = DEFAULT_PANE_PAD_X, pad_y: f32 = DEFAULT_PANE_PAD_Y, pane_opacity: f32 = 0.45) -> Visual_Metrics {
 	s := max(1.0, scale)
 	return Visual_Metrics{
 		scale               = s,
@@ -40,6 +41,7 @@ visual_metrics_make :: proc(scale: f32 = 1.0, pad_x: f32 = DEFAULT_PANE_PAD_X, p
 		traffic_clearance   = 78.0 * s,
 		pane_pad_x          = pad_x * s,
 		pane_pad_y          = pad_y * s,
+		pane_opacity        = pane_opacity,
 	}
 }
 

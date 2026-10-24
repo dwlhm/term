@@ -90,6 +90,10 @@ app_apply_config :: proc(app: ^Term_App, opts: Cli_Options = {}) {
 	opacity := config_resolve_window_opacity(&app.config)
 	if opts.opacity_override >= 0.0 do opacity = clamp(opts.opacity_override, 0.0, 1.0)
 
+	pane_opacity := config_resolve_pane_opacity(&app.config, opts.opacity_override, blur_enabled)
+	if opts.pane_opacity_override >= 0.0 do pane_opacity = clamp(opts.pane_opacity_override, 0.0, 1.0)
+	app.layout.metrics.pane_opacity = pane_opacity
+
 	wgpu_backend.surface_set_transparent(app.surface, blur_enabled)
 	when ODIN_OS == .Darwin {
 		plat_win.platform_setup_window_vibrancy(app.window.handle, blur_enabled)
@@ -175,7 +179,13 @@ app_init :: proc(app: ^Term_App, opts: Cli_Options = {}) -> bool {
 	plat_win.window_update_pixel_size(&app.window)
 	scale := app.window.pixel_ratio
 	pad_x, pad_y := config_resolve_padding(&app.config)
-	layout_init(&app.layout, scale, pad_x, pad_y)
+	blur_enabled := config_resolve_window_blur(&app.config)
+	if opts.blur_override == 1 do blur_enabled = false
+	else if opts.blur_override == 2 do blur_enabled = true
+
+	pane_opacity := config_resolve_pane_opacity(&app.config, opts.opacity_override, blur_enabled)
+	if opts.pane_opacity_override >= 0.0 do pane_opacity = clamp(opts.pane_opacity_override, 0.0, 1.0)
+	layout_init(&app.layout, scale, pad_x, pad_y, pane_opacity)
 
 	// In high-DPI (Retina), render surface and composition textures use full backing pixels
 	app.layout.screen_w = f32(app.window.pixel_w)

@@ -35,6 +35,10 @@ Drop_Config :: struct {
 	animation: bool `json:"animation"`,
 }
 
+Pane_Config :: struct {
+	opacity: f32 `json:"opacity"`,
+}
+
 // Theme_Config holds color overrides driven from config.json. Colors use
 // "#RRGGBB" hex strings; empty strings keep the built-in theme defaults.
 Theme_Config :: struct {
@@ -59,6 +63,8 @@ App_Config :: struct {
 	theme:          Theme_Config   `json:"theme"`,
 	blur:           bool           `json:"blur"`,
 	window_opacity: f32            `json:"window_opacity"`,
+	pane_opacity:   f32            `json:"pane_opacity"`,
+	pane:           Pane_Config    `json:"pane"`,
 	scroll_multiplier: f32         `json:"scroll_multiplier"`,
 	scroll_speed:      f32         `json:"scroll_speed"`,
 	working_directory: string      `json:"working_directory"`,
@@ -77,6 +83,10 @@ config_default :: proc() -> App_Config {
 		padding        = {x = -1.0, y = -1.0},
 		blur           = default_blur,
 		window_opacity = -1.0,
+		pane_opacity   = -1.0,
+		pane           = {
+			opacity = -1.0,
+		},
 		scroll_multiplier = 1.0,
 		scroll_speed      = 1.0,
 		window         = {
@@ -151,6 +161,21 @@ config_resolve_window_opacity :: proc(cfg: ^App_Config) -> f32 {
 	if cfg.window.opacity >= 0.0 do return clamp(cfg.window.opacity, 0.0, 1.0)
 	if cfg.window_opacity >= 0.0 do return clamp(cfg.window_opacity, 0.0, 1.0)
 	return 0.0
+}
+
+DEFAULT_PANE_OPACITY_BLUR: f32 : 0.45
+DEFAULT_PANE_OPACITY_SOLID: f32 : 1.0
+
+// config_resolve_pane_opacity returns the terminal pane opacity (0.0 = fully transparent, 1.0 = solid).
+config_resolve_pane_opacity :: proc(cfg: ^App_Config, window_opacity: f32 = -1.0, blur_enabled: bool = false) -> f32 {
+	if cfg != nil {
+		if cfg.pane.opacity >= 0.0 do return clamp(cfg.pane.opacity, 0.0, 1.0)
+		if cfg.pane_opacity >= 0.0 do return clamp(cfg.pane_opacity, 0.0, 1.0)
+		if cfg.window.opacity >= 0.0 do return clamp(cfg.window.opacity, 0.0, 1.0)
+		if cfg.window_opacity >= 0.0 do return clamp(cfg.window_opacity, 0.0, 1.0)
+	}
+	if window_opacity >= 0.0 do return clamp(window_opacity, 0.0, 1.0)
+	return DEFAULT_PANE_OPACITY_BLUR if blur_enabled else DEFAULT_PANE_OPACITY_SOLID
 }
 
 // config_resolve_scroll_multiplier extracts effective scroll speed multiplier (default 1.0).

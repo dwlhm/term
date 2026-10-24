@@ -222,6 +222,7 @@ terminal_view_encode_pane :: proc(
 		load_op,
 		metrics.border_radius,
 		is_focused,
+		metrics.pane_opacity,
 	)
 
 	return rend.last_strategy, rend.last_dirty_cells
@@ -298,5 +299,6 @@ terminal_view_render_pane :: proc(
 		hover_blocked_bg,
 		metrics.border_radius,
 		is_focused,
+		metrics.pane_opacity,
 	)
 }
