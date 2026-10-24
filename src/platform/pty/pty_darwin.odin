@@ -15,9 +15,12 @@ foreign libc {
 	ioctl     :: proc(fd: c.int, request: c.ulong, #c_vararg args: ..rawptr) -> c.int ---
 	openpty   :: proc(amaster, aslave: ^c.int, name: [^]u8, termp: rawptr, winp: ^Winsize) -> c.int ---
 	login_tty :: proc(fd: c.int) -> c.int ---
+	fcntl     :: proc(fd: c.int, cmd: c.int, #c_vararg args: ..rawptr) -> c.int ---
 }
 
 TIOCSWINSZ :: 0x80087467
+F_SETFD    :: 2
+FD_CLOEXEC :: 1
 
 Winsize :: struct {
 	ws_row:    c.ushort,
@@ -69,8 +72,22 @@ _pty_spawn_platform :: proc(config: Pty_Config) -> (handle: ^Pty_Handle, err: Pt
 		return nil, .Master_Open_Failed
 	}
 
+	pipe_fds: [2]posix.FD
+	if posix.pipe(&pipe_fds) != .OK {
+		posix.close(posix.FD(master))
+		posix.close(posix.FD(slave))
+		return nil, .Pipe_Failed
+	}
+
+	// Ensure master and shutdown pipes do not leak across execve
+	fcntl(c.int(master), F_SETFD, rawptr(uintptr(FD_CLOEXEC)))
+	fcntl(c.int(pipe_fds[0]), F_SETFD, rawptr(uintptr(FD_CLOEXEC)))
+	fcntl(c.int(pipe_fds[1]), F_SETFD, rawptr(uintptr(FD_CLOEXEC)))
+
 	pid := posix.fork()
 	if pid < 0 {
+		posix.close(pipe_fds[0])
+		posix.close(pipe_fds[1])
 		posix.close(posix.FD(master))
 		posix.close(posix.FD(slave))
 		return nil, .Fork_Failed
@@ -79,7 +96,14 @@ _pty_spawn_platform :: proc(config: Pty_Config) -> (handle: ^Pty_Handle, err: Pt
 	if pid == 0 {
 		// --- CHILD PROCESS ---
 		posix.close(posix.FD(master))
+		posix.close(pipe_fds[0])
+		posix.close(pipe_fds[1])
 		_ = login_tty(slave)
+
+		// Close any file descriptors >= 3 so no master FDs or pipes leak across panes
+		for fd in 3..<1024 {
+			posix.close(posix.FD(fd))
+		}
 
 		if len(config.cwd) > 0 {
 			c_cwd := strings.clone_to_cstring(config.cwd)
@@ -126,37 +150,54 @@ _pty_spawn_platform :: proc(config: Pty_Config) -> (handle: ^Pty_Handle, err: Pt
 	h := new(Pty_Handle)
 	h.master_fd = i32(master)
 	h.child_pid = i32(pid)
+	h.shutdown_pipe = [2]i32{i32(pipe_fds[0]), i32(pipe_fds[1])}
 	h.rows = rows
 	h.cols = cols
 	h.is_running = true
 	h.exit_code = 0
 	ring_init(&h.ring)
 
-	// Spawn background drain thread with 64KB read buffer on blocking PTY master
+	// Spawn background drain thread with 64KB read buffer
 	h.drain_thread = thread.create_and_start_with_data(rawptr(h), proc(data: rawptr) {
 		handle := (^Pty_Handle)(data)
 		buf: [65536]u8
 
+		pfds := [2]posix.pollfd{
+			{fd = posix.FD(handle.master_fd), events = {.IN}},
+			{fd = posix.FD(handle.shutdown_pipe[0]), events = {.IN}},
+		}
+
 		for handle.is_running {
-			n := posix.read(posix.FD(handle.master_fd), &buf[0], len(buf))
-			if n > 0 {
-				ring_write(&handle.ring, buf[:n])
-			} else if n == 0 {
-				// EOF
+			ret := posix.poll(&pfds[0], 2, -1)
+			if ret < 0 {
+				if posix.errno() == .EINTR do continue
 				break
-			} else {
-				err_no := posix.errno()
-				if err_no == .EINTR {
-					continue
+			}
+			if !handle.is_running do break
+			if .IN in pfds[1].revents || .HUP in pfds[1].revents || .ERR in pfds[1].revents {
+				break
+			}
+			if .IN in pfds[0].revents {
+				n := posix.read(posix.FD(handle.master_fd), &buf[0], len(buf))
+				if n > 0 {
+					ring_write(&handle.ring, buf[:n])
+				} else if n == 0 {
+					// EOF
+					break
+				} else {
+					err_no := posix.errno()
+					if err_no == .EINTR do continue
+					// EIO or hangup
+					break
 				}
-				// EIO (slave closed) or other terminal hangup
+			} else if .HUP in pfds[0].revents || .ERR in pfds[0].revents {
 				break
 			}
 		}
 
-		// Collect exit code
+		// Non-blocking exit code harvest
 		status: c.int = 0
-		_ = posix.waitpid(posix.pid_t(handle.child_pid), &status, {})
+		_ = posix.waitpid(posix.pid_t(handle.child_pid), &status, {.NOHANG})
 		handle.exit_code = int(status >> 8)
 		handle.is_running = false
 	})
@@ -168,23 +209,50 @@ _pty_close_platform :: proc(h: ^Pty_Handle) {
 	if h == nil do return
 	h.is_running = false
 
-	// First terminate child process so slave end closes and master unblocks from read
+	// 1. Signal shutdown pipe to immediately wake drain_thread if blocked in poll
+	if h.shutdown_pipe[1] >= 0 {
+		sig: u8 = 1
+		_ = posix.write(posix.FD(h.shutdown_pipe[1]), &sig, 1)
+	}
+
+	// 2. Terminate foreground process group if one is running in the pane
+	if h.master_fd >= 0 {
+		fg_pg := tcgetpgrp(c.int(h.master_fd))
+		if fg_pg > 0 && fg_pg != c.int(h.child_pid) {
+			_ = posix.kill(posix.pid_t(-fg_pg), .SIGHUP)
+			_ = posix.kill(posix.pid_t(-fg_pg), .SIGKILL)
+		}
+	}
+
+	// 3. Terminate the child shell and its process group
 	if h.child_pid > 0 {
+		_ = posix.kill(posix.pid_t(-h.child_pid), .SIGHUP)
+		_ = posix.kill(posix.pid_t(-h.child_pid), .SIGKILL)
 		_ = posix.kill(posix.pid_t(h.child_pid), .SIGHUP)
 		_ = posix.kill(posix.pid_t(h.child_pid), .SIGKILL)
 		status: c.int = 0
 		_ = posix.waitpid(posix.pid_t(h.child_pid), &status, {.NOHANG})
 	}
 
-	if h.master_fd >= 0 {
-		posix.close(posix.FD(h.master_fd))
-		h.master_fd = -1
-	}
-
+	// 4. Drain thread will exit promptly because shutdown_pipe was triggered
 	if h.drain_thread != nil {
 		thread.join(h.drain_thread)
 		thread.destroy(h.drain_thread)
 		h.drain_thread = nil
+	}
+
+	if h.shutdown_pipe[0] >= 0 {
+		posix.close(posix.FD(h.shutdown_pipe[0]))
+		h.shutdown_pipe[0] = -1
+	}
+	if h.shutdown_pipe[1] >= 0 {
+		posix.close(posix.FD(h.shutdown_pipe[1]))
+		h.shutdown_pipe[1] = -1
+	}
+
+	if h.master_fd >= 0 {
+		posix.close(posix.FD(h.master_fd))
+		h.master_fd = -1
 	}
 
 	ring_destroy(&h.ring)

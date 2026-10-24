@@ -123,3 +123,56 @@ test_pty_foreground_process_and_cwd :: proc(t: ^testing.T) {
 	cwd := pty.pty_get_foreground_cwd(handle, cwd_buf[:])
 	testing.expect(t, len(cwd) > 0, "Expected non-empty cwd from PTY")
 }
+
+@test
+test_multiple_pty_concurrent_close :: proc(t: ^testing.T) {
+	handles: [4]^pty.Pty_Handle
+	for i in 0..<4 {
+		config := pty.Pty_Config{
+			shell = "/bin/sh",
+			argv  = []string{"-c", "while true; do sleep 1; done"},
+			rows  = 24,
+			cols  = 80,
+		}
+		h, err := pty.pty_spawn(config)
+		testing.expect(t, err == .None, "pty_spawn failed")
+		testing.expect(t, h != nil, "handle is nil")
+		handles[i] = h
+	}
+
+	time.sleep(50 * time.Millisecond)
+
+	start := time.now()
+	for i in 0..<4 {
+		pty.pty_close(handles[i])
+	}
+	elapsed := time.since(start)
+	testing.expect(t, elapsed < 2 * time.Second, "Closing 4 active PTYs must terminate immediately without hanging")
+}
+
+@test
+test_multiple_pty_with_background_jobs_close :: proc(t: ^testing.T) {
+	handles: [4]^pty.Pty_Handle
+	for i in 0..<4 {
+		// Spawn shell running multiple background processes holding stdio
+		config := pty.Pty_Config{
+			shell = "/bin/sh",
+			argv  = []string{"-c", "sleep 30 & sleep 30 & while true; do sleep 1; done"},
+			rows  = 24,
+			cols  = 80,
+		}
+		h, err := pty.pty_spawn(config)
+		testing.expect(t, err == .None, "pty_spawn failed")
+		testing.expect(t, h != nil, "handle is nil")
+		handles[i] = h
+	}
+
+	time.sleep(50 * time.Millisecond)
+
+	start := time.now()
+	for i in 0..<4 {
+		pty.pty_close(handles[i])
+	}
+	elapsed := time.since(start)
+	testing.expect(t, elapsed < 2 * time.Second, "Closing multiple PTYs with background jobs must terminate immediately without hanging")
+}

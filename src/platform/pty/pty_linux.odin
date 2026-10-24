@@ -11,10 +11,13 @@ import posix "core:sys/posix"
 foreign import libc "system:c"
 @(default_calling_convention="c")
 foreign libc {
-	ioctl :: proc(fd: c.int, request: c.ulong, #c_vararg args: ..any) -> c.int ---
+	ioctl     :: proc(fd: c.int, request: c.ulong, #c_vararg args: ..any) -> c.int ---
+	fcntl     :: proc(fd: c.int, cmd: c.int, #c_vararg args: ..rawptr) -> c.int ---
 }
 
 TIOCSWINSZ :: 0x5414
+F_SETFD    :: 2
+FD_CLOEXEC :: 1
 
 Winsize :: struct {
 	ws_row:    c.ushort,
@@ -80,14 +83,28 @@ _pty_spawn_platform :: proc(config: Pty_Config) -> (handle: ^Pty_Handle, err: Pt
 		ws_ypixel = c.ushort(yp),
 	}
 
+	pipe_fds: [2]posix.FD
+	if posix.pipe(&pipe_fds) != .OK {
+		posix.close(master)
+		return nil, .Pipe_Failed
+	}
+
+	fcntl(c.int(master), F_SETFD, rawptr(uintptr(FD_CLOEXEC)))
+	fcntl(c.int(pipe_fds[0]), F_SETFD, rawptr(uintptr(FD_CLOEXEC)))
+	fcntl(c.int(pipe_fds[1]), F_SETFD, rawptr(uintptr(FD_CLOEXEC)))
+
 	pid := posix.fork()
 	if pid < 0 {
+		posix.close(pipe_fds[0])
+		posix.close(pipe_fds[1])
 		posix.close(master)
 		return nil, .Fork_Failed
 	}
 
 	if pid == 0 {
 		posix.close(master)
+		posix.close(pipe_fds[0])
+		posix.close(pipe_fds[1])
 		_ = posix.setsid()
 
 		slave := posix.open(slave_path, {.RDWR})
@@ -99,6 +116,10 @@ _pty_spawn_platform :: proc(config: Pty_Config) -> (handle: ^Pty_Handle, err: Pt
 			if int(slave) > 2 {
 				posix.close(slave)
 			}
+		}
+
+		for fd in 3..<1024 {
+			posix.close(posix.FD(fd))
 		}
 
 		if len(config.cwd) > 0 {
@@ -131,6 +152,7 @@ _pty_spawn_platform :: proc(config: Pty_Config) -> (handle: ^Pty_Handle, err: Pt
 	h := new(Pty_Handle)
 	h.master_fd = i32(master)
 	h.child_pid = i32(pid)
+	h.shutdown_pipe = [2]i32{i32(pipe_fds[0]), i32(pipe_fds[1])}
 	h.rows = rows
 	h.cols = cols
 	h.is_running = true
@@ -139,26 +161,41 @@ _pty_spawn_platform :: proc(config: Pty_Config) -> (handle: ^Pty_Handle, err: Pt
 
 	h.drain_thread = thread.create_and_start_with_data(rawptr(h), proc(data: rawptr) {
 		handle := (^Pty_Handle)(data)
-		buf: [4096]u8
+		buf: [65536]u8
+
+		pfds := [2]posix.pollfd{
+			{fd = posix.FD(handle.master_fd), events = {.IN}},
+			{fd = posix.FD(handle.shutdown_pipe[0]), events = {.IN}},
+		}
 
 		for handle.is_running {
-			n := posix.read(posix.FD(handle.master_fd), &buf[0], len(buf))
-			if n > 0 {
-				ring_write(&handle.ring, buf[:n])
-			} else if n == 0 {
+			ret := posix.poll(&pfds[0], 2, -1)
+			if ret < 0 {
+				if posix.errno() == .EINTR do continue
 				break
-			} else {
-				err_no := posix.errno()
-				if err_no == .EAGAIN || err_no == .EINTR {
-					posix.nanosleep(&posix.timespec{tv_nsec = 1_000_000}, nil)
-					continue
+			}
+			if !handle.is_running do break
+			if .IN in pfds[1].revents || .HUP in pfds[1].revents || .ERR in pfds[1].revents {
+				break
+			}
+			if .IN in pfds[0].revents {
+				n := posix.read(posix.FD(handle.master_fd), &buf[0], len(buf))
+				if n > 0 {
+					ring_write(&handle.ring, buf[:n])
+				} else if n == 0 {
+					break
+				} else {
+					err_no := posix.errno()
+					if err_no == .EAGAIN || err_no == .EINTR do continue
+					break
 				}
+			} else if .HUP in pfds[0].revents || .ERR in pfds[0].revents {
 				break
 			}
 		}
 
 		status: c.int = 0
-		_ = posix.waitpid(posix.pid_t(handle.child_pid), &status, {})
+		_ = posix.waitpid(posix.pid_t(handle.child_pid), &status, {.NOHANG})
 		handle.exit_code = int(status >> 8)
 		handle.is_running = false
 	})
@@ -170,13 +207,24 @@ _pty_close_platform :: proc(h: ^Pty_Handle) {
 	if h == nil do return
 	h.is_running = false
 
+	if h.shutdown_pipe[1] >= 0 {
+		sig: u8 = 1
+		_ = posix.write(posix.FD(h.shutdown_pipe[1]), &sig, 1)
+	}
+
 	if h.master_fd >= 0 {
-		posix.close(posix.FD(h.master_fd))
-		h.master_fd = -1
+		fg_pg := tcgetpgrp(c.int(h.master_fd))
+		if fg_pg > 0 && fg_pg != c.int(h.child_pid) {
+			_ = posix.kill(posix.pid_t(-fg_pg), .SIGHUP)
+			_ = posix.kill(posix.pid_t(-fg_pg), .SIGKILL)
+		}
 	}
 
 	if h.child_pid > 0 {
+		_ = posix.kill(posix.pid_t(-h.child_pid), .SIGHUP)
+		_ = posix.kill(posix.pid_t(-h.child_pid), .SIGKILL)
 		_ = posix.kill(posix.pid_t(h.child_pid), .SIGHUP)
+		_ = posix.kill(posix.pid_t(h.child_pid), .SIGKILL)
 		status: c.int = 0
 		_ = posix.waitpid(posix.pid_t(h.child_pid), &status, {.NOHANG})
 	}
@@ -185,6 +233,20 @@ _pty_close_platform :: proc(h: ^Pty_Handle) {
 		thread.join(h.drain_thread)
 		thread.destroy(h.drain_thread)
 		h.drain_thread = nil
+	}
+
+	if h.shutdown_pipe[0] >= 0 {
+		posix.close(posix.FD(h.shutdown_pipe[0]))
+		h.shutdown_pipe[0] = -1
+	}
+	if h.shutdown_pipe[1] >= 0 {
+		posix.close(posix.FD(h.shutdown_pipe[1]))
+		h.shutdown_pipe[1] = -1
+	}
+
+	if h.master_fd >= 0 {
+		posix.close(posix.FD(h.master_fd))
+		h.master_fd = -1
 	}
 
 	ring_destroy(&h.ring)

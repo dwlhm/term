@@ -131,12 +131,13 @@ ring_read :: proc(r: ^Pty_Ring_Buffer, out: []u8) -> int {
 }
 
 Pty_Handle :: struct {
-	master_fd:    i32,
-	child_pid:    i32,
-	rows:         int,
-	cols:         int,
-	ring:         Pty_Ring_Buffer,
-	is_running:   bool,
-	exit_code:    int,
-	drain_thread: ^thread.Thread,
+	master_fd:     i32,
+	child_pid:     i32,
+	rows:          int,
+	cols:          int,
+	ring:          Pty_Ring_Buffer,
+	is_running:    bool,
+	exit_code:     int,
+	drain_thread:  ^thread.Thread,
+	shutdown_pipe: [2]i32,
 }
