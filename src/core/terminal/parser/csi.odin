@@ -560,6 +560,13 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 			}
 		}
 
+	case 'y': // DECRQCRA - Request Checksum of Rectangular Area (intermediate '*')
+		if p.csi_intermediate == '*' {
+			_parser_report_checksum(p, g)
+		} else if p.on_csi != nil {
+			p.on_csi(p.user_data, rune(cmd), p.csi_params[:p.csi_count])
+		}
+
 	case 'c': // DA - Device Attributes
 		if p.csi_prefix == 0 {
 			// Primary DA: VT220

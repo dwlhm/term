@@ -22,6 +22,7 @@ Status terakhir diperbarui pada hardening v2.1.1. Dokumen ini **hanya berisi ite
   guard path (tidak boleh hapus file di luar TMPDIR), budget 128 MiB, validasi GPU
 - EGC pool free-list LIFO (slot aktif tidak pernah dipakai dua kali)
 - Tab stops (HTS/TBC/CHT/CBT), REP, DECSTR, DECRQM, IND/NEL
+- DECRQCRA `CSI Ps;Ps;Ps;Ps;Ps * y` (checksum grid 16-bit DEC VT420/VT520, clipping, origin-relative) — `src/core/terminal/parser/checksum.odin`
 - Origin Mode (`DEC 6`), Auto-wrap Mode (`DEC 7`), dan DECRC/DECSC save-restore
 - Dynamic OS Font Discovery & Cascade (CoreText on macOS / Fontconfig on Linux) — font fixed-pitch dan daftar cascade resmi OS (Geeza Pro Arab, CJK, Emoji, Symbols) dimuat secara dinamis
 - B8 Arabic font fallback & contextual shaping via HarfBuzz (`0x0600..0x06FF` / Presentation Forms)
@@ -71,6 +72,28 @@ README sudah dikoreksi untuk tidak mengklaim fitur ini. Jangan tambahkan klaim s
    `Terminal` **tidak boleh di-copy setelah `terminal_init`**. Saat ini aman karena
    session selalu dialokasikan di heap (`session_create`) — jangan pernah menaruh
    `Terminal` di dalam `[dynamic]` yang bisa realloc.
+
+## D. Kesenjangan protokol VT & standar ECMA-48
+
+Daftar urutan perbaikan berdasarkan spesifikasi resmi terminal (ECMA-48 dan DEC VT100–VT520).
+Dikerjakan per-sub-protokol secara utuh (kontrak root di parser/grid), bukan tambal per-sequence:
+
+1. **Rectangular Area Operations** (`DECCRA` copy, `DECERA` erase, `DECFRA` fill, `DECSERA` selective erase)
+   — standar DEC VT400. Butuh satu primitif manipulasi rectangle di `grid/` yang dipakai bersama oleh keempat sequence.
+2. **Horizontal Scrolling Region** (`DECSLRM` + `DECLRMM ?69`) — standar DEC VT420.
+   Menambahkan `scroll_left` & `scroll_right` pada `Parser`, dan dihormati oleh `CR`, `BS`, `CUB`, `CUF`, `ICH`, `DCH`, `ECH`, dan autowrap.
+3. **Origin-Relative Cursor Position Report** (`DSR 6n` di bawah `DECOM ?6`) — standar DEC VT100.
+   CPR harus melaporkan koordinat relatif terhadap `scroll_top` saat mode origin aktif.
+4. **ECMA-48 Cursor Positioning**:
+   - `HPA` (`CSI Ps \``) — Horizontal Position Absolute
+   - `HPR` (`CSI Ps a`) — Horizontal Position Relative
+   - `VPR` (`CSI Ps e`) — Vertical Position Relative
+5. **Standard Mode Queries & Device Reports**:
+   - `DECRQSS` (`DCS $ q`) — Request Status String (VT420)
+   - `DECRQM` (`CSI Ps $ p`) — konsistensi pelaporan mode ANSI (mis. IRM 4) dan DEC
+   - `DA1` / `DA2` — kelengkapan atribut perangkat standar VT220/VT420
+6. **Character Protection & Selective Erase** (`DECSCA`, `DECSED`, `DECSEL`) — standar DEC VT220.
+   Atribut proteksi sel yang dihormati saat operasi erase selektif.
 
 ## Prioritas yang disarankan
 
