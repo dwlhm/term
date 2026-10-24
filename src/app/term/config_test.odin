@@ -2,6 +2,7 @@ package term
 
 // Behavioral tests for theme color config parsing & resolution.
 
+import "core:os"
 import "core:testing"
 
 @test
@@ -176,4 +177,49 @@ test_config_pane_opacity_resolution :: proc(t: ^testing.T) {
 	cfg_win, ok_win := config_parse_json5(transmute([]byte)json_win)
 	testing.expect(t, ok_win, "window.opacity JSON5 must parse")
 	testing.expect(t, abs(config_resolve_pane_opacity(&cfg_win) - 0.60) < 0.001, "must fall back to window.opacity when pane.opacity unset")
+}
+
+@test
+test_default_config_template_parsing :: proc(t: ^testing.T) {
+	cfg, ok := config_parse_json5(transmute([]byte)DEFAULT_CONFIG_JSON5)
+	testing.expect(t, ok, "default config template must parse as valid JSON5")
+
+	w, h := config_resolve_window_dimensions(&cfg)
+	testing.expect_value(t, w, 1280)
+	testing.expect_value(t, h, 800)
+
+	pad_x, pad_y := config_resolve_padding(&cfg)
+	testing.expect(t, abs(pad_x - 4.0) < 0.001, "pad_x must be 4.0")
+	testing.expect(t, abs(pad_y - 4.0) < 0.001, "pad_y must be 4.0")
+
+	pane_op := config_resolve_pane_opacity(&cfg, -1.0, true)
+	testing.expect(t, abs(pane_op - 0.45) < 0.001, "pane_opacity must resolve to 0.45")
+
+	font_sz := config_resolve_font_size(&cfg)
+	testing.expect(t, abs(font_sz - 13.0) < 0.001, "font_size must resolve to 13.0")
+
+	testing.expect_value(t, config_resolve_scroll_multiplier(&cfg), 1.0)
+	testing.expect_value(t, config_resolve_drop_animation(&cfg), false)
+}
+
+@test
+test_config_ensure_default_file :: proc(t: ^testing.T) {
+	test_dir := "/tmp/test_term_config_auto_init"
+	test_file := "/tmp/test_term_config_auto_init/config.json5"
+	_ = os.remove(test_file)
+	_ = os.remove(test_dir)
+
+	path, ok := config_ensure_default_file(test_dir)
+	testing.expect(t, ok, "config_ensure_default_file must succeed")
+	testing.expect_value(t, path, test_file)
+	testing.expect(t, os.is_file(test_file), "config.json5 must exist on disk")
+
+	// Verify idempotency: calling again should succeed without error
+	path2, ok2 := config_ensure_default_file(test_dir)
+	testing.expect(t, ok2, "second call must succeed")
+	testing.expect_value(t, path2, test_file)
+
+	// Clean up
+	_ = os.remove(test_file)
+	_ = os.remove(test_dir)
 }

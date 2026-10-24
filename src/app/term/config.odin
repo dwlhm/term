@@ -364,11 +364,19 @@ config_resolve_path :: proc() -> (string, bool) {
 	return "", false
 }
 
-// config_load reads and decodes the user configuration file via config_parse_json5,
-// falling back silently to config_default() if absent or unreadable.
+// config_load reads and decodes the user configuration file via config_parse_json5.
+// If absent, it automatically generates ~/.config/term/config.json5 from the default template.
+// Falls back silently to config_default() if unreadable or cannot write.
 config_load :: proc() -> App_Config {
 	path, found := config_resolve_path()
-	if !found do return config_default()
+	if !found {
+		if default_path, ok := config_ensure_default_file(); ok {
+			path = default_path
+			found = true
+		} else {
+			return config_default()
+		}
+	}
 
 	data, err := os.read_entire_file(path, context.temp_allocator)
 	if err != nil do return config_default()
