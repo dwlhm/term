@@ -16,6 +16,7 @@ import sess_feat "../../features/session"
 import terminal_grid "../../core/terminal/grid"
 import damage "../../core/terminal/damage"
 import chrome_render "../../core/render/chrome"
+import telemetry "../../features/telemetry"
 
 _app_osc_52_sink :: proc(user_data: rawptr, text: string) -> bool {
 	cb := (^Clipboard_Bridge)(user_data)
@@ -214,6 +215,12 @@ app_reap_dead_sessions :: proc(app: ^Term_App) -> (reaped: bool) {
 	}
 
 	for pid in dead_ids {
+		if len(app.diag.grid_dump_dir) > 0 {
+			if pane := mux_feat.multiplexer_get_pane(&app.mux, pid); pane != nil && pane.kind == .Terminal && pane.session != nil {
+				app.diag.dump_seq += 1
+				_ = telemetry.grid_dump_write(app.diag.grid_dump_dir, app.diag.dump_seq, pane.id, &pane.session.term)
+			}
+		}
 		app_close_pane(app, pid)
 		reaped = true
 	}

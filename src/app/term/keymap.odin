@@ -70,8 +70,8 @@ ACTION_CATALOG := []Action_Metadata{
 	{.Search_Toggle,         "Find in Terminal",           "⌘F",       "Search the visible grid and scrollback"},
 	{.Tab_New,               "New Tab",                    "⌘T",       "Open a new terminal tab"},
 	{.Tab_Close,             "Close Tab",                  "⌘W",       "Close the active tab"},
-	{.Tab_Detach,            "Detach Tab to Background",   "^⌘D",      "Move current tab to background sessions"},
-	{.Tab_Attach_Latest,     "Attach Background Session",  "⌘O",       "Restore the latest background session into a tab"},
+	{.Tab_Detach,            "Detach Tab to Background",   "⌥⌘B",      "Move current tab to background sessions"},
+	{.Tab_Attach_Latest,     "Attach Background Session",  "⌥⌘A",      "Restore the latest background session into a tab"},
 	{.Tab_Next,              "Next Tab",                   "^Tab",     "Switch to the next tab"},
 	{.Tab_Prev,              "Previous Tab",               "⇧^Tab",    "Switch to previous tab"},
 	{.Tab_Overview_Toggle,   "Show All Tabs",              "⇧⌘A / ⇧⌘O","Open tab overview and quick switcher"},
@@ -134,11 +134,11 @@ keymap_evaluate :: proc(key: sdl3.Keycode, mod: sdl3.Keymod) -> (Action_Id, bool
 		} else if is_ctrl {
 			switch key {
 			case sdl3.K_F:                  return .Toggle_Fullscreen, true
-			case sdl3.K_D:                  return .Tab_Detach, true
 			}
 		} else if is_alt {
 			switch key {
-			case sdl3.K_D:                  return .Tab_Detach, true
+			case sdl3.K_B:                  return .Tab_Detach, true
+			case sdl3.K_A:                  return .Tab_Attach_Latest, true
 			}
 		} else {
 			switch key {
@@ -149,7 +149,6 @@ keymap_evaluate :: proc(key: sdl3.Keycode, mod: sdl3.Keymod) -> (Action_Id, bool
 			case sdl3.K_D:                  return .Pane_Split_Right, true
 			case sdl3.K_C:                  return .Clipboard_Copy, true
 			case sdl3.K_V:                  return .Clipboard_Paste, true
-			case sdl3.K_O:                  return .Tab_Attach_Latest, true
 			case sdl3.K_A:                  return .Select_All, true
 			case sdl3.K_PLUS, sdl3.K_EQUALS: return .Font_Zoom_In, true
 			case sdl3.K_MINUS:              return .Font_Zoom_Out, true
