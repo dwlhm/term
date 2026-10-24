@@ -655,7 +655,7 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 
 			// C. Autonomous Cursor Determination: Chrome View -> Hyperlink (Cmd-gated) -> Terminal/Session -> Window Default
 			if !divider_cursor_handled {
-				if cur, handled := chrome_view_cursor(&app.chrome_view, &app.layout, &app.tabs_mgr, &app.cmd_center, {mx, my}); handled {
+				if cur, handled := chrome_view_cursor(&app.chrome_view, &app.layout, &app.tabs_mgr, &app.cmd_center, {mx, my}, &app.session_dlg); handled {
 					app.mouse.hover_link = {}
 					app_set_mouse_cursor(cur)
 				} else if hovered_pane != nil {

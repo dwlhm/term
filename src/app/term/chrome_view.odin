@@ -458,13 +458,37 @@ _cursor_for_tab_bar :: proc(layout: ^Layout_State, tabs: ^tabs_feat.Tabs_Manager
 }
 
 // chrome_view_cursor determines the mouse cursor shape for all chrome elements.
+_cursor_for_session_dialog :: proc(dlg: ^chrome_modals.Session_Dialog_State, pt: [2]f32) -> (cursor.Mouse_Cursor, bool) {
+	if dlg == nil || !dlg.visible do return .Default, false
+
+	in_box :: #force_inline proc "contextless" (p: [2]f32, rect: [4]f32) -> bool {
+		return rect[2] > 0 && rect[3] > 0 &&
+		       p.x >= rect[0] && p.x <= rect[0] + rect[2] &&
+		       p.y >= rect[1] && p.y <= rect[1] + rect[3]
+	}
+
+	if in_box(pt, dlg.cancel_rect) do return .Pointer, true
+	if in_box(pt, dlg.apply_rect) do return .Pointer, true
+	if in_box(pt, dlg.toggle_rect) do return .Pointer, true
+
+	for item in dlg.items {
+		if in_box(pt, item.btn_rect) do return .Pointer, true
+	}
+
+	return .Default, true
+}
+
 chrome_view_cursor :: proc(
 	cv: ^Chrome_View,
 	layout: ^Layout_State,
 	tabs: ^tabs_feat.Tabs_Manager,
 	cmd_center: ^Command_Center_State,
 	pt: [2]f32,
+	session_dlg: ^chrome_modals.Session_Dialog_State = nil,
 ) -> (cursor_shape: cursor.Mouse_Cursor, handled: bool) {
+	if session_dlg != nil && session_dlg.visible {
+		return _cursor_for_session_dialog(session_dlg, pt)
+	}
 	if cv == nil || layout == nil do return .Default, false
 
 	if c, ok := _cursor_for_command_center(cmd_center, pt); ok do return c, true
