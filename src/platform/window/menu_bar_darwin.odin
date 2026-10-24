@@ -40,8 +40,10 @@ Set_Obj_Proc :: #type proc "c" (target: id, sel: SEL, obj: id)
 @(private = "file")
 Set_Tag_Proc :: #type proc "c" (target: id, sel: SEL, tag: int)
 
-@(private = "file")
+@(private)
 g_last_menu_bar_tag: int = 0
+@(private)
+g_menu_bar_handler: id = nil
 
 @(private = "file")
 _menu_bar_item_clicked :: proc "c" (self: id, _cmd: SEL, sender: id) {
@@ -53,6 +55,31 @@ _menu_bar_item_clicked :: proc "c" (self: id, _cmd: SEL, sender: id) {
 		Get_Tag_Proc :: #type proc "c" (target: id, sel: SEL) -> int
 		g_last_menu_bar_tag = (Get_Tag_Proc(imp_tag))(sender, sel_tag)
 	}
+}
+
+@(private)
+_get_menu_bar_handler :: proc() -> id {
+	if g_menu_bar_handler != nil do return g_menu_bar_handler
+	cls_handler := objc_getClass("TermMenuBarHandler")
+	if cls_handler == nil {
+		cls_nsobject := objc_getClass("NSObject")
+		cls_handler = objc_allocateClassPair(cls_nsobject, "TermMenuBarHandler", 0)
+		sel_action := sel_registerName("onMenuBarItemClicked:")
+		_ = class_addMethod(cls_handler, sel_action, rawptr(_menu_bar_item_clicked), "v@:@")
+		objc_registerClassPair(cls_handler)
+	}
+
+	sel_alloc := sel_registerName("alloc")
+	sel_init := sel_registerName("init")
+	imp_alloc := class_getMethodImplementation(object_getClass(id(cls_handler)), sel_alloc)
+	imp_init := class_getMethodImplementation(cls_handler, sel_init)
+	if imp_alloc != nil && imp_init != nil {
+		Alloc_Proc :: #type proc "c" (cls: Class, sel: SEL) -> id
+		Init_Proc :: #type proc "c" (target: id, sel: SEL) -> id
+		inst := (Alloc_Proc(imp_alloc))(cls_handler, sel_alloc)
+		g_menu_bar_handler = (Init_Proc(imp_init))(inst, sel_init)
+	}
+	return g_menu_bar_handler
 }
 
 platform_menu_bar_take_action :: proc() -> int {
@@ -150,8 +177,8 @@ platform_menu_bar_update :: proc(handle: rawptr, header: string, items: []Platfo
 	}
 
 	// 3. Dynamic items
-	handler := _get_menu_handler()
-	sel_action := sel_registerName("onMenuItemClicked:")
+	handler := _get_menu_bar_handler()
+	sel_action := sel_registerName("onMenuBarItemClicked:")
 
 	for it in items {
 		if it.is_separator {

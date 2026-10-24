@@ -123,7 +123,7 @@ bench-session:
 	$(ODIN) build src/cmd/bench_session -out:$(OUT_DIR)/bench_session $(RELEASE_FLAGS) $(COMMON_FLAGS)
 	./$(OUT_DIR)/bench_session
 
-test: test-app test-terminal test-pty test-font test-session test-tabs test-multiplexer test-interaction test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-selector test-gpu test-features test-e2e
+test: test-app test-terminal test-pty test-font test-window test-session test-tabs test-multiplexer test-interaction test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-selector test-gpu test-features test-e2e
 
 test-app:
 	$(ODIN) test src/app/term $(TEST_FLAGS)
@@ -136,6 +136,9 @@ test-pty:
 
 test-font:
 	$(ODIN) test src/platform/font/tests $(TEST_FLAGS)
+
+test-window:
+	$(ODIN) test src/platform/window $(TEST_FLAGS)
 
 test-session:
 	$(ODIN) test src/features/session/tests $(TEST_FLAGS)
