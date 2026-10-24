@@ -527,6 +527,55 @@ app_update_hyperlink_hover :: proc(app: ^Term_App) -> bool {
 	return changed
 }
 
+app_handle_drop_position :: proc(app: ^Term_App, drop: sdl3.DropEvent) {
+	if app == nil do return
+	ratio := app.window.pixel_ratio
+	mx := f32(drop.x) * ratio
+	my := f32(drop.y) * ratio
+
+	target_pane := mux_feat.multiplexer_get_focused_pane(&app.mux)
+	for &p in app.mux.panes {
+		if mouse_is_in_rect({mx, my}, p.rect) {
+			target_pane = &p
+			break
+		}
+	}
+	p_id := target_pane.id if target_pane != nil else 0
+	p_rect := target_pane.rect if target_pane != nil else [4]f32{0, 0, app.layout.screen_w, app.layout.screen_h}
+	drop_effect_on_drag_pos(&app.drop_effect, {mx, my}, p_id, p_rect)
+	chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
+}
+
+app_handle_drop_file :: proc(app: ^Term_App, drop: sdl3.DropEvent, is_text: bool = false) {
+	if app == nil do return
+	ratio := app.window.pixel_ratio
+	mx := f32(drop.x) * ratio
+	my := f32(drop.y) * ratio
+
+	target_pane := mux_feat.multiplexer_get_focused_pane(&app.mux)
+	for &p in app.mux.panes {
+		if mouse_is_in_rect({mx, my}, p.rect) {
+			target_pane = &p
+			break
+		}
+	}
+	if target_pane != nil {
+		mux_feat.multiplexer_focus_pane(&app.mux, target_pane.id)
+	}
+	p_id := target_pane.id if target_pane != nil else 0
+	p_rect := target_pane.rect if target_pane != nil else [4]f32{0, 0, app.layout.screen_w, app.layout.screen_h}
+	drop_effect_on_drop(&app.drop_effect, {mx, my}, p_id, p_rect)
+
+	if target_pane != nil && target_pane.session != nil && drop.data != nil {
+		raw_data := string(drop.data)
+		payload := escape_shell_path(raw_data, context.temp_allocator) if !is_text else raw_data
+		if len(payload) > 0 {
+			sess_feat.session_write_string(target_pane.session, payload)
+		}
+	}
+	chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
+}
+
 app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty: bool) {
 	ev: sdl3.Event
 	if non_blocking {
@@ -736,6 +785,18 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 		case .KEY_UP:
 			app_handle_key_up(app, ev.key)
 			_ = app_update_hyperlink_hover(app)
+		case .DROP_BEGIN:
+			drop_effect_on_drag_begin(&app.drop_effect)
+			chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
+		case .DROP_POSITION:
+			app_handle_drop_position(app, ev.drop)
+		case .DROP_FILE:
+			app_handle_drop_file(app, ev.drop, false)
+		case .DROP_TEXT:
+			app_handle_drop_file(app, ev.drop, true)
+		case .DROP_COMPLETE:
+			drop_effect_on_drag_complete(&app.drop_effect)
+			chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
 		}
 
 		if !sdl3.PollEvent(&ev) do break

@@ -63,6 +63,7 @@ Term_App :: struct {
 	default_cwd:   string,
 	hyperlink_openable_bg: [4]f32,
 	hyperlink_blocked_bg:  [4]f32,
+	drop_effect:           Drop_Effect_State,
 }
 
 app_apply_config :: proc(app: ^Term_App, opts: Cli_Options = {}) {
@@ -206,6 +207,7 @@ app_init :: proc(app: ^Term_App, opts: Cli_Options = {}) -> bool {
 	cursor_init(&app.cursor)
 	clipboard_init(&app.clipboard, plat_clip.clipboard_set_text, plat_clip.clipboard_get_text, plat_clip.clipboard_has_text)
 	command_center_init(&app.cmd_center)
+	drop_effect_init(&app.drop_effect)
 
 	app_apply_config(app, opts)
 
@@ -336,6 +338,7 @@ app_run :: proc(app: ^Term_App) {
 		term_dirty := false
 
 		layout_update(&app.layout, dt)
+		drop_effect_update(&app.drop_effect, dt)
 
 		has_pending := mux_feat.multiplexer_has_pending_data(&app.mux)
 		if app_process_events(app, has_pending) {

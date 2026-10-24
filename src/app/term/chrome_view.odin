@@ -46,6 +46,7 @@ _chrome_draw_list_hash :: proc "contextless" (dl: ^chrome_dl.Ui_Draw_List, scree
 		hash = _fnv1a_bytes(hash, ([^]byte)(&cmd.color)[:size_of([4]f32)])
 		hash = _fnv1a_bytes(hash, ([^]byte)(&cmd.border_color)[:size_of([4]f32)])
 		hash = _fnv1a_bytes(hash, ([^]byte)(&cmd.radius)[:size_of(f32)])
+		hash = _fnv1a_bytes(hash, ([^]byte)(&cmd.border_width)[:size_of(f32)])
 		hash = _fnv1a_bytes(hash, ([^]byte)(&cmd.clip_rect)[:size_of([4]f32)])
 		if len(cmd.text) > 0 {
 			hash = _fnv1a_bytes(hash, transmute([]byte)(cmd.text))
@@ -106,6 +107,7 @@ chrome_view_build_draw_list :: proc(
 	hovered_scrollbar: u32 = 0,
 	dragged_scrollbar: u32 = 0,
 	session_dlg: ^chrome_modals.Session_Dialog_State = nil,
+	drop_effect: ^Drop_Effect_State = nil,
 ) -> (dirty: bool) {
 	if cv == nil do return false
 
@@ -205,6 +207,19 @@ chrome_view_build_draw_list :: proc(
 			s := layout.metrics.scale if layout != nil else 1.0
 			divider_view_emit_tree(&cv.draw_list, active_tab.split_tree, hovered_divider, dragged_divider, s)
 		}
+	}
+
+	// 2b. Drag & Drop Tactile Feedback & Crystal 3D Water Ripple
+	if drop_effect != nil && drop_effect_is_active(drop_effect) && layout != nil {
+		fade := drop_effect.exit_fade_t if drop_effect.is_exiting else 1.0
+		if (drop_effect.is_dragging || drop_effect.is_exiting) && drop_effect.target_rect[2] > 20.0 && fade > 0.001 {
+			p_rect := drop_effect.target_rect
+			r := layout.metrics.border_radius
+			// Tactile Drop Target Pane Card: concentric soft ambient glow & subtle ice-blue border
+			chrome_dl.ui_draw_rounded_rect(&cv.draw_list, p_rect, {0.35, 0.65, 1.0, 0.035 * fade}, r)
+			chrome_dl.ui_draw_border(&cv.draw_list, p_rect, {0.45, 0.72, 1.0, 0.35 * fade}, r, 1.5 * layout.metrics.scale)
+		}
+		drop_effect_emit_draw_list(drop_effect, &cv.draw_list, layout.screen_w, layout.screen_h, layout.metrics.scale)
 	}
 
 	// 3. Render Modern Integrated Top Bar & Tabs

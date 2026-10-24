@@ -125,6 +125,7 @@ app_sync_layout_and_winsize :: proc(app: ^Term_App) -> (dirty: bool) {
 // input or PTY output (in-flight tab-bar animation, blinking cursor).
 app_needs_animation :: proc(app: ^Term_App) -> bool {
 	if app.layout.tab_bar_anim_t > 0.0 && app.layout.tab_bar_anim_t < 1.0 do return true
+	if drop_effect_is_active(&app.drop_effect) do return true
 
 	p := mux_feat.multiplexer_get_focused_pane(&app.mux)
 	return p != nil && p.session != nil && p.session.term.parser.cursor.blinking
@@ -222,6 +223,7 @@ app_render_frame :: proc(app: ^Term_App, term_dirty: bool = true) {
 		app.mouse.hovered_scrollbar,
 		app.mouse.scrollbar_pane_id,
 		&app.session_dlg,
+		&app.drop_effect,
 	)
 
 	if term_dirty {
