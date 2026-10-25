@@ -176,3 +176,52 @@ test_multiple_pty_with_background_jobs_close :: proc(t: ^testing.T) {
 	elapsed := time.since(start)
 	testing.expect(t, elapsed < 2 * time.Second, "Closing multiple PTYs with background jobs must terminate immediately without hanging")
 }
+
+@test
+test_pty_nonblocking_write_when_child_stalled :: proc(t: ^testing.T) {
+	// Spawn a child that never reads from stdin and sleeps
+	config := pty.Pty_Config{
+		shell = "/bin/sh",
+		argv  = []string{"-c", "sleep 30"},
+		rows  = 24,
+		cols  = 80,
+	}
+	h, err := pty.pty_spawn(config)
+	testing.expect(t, err == .None, "pty_spawn failed")
+	testing.expect(t, h != nil, "handle is nil")
+	defer pty.pty_close(h)
+
+	time.sleep(20 * time.Millisecond)
+
+	// Write a 64 KB payload (far exceeding macOS 4 KB kernel PTY input queue)
+	payload := make([]u8, 65536, context.temp_allocator)
+	for i in 0..<len(payload) {
+		payload[i] = 'A'
+	}
+
+	start := time.now()
+	_, _ = pty.pty_write(h, payload)
+	elapsed := time.since(start)
+	testing.expect(t, elapsed < 200 * time.Millisecond, "pty_write must not block the UI thread when child stdin is full")
+}
+
+@test
+test_pty_close_with_detached_grandchild_holding_tty :: proc(t: ^testing.T) {
+	// Spawn a shell that forks a detached background subshell holding slave stdio open
+	config := pty.Pty_Config{
+		shell = "/bin/sh",
+		argv  = []string{"-c", "(trap '' HUP TERM; sleep 30) & sleep 30"},
+		rows  = 24,
+		cols  = 80,
+	}
+	h, err := pty.pty_spawn(config)
+	testing.expect(t, err == .None, "pty_spawn failed")
+	testing.expect(t, h != nil, "handle is nil")
+
+	time.sleep(40 * time.Millisecond)
+
+	start := time.now()
+	pty.pty_close(h)
+	elapsed := time.since(start)
+	testing.expect(t, elapsed < 500 * time.Millisecond, "pty_close must complete immediately even when a grandchild ignores SIGHUP and holds slave FD")
+}

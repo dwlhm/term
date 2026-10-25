@@ -24,6 +24,20 @@ import sess_feat "../../features/session"
 FRAME_TICK_MS :: 8
 
 app_handle_window_resize :: proc(app: ^Term_App) {
+	curr_fs := plat_win.platform_is_fullscreen(app.window.handle)
+	fs_changed := app.layout.is_fullscreen != curr_fs
+	app.layout.is_fullscreen = curr_fs
+
+	if fs_changed && !app.layout.is_fullscreen {
+		// SDL3 resets NSWindow styleMask & titlebar properties when exiting macOS fullscreen space.
+		// Re-apply unified titlebar (FullSizeContentView, TitleHidden, TitlebarAppearsTransparent)
+		// BEFORE querying pixel size and computing size_changed so setStyleMask:'s synchronous
+		// viewport update is captured in the same pass.
+		plat_win.platform_setup_unified_titlebar(app.window.handle)
+		blur_enabled := config_resolve_window_blur(&app.config)
+		plat_win.platform_setup_metal_layer(app.window.handle, !blur_enabled)
+	}
+
 	plat_win.window_update_pixel_size(&app.window)
 	if app.window.pixel_w <= 0 || app.window.pixel_h <= 0 do return
 
@@ -34,24 +48,21 @@ app_handle_window_resize :: proc(app: ^Term_App) {
 		app.layout.metrics.cell_w = app.text_atlas.cell_w
 		app.layout.metrics.cell_h = app.text_atlas.cell_h
 	}
-	app_sync_resize_increments(app)
 
-	curr_fs := plat_win.platform_is_fullscreen(app.window.handle)
-	fs_changed := app.layout.is_fullscreen != curr_fs
-	app.layout.is_fullscreen = curr_fs
-
-	size_changed := app.layout.screen_w != f32(app.window.pixel_w) || app.layout.screen_h != f32(app.window.pixel_h)
+	target_w := f32(app.window.pixel_w)
+	target_h := f32(app.window.pixel_h)
+	size_changed := app.layout.screen_w != target_w ||
+		app.layout.screen_h != target_h ||
+		app.composer.screen_w != target_w ||
+		app.composer.screen_h != target_h ||
+		app.chrome_view.rend.width != u32(app.window.pixel_w) ||
+		app.chrome_view.rend.height != u32(app.window.pixel_h)
 
 	if !size_changed && !fs_changed do return
 
-	if fs_changed && !app.layout.is_fullscreen {
-		plat_win.platform_setup_unified_titlebar(app.window.handle)
-		plat_win.window_update_pixel_size(&app.window)
-	}
-
 	// Rendering pipeline is fully in pixel space.
-	app.layout.screen_w = f32(app.window.pixel_w)
-	app.layout.screen_h = f32(app.window.pixel_h)
+	app.layout.screen_w = target_w
+	app.layout.screen_h = target_h
 
 	if size_changed {
 		contract.configure_surface(app.surface, app.device, app.format, u32(app.window.pixel_w), u32(app.window.pixel_h))
@@ -64,7 +75,7 @@ app_handle_window_resize :: proc(app: ^Term_App) {
 	app.mouse.pad_x = app.layout.metrics.pane_pad_x
 	app.mouse.pad_y = app.layout.metrics.pane_pad_y
 
-	app_sync_layout_and_winsize(app)
+	app_sync_layout_and_winsize(app, false)
 	for &pane in app.mux.panes {
 		if pane.kind == .Terminal && pane.session != nil {
 			damage.damage_mark_all(&pane.session.term.damage)
@@ -77,14 +88,23 @@ app_event_watch :: proc "c" (userdata: rawptr, event: ^sdl3.Event) -> bool {
 	if event == nil || userdata == nil do return true
 	#partial switch event.type {
 	case .WINDOW_RESIZED, .WINDOW_PIXEL_SIZE_CHANGED, .WINDOW_EXPOSED, .WINDOW_LEAVE_FULLSCREEN, .WINDOW_ENTER_FULLSCREEN, .WINDOW_RESTORED:
+		app := (^Term_App)(userdata)
+		if app == nil || !app.running || app.window.handle == nil do return true
+		if event.window.windowID != sdl3.GetWindowID(app.window.handle) do return true
+		if app.in_event_watch {
+			app.resize_pending = true
+			return true
+		}
 		context = runtime.default_context()
 		defer free_all(context.temp_allocator)
-		app := (^Term_App)(userdata)
-		if app != nil && app.running && app.window.handle != nil && event.window.windowID == sdl3.GetWindowID(app.window.handle) {
-			sdl3.FlushEvents(sdl3.EventType.WINDOW_RESIZED, sdl3.EventType.WINDOW_PIXEL_SIZE_CHANGED)
+		app.in_event_watch = true
+		defer app.in_event_watch = false
+		for {
+			app.resize_pending = false
 			app_handle_window_resize(app)
 			_ = mux_feat.multiplexer_drain_all(&app.mux)
 			app_render_frame(app, true)
+			if !app.resize_pending do break
 		}
 	}
 	return true

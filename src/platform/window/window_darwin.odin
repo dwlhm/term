@@ -126,21 +126,10 @@ when ODIN_OS == .Darwin {
 		nswindow := id(sdl3.GetPointerProperty(props, sdl3.PROP_WINDOW_COCOA_WINDOW_POINTER, nil))
 		if nswindow != nil {
 			cls_win := object_getClass(nswindow)
-			sel_is_zoomed := sel_registerName("isZoomed")
-			imp_is_zoomed := class_getMethodImplementation(cls_win, sel_is_zoomed)
 			sel_zoom := sel_registerName("zoom:")
 			imp_zoom := class_getMethodImplementation(cls_win, sel_zoom)
-
-			if imp_is_zoomed != nil && imp_zoom != nil {
-				Is_Zoomed_Proc :: #type proc "c" (target: id, sel: SEL) -> BOOL
+			if imp_zoom != nil {
 				Send_Nil_Proc :: #type proc "c" (target: id, sel: SEL, arg: id)
-				is_zoomed := bool((Is_Zoomed_Proc(imp_is_zoomed))(nswindow, sel_is_zoomed))
-
-				if !is_zoomed {
-					// Clamping increments to (1.0, 1.0) allows standard zoom to expand fully to screen edges
-					// without triggering AppKit's division-by-zero NaN crash in _zoomToScreen.
-					platform_set_resize_increments(sdl_window, 1.0, 1.0)
-				}
 				(Send_Nil_Proc(imp_zoom))(nswindow, sel_zoom, nil)
 				return
 			}
@@ -388,6 +377,7 @@ when ODIN_OS == .Darwin {
 		}
 
 		platform_setup_metal_layer(sdl_window)
+		platform_set_resize_increments(sdl_window, 1.0, 1.0)
 		platform_disable_system_titlebar_double_click()
 		return true
 	}

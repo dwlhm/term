@@ -56,6 +56,9 @@ Term_App :: struct {
 	session_dlg:   chrome_modals.Session_Dialog_State,
 	menu_bar:      rawptr,
 	last_mb_sync:  time.Time,
+	last_title_sync: time.Time,
+	in_event_watch:  bool,
+	resize_pending:  bool,
 	// Set when a key event was already encoded byte-exactly (Alt/Option combos),
 	// so the follow-up TEXT_INPUT for the same keystroke is not sent twice.
 	suppress_text_input: bool,
@@ -259,6 +262,16 @@ app_init :: proc(app: ^Term_App, opts: Cli_Options = {}) -> bool {
 
 app_destroy :: proc(app: ^Term_App) {
 	if app == nil do return
+	app.running = false
+	sdl3.RemoveEventWatch(app_event_watch, app)
+
+	// Immediately hide the native window so clicking the red traffic light or pressing Cmd+Q
+	// gives instant visual closure before GPU and PTY teardown runs.
+	if app.window.handle != nil {
+		_ = sdl3.HideWindow(app.window.handle)
+		sdl3.PumpEvents()
+	}
+
 	if app.menu_bar != nil {
 		plat_win.platform_menu_bar_destroy(app.menu_bar)
 		app.menu_bar = nil
@@ -266,9 +279,14 @@ app_destroy :: proc(app: ^Term_App) {
 	chrome_modals.session_dialog_destroy(&app.session_dlg)
 	sess_feat.session_registry_destroy(&app.session_reg)
 	diagnostics_shutdown(app)
-	sdl3.RemoveEventWatch(app_event_watch, app)
 	mux_feat.multiplexer_destroy(&app.mux)
 	tabs_feat.tabs_manager_destroy(&app.tabs_mgr)
+
+	// Drain any in-flight GPU work before releasing textures, views, and surface.
+	if contract.wait_for_idle != nil && rawptr(app.device) != nil {
+		_ = contract.wait_for_idle(app.device)
+	}
+
 	composer_view_destroy(&app.composer)
 	chrome_view_destroy(&app.chrome_view)
 	terminal_view_destroy(&app.term_view)
@@ -291,23 +309,12 @@ app_destroy :: proc(app: ^Term_App) {
 	app_cleanup_mouse_cursors()
 }
 
-// app_sync_resize_increments keeps the macOS window's live resize "magnet"
-// aligned with the current cell size (in logical points), so windowed resizing
-// snaps to exact rows/columns instead of leaving fractional leftover space.
-// Increments are bypassed when the window is maximized or fullscreen to allow
-// touching screen edges.
+// app_sync_resize_increments keeps continuous 1-point window sizing enabled so
+// macOS zoom/maximize, fullscreen, and third-party window managers never hit
+// AppKit _zoomToScreen constraint loops; pane_grid_pad centers sub-cell space.
 app_sync_resize_increments :: proc(app: ^Term_App) {
 	if app == nil || app.window.handle == nil do return
-	if plat_win.platform_is_maximized(app.window.handle) || plat_win.platform_is_fullscreen(app.window.handle) {
-		plat_win.platform_set_resize_increments(app.window.handle, 1.0, 1.0)
-		return
-	}
-	ratio := app.window.pixel_ratio if app.window.pixel_ratio > 0.0 else 1.0
-	plat_win.platform_set_resize_increments(
-		app.window.handle,
-		app.layout.metrics.cell_w / ratio,
-		app.layout.metrics.cell_h / ratio,
-	)
+	plat_win.platform_set_resize_increments(app.window.handle, 1.0, 1.0)
 }
 
 app_apply_font_size :: proc(app: ^Term_App, new_size: f32) {
@@ -370,7 +377,7 @@ app_run :: proc(app: ^Term_App) {
 		if app_reap_dead_sessions(app) do term_dirty = true
 		if !app.running do break
 
-		if app_sync_layout_and_winsize(app) do term_dirty = true
+		if app_sync_layout_and_winsize(app, drained > 0) do term_dirty = true
 		diagnostics_poll(app)
 
 		if tag := plat_win.platform_menu_bar_take_action(); tag > 0 {

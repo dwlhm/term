@@ -438,6 +438,13 @@ _wgpu_configure_surface :: proc(surface: rawptr, device: contract.Gpu_Device, fo
 	w := max(u32(1), width)
 	h := max(u32(1), height)
 
+	if surf.configured && surf.device == dev && surf.format == wgpu_fmt && surf.width == w && surf.height == h && surf.alpha_mode == target_alpha {
+		return
+	}
+	if surf.configured && surf.device != nil {
+		wgpu.DevicePoll(surf.device, true, nil)
+	}
+
 	surf.device = dev
 	if surf.present_mode == .Undefined {
 		surf.present_mode = .Fifo
@@ -496,7 +503,11 @@ surface_set_transparent :: proc(surface: rawptr, transparent: bool) {
 				target_alpha = .Unpremultiplied
 			}
 		}
+		if s.alpha_mode == target_alpha {
+			return
+		}
 		s.alpha_mode = target_alpha
+		wgpu.DevicePoll(s.device, true, nil)
 		config := wgpu.SurfaceConfiguration{
 			device      = s.device,
 			format      = s.format,
@@ -556,19 +567,21 @@ _wgpu_set_present_mode :: proc(surface: rawptr, mode: contract.Gpu_Present_Mode)
 		}
 	}
 
-	surf.present_mode = target
-
-	if surf.configured && surf.device != nil {
+	if surf.configured && surf.device != nil && surf.present_mode != target {
+		surf.present_mode = target
+		wgpu.DevicePoll(surf.device, true, nil)
 		config := wgpu.SurfaceConfiguration{
 			device      = surf.device,
 			format      = surf.format,
 			usage       = { .RenderAttachment },
 			width       = surf.width,
 			height      = surf.height,
-			alphaMode   = .Opaque,
+			alphaMode   = surf.alpha_mode,
 			presentMode = target,
 		}
 		wgpu.SurfaceConfigure(surf.handle, &config)
+	} else {
+		surf.present_mode = target
 	}
 }
 

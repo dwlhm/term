@@ -17,7 +17,10 @@ foreign libc {
 
 TIOCSWINSZ :: 0x5414
 F_SETFD    :: 2
+F_GETFL    :: 3
+F_SETFL    :: 4
 FD_CLOEXEC :: 1
+O_NONBLOCK :: 0x0800
 
 Winsize :: struct {
 	ws_row:    c.ushort,
@@ -92,6 +95,11 @@ _pty_spawn_platform :: proc(config: Pty_Config) -> (handle: ^Pty_Handle, err: Pt
 	fcntl(c.int(master), F_SETFD, rawptr(uintptr(FD_CLOEXEC)))
 	fcntl(c.int(pipe_fds[0]), F_SETFD, rawptr(uintptr(FD_CLOEXEC)))
 	fcntl(c.int(pipe_fds[1]), F_SETFD, rawptr(uintptr(FD_CLOEXEC)))
+
+	p0_flags := fcntl(c.int(pipe_fds[0]), F_GETFL)
+	if p0_flags >= 0 do fcntl(c.int(pipe_fds[0]), F_SETFL, rawptr(uintptr(p0_flags | O_NONBLOCK)))
+	p1_flags := fcntl(c.int(pipe_fds[1]), F_GETFL)
+	if p1_flags >= 0 do fcntl(c.int(pipe_fds[1]), F_SETFL, rawptr(uintptr(p1_flags | O_NONBLOCK)))
 
 	pid := posix.fork()
 	if pid < 0 {
@@ -212,17 +220,23 @@ _pty_close_platform :: proc(h: ^Pty_Handle) {
 		_ = posix.write(posix.FD(h.shutdown_pipe[1]), &sig, 1)
 	}
 
-	if h.master_fd >= 0 {
-		fg_pg := tcgetpgrp(c.int(h.master_fd))
+	master_fd := h.master_fd
+	h.master_fd = -1
+	if master_fd >= 0 {
+		fg_pg := tcgetpgrp(c.int(master_fd))
 		if fg_pg > 0 && fg_pg != c.int(h.child_pid) {
+			_ = posix.kill(posix.pid_t(-fg_pg), .SIGCONT)
 			_ = posix.kill(posix.pid_t(-fg_pg), .SIGHUP)
 			_ = posix.kill(posix.pid_t(-fg_pg), .SIGKILL)
 		}
+		posix.close(posix.FD(master_fd))
 	}
 
 	if h.child_pid > 0 {
+		_ = posix.kill(posix.pid_t(-h.child_pid), .SIGCONT)
 		_ = posix.kill(posix.pid_t(-h.child_pid), .SIGHUP)
 		_ = posix.kill(posix.pid_t(-h.child_pid), .SIGKILL)
+		_ = posix.kill(posix.pid_t(h.child_pid), .SIGCONT)
 		_ = posix.kill(posix.pid_t(h.child_pid), .SIGHUP)
 		_ = posix.kill(posix.pid_t(h.child_pid), .SIGKILL)
 		status: c.int = 0
@@ -242,11 +256,6 @@ _pty_close_platform :: proc(h: ^Pty_Handle) {
 	if h.shutdown_pipe[1] >= 0 {
 		posix.close(posix.FD(h.shutdown_pipe[1]))
 		h.shutdown_pipe[1] = -1
-	}
-
-	if h.master_fd >= 0 {
-		posix.close(posix.FD(h.master_fd))
-		h.master_fd = -1
 	}
 
 	ring_destroy(&h.ring)
@@ -275,7 +284,26 @@ _pty_write_platform :: proc(h: ^Pty_Handle, data: []u8) -> (int, Pty_Error) {
 	if h == nil || h.master_fd < 0 do return 0, .Closed
 	if len(data) == 0 do return 0, .None
 
-	n := posix.write(posix.FD(h.master_fd), &data[0], len(data))
-	if n < 0 do return 0, .Write_Failed
-	return n, .None
+	fd := posix.FD(h.master_fd)
+	total := 0
+	for total < len(data) {
+		rem := len(data) - total
+		n := posix.write(fd, &data[total], uint(rem))
+		if n > 0 {
+			total += int(n)
+			continue
+		}
+		if n < 0 {
+			err_no := posix.errno()
+			if err_no == .EINTR do continue
+			if err_no == .EAGAIN {
+				pfd := posix.pollfd{fd = fd, events = {.OUT}}
+				if posix.poll(&pfd, 1, 2) <= 0 do break
+				continue
+			}
+		}
+		if total > 0 do return total, .None
+		return 0, .Write_Failed
+	}
+	return total, .None
 }

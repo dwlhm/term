@@ -88,7 +88,8 @@ app_select_tab :: proc(app: ^Term_App, idx: int) {
 		}
 	}
 
-	app_sync_layout_and_winsize(app)
+	app.last_title_sync = {}
+	app_sync_layout_and_winsize(app, true)
 
 	// Mark all visible panes in this tab as damaged so their content renders immediately
 	for &pane in app.mux.panes {
@@ -134,7 +135,8 @@ app_close_tab :: proc(app: ^Term_App, tab_idx: int) {
 		if active_tab.active_pane_id != 0 {
 			mux_feat.multiplexer_focus_pane(&app.mux, active_tab.active_pane_id)
 		}
-		app_sync_layout_and_winsize(app)
+		app.last_title_sync = {}
+	app_sync_layout_and_winsize(app, true)
 		for &pane in app.mux.panes {
 			if pane.kind == .Terminal && pane.session != nil && pane.rect[2] > 0 {
 				damage.damage_mark_all(&pane.session.term.damage)
@@ -188,7 +190,8 @@ app_close_pane :: proc(app: ^Term_App, pane_id: u32) {
 		}
 	}
 
-	app_sync_layout_and_winsize(app)
+	app.last_title_sync = {}
+	app_sync_layout_and_winsize(app, true)
 	for &pane in app.mux.panes {
 		if pane.kind == .Terminal && pane.session != nil && pane.rect[2] > 0 {
 			damage.damage_mark_all(&pane.session.term.damage)
@@ -367,7 +370,8 @@ app_execute_action :: proc(app: ^Term_App, act: Action_Id) {
 			chrome_splits.split_node_split(target_leaf, .Horizontal, 0.5, new_p, app.tabs_mgr.allocator)
 			mux_feat.multiplexer_focus_pane(&app.mux, new_p)
 			active_tab.active_pane_id = new_p
-			app_sync_layout_and_winsize(app)
+			app.last_title_sync = {}
+	app_sync_layout_and_winsize(app, true)
 		}
 
 	case .Pane_Split_Down:
@@ -382,7 +386,8 @@ app_execute_action :: proc(app: ^Term_App, act: Action_Id) {
 			chrome_splits.split_node_split(target_leaf, .Vertical, 0.5, new_p, app.tabs_mgr.allocator)
 			mux_feat.multiplexer_focus_pane(&app.mux, new_p)
 			active_tab.active_pane_id = new_p
-			app_sync_layout_and_winsize(app)
+			app.last_title_sync = {}
+	app_sync_layout_and_winsize(app, true)
 		}
 
 	case .Pane_Close:
@@ -400,7 +405,8 @@ app_execute_action :: proc(app: ^Term_App, act: Action_Id) {
 		p := mux_feat.multiplexer_get_focused_pane(&app.mux)
 		if p != nil {
 			_ = mux_feat.multiplexer_toggle_zoom(&app.mux, p.id)
-			app_sync_layout_and_winsize(app)
+			app.last_title_sync = {}
+	app_sync_layout_and_winsize(app, true)
 			for &pane in app.mux.panes {
 				if pane.kind == .Terminal && pane.session != nil && pane.rect[2] > 0 {
 					damage.damage_mark_all(&pane.session.term.damage)

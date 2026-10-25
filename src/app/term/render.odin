@@ -89,8 +89,14 @@ app_sync_tab_titles :: proc(app: ^Term_App) -> (dirty: bool) {
 
 // app_sync_layout_and_winsize synchronizes the active tab split geometry
 // and updates the PTY window size (TIOCSWINSZ) for any mutated terminal panes.
-app_sync_layout_and_winsize :: proc(app: ^Term_App) -> (dirty: bool) {
-	if app_sync_tab_titles(app) do dirty = true
+app_sync_layout_and_winsize :: proc(app: ^Term_App, sync_titles: bool = true) -> (dirty: bool) {
+	if sync_titles {
+		now := time.now()
+		if time.duration_milliseconds(time.diff(app.last_title_sync, now)) >= 200 {
+			app.last_title_sync = now
+			if app_sync_tab_titles(app) do dirty = true
+		}
+	}
 
 	// Sync active tab split tree with uniform margin == pane gap
 	content_area := layout_compute_content_area(&app.layout)
