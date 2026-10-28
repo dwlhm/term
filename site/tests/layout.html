@@ -1,0 +1,24 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Layout checks</title>
+<body style="margin:0">
+<iframe id="frame" title="page under test"></iframe>
+<script src="harness.js"></script>
+<script>
+const { check, load, run } = Harness;
+const WIDTHS = [360, 768, 1280];
+
+run(async () => {
+  for (const width of WIDTHS) {
+    const { win, doc, errors } = await load(frame, width);
+    check(`${width}px: no load or runtime errors`, errors.length === 0, errors.join(' | '));
+    const viewport = win.innerWidth;
+    const offenders = [...doc.querySelectorAll('body *')]
+      .filter((el) => el.getBoundingClientRect().right > viewport + 1)
+      .slice(0, 5)
+      .map((el) => `${el.tagName.toLowerCase()}.${[...el.classList].join('.')}`);
+    check(`${width}px: no horizontal overflow`,
+      doc.documentElement.scrollWidth <= viewport && offenders.length === 0, offenders.join(', '));
+  }
+});
+</script>

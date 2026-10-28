@@ -1,0 +1,69 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Dirty Cells checks</title>
+<body style="margin:0">
+<iframe id="frame" title="page under test"></iframe>
+<script src="harness.js"></script>
+<script>
+const { check, load, run, wait } = Harness;
+const CHARS = 'abcdefghijklmnopqrstuvwxyz0123456789;:/-_[]{}';
+
+run(async () => {
+  const { win, doc, errors } = await load(frame, 1100);
+  const $ = (id) => doc.getElementById(id);
+  const keyEvent = (key, code = '', extra = {}) =>
+    new win.KeyboardEvent('keydown', { key, code, bubbles: true, cancelable: true, ...extra });
+  const press = (key, code) => doc.dispatchEvent(keyEvent(key, code));
+  const paused = () => !$('game-overlay').hidden && /Paused/.test($('game-overlay-text').textContent);
+  const showBoard = async () => { $('play').scrollIntoView({ behavior: 'instant' }); await wait(300); };
+
+  await showBoard();
+  check('idle: overlay hidden', $('game-overlay').hidden);
+  $('game-play').click(); $('game-play').click(); $('game-play').click();
+  await wait(200);
+  check('triple Play click starts one game', /Score 0/.test($('game-canvas').getAttribute('aria-label')));
+
+  for (const c of CHARS) press(c);
+  await wait(100);
+  const score = $('game-score').textContent;
+  check('typing cleans a dirty cell', Number(score) > 0, `score=${score}`);
+
+  frame.style.width = '420px'; await wait(400);
+  check('resize keeps state', $('game-score').textContent === score && $('game-lives-text').textContent.startsWith('3'));
+  frame.style.width = '1100px'; await showBoard();
+  if (paused()) press(' ', 'Space');
+  await wait(150);
+  check('resume after resize', $('game-overlay').hidden);
+
+  const meta = keyEvent('k', '', { metaKey: true });
+  doc.dispatchEvent(meta);
+  check('modifier shortcuts pass through', !meta.defaultPrevented);
+
+  press('Escape'); await wait(100);
+  check('Esc pauses', paused());
+  await wait(3500);
+  check('no deadline expiry while paused', paused() && $('game-score').textContent === score);
+  press(' ', 'Space'); await wait(150);
+  check('Space resumes', $('game-overlay').hidden);
+
+  win.scrollTo({ top: 0, behavior: 'instant' }); await wait(300);
+  check('scrolling the board away pauses', paused());
+  const space = keyEvent(' ', 'Space');
+  doc.dispatchEvent(space);
+  check('Space scrolls the page while board is offscreen', !space.defaultPrevented);
+
+  await showBoard();
+  press(' ', 'Space');
+  await wait(9000);
+  check('idle play ends in game over', /Frame dropped/.test($('game-overlay-text').textContent));
+  check('button offers Play again', $('game-play').textContent.trim() === 'Play again');
+  let stored = null;
+  try { stored = win.localStorage.getItem('term.dirtycells.best'); } catch { stored = 'storage-blocked'; }
+  check('best score persisted', stored === $('game-best').textContent && Number(stored) > 0, `stored=${stored}`);
+  check('game over announced', /Frame dropped/.test($('game-live').textContent));
+
+  $('game-play').click(); await wait(150);
+  check('restart resets lives', $('game-lives-text').textContent.startsWith('3'));
+  check('no load or runtime errors', errors.length === 0, errors.join(' | '));
+});
+</script>

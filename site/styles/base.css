@@ -1,0 +1,100 @@
+*,
+*::before,
+*::after { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--surface-0);
+  color: var(--text-1);
+  font-family: var(--font-sans);
+  font-size: var(--step-0);
+  line-height: var(--leading-body);
+  overflow-x: hidden;
+}
+
+img, svg, canvas { display: block; max-width: 100%; }
+
+a { color: inherit; }
+
+:focus-visible { outline: none; box-shadow: var(--focus-ring); border-radius: var(--radius-1); }
+
+.container {
+  width: 100%;
+  max-width: var(--content-max);
+  margin-inline: auto;
+  padding-inline: var(--gutter);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.section {
+  padding-block: var(--space-7);
+  border-top: 1px solid var(--line);
+}
+
+.section-head { max-width: 46rem; margin-bottom: var(--space-6); }
+
+.eyebrow {
+  margin: 0;
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: var(--step--1);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.section-title {
+  margin: var(--space-3) 0 0;
+  font-size: var(--step-section);
+  font-weight: var(--weight-strong);
+  line-height: var(--leading-tight);
+  letter-spacing: -0.02em;
+  text-wrap: balance;
+}
+
+.section-lede {
+  max-width: 54ch;
+  margin: var(--space-3) 0 0;
+  color: var(--text-2);
+}
+
+@media (min-width: 64rem) {
+  .section { padding-block: var(--space-8); }
+}
+
+/* Pressable: tactile scale feedback for buttons and button-like links. */
+:where(button, .pressable) {
+  transition: transform var(--dur-press) var(--ease);
+}
+
+:where(button, .pressable):active:not(:disabled) {
+  transform: scale(var(--press-scale));
+}
+
+/* Hit area: grows the invisible target to --hit-min without changing the visual box. */
+.hit-area { position: relative; }
+
+.hit-area::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: max(100%, var(--hit-min));
+  height: max(100%, var(--hit-min));
+  transform: translate(-50%, -50%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  :where(button, .pressable) { transition: none; }
+  :where(button, .pressable):active:not(:disabled) { transform: none; }
+}

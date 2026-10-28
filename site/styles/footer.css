@@ -1,0 +1,65 @@
+.foot-root {
+  padding-block: var(--space-6);
+  border-top: 1px solid var(--line);
+  background: var(--surface-0);
+  color: var(--text-2);
+  font-size: var(--step--1);
+}
+
+.foot-container {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3) var(--space-5);
+  width: 100%;
+  max-width: var(--content-max);
+  margin-inline: auto;
+  padding-inline: var(--gutter);
+}
+
+.foot-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.foot-mark {
+  width: 1.25rem;
+  height: 1.25rem;
+  border-radius: var(--radius-1);
+}
+
+.foot-license {
+  margin: 0;
+}
+
+.foot-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.foot-link {
+  display: inline-block;
+  padding-block: var(--space-1);
+  color: var(--text-2);
+  text-decoration: underline;
+  text-decoration-color: var(--line-strong);
+  text-underline-offset: 0.2em;
+  border-radius: var(--radius-1);
+  transition: color var(--dur-fast) var(--ease);
+}
+
+.foot-link:hover {
+  color: var(--text-1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .foot-link {
+    transition: none;
+  }
+}

@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Term — GPU terminal emulator</title>
+  <meta name="description" content="Term is a GPU-accelerated terminal emulator built with Odin and Native Apple Metal for macOS and Linux.">
+  <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles/tokens.css">
+  <link rel="stylesheet" href="styles/base.css">
+  <link rel="stylesheet" href="styles/hero.css">
+  <link rel="stylesheet" href="styles/features.css">
+  <link rel="stylesheet" href="styles/game.css">
+  <link rel="stylesheet" href="styles/start.css">
+  <link rel="stylesheet" href="styles/footer.css">
+</head>
+<body>
+  <header id="hero" class="hero-root">
+  <nav class="hero-nav" aria-label="Primary">
+    <div class="hero-nav-inner">
+      <a class="hero-brand" href="#hero">
+        <img class="hero-brand-mark" src="assets/logo.svg" alt="" width="24" height="24">
+        <span>Term</span>
+      </a>
+      <ul class="hero-links">
+        <li><a class="hero-link hit-area" href="#features">Features</a></li>
+        <li><a class="hero-link hit-area" href="#play">Play</a></li>
+        <li><a class="hero-link hit-area" href="#get-started">Get started</a></li>
+        <li><a class="hero-link hit-area" href="https://github.com/dwlhm/term">GitHub</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <div class="hero-inner">
+    <div class="hero-copy">
+      <h1 class="hero-title">A terminal that only draws what changed.</h1>
+      <p class="hero-sub">A GPU-accelerated terminal emulator built with Odin and Native Apple Metal for macOS and Linux.</p>
+      <div class="hero-actions">
+        <a class="hero-btn hero-btn-primary pressable" href="https://github.com/dwlhm/term/releases">Download</a>
+        <a class="hero-btn pressable" href="#play">Play Dirty Cells</a>
+      </div>
+      <ul class="hero-badges" aria-label="Project facts">
+        <li class="hero-badge">Odin</li>
+        <li class="hero-badge">Metal / wgpu</li>
+        <li class="hero-badge">macOS · Linux</li>
+        <li class="hero-badge">MIT</li>
+      </ul>
+    </div>
+
+    <div class="hero-term" role="img" aria-label="Example terminal session: make term, then ./bin/term, then a grid dump while running htop">
+      <div class="hero-term-bar">
+        <span class="hero-dot"></span>
+        <span class="hero-dot"></span>
+        <span class="hero-dot"></span>
+        <span class="hero-term-label">term</span>
+      </div>
+      <div class="hero-term-body">
+        <p class="hero-line"><span class="hero-prompt">$</span><span class="hero-command">make term</span></p>
+        <p class="hero-line"><span class="hero-prompt">$</span><span class="hero-command">./bin/term</span></p>
+        <p class="hero-line"><span class="hero-prompt">$</span><span class="hero-command">./bin/term --grid-dump ./out -e htop</span></p>
+        <p class="hero-line"><span class="hero-prompt">$</span><span class="hero-caret" aria-hidden="true"></span></p>
+      </div>
+    </div>
+  </div>
+</header>
+  <main>
+    <section id="features" class="section feat-root" aria-labelledby="features-title">
+  <div class="container">
+    <header class="section-head">
+      <p class="eyebrow">Features</p>
+      <h2 id="features-title" class="section-title">Built from first principles</h2>
+      <p class="section-lede">Every stage is measured before it ships. Empirical percentiles, not intuition, decide which data structure or GPU pass survives.</p>
+    </header>
+
+    <ul class="feat-grid">
+      <li class="feat-card">
+        <p class="feat-label"><span class="feat-label-num">01</span>Memory</p>
+        <h3 class="feat-card-title">Zero steady-state allocations</h3>
+        <p class="feat-card-body">Input rings, grapheme pools, the shape cache and GPU atlas slots are allocated up front. Once running, normal frame cycles perform zero heap allocations.</p>
+      </li>
+      <li class="feat-card">
+        <p class="feat-label"><span class="feat-label-num">02</span>Renderer</p>
+        <h3 class="feat-card-title">Adaptive GPU rendering</h3>
+        <p class="feat-card-body">Each frame chooses between instance, compute-tile and fullscreen strategies to match the workload. Carve-outs keep single-cell updates and scrolling off the heavy GPU passes.</p>
+      </li>
+      <li class="feat-card">
+        <p class="feat-label"><span class="feat-label-num">03</span>Damage</p>
+        <h3 class="feat-card-title">Only changed cells are uploaded</h3>
+        <p class="feat-card-body">Damage tracking narrows work from cell to span to row, so only mutated cells reach the GPU. Scrollback advances through ring offsets in constant time, with no memory copying.</p>
+      </li>
+      <li class="feat-card">
+        <p class="feat-label"><span class="feat-label-num">04</span>Protocols</p>
+        <h3 class="feat-card-title">Modern terminal protocols</h3>
+        <p class="feat-card-body">Term speaks Kitty graphics and keyboard, Sixel, OSC 8 hyperlinks and synchronized output. Alternate screen, DEC graphics and complete SGR keep <code class="feat-code">vim</code>, <code class="feat-code">htop</code> and <code class="feat-code">tmux</code> intact.</p>
+      </li>
+      <li class="feat-card">
+        <p class="feat-label"><span class="feat-label-num">05</span>Text</p>
+        <h3 class="feat-card-title">Unicode &amp; typography</h3>
+        <p class="feat-card-body">Extended grapheme clusters cover combining marks, ZWJ sequences and wide CJK glyphs. Multi-tier fallback spans symbols, Arabic and color emoji, while glyphs rasterize on a background worker.</p>
+      </li>
+      <li class="feat-card">
+        <p class="feat-label"><span class="feat-label-num">06</span>Workspace</p>
+        <h3 class="feat-card-title">Native feel</h3>
+        <p class="feat-card-body">Tabs, splits, in-terminal search and JSON5 configuration share one window. Session persistence keeps long-running work alive after a window closes.</p>
+      </li>
+    </ul>
+
+    <div class="feat-pipeline">
+      <div class="feat-pipeline-head">
+        <h3 class="feat-pipeline-title" id="feat-pipeline-title">From PTY bytes to pixels</h3>
+        <p class="feat-pipeline-note">The shortest path from input to displayed pixels: each stage hands off to the next.</p>
+      </div>
+      <ol class="feat-flow" aria-labelledby="feat-pipeline-title">
+        <li class="feat-step">
+          <span class="feat-step-index" aria-hidden="true">01</span>
+          <span class="feat-step-name">PTY bytes</span>
+        </li>
+        <li class="feat-step">
+          <span class="feat-step-index" aria-hidden="true">02</span>
+          <span class="feat-step-name">Input ring</span>
+        </li>
+        <li class="feat-step">
+          <span class="feat-step-index" aria-hidden="true">03</span>
+          <span class="feat-step-name">VT state machine</span>
+        </li>
+        <li class="feat-step">
+          <span class="feat-step-index" aria-hidden="true">04</span>
+          <span class="feat-step-name">Ring grid</span>
+        </li>
+        <li class="feat-step">
+          <span class="feat-step-index" aria-hidden="true">05</span>
+          <span class="feat-step-name">Render compiler</span>
+        </li>
+        <li class="feat-step">
+          <span class="feat-step-index" aria-hidden="true">06</span>
+          <span class="feat-step-name">GPU strategy</span>
+        </li>
+        <li class="feat-step">
+          <span class="feat-step-index" aria-hidden="true">07</span>
+          <span class="feat-step-name">Pixels</span>
+        </li>
+      </ol>
+    </div>
+  </div>
+</section>
+    <section id="play" class="section game-root" aria-labelledby="game-title">
+  <div class="container">
+    <header class="section-head">
+      <p class="eyebrow">Play</p>
+      <h2 id="game-title" class="section-title">Dirty Cells</h2>
+      <p class="section-lede">Term only redraws cells that change. Type each dirty cell&rsquo;s character before its deadline to clean it.</p>
+    </header>
+
+    <dl class="game-hud" aria-label="Game status">
+      <div class="game-stat">
+        <dt class="game-stat-label">Score</dt>
+        <dd class="game-stat-value" id="game-score">0</dd>
+      </div>
+      <div class="game-stat">
+        <dt class="game-stat-label">Streak</dt>
+        <dd class="game-stat-value" id="game-streak">0</dd>
+      </div>
+      <div class="game-stat">
+        <dt class="game-stat-label">Level</dt>
+        <dd class="game-stat-value" id="game-level">sparse</dd>
+      </div>
+      <div class="game-stat">
+        <dt class="game-stat-label">Best</dt>
+        <dd class="game-stat-value" id="game-best">0</dd>
+      </div>
+      <div class="game-stat">
+        <dt class="game-stat-label">Lives</dt>
+        <dd class="game-stat-value game-lives">
+          <span class="game-life" aria-hidden="true"></span>
+          <span class="game-life" aria-hidden="true"></span>
+          <span class="game-life" aria-hidden="true"></span>
+          <span class="visually-hidden" id="game-lives-text">3 of 3 lives</span>
+        </dd>
+      </div>
+    </dl>
+
+    <div class="game-board" id="game-board">
+      <canvas id="game-canvas" class="game-canvas" role="img" aria-label="Dirty Cells board. Press Play to start."></canvas>
+      <div class="game-overlay" id="game-overlay" hidden>
+        <p class="game-overlay-text" id="game-overlay-text"></p>
+      </div>
+    </div>
+
+    <div class="game-actions">
+      <button type="button" id="game-play" class="game-play">Play</button>
+      <ul class="game-help" aria-label="Controls">
+        <li class="game-help-item"><kbd>Type</kbd><span>the character shown in a dirty cell</span></li>
+        <li class="game-help-item"><kbd>Space</kbd><span>pause / resume</span></li>
+        <li class="game-help-item"><kbd>Esc</kbd><span>pause</span></li>
+        <li class="game-help-item"><kbd>Tap</kbd><span>clean a cell on touch</span></li>
+      </ul>
+    </div>
+
+    <p class="game-live visually-hidden" id="game-live" aria-live="polite"></p>
+  </div>
+</section>
+    <section id="get-started" class="section start-root" aria-labelledby="start-title">
+  <div class="container">
+    <header class="section-head">
+      <p class="eyebrow">Install</p>
+      <h2 id="start-title" class="section-title">Get started</h2>
+      <p class="section-lede">Download a prebuilt release, or build from source.</p>
+    </header>
+
+    <div class="start-grid">
+      <div class="start-col">
+        <h3 class="start-col-title">Install</h3>
+        <p class="start-text">Prebuilt releases are available for macOS and Linux.</p>
+
+        <h4 class="start-platform">macOS</h4>
+        <p class="start-text">Download <code class="start-inline">Term.dmg</code> from
+          <a class="start-link" href="https://github.com/dwlhm/term/releases">Releases</a>, open it, and drag
+          <code class="start-inline">Term.app</code> into <code class="start-inline">/Applications</code>.</p>
+
+        <h4 class="start-platform">Linux</h4>
+        <p class="start-text">Download the Linux tarball from Releases, extract it, then run:</p>
+        <div class="start-code" role="group" aria-label="Linux install command">
+          <pre class="start-pre"><code>sudo ./install.sh</code></pre>
+          <button class="start-copy hit-area" type="button">Copy</button>
+          <span class="start-status" role="status"></span>
+        </div>
+      </div>
+
+      <div class="start-col">
+        <h3 class="start-col-title">Build from source</h3>
+        <p class="start-text">Requires the Odin compiler (<code class="start-inline">dev-2026-08</code> or newer)
+          on your <code class="start-inline">PATH</code> and <code class="start-inline">make</code>.</p>
+
+        <h4 class="start-platform">macOS dependencies</h4>
+        <div class="start-code" role="group" aria-label="macOS dependency command">
+          <pre class="start-pre"><code>brew install sdl3 freetype harfbuzz</code></pre>
+          <button class="start-copy hit-area" type="button">Copy</button>
+          <span class="start-status" role="status"></span>
+        </div>
+
+        <h4 class="start-platform">Build and run</h4>
+        <div class="start-code" role="group" aria-label="Build and run commands">
+          <pre class="start-pre"><code>make term
+./bin/term</code></pre>
+          <button class="start-copy hit-area" type="button">Copy</button>
+          <span class="start-status" role="status"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+  </main>
+  <footer class="foot-root">
+  <div class="foot-container">
+    <div class="foot-brand">
+      <img class="foot-mark" src="assets/logo.svg" alt="" width="20" height="20">
+      <p class="foot-license">Term — MIT License</p>
+    </div>
+    <nav class="foot-nav" aria-label="Footer">
+      <ul class="foot-links">
+        <li><a class="foot-link hit-area" href="https://github.com/dwlhm/term">GitHub</a></li>
+        <li><a class="foot-link hit-area" href="https://github.com/dwlhm/term/releases">Releases</a></li>
+        <li><a class="foot-link hit-area" href="https://github.com/dwlhm/term/blob/main/LICENSE">License</a></li>
+      </ul>
+    </nav>
+  </div>
+</footer>
+  <script src="scripts/start.js" defer></script>
+  <script type="module" src="scripts/game/main.js"></script>
+</body>
+</html>
