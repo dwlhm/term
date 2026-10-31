@@ -45,11 +45,18 @@ session_registry_destroy :: proc(reg: ^Session_Registry) {
 	reg.entries = nil
 }
 
+// _session_state classifies a session; may issue a foreground-process syscall.
+@(private = "file")
+_session_state :: proc(sess: ^Terminal_Session) -> Detached_Session_State {
+	if alive, _ := session_is_alive(sess); !alive do return .Exited
+	return .Busy if session_is_running_job(sess) else .Idle
+}
+
 // session_registry_detach takes ownership of sess. Initial state is computed
 // immediately (same rules as poll with had_output = true), attention = false.
 session_registry_detach :: proc(reg: ^Session_Registry, id: u32, sess: ^Terminal_Session) -> bool {
 	if reg == nil || sess == nil do return false
-	append(&reg.entries, Detached_Session_Entry{id = id, session = sess})
+	append(&reg.entries, Detached_Session_Entry{id = id, session = sess, state = _session_state(sess)})
 	return true
 }
 
@@ -59,11 +66,11 @@ session_registry_detach :: proc(reg: ^Session_Registry, id: u32, sess: ^Terminal
 session_registry_pop :: proc(reg: ^Session_Registry, id: u32) -> (sess: ^Terminal_Session, found: bool) {
 	if reg == nil do return nil, false
 	for i in 0..<len(reg.entries) {
-		if reg.entries[i].id == id {
-			entry := reg.entries[i]
-			ordered_remove(&reg.entries, i)
-			return entry.session, true
-		}
+		if reg.entries[i].id != id do continue
+		if reg.entries[i].state == .Exited do return nil, false
+		entry := reg.entries[i]
+		ordered_remove(&reg.entries, i)
+		return entry.session, true
 	}
 	return nil, false
 }
@@ -71,13 +78,30 @@ session_registry_pop :: proc(reg: ^Session_Registry, id: u32) -> (sess: ^Termina
 // session_registry_remove destroys the entry's session (kills the child via
 // session_destroy) and removes it. Works for any state. false if id unknown.
 session_registry_remove :: proc(reg: ^Session_Registry, id: u32) -> bool {
-	unimplemented("T1")
+	if reg == nil do return false
+	for i in 0..<len(reg.entries) {
+		if reg.entries[i].id == id {
+			if reg.entries[i].session != nil {
+				session_destroy(reg.entries[i].session)
+				reg.entries[i].session = nil
+			}
+			ordered_remove(&reg.entries, i)
+			return true
+		}
+	}
+	return false
 }
 
 // session_registry_find returns a pointer into entries (invalidated by any
 // detach/pop/remove) or nil.
 session_registry_find :: proc(reg: ^Session_Registry, id: u32) -> ^Detached_Session_Entry {
-	unimplemented("T1")
+	if reg == nil do return nil
+	for i in 0..<len(reg.entries) {
+		if reg.entries[i].id == id {
+			return &reg.entries[i]
+		}
+	}
+	return nil
 }
 
 // session_registry_poll recomputes every entry's state. Exited is detected
@@ -86,17 +110,40 @@ session_registry_find :: proc(reg: ^Session_Registry, id: u32) -> ^Detached_Sess
 // re-evaluated when had_output is true. Sets attention on Busy→Idle and on
 // any transition into .Exited. Returns true if any state or attention changed.
 session_registry_poll :: proc(reg: ^Session_Registry, had_output: bool) -> (changed: bool) {
-	unimplemented("T1")
+	if reg == nil do return false
+	for &entry in reg.entries {
+		if entry.state == .Exited do continue
+		if alive, _ := session_is_alive(entry.session); !alive {
+			entry.state, entry.attention, changed = .Exited, true, true
+			continue
+		}
+		if !had_output do continue
+		next := _session_state(entry.session)
+		if entry.state == .Busy && next == .Idle do entry.attention = true
+		if next != entry.state {
+			entry.state = next
+			changed = true
+		}
+	}
+	return
 }
 
 session_registry_attention_count :: proc(reg: ^Session_Registry) -> int {
-	unimplemented("T1")
+	if reg == nil do return 0
+	count := 0
+	for entry in reg.entries {
+		if entry.attention do count += 1
+	}
+	return count
 }
 
 // session_registry_clear_attention resets attention on all entries; returns
 // true if any flag was set.
 session_registry_clear_attention :: proc(reg: ^Session_Registry) -> bool {
-	unimplemented("T1")
+	if reg == nil do return false
+	had_attention := session_registry_attention_count(reg) > 0
+	for &entry in reg.entries do entry.attention = false
+	return had_attention
 }
 
 // session_registry_drain_all drains PTY output for all background sessions without invoking GPU render passes.
