@@ -54,10 +54,9 @@ test_session_registry_lifecycle :: proc(t: ^testing.T) {
 
 	testing.expect_value(t, session.session_registry_count(&reg), 0)
 
-	s1 := new(session.Terminal_Session)
-	defer free(s1)
-	term.terminal_init(&s1.term, 24, 80)
-	defer term.terminal_destroy(&s1.term)
+	s1, err := session.session_create(session.Session_Config{shell = "/bin/sh", rows = 24, cols = 80})
+	testing.expect(t, err == .None, "session_create failed")
+	testing.expect(t, s1 != nil, "session_create returned nil session")
 
 	// Detach session 101
 	ok := session.session_registry_detach(&reg, 101, s1)
@@ -69,6 +68,7 @@ test_session_registry_lifecycle :: proc(t: ^testing.T) {
 	testing.expect(t, found, "pop must find detached session")
 	testing.expect_value(t, popped, s1)
 	testing.expect_value(t, session.session_registry_count(&reg), 0)
+	session.session_destroy(popped)
 }
 
 @test
