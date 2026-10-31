@@ -232,7 +232,8 @@ command_center_emit_draw_list :: proc(cc: ^Command_Center_State, src: Command_Ce
 	if cc.visible do cc.modal_rect = {mx, my, mw, mh}
 	else do cc.modal_rect, cc.search_rect, cc.chip_rects, cc.row_rect_count = {}, {}, {}, 0
 
-	chrome_dl.ui_draw_shadow(dl, {mx - 4.0 * s, my + 4.0 * s, mw + 8.0 * s, mh + 8.0 * s}, chrome_with_alpha(COLOR_CHROME_SHADOW, e), 24.0 * s)
+	// Same corner radius as the body, dropped 6 px: a soft lift below the modal, not a ring around it.
+	chrome_dl.ui_draw_shadow(dl, {mx, my + 6.0 * s, mw, mh}, chrome_with_alpha(COLOR_CHROME_SHADOW, e), 14.0 * s)
 	chrome_dl.ui_draw_rounded_rect(dl, {mx, my, mw, mh}, chrome_with_alpha(COLOR_CHROME_SURFACE, e), 14.0 * s)
 	chrome_dl.ui_draw_border(dl, {mx, my, mw, mh}, chrome_with_alpha(COLOR_CHROME_BORDER, e), 14.0 * s, 1.0 * s)
 

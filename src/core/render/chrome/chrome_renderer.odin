@@ -247,7 +247,9 @@ chrome_renderer_encode :: proc(
 				pen_x := cmd.rect[0]
 				max_x := cmd.rect[0] + cmd.rect[2]
 				for ch in cmd.text {
-					if pen_x + gw > max_x do break
+					// 0.5 px slack: pen_x accumulates per glyph, so a run measured as
+					// n * advance must not lose its last glyph to float rounding.
+					if pen_x + gw > max_x + 0.5 do break
 					if ch > ' ' {
 						if slot, ok := _chrome_lookup_pinned_slot(ch); ok {
 							u0, v0, u1, v1 := atlas.atlas_slot_uv(slot, cell_w, cell_h)
