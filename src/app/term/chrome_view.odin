@@ -374,7 +374,7 @@ chrome_view_build_draw_list :: proc(
 	}
 
 	// 4. Modal Overlay (Command Center or Tab Overview)
-	if cmd_center != nil && cmd_center.visible {
+	if cmd_center != nil && (cmd_center.visible || cmd_center.closing) {
 		cc_src := Command_Center_Sources{tabs = tabs, sessions = sessions}
 		command_center_emit_draw_list(cmd_center, cc_src, &cv.draw_list, layout)
 	}
