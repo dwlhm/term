@@ -46,11 +46,32 @@ PINNED_POWERLINE_BASE :: 255
 PINNED_POWERLINE_COUNT :: 4
 
 PINNED_UI_BASE :: 259
-PINNED_UI_COUNT :: 12
+PINNED_UI_COUNT :: 16
 
-PINNED_TOTAL :: PINNED_UI_BASE + PINNED_UI_COUNT // 271
+// PINNED_UI_CODEPOINTS is the single list of UI symbols pre-rasterized into the
+// pinned UI slots (shared by the glyph atlas and the chrome renderer).
+PINNED_UI_CODEPOINTS := [PINNED_UI_COUNT]rune{
+	0x2318, // ⌘ command
+	0x2325, // ⌥ option
+	0x21E7, // ⇧ shift
+	0x2303, // ⌃ control
+	0x21E5, // ⇥ tab
+	0x21B5, // ↵ return
+	0x2715, // ✕ close
+	0x00B7, // · middle dot
+	0x2026, // … horizontal ellipsis
+	0x2191, // ↑ up arrow
+	0x2193, // ↓ down arrow
+	0x25CB, // ○ white circle
+	0x25CF, // ● black circle
+	0x232B, // ⌫ delete
+	0x238B, // ⎋ escape
+	0x2192, // → right arrow
+}
+
+PINNED_TOTAL :: PINNED_UI_BASE + PINNED_UI_COUNT // 275
 FALLBACK_BASE :: PINNED_TOTAL
-FALLBACK_COUNT :: ATLAS_SLOT_COUNT - FALLBACK_BASE // 241
+FALLBACK_COUNT :: ATLAS_SLOT_COUNT - FALLBACK_BASE // 237
 
 // Atlas_Slot: Sub-slot UV mapping and metrics for a rasterized glyph.
 Atlas_Slot :: struct {
