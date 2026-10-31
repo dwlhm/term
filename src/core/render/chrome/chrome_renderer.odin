@@ -17,21 +17,6 @@ import "surface"
 import "batch"
 import "sdf"
 
-_CHROME_PINNED_UI_RUNES := [12]rune{
-	0x2318, // ⌘ command
-	0x2325, // ⌥ option
-	0x21E7, // ⇧ shift
-	0x2303, // ⌃ control
-	0x21E5, // ⇥ tab
-	0x21B5, // ↵ return
-	0x2715, // ✕ close
-	0x00B7, // · middle dot
-	0x2026, // … horizontal ellipsis
-	0x2191, // ↑ up arrow
-	0x2193, // ↓ down arrow
-	0x25CB, // ○ white circle
-}
-
 _chrome_lookup_pinned_slot :: #force_inline proc "contextless" (cp: rune) -> (slot: u32, ok: bool) {
 	u := u32(cp)
 	if u >= 0x20 && u <= 0x7E {
@@ -46,7 +31,7 @@ _chrome_lookup_pinned_slot :: #force_inline proc "contextless" (cp: rune) -> (sl
 	if u >= 0xE0B0 && u <= 0xE0B3 {
 		return u32(atlas.PINNED_POWERLINE_BASE + (u - 0xE0B0)), true
 	}
-	for p_cp, idx in _CHROME_PINNED_UI_RUNES {
+	for p_cp, idx in atlas.PINNED_UI_CODEPOINTS {
 		if cp == p_cp {
 			return u32(atlas.PINNED_UI_BASE + idx), true
 		}

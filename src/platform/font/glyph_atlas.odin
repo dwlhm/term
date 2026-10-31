@@ -8,21 +8,6 @@ import "core:sync"
 import core_atlas "../../core/render/atlas"
 import contract "../../core/render/contract"
 
-PINNED_UI_CODEPOINTS := [12]rune{
-	0x2318, // ⌘ command
-	0x2325, // ⌥ option
-	0x21E7, // ⇧ shift
-	0x2303, // ⌃ control
-	0x21E5, // ⇥ tab
-	0x21B5, // ↵ return
-	0x2715, // ✕ close
-	0x00B7, // · middle dot
-	0x2026, // … horizontal ellipsis
-	0x2191, // ↑ up arrow
-	0x2193, // ↓ down arrow
-	0x25CB, // ○ white circle
-}
-
 Glyph_Atlas_Manager :: struct {
 	atlas:            core_atlas.Atlas,
 	fc:               ^Font_Context,
@@ -169,7 +154,7 @@ _glyph_atlas_prewarm_pinned :: proc(gam: ^Glyph_Atlas_Manager) {
 	}
 
 	// 5. Prewarm UI Symbols (Command, Option, Arrows, etc.)
-	for cp, idx in PINNED_UI_CODEPOINTS {
+	for cp, idx in core_atlas.PINNED_UI_CODEPOINTS {
 		slot := u32(core_atlas.PINNED_UI_BASE + idx)
 		px, py := core_atlas.atlas_slot_origin(slot)
 
@@ -302,7 +287,7 @@ glyph_atlas_lookup_slot :: proc(cp: rune) -> (slot: u32, ok: bool) {
 	if u >= 0xE0B0 && u <= 0xE0B3 {
 		return u32(core_atlas.PINNED_POWERLINE_BASE + (u - 0xE0B0)), true
 	}
-	for p_cp, idx in PINNED_UI_CODEPOINTS {
+	for p_cp, idx in core_atlas.PINNED_UI_CODEPOINTS {
 		if cp == p_cp {
 			return u32(core_atlas.PINNED_UI_BASE + idx), true
 		}
