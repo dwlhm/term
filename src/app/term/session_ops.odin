@@ -120,7 +120,7 @@ app_detach_focused_pane :: proc(app: ^Term_App) -> bool {
 			damage.damage_mark_all(&pane.session.term.damage)
 		}
 	}
-	app_sync_menu_bar(app, time.now())
+	app_sync_menu_bar(app)
 	chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
 	return true
 }
@@ -176,7 +176,7 @@ app_attach_background_session :: proc(app: ^Term_App, bg_id: u32) -> bool {
 		app_select_tab(app, new_tab_idx)
 	}
 	damage.damage_mark_all(&sess.term.damage)
-	app_sync_menu_bar(app, time.now())
+	app_sync_menu_bar(app)
 	chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
 	return true
 }

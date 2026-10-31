@@ -65,6 +65,7 @@ app_spawn_terminal_pane :: proc(app: ^Term_App, rows: int = 24, cols: int = 80) 
 	if err != .None do return 0, false
 
 	app_bind_session_extensions(app, new_p)
+	app_sync_menu_bar(app)
 	return new_p, true
 }
 
@@ -198,6 +199,7 @@ app_close_pane :: proc(app: ^Term_App, pane_id: u32) {
 		}
 	}
 	chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
+	app_sync_menu_bar(app)
 }
 
 // app_reap_dead_sessions checks all terminal panes for terminated child shells

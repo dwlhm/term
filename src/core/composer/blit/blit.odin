@@ -230,6 +230,7 @@ blit_layer :: proc(
 	if screen_w <= 0.0 || screen_h <= 0.0 do return false
 	if layer_ptr.dest_rect.w <= 0.0 || layer_ptr.dest_rect.h <= 0.0 do return false
 	if rawptr(layer_ptr.view) == nil do return false
+	if layer_ptr.opacity <= 0.0 do return true
 
 	slot := &p.slots[slot_idx]
 	if slot.bound_view != layer_ptr.view || slot.bound_version != layer_ptr.version || rawptr(slot.bind_group) == nil {

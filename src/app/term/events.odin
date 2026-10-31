@@ -3,7 +3,9 @@ package term
 // Term Event Processing, Input Routing & Dispatch
 // Part of Tier 3 Application Shell (src/app/term/*).
 
+import "base:intrinsics"
 import "base:runtime"
+import "core:time"
 import "vendor:sdl3"
 
 import cursor "../../core/cursor"
@@ -598,46 +600,105 @@ app_handle_drop_file :: proc(app: ^Term_App, drop: sdl3.DropEvent, is_text: bool
 	}
 }
 
-app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty: bool) {
-	ev: sdl3.Event
-	if non_blocking {
-		if !sdl3.PollEvent(&ev) do return false
-	} else {
-		// Block until an event arrives or the animation tick elapses, then drain
-		// any events queued behind it.
-		if !sdl3.WaitEventTimeout(&ev, FRAME_TICK_MS) do return false
+app_pty_wakeup_callback :: proc "contextless" (user_data: rawptr) {
+	if user_data == nil do return
+	app := (^Term_App)(user_data)
+	if !intrinsics.atomic_exchange_explicit(&app.pty_wakeup_pending, true, .Acq_Rel) {
+		ev: sdl3.Event
+		ev.type = .USER
+		_ = sdl3.PushEvent(&ev)
+	}
+}
+
+app_compute_wait_timeout_ms :: proc(app: ^Term_App, non_blocking: bool) -> i32 {
+	if app == nil || non_blocking do return 0
+	if app.last_frame_acquire_failed do return FRAME_TICK_MS
+	if app.composer.sched.force_next || app.composer.sched.damage_pending do return 0
+	if intrinsics.atomic_load_explicit(&app.pty_wakeup_pending, .Acquire) do return 0
+	if app_needs_animation(app) || _app_any_pane_sync_output(app) do return FRAME_TICK_MS
+	if len(app.diag.grid_dump_dir) > 0 do return 16
+
+	timeout_ms: i32 = -1
+	if app.layout.is_fullscreen && app.layout.tab_bar_reveal_timer > 0.0 {
+		timeout_ms = max(1, i32(app.layout.tab_bar_reveal_timer * 1000.0) + 1)
 	}
 
+	if app.composer.sched.next_deadline > 0 {
+		now_ns := u64(time.duration_nanoseconds(time.since(app.start_time)))
+		if now_ns >= app.composer.sched.next_deadline do return 0
+		rem_ms := max(1, i32((app.composer.sched.next_deadline - now_ns + 999_999) / 1_000_000))
+		if timeout_ms < 0 || rem_ms < timeout_ms {
+			timeout_ms = rem_ms
+		}
+	}
+	return timeout_ms
+}
+
+app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty: bool) {
+	ev: sdl3.Event
+	timeout_ms := app_compute_wait_timeout_ms(app, non_blocking)
+	if timeout_ms == 0 {
+		if !sdl3.PollEvent(&ev) {
+			intrinsics.atomic_store_explicit(&app.pty_wakeup_pending, false, .Release)
+			return false
+		}
+	} else if timeout_ms < 0 {
+		if !sdl3.WaitEvent(&ev) {
+			intrinsics.atomic_store_explicit(&app.pty_wakeup_pending, false, .Release)
+			return false
+		}
+	} else {
+		if !sdl3.WaitEventTimeout(&ev, timeout_ms) {
+			intrinsics.atomic_store_explicit(&app.pty_wakeup_pending, false, .Release)
+			return false
+		}
+	}
+	intrinsics.atomic_store_explicit(&app.pty_wakeup_pending, false, .Release)
+
+	ui_dirty := false
 	for {
 		#partial switch ev.type {
 		case .QUIT, .WINDOW_CLOSE_REQUESTED:
+			ui_dirty = true
 			if !app_check_and_show_safety_dialog(app) {
 				app.running = false
 			}
 		case .WINDOW_FOCUS_GAINED:
+			app.window_focused = true
+			cursor_reset_blink(&app.cursor, u64(time.duration_nanoseconds(time.since(app.start_time))))
 			pane := mux_feat.multiplexer_get_focused_pane(&app.mux)
 			if pane != nil && pane.session != nil {
 				mouse_protocol_report_focus(pane.session, true)
 			}
 		case .WINDOW_FOCUS_LOST:
+			app.window_focused = false
 			pane := mux_feat.multiplexer_get_focused_pane(&app.mux)
 			if pane != nil && pane.session != nil {
 				mouse_protocol_report_focus(pane.session, false)
 			}
+			if app.mouse.hover_link.active {
+				ui_dirty = true
+			}
 			app.mouse.hover_link = {}
 			app_set_mouse_cursor(.Default)
 		case .WINDOW_PIXEL_SIZE_CHANGED, .WINDOW_RESIZED, .WINDOW_EXPOSED, .WINDOW_LEAVE_FULLSCREEN, .WINDOW_ENTER_FULLSCREEN, .WINDOW_RESTORED:
+			ui_dirty = true
 			sdl3.FlushEvents(sdl3.EventType.WINDOW_RESIZED, sdl3.EventType.WINDOW_PIXEL_SIZE_CHANGED)
 			app_handle_window_resize(app)
 		case .MOUSE_MOTION:
 			ratio := app.window.pixel_ratio
 			mx := f32(ev.motion.x) * ratio
 			my := f32(ev.motion.y) * ratio
+			prev_mouse_y := app.layout.mouse_y
 			app.layout.mouse_y = my
 			app.mouse.pos = {mx, my}
+			if app.layout.is_fullscreen && ((prev_mouse_y <= app.layout.metrics.auto_hide_trigger_y) != (my <= app.layout.metrics.auto_hide_trigger_y)) {
+				ui_dirty = true
+			}
 
 			// A0. Dragging the scrollback thumb
 			if scrollbar_drag_active(app) {
+				ui_dirty = true
 				if pane := mux_feat.multiplexer_get_pane(&app.mux, app.mouse.scrollbar_pane_id); pane != nil {
 					scrollbar_update_drag(app, pane, my)
 					chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
@@ -648,6 +709,7 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 
 			// A. If dragging split divider, dynamically update partition ratio
 			if app.mouse.is_dragging_divider && app.mouse.drag_split_node != nil {
+				ui_dirty = true
 				node := app.mouse.drag_split_node
 				scale := app.layout.metrics.scale
 				gap := app.layout.metrics.pane_gap
@@ -681,6 +743,7 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 			if hovered_sb != app.mouse.hovered_scrollbar {
 				app.mouse.hovered_scrollbar = hovered_sb
 				chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
+				ui_dirty = true
 			}
 
 			// B. If not dragging, perform hover test on split dividers for cursor & grip highlight
@@ -699,11 +762,13 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 					}
 					if prev_hovered != hit.split_node {
 						chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
+						ui_dirty = true
 					}
 				}
 			}
 			if prev_hovered != nil && app.mouse.hovered_split_node == nil {
 				chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
+				ui_dirty = true
 			}
 
 			if app.mouse.hovered_split_node != nil {
@@ -727,16 +792,19 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 			// C. Autonomous Cursor Determination: Chrome View -> Hyperlink (Cmd-gated) -> Terminal/Session -> Window Default
 			if !divider_cursor_handled {
 				if cur, handled := chrome_view_cursor(&app.chrome_view, &app.layout, &app.tabs_mgr, &app.cmd_center, {mx, my}, &app.session_dlg); handled {
+					if app.mouse.hover_link.active do ui_dirty = true
 					app.mouse.hover_link = {}
 					app_set_mouse_cursor(cur)
 				} else if hovered_pane != nil {
 					if hovered_pane.kind == .Terminal && hovered_pane.session != nil {
-						app_update_hyperlink_hover(app)
+						if app_update_hyperlink_hover(app) do ui_dirty = true
 					} else {
+						if app.mouse.hover_link.active do ui_dirty = true
 						app.mouse.hover_link = {}
 						app_set_mouse_cursor(.Default)
 					}
 				} else {
+					if app.mouse.hover_link.active do ui_dirty = true
 					app.mouse.hover_link = {}
 					app_set_mouse_cursor(.Default)
 				}
@@ -758,11 +826,17 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 					}
 				}
 			} else {
+				prev_sel := app.mouse.selection
 				mouse_on_motion(&app.mouse, {mx, my}, pane_rect, sess, scroll_off)
+				if app.mouse.selection != prev_sel {
+					ui_dirty = true
+				}
 			}
 		case .MOUSE_BUTTON_DOWN:
+			ui_dirty = true
 			app_handle_mouse_button_down(app, ev.button)
 		case .MOUSE_BUTTON_UP:
+			ui_dirty = true
 			if scrollbar_drag_active(app) {
 				scrollbar_end_drag(app)
 				chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
@@ -798,27 +872,37 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 			}
 			mouse_on_button_up(&app.mouse, u8(ev.button.button))
 		case .MOUSE_WHEEL:
+			ui_dirty = true
 			app_handle_mouse_wheel(app, ev.wheel)
 		case .TEXT_INPUT:
+			ui_dirty = true
+			cursor_reset_blink(&app.cursor, u64(time.duration_nanoseconds(time.since(app.start_time))))
 			app_handle_text_input(app, string(ev.text.text))
 		case .KEY_DOWN:
+			ui_dirty = true
+			cursor_reset_blink(&app.cursor, u64(time.duration_nanoseconds(time.since(app.start_time))))
 			app_handle_key_down(app, ev.key)
 			_ = app_update_hyperlink_hover(app)
 		case .KEY_UP:
 			app_handle_key_up(app, ev.key)
-			_ = app_update_hyperlink_hover(app)
+			if app_update_hyperlink_hover(app) do ui_dirty = true
 		case .DROP_BEGIN:
+			ui_dirty = true
 			drop_effect_on_drag_begin(&app.drop_effect)
 			if app.drop_effect.enabled {
 				chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
 			}
 		case .DROP_POSITION:
+			ui_dirty = true
 			app_handle_drop_position(app, ev.drop)
 		case .DROP_FILE:
+			ui_dirty = true
 			app_handle_drop_file(app, ev.drop, false)
 		case .DROP_TEXT:
+			ui_dirty = true
 			app_handle_drop_file(app, ev.drop, true)
 		case .DROP_COMPLETE:
+			ui_dirty = true
 			drop_effect_on_drag_complete(&app.drop_effect)
 			if app.drop_effect.enabled {
 				chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
@@ -827,5 +911,5 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 
 		if !sdl3.PollEvent(&ev) do break
 	}
-	return true
+	return ui_dirty
 }

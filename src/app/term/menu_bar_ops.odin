@@ -12,11 +12,10 @@ import mux_feat "../../features/multiplexer"
 import sess_feat "../../features/session"
 import plat_win "../../platform/window"
 
-// app_sync_menu_bar updates the native macOS Menu Bar with live background session status.
-app_sync_menu_bar :: proc(app: ^Term_App, now: time.Time) {
+// app_sync_menu_bar updates the native macOS Menu Bar on session/PTY state transitions,
+// skipping Objective-C NSMenu reconstruction when the state hash is unchanged.
+app_sync_menu_bar :: proc(app: ^Term_App) {
 	if app == nil || app.menu_bar == nil do return
-	if time.duration_seconds(time.diff(app.last_mb_sync, now)) < 1.0 do return
-	app.last_mb_sync = now
 
 	items := make([dynamic]plat_win.Platform_Menu_Bar_Item, 0, 16, context.temp_allocator)
 	active_jobs := _append_menu_bar_sessions(app, &items)
@@ -26,6 +25,16 @@ app_sync_menu_bar :: proc(app: ^Term_App, now: time.Time) {
 	append(&items, plat_win.Platform_Menu_Bar_Item{is_separator = true})
 	append(&items, plat_win.Platform_Menu_Bar_Item{title = "Show Window", tag = 1, is_enabled = true})
 	append(&items, plat_win.Platform_Menu_Bar_Item{title = "Quit Term", tag = 2, is_enabled = true})
+
+	h := _fnv1a_bytes(14695981039346656037, transmute([]byte)header)
+	for it in items {
+		h = _fnv1a_bytes(h, transmute([]byte)it.title)
+		tag_u := u64(it.tag)
+		h = _fnv1a_bytes(h, ([^]byte)(&tag_u)[:size_of(u64)])
+	}
+	if app.has_mb_hash && app.last_mb_hash == h do return
+	app.last_mb_hash = h
+	app.has_mb_hash = true
 
 	plat_win.platform_menu_bar_update(app.menu_bar, header, items[:])
 }

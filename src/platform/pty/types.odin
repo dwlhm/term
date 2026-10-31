@@ -72,7 +72,6 @@ ring_available :: proc(r: ^Pty_Ring_Buffer) -> int {
 ring_write :: proc(r: ^Pty_Ring_Buffer, data: []u8) -> int {
 	if r == nil || len(data) == 0 do return 0
 	sync.mutex_lock(&r.mutex)
-	defer sync.mutex_unlock(&r.mutex)
 
 	// Ensure buffer capacity grows dynamically without data loss
 	needed := r.count + len(data)
@@ -106,6 +105,8 @@ ring_write :: proc(r: ^Pty_Ring_Buffer, data: []u8) -> int {
 		r.head = len(data) - part1
 	}
 	r.count += len(data)
+	sync.mutex_unlock(&r.mutex)
+	pty_notify_wakeup()
 	return len(data)
 }
 
@@ -140,4 +141,22 @@ Pty_Handle :: struct {
 	exit_code:     int,
 	drain_thread:  ^thread.Thread,
 	shutdown_pipe: [2]i32,
+}
+
+Pty_Wakeup_Proc :: #type proc "contextless" (user_data: rawptr)
+
+@(private)
+_wakeup_cb: Pty_Wakeup_Proc
+@(private)
+_wakeup_user_data: rawptr
+
+pty_set_wakeup_callback :: proc(cb: Pty_Wakeup_Proc, user_data: rawptr = nil) {
+	_wakeup_cb = cb
+	_wakeup_user_data = user_data
+}
+
+pty_notify_wakeup :: proc "contextless" () {
+	if cb := _wakeup_cb; cb != nil {
+		cb(_wakeup_user_data)
+	}
 }

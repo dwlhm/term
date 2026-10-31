@@ -13,6 +13,7 @@ import "vendor:sdl3"
 import plat_win "../../platform/window"
 import plat_clip "../../platform/clipboard"
 import plat_font "../../platform/font"
+import plat_pty "../../platform/pty"
 import contract "../../core/render/contract"
 import damage "../../core/terminal/damage"
 import chrome_modals "../../core/chrome/modals"
@@ -55,8 +56,12 @@ Term_App :: struct {
 	session_reg:   sess_feat.Session_Registry,
 	session_dlg:   chrome_modals.Session_Dialog_State,
 	menu_bar:      rawptr,
-	last_mb_sync:  time.Time,
+	last_mb_hash:  u64,
+	has_mb_hash:   bool,
 	last_title_sync: time.Time,
+	window_focused:            bool,
+	pty_wakeup_pending:        bool,
+	last_frame_acquire_failed: bool,
 	in_event_watch:  bool,
 	resize_pending:  bool,
 	// Set when a key event was already encoded byte-exactly (Alt/Option combos),
@@ -255,7 +260,10 @@ app_init :: proc(app: ^Term_App, opts: Cli_Options = {}) -> bool {
 	}
 
 	app.running = true
+	app.window_focused = true
 	app.start_time = time.now()
+	plat_pty.pty_set_wakeup_callback(app_pty_wakeup_callback, app)
+	app_sync_menu_bar(app)
 	_ = sdl3.AddEventWatch(app_event_watch, app)
 	return true
 }
@@ -263,6 +271,7 @@ app_init :: proc(app: ^Term_App, opts: Cli_Options = {}) -> bool {
 app_destroy :: proc(app: ^Term_App) {
 	if app == nil do return
 	app.running = false
+	plat_pty.pty_set_wakeup_callback(nil, nil)
 	sdl3.RemoveEventWatch(app_event_watch, app)
 
 	// Immediately hide the native window so clicking the red traffic light or pressing Cmd+Q
@@ -355,26 +364,25 @@ app_reset_font_size :: proc(app: ^Term_App) {
 app_run :: proc(app: ^Term_App) {
 	last_time := time.now()
 	for app.running {
+		has_pending := mux_feat.multiplexer_has_pending_data(&app.mux)
+		events_dirty := app_process_events(app, has_pending)
+		if !app.running do break
+
 		now := time.now()
 		dt := f32(time.duration_seconds(time.diff(last_time, now)))
 		last_time = now
 		app.time_elapsed = f32(time.duration_seconds(time.diff(app.start_time, now)))
-		term_dirty := false
+		term_dirty := events_dirty
 
 		layout_update(&app.layout, dt)
 		drop_effect_update(&app.drop_effect, dt)
-
-		has_pending := mux_feat.multiplexer_has_pending_data(&app.mux)
-		if app_process_events(app, has_pending) {
-			term_dirty = true
-		}
-		if !app.running do break
 
 		drained := mux_feat.multiplexer_drain_all(&app.mux)
 		telemetry.telemetry_add_drain(&app.diag.tel, drained)
 		if drained > 0 do term_dirty = true
 
-		if app_reap_dead_sessions(app) do term_dirty = true
+		reaped := app_reap_dead_sessions(app)
+		if reaped do term_dirty = true
 		if !app.running do break
 
 		if app_sync_layout_and_winsize(app, drained > 0) do term_dirty = true
@@ -384,17 +392,26 @@ app_run :: proc(app: ^Term_App) {
 			app_handle_menu_bar_action(app, tag)
 			term_dirty = true
 		}
-		_ = sess_feat.session_registry_drain_all(&app.session_reg)
-		app_sync_menu_bar(app, now)
+		bg_drained := sess_feat.session_registry_drain_all(&app.session_reg)
+		if drained > 0 || bg_drained > 0 || reaped {
+			app_sync_menu_bar(app)
+		}
 
-		// Render only on real change or active animation; stay idle otherwise.
-		// While a pane holds a synchronized update, presentation waits so the
-		// client's frame lands atomically.
-		if (term_dirty || app_needs_animation(app)) && !app_sync_output_hold(app, now) {
+		now_ns := u64(time.duration_nanoseconds(time.diff(app.start_time, now)))
+		if term_dirty {
+			cursor_reset_blink(&app.cursor, now_ns)
+		}
+		cursor_damaged := app_sync_cursor_layer(app, now_ns)
+		needs_frame := term_dirty || cursor_damaged || app_needs_animation(app) || app.composer.sched.force_next || app.composer.sched.damage_pending
+
+		// Render only on real change, cursor toggle, or active animation; stay parked otherwise.
+		if needs_frame && !app_sync_output_hold(app, now) {
 			frame_start := time.tick_now()
 			app_render_frame(app, term_dirty)
 			telemetry.telemetry_end_frame(&app.diag.tel, u64(time.tick_since(frame_start)))
 		}
+
+		free_all(context.temp_allocator)
 	}
 }
 

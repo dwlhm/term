@@ -212,6 +212,7 @@ _pty_spawn_platform :: proc(config: Pty_Config) -> (handle: ^Pty_Handle, err: Pt
 		_ = posix.waitpid(posix.pid_t(handle.child_pid), &status, {.NOHANG})
 		handle.exit_code = int(status >> 8)
 		handle.is_running = false
+		pty_notify_wakeup()
 	})
 
 	return h, .None

@@ -7,6 +7,7 @@ import "core:os"
 import "core:strings"
 import "core:time"
 import contract "../../core/render/contract"
+import chrome_render "../../core/render/chrome"
 import composer "../../core/composer"
 import pipeline "../../core/composer/pipeline"
 import scheduler "../../core/composer/scheduler"
@@ -127,14 +128,90 @@ app_sync_layout_and_winsize :: proc(app: ^Term_App, sync_titles: bool = true) ->
 	return dirty
 }
 
-// app_needs_animation reports whether a redraw is required even without new
-// input or PTY output (in-flight tab-bar animation, blinking cursor).
+// app_needs_animation reports whether a continuous multi-frame transition is active
+// (in-flight tab-bar slide or 3D water drop ripple). Cursor blink is deadline-driven
+// via Frame_Scheduler.next_deadline on CURSOR_LAYER_ID, never a continuous 120Hz loop.
 app_needs_animation :: proc(app: ^Term_App) -> bool {
 	if app.layout.tab_bar_anim_t > 0.0 && app.layout.tab_bar_anim_t < 1.0 do return true
 	if drop_effect_is_active(&app.drop_effect) do return true
+	return false
+}
+
+// app_sync_cursor_layer updates the dedicated CURSOR_LAYER_ID (151, .Overlay)
+// geometry, pane scissor clip, corner radius, and discrete 500ms blink opacity
+// directly via compositor uniforms (zero raster passes on move or blink).
+app_sync_cursor_layer :: proc(app: ^Term_App, now_ns: u64) -> (damaged: bool) {
+	if app == nil do return false
+	l := pipeline.composer_pipeline_get_layer(&app.composer.pipe, CURSOR_LAYER_ID)
+	if l == nil do return false
 
 	p := mux_feat.multiplexer_get_focused_pane(&app.mux)
-	return p != nil && p.session != nil && p.session.term.parser.cursor.blinking
+	can_show := p != nil && p.kind == .Terminal && p.session != nil &&
+	            p.rect[2] > 0 && p.rect[3] > 0 &&
+	            p.session.term.parser.cursor.visible &&
+	            !app.cmd_center.visible && !app.session_dlg.visible
+
+	can_blink := can_show && app.window_focused && p.session.term.parser.cursor.blinking
+	_ = cursor_update_blink(&app.cursor, now_ns, can_blink)
+	scheduler.scheduler_set_deadline(&app.composer.sched, app.cursor.next_blink_ns)
+
+	target_rect := l.dest_rect
+	target_scissor := l.scissor_rect
+	target_opacity: f32 = 0.0
+	target_radius: f32 = 0.0
+
+	if can_show {
+		cur_c := p.session.term.parser.cursor.col
+		cur_r := p.session.term.parser.cursor.row + p.session.scroll_offset
+		cur_pad_x, cur_pad_y := pane_grid_pad(
+			p.rect,
+			p.session.term.rows,
+			p.session.term.cols,
+			app.layout.metrics.cell_w,
+			app.layout.metrics.cell_h,
+			app.layout.metrics.pane_pad_x,
+			app.layout.metrics.pane_pad_y,
+		)
+		rows_visible := int((p.rect[3] - 2.0 * cur_pad_y) / max(1.0, app.layout.metrics.cell_h))
+		if cur_r >= 0 && cur_r < rows_visible {
+			cur_shape: Cursor_Shape = .Block
+			switch p.session.term.parser.cursor.shape {
+			case .Block:     cur_shape = .Block
+			case .Beam:      cur_shape = .Beam
+			case .Underline: cur_shape = .Underline
+			}
+			r := cursor_compute_rect(
+				cur_c,
+				cur_r,
+				p.rect,
+				app.layout.metrics.cell_w,
+				app.layout.metrics.cell_h,
+				cur_pad_x,
+				cur_pad_y,
+				cur_shape,
+			)
+			if r[0] + r[2] <= p.rect[0] + p.rect[2] && r[1] + r[3] <= p.rect[1] + p.rect[3] {
+				target_rect = composer.rect_make(r[0], r[1], r[2], r[3])
+				target_scissor = composer.rect_make(p.rect[0], p.rect[1], p.rect[2], p.rect[3])
+				target_radius = (2.0 * app.layout.metrics.scale) if cur_shape == .Block else 0.0
+				if !app.window_focused {
+					target_opacity = 0.35
+				} else if !p.session.term.parser.cursor.blinking || app.cursor.is_visible {
+					target_opacity = COLOR_CURSOR_BLOCK[3]
+				}
+			}
+		}
+	}
+
+	if l.dest_rect != target_rect || l.scissor_rect != target_scissor || l.opacity != target_opacity || l.corner_radius != target_radius {
+		l.dest_rect = target_rect
+		l.scissor_rect = target_scissor
+		l.opacity = target_opacity
+		l.corner_radius = target_radius
+		scheduler.scheduler_mark_damage(&app.composer.sched, CURSOR_LAYER_ID)
+		return true
+	}
+	return false
 }
 
 App_Frame_Context :: struct {
@@ -157,7 +234,7 @@ _app_frame_raster :: proc(user: rawptr, enc: contract.Gpu_CommandEncoder, l: ^co
 	app := ctx.app
 
 	switch l.id {
-	case 101:
+	case TERMINAL_LAYER_ID:
 		first := true
 		for &pane in app.mux.panes {
 			if pane.kind == .Terminal && pane.session != nil && pane.rect[2] > 10 {
@@ -196,7 +273,18 @@ _app_frame_raster :: proc(user: rawptr, enc: contract.Gpu_CommandEncoder, l: ^co
 		}
 		return true
 
-	case 201:
+	case CURSOR_LAYER_ID:
+		col := [4]f64{
+			f64(COLOR_CURSOR_BLOCK[0]),
+			f64(COLOR_CURSOR_BLOCK[1]),
+			f64(COLOR_CURSOR_BLOCK[2]),
+			1.0,
+		}
+		pass := contract.begin_render_pass(enc, l.view, col, .Clear)
+		if rawptr(pass) != nil do contract.end_render_pass(pass)
+		return true
+
+	case CHROME_LAYER_ID:
 		return chrome_view_encode(&app.chrome_view, enc, l.view, .Clear)
 	}
 
@@ -215,30 +303,39 @@ _app_frame_present :: proc(user: rawptr, tex: contract.Gpu_Texture, view: contra
 // app_render_frame executes production frame_tick: rasters only dirty layers onto
 // a single CommandEncoder, composites via Composer_Pipeline, submits, and presents once.
 app_render_frame :: proc(app: ^Term_App, term_dirty: bool = true) {
-	chrome_dirty := chrome_view_build_draw_list(
-		&app.chrome_view,
-		&app.layout,
-		&app.tabs_mgr,
-		&app.mux,
-		&app.cmd_center,
-		&app.search,
-		&app.cursor,
-		app.time_elapsed,
-		app.mouse.hovered_split_node,
-		app.mouse.drag_split_node,
-		app.mouse.hovered_scrollbar,
-		app.mouse.scrollbar_pane_id,
-		&app.session_dlg,
-		&app.drop_effect,
-	)
+	chrome_dirty := false
+	if term_dirty || app_needs_animation(app) || !app.chrome_view.has_dl_hash || chrome_render.chrome_renderer_is_dirty(&app.chrome_view.rend) {
+		chrome_dirty = chrome_view_build_draw_list(
+			&app.chrome_view,
+			&app.layout,
+			&app.tabs_mgr,
+			&app.mux,
+			&app.cmd_center,
+			&app.search,
+			&app.cursor,
+			app.time_elapsed,
+			app.mouse.hovered_split_node,
+			app.mouse.drag_split_node,
+			app.mouse.hovered_scrollbar,
+			app.mouse.scrollbar_pane_id,
+			&app.session_dlg,
+			&app.drop_effect,
+		)
+	}
+
+	now_ns := u64(time.duration_nanoseconds(time.since(app.start_time)))
+	if term_dirty {
+		cursor_reset_blink(&app.cursor, now_ns)
+	}
+	_ = app_sync_cursor_layer(app, now_ns)
 
 	if term_dirty {
-		pipeline.composer_pipeline_mark_dirty(&app.composer.pipe, 101)
-		scheduler.scheduler_mark_damage(&app.composer.sched, 101)
+		pipeline.composer_pipeline_mark_dirty(&app.composer.pipe, TERMINAL_LAYER_ID)
+		scheduler.scheduler_mark_damage(&app.composer.sched, TERMINAL_LAYER_ID)
 	}
 	if chrome_dirty {
-		pipeline.composer_pipeline_mark_dirty(&app.composer.pipe, 201)
-		scheduler.scheduler_mark_damage(&app.composer.sched, 201)
+		pipeline.composer_pipeline_mark_dirty(&app.composer.pipe, CHROME_LAYER_ID)
+		scheduler.scheduler_mark_damage(&app.composer.sched, CHROME_LAYER_ID)
 	}
 
 	ctx := App_Frame_Context{app = app}
@@ -249,6 +346,6 @@ app_render_frame :: proc(app: ^Term_App, term_dirty: bool = true) {
 		present = _app_frame_present,
 	}
 
-	now_ns := u64(time.duration_nanoseconds(time.since(app.start_time)))
-	_ = frame.frame_tick(&app.composer.sched, &app.composer.pipe, nil, &driver, now_ns)
+	out := frame.frame_tick(&app.composer.sched, &app.composer.pipe, nil, &driver, now_ns)
+	app.last_frame_acquire_failed = (out.fail == .Acquire_Failed)
 }

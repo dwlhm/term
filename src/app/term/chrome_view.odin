@@ -128,9 +128,9 @@ chrome_view_build_draw_list :: proc(
 				}
 			}
 
-			// 2. Draw Cursor for this terminal pane
+			// 2. Draw Cursor for inactive split panes (focused pane cursor lives on dedicated CURSOR_LAYER_ID)
 			if pane.session != nil {
-				if pane.session.term.parser.cursor.visible {
+				if !pane.is_focused && pane.session.term.parser.cursor.visible {
 					cur_c := pane.session.term.parser.cursor.col
 					cur_r := pane.session.term.parser.cursor.row + pane.session.scroll_offset
 					cur_pad_x, cur_pad_y := pane_grid_pad(
@@ -157,21 +157,11 @@ chrome_view_build_draw_list :: proc(
 						// Clip cursor to pane bounds
 						if cur_rect[0] + cur_rect[2] <= pane.rect[0] + pane.rect[2] &&
 						   cur_rect[1] + cur_rect[3] <= pane.rect[1] + pane.rect[3] {
-							if pane.is_focused {
-								opacity: f32 = 1.0
-								if pane.session.term.parser.cursor.blinking {
-									opacity = cursor_compute_opacity(time_elapsed, true)
-								}
-								cur_col: [4]f32 = {COLOR_CURSOR_BLOCK[0], COLOR_CURSOR_BLOCK[1], COLOR_CURSOR_BLOCK[2], opacity}
-								chrome_dl.ui_draw_rounded_rect(&cv.draw_list, cur_rect, cur_col, 2.0 * layout.metrics.scale)
-							} else {
-								// Inactive pane: non-blinking, subtle hollow outline for block or dimmed line for beam/underline
-								switch cur_shape {
-								case .Block:
-									chrome_dl.ui_draw_border(&cv.draw_list, cur_rect, {0.55, 0.60, 0.70, 0.35}, 1.0 * layout.metrics.scale)
-								case .Beam, .Underline:
-									chrome_dl.ui_draw_rounded_rect(&cv.draw_list, cur_rect, {0.55, 0.60, 0.70, 0.30}, 0.0)
-								}
+							switch cur_shape {
+							case .Block:
+								chrome_dl.ui_draw_border(&cv.draw_list, cur_rect, {0.55, 0.60, 0.70, 0.35}, 1.0 * layout.metrics.scale)
+							case .Beam, .Underline:
+								chrome_dl.ui_draw_rounded_rect(&cv.draw_list, cur_rect, {0.55, 0.60, 0.70, 0.30}, 0.0)
 							}
 						}
 					}

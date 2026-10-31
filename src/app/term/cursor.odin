@@ -1,9 +1,9 @@
 package term
 
-// Dedicated Terminal Cursor Shapes, Geometry & Smooth Blink Engine
+// Dedicated Terminal Cursor Shapes, Geometry & Deadline-Driven Blink Engine
 // Part of Tier 3 Application Shell (src/app/term/*).
 
-import "core:math"
+CURSOR_BLINK_INTERVAL_NS: u64 : 500_000_000 // 500 ms per half-cycle (2 toggles/sec)
 
 Cursor_Shape :: enum {
 	Block,
@@ -12,9 +12,10 @@ Cursor_Shape :: enum {
 }
 
 Cursor_State :: struct {
-	shape:       Cursor_Shape,
-	blink_rate:  f32, // Hz
-	is_visible:  bool,
+	shape:         Cursor_Shape,
+	blink_rate:    f32, // Hz
+	is_visible:    bool,
+	next_blink_ns: u64,
 }
 
 cursor_init :: proc(c: ^Cursor_State) {
@@ -22,6 +23,39 @@ cursor_init :: proc(c: ^Cursor_State) {
 	c.shape = .Block
 	c.blink_rate = 1.0
 	c.is_visible = true
+	c.next_blink_ns = 0
+}
+
+// cursor_reset_blink forces the cursor visible and pushes the next blink deadline
+// forward by one full half-cycle (used on key input or PTY activity).
+cursor_reset_blink :: proc(c: ^Cursor_State, now_ns: u64) {
+	if c == nil do return
+	c.is_visible = true
+	c.next_blink_ns = now_ns + CURSOR_BLINK_INTERVAL_NS
+}
+
+// cursor_update_blink advances the discrete blink state against now_ns without drift.
+// When active is false (window unfocused, cursor hidden, or steady cursor), resets
+// to visible with deadline 0 (parked).
+cursor_update_blink :: proc(c: ^Cursor_State, now_ns: u64, active: bool) -> (toggled: bool) {
+	if c == nil do return false
+	if !active {
+		changed := !c.is_visible
+		c.is_visible = true
+		c.next_blink_ns = 0
+		return changed
+	}
+	if c.next_blink_ns == 0 {
+		c.is_visible = true
+		c.next_blink_ns = now_ns + CURSOR_BLINK_INTERVAL_NS
+		return false
+	}
+	if now_ns < c.next_blink_ns do return false
+	c.is_visible = !c.is_visible
+	for c.next_blink_ns <= now_ns {
+		c.next_blink_ns += CURSOR_BLINK_INTERVAL_NS
+	}
+	return true
 }
 
 // cursor_compute_rect calculates physical pixel rectangle of the cursor inside a pane card
@@ -47,15 +81,9 @@ cursor_compute_rect :: proc(
 	return {base_x, base_y, cell_w, cell_h}
 }
 
-// cursor_compute_opacity provides smooth sinusoidal 120Hz/60Hz blink
+// cursor_compute_opacity returns discrete cursor opacity for focused/unfocused state.
 cursor_compute_opacity :: proc(time_elapsed: f32, is_focused: bool) -> f32 {
-	if !is_focused do return 0.50
-
-	// Sinusoidal blink between 0.25 and 1.0
-	s := math.sin(time_elapsed * 5.0)
-	if s >= 0.0 {
-		return 0.85 + 0.15 * s
-	} else {
-		return 0.85 + 0.55 * s // Fades down smoothly
-	}
+	_ = time_elapsed
+	if !is_focused do return 0.35
+	return 0.85
 }
