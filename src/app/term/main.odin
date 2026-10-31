@@ -14,6 +14,7 @@ import plat_win "../../platform/window"
 import plat_clip "../../platform/clipboard"
 import plat_font "../../platform/font"
 import plat_pty "../../platform/pty"
+import plat_ipc "../../platform/ipc"
 import contract "../../core/render/contract"
 import damage "../../core/terminal/damage"
 import chrome_modals "../../core/chrome/modals"
@@ -38,6 +39,7 @@ Term_App :: struct {
 	window_hidden: bool, // set by app_request_hide; rendering and blink ticks stop while true
 	quit_requested: bool, // atomic; set by the signal thread, consumed by app_run
 	signals:       Signal_Router,
+	control:       ^plat_ipc.Ipc_Server, // nil unless Primary with a bound control socket
 	time_elapsed:  f32,
 	start_time:    time.Time,
 
