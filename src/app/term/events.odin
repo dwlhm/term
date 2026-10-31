@@ -126,25 +126,21 @@ app_handle_mouse_button_down :: proc(app: ^Term_App, ev: sdl3.MouseButtonEvent) 
 	}
 
 	// Click on tab pills, buttons, or free space in tab bar
+	sessions := &app.session_reg
+	g := tab_bar_geometry(&app.layout, session_pill_width(&app.layout, sessions))
 	scale := app.layout.metrics.scale
-	bar_h := app.layout.metrics.tab_bar_height
-	anim_offset_y: f32 = -(1.0 - app.layout.tab_bar_anim_t) * (bar_h + 6.0 * scale) if app.layout.is_fullscreen else 0.0
-	tab_h: f32 = 22.0 * scale
-	tab_y := (bar_h - tab_h) * 0.5 + anim_offset_y
-	tab_w: f32 = 140.0 * scale
-	tab_gap: f32 = 6.0 * scale
-	tabs_x := (12.0 * scale) if app.layout.is_fullscreen else (app.layout.metrics.traffic_clearance + 6.0 * scale)
+	tab_bar_interactive := g.interactive
+	if tab_bar_interactive && my >= 0 && my <= (g.bar_h + g.offset_y) {
+		tab_y := g.tab_y
+		tab_h := g.tab_h
+		tabs_x := g.tabs_x
+		tab_w := g.tab_w
+		tab_gap := g.tab_gap
+		tabs_end_x := g.tabs_end_x
+		btn_ov_x := g.overview_x
+		btn_plus_x := g.new_tab_x
+		btn_w := g.btn_w
 
-	// Fixed right-side buttons: [⊞] Overview and [+] New Tab
-	btn_w: f32 = tab_h
-	btn_gap: f32 = 4.0 * scale
-	right_margin: f32 = 12.0 * scale
-	btn_ov_x := app.layout.screen_w - right_margin - btn_w
-	btn_plus_x := btn_ov_x - btn_gap - btn_w
-	tabs_end_x := btn_plus_x - 8.0 * scale
-
-	tab_bar_interactive := !app.layout.is_fullscreen || app.layout.tab_bar_anim_t > 0.5
-	if tab_bar_interactive && my >= 0 && my <= (bar_h + anim_offset_y) {
 		// 1. Click on [⊞] Show All Tabs button
 		if mx >= btn_ov_x && mx <= btn_ov_x + btn_w && my >= tab_y && my <= tab_y + tab_h {
 			app_execute_action(app, .Tab_Overview_Toggle)
@@ -154,6 +150,12 @@ app_handle_mouse_button_down :: proc(app: ^Term_App, ev: sdl3.MouseButtonEvent) 
 		// 2. Click on [+] new tab button
 		if mx >= btn_plus_x && mx <= btn_plus_x + btn_w && my >= tab_y && my <= tab_y + tab_h {
 			app_execute_action(app, .Tab_New)
+			return
+		}
+
+		// Session pill
+		if tab_bar_point_in(g.pill_rect, mx, my) {
+			app_execute_action(app, .Sessions_Toggle)
 			return
 		}
 
@@ -775,7 +777,7 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 
 			// C. Autonomous Cursor Determination: Chrome View -> Hyperlink (Cmd-gated) -> Terminal/Session -> Window Default
 			if !divider_cursor_handled {
-				if cur, handled := chrome_view_cursor(&app.chrome_view, &app.layout, &app.tabs_mgr, &app.cmd_center, {mx, my}); handled {
+				if cur, handled := chrome_view_cursor(&app.chrome_view, &app.layout, &app.tabs_mgr, &app.cmd_center, {mx, my}, &app.session_reg); handled {
 					if app.mouse.hover_link.active do ui_dirty = true
 					app.mouse.hover_link = {}
 					app_set_mouse_cursor(cur)

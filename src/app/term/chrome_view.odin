@@ -214,11 +214,12 @@ chrome_view_build_draw_list :: proc(
 
 	// 3. Render Modern Integrated Top Bar & Tabs
 	if layout != nil && tabs != nil && layout.tab_bar_anim_t > 0.001 {
-		bar_h := layout.metrics.tab_bar_height
+		g := tab_bar_geometry(layout, session_pill_width(layout, sessions))
 		scale := layout.metrics.scale
 
-		anim_offset_y: f32 = -(1.0 - layout.tab_bar_anim_t) * (bar_h + 6.0 * scale) if layout.is_fullscreen else 0.0
-		alpha_factor: f32 = layout.tab_bar_anim_t if layout.is_fullscreen else 1.0
+		anim_offset_y := g.offset_y
+		alpha_factor := g.alpha
+		bar_h := g.bar_h
 
 		// Subtle backdrop banner when sliding down over terminal panes in fullscreen
 		if layout.is_fullscreen {
@@ -227,21 +228,18 @@ chrome_view_build_draw_list :: proc(
 			chrome_dl.ui_draw_rounded_rect(&cv.draw_list, banner_rect, banner_bg, 0)
 		}
 
-		tab_h: f32 = 22.0 * scale
-		tab_y := (bar_h - tab_h) * 0.5 + anim_offset_y
-		tabs_x := (12.0 * scale) if layout.is_fullscreen else (layout.metrics.traffic_clearance + 6.0 * scale)
-		tab_w: f32 = 140.0 * scale
-		tab_gap: f32 = 6.0 * scale
+		tab_h := g.tab_h
+		tab_y := g.tab_y
+		tabs_x := g.tabs_x
+		tab_w := g.tab_w
+		tab_gap := g.tab_gap
 		capsule_radius := tab_h * 0.5
 
 		// Fixed right-side buttons: [⊞] Overview and [+] New Tab
-		btn_w: f32 = tab_h
-		btn_gap: f32 = 4.0 * scale
-		right_margin: f32 = 12.0 * scale
-
-		btn_ov_x := layout.screen_w - right_margin - btn_w
-		btn_plus_x := btn_ov_x - btn_gap - btn_w
-		tabs_end_x := btn_plus_x - 8.0 * scale
+		btn_w := g.btn_w
+		btn_ov_x := g.overview_x
+		btn_plus_x := g.new_tab_x
+		tabs_end_x := g.tabs_end_x
 
 		avail_tabs_w := max(40.0 * scale, tabs_end_x - tabs_x)
 
@@ -326,6 +324,8 @@ chrome_view_build_draw_list :: proc(
 			chrome_dl.ui_draw_rounded_rect(&cv.draw_list, {top_left_x, top_left_y + sq_s + sq_gap, sq_s, sq_s}, icon_col, 0.8 * scale)
 			chrome_dl.ui_draw_rounded_rect(&cv.draw_list, {top_left_x + sq_s + sq_gap, top_left_y + sq_s + sq_gap, sq_s, sq_s}, icon_col, 0.8 * scale)
 		}
+
+		session_pill_emit(&cv.draw_list, layout, g, sessions, cmd_center != nil && cmd_center.visible && cmd_center.mode == .Sessions)
 	}
 
 	// 3b. Search bar (Cmd+F)
@@ -426,28 +426,24 @@ _cursor_for_command_center :: proc(cc: ^Command_Center_State, pt: [2]f32) -> (cu
 	return .Default, true // modal is up: nothing underneath gets a cursor
 }
 
-_cursor_for_tab_bar :: proc(layout: ^Layout_State, tabs: ^tabs_feat.Tabs_Manager, pt: [2]f32) -> (cursor.Mouse_Cursor, bool) {
+_cursor_for_tab_bar :: proc(layout: ^Layout_State, tabs: ^tabs_feat.Tabs_Manager, pt: [2]f32, sessions: ^sess_feat.Session_Registry = nil) -> (cursor.Mouse_Cursor, bool) {
 	if layout == nil do return .Default, false
-	scale := layout.metrics.scale
-	bar_h := layout.metrics.tab_bar_height
-	anim_offset_y: f32 = -(1.0 - layout.tab_bar_anim_t) * (bar_h + 6.0 * scale) if layout.is_fullscreen else 0.0
-	tab_bar_interactive := !layout.is_fullscreen || layout.tab_bar_anim_t > 0.5
-	if !tab_bar_interactive || pt.y < 0 || pt.y > (bar_h + anim_offset_y) {
+	g := tab_bar_geometry(layout, session_pill_width(layout, sessions))
+	if !g.interactive || pt.y < 0 || pt.y > (g.bar_h + g.offset_y) {
 		return .Default, false
 	}
 
-	tab_h: f32 = 22.0 * scale
-	tab_y := (bar_h - tab_h) * 0.5 + anim_offset_y
-	tab_w: f32 = 140.0 * scale
-	tab_gap: f32 = 6.0 * scale
-	tabs_x := (12.0 * scale) if layout.is_fullscreen else (layout.metrics.traffic_clearance + 6.0 * scale)
-	btn_w: f32 = tab_h
-	btn_gap: f32 = 4.0 * scale
-	right_margin: f32 = 12.0 * scale
-	btn_ov_x := layout.screen_w - right_margin - btn_w
-	btn_plus_x := btn_ov_x - btn_gap - btn_w
-	tabs_end_x := btn_plus_x - 8.0 * scale
+	tab_h := g.tab_h
+	tab_y := g.tab_y
+	tab_w := g.tab_w
+	tab_gap := g.tab_gap
+	tabs_x := g.tabs_x
+	btn_w := g.btn_w
+	btn_ov_x := g.overview_x
+	btn_plus_x := g.new_tab_x
+	tabs_end_x := g.tabs_end_x
 
+	if tab_bar_point_in(g.pill_rect, pt.x, pt.y) do return .Pointer, true
 	if pt.x >= btn_ov_x && pt.x <= btn_ov_x + btn_w && pt.y >= tab_y && pt.y <= tab_y + tab_h do return .Pointer, true
 	if pt.x >= btn_plus_x && pt.x <= btn_plus_x + btn_w && pt.y >= tab_y && pt.y <= tab_y + tab_h do return .Pointer, true
 	if tabs != nil {
@@ -470,11 +466,12 @@ chrome_view_cursor :: proc(
 	tabs: ^tabs_feat.Tabs_Manager,
 	cmd_center: ^Command_Center_State,
 	pt: [2]f32,
+	sessions: ^sess_feat.Session_Registry = nil,
 ) -> (cursor_shape: cursor.Mouse_Cursor, handled: bool) {
 	if cv == nil || layout == nil do return .Default, false
 
 	if c, ok := _cursor_for_command_center(cmd_center, pt); ok do return c, true
-	if c, ok := _cursor_for_tab_bar(layout, tabs, pt); ok do return c, true
+	if c, ok := _cursor_for_tab_bar(layout, tabs, pt, sessions); ok do return c, true
 
 	return .Default, false
 }
