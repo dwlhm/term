@@ -95,3 +95,19 @@ Ipc_Request :: struct {
 ipc_request_line :: proc(r: ^Ipc_Request) -> string {
 	return string(r.line_buf[:r.line_len])
 }
+
+// ipc_error_message is the human-readable form used by the CLI and startup warnings.
+ipc_error_message :: proc(err: Ipc_Error) -> string {
+	switch err {
+	case .None:            return "ok"
+	case .Path_Too_Long:   return "socket path is too long (max 103 bytes; check $TMPDIR or $TERM_CTL_SOCK)"
+	case .Unsafe_Path:     return "socket path is not private to this user"
+	case .Already_Running: return "another Term instance owns the socket"
+	case .Not_Running:     return "Term is not running"
+	case .Socket_Failed:   return "socket error"
+	case .Timeout:         return "timed out waiting for Term"
+	case .Too_Large:       return "message too large"
+	case .Busy:            return "Term is busy, try again"
+	}
+	return "unknown error"
+}

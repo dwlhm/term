@@ -8,6 +8,7 @@ package term
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import "core:time"
 
 import plat_ipc "../../platform/ipc"
 import ctrl_feat "../../features/control"
@@ -47,7 +48,7 @@ app_run_control_cli :: proc(args: []string) -> (handled: bool, exit_code: int) {
 	if path_err != .None do return true, _cli_fail(path_err)
 	req_buf: [64]u8
 	reply_buf: [plat_ipc.IPC_MAX_REPLY]u8
-	reply, err := plat_ipc.ipc_client_request(path, ctrl_feat.control_format_request(req, req_buf[:]), reply_buf[:])
+	reply, err := app_control_request(path, ctrl_feat.control_format_request(req, req_buf[:]), reply_buf[:])
 	if err != .None do return true, _cli_fail(err)
 	ok, code, message, body, well_formed := ctrl_feat.control_split_reply(reply)
 	if !well_formed || !ok {
@@ -58,13 +59,26 @@ app_run_control_cli :: proc(args: []string) -> (handled: bool, exit_code: int) {
 	return true, 0
 }
 
+// app_control_request is ipc_client_request with a short backoff on Busy
+// (the server sheds load beyond IPC_MAILBOX_CAP instead of queueing it).
+app_control_request :: proc(path, line: string, out: []u8) -> (reply: string, err: plat_ipc.Ipc_Error) {
+	backoff := 25 * time.Millisecond
+	for attempt in 0..<5 {
+		reply, err = plat_ipc.ipc_client_request(path, line, out)
+		if err != .Busy || attempt == 4 do return
+		time.sleep(backoff)
+		backoff *= 2
+	}
+	return
+}
+
 @(private = "file")
 _cli_fail :: proc(err: plat_ipc.Ipc_Error) -> int {
 	if err == .Not_Running {
 		fmt.eprintln("term: Term is not running")
 		return 2
 	}
-	fmt.eprintf("term: control socket %v\n", err)
+	fmt.eprintf("term: %s\n", plat_ipc.ipc_error_message(err))
 	return 1
 }
 

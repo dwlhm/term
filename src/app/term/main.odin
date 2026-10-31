@@ -435,10 +435,10 @@ main :: proc() {
 			buf: [256]u8
 			path, _ := plat_ipc.ipc_default_socket_path(buf[:])
 			reply_buf: [512]u8
-			_, cerr := plat_ipc.ipc_client_request(path, "show", reply_buf[:])
+			_, cerr := app_control_request(path, "show", reply_buf[:])
 			os.exit(0 if cerr == .None else 1)
 		case:
-			fmt.eprintf("term: control socket unavailable (%v); running standalone\n", err)
+			fmt.eprintf("term: control socket unavailable (%s); running standalone\n", plat_ipc.ipc_error_message(err))
 			app.role = .Standalone
 		}
 	}
