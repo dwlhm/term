@@ -32,7 +32,7 @@ test_menu_bar_attach_background_session :: proc(t: ^testing.T) {
 	copy(sess.title_buf[:14], "Background Job")
 	sess.title_len = 14
 
-	ok_detach := sess_feat.session_registry_detach(&app.session_reg, 42, 0, "Background Job", sess)
+	ok_detach := sess_feat.session_registry_detach(&app.session_reg, 42, sess)
 	testing.expect(t, ok_detach, "Failed to detach session into registry")
 	testing.expect_value(t, sess_feat.session_registry_count(&app.session_reg), 1)
 

@@ -67,7 +67,7 @@ app_apply_safety_dialog :: proc(app: ^Term_App) {
 	for item in app.session_dlg.items {
 		if item.choice == .Background {
 			if p := mux_feat.multiplexer_get_pane(&app.mux, item.pane_id); p != nil && p.session != nil {
-				sess_feat.session_registry_detach(&app.session_reg, item.pane_id, u32(item.tab_index), item.title, p.session)
+				sess_feat.session_registry_detach(&app.session_reg, item.pane_id, p.session)
 				p.session = nil
 			}
 		}
@@ -99,8 +99,7 @@ app_detach_focused_pane :: proc(app: ^Term_App) -> bool {
 	if found_tab_idx < 0 do return false
 	tab := &app.tabs_mgr.entries[found_tab_idx]
 
-	title := string(tab.title_buf[:tab.title_len]) if tab.title_len > 0 else "Shell"
-	sess_feat.session_registry_detach(&app.session_reg, p.id, u32(found_tab_idx), title, p.session)
+	sess_feat.session_registry_detach(&app.session_reg, p.id, p.session)
 	p.session = nil
 
 	terminal_view_release_pane(&app.term_view, pane_id)

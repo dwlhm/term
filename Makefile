@@ -123,7 +123,7 @@ bench-session:
 	$(ODIN) build src/cmd/bench_session -out:$(OUT_DIR)/bench_session $(RELEASE_FLAGS) $(COMMON_FLAGS)
 	./$(OUT_DIR)/bench_session
 
-test: test-app test-terminal test-pty test-font test-window test-session test-tabs test-multiplexer test-interaction test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-selector test-gpu test-features test-e2e
+test: test-app test-terminal test-pty test-font test-window test-session test-control test-ipc test-tabs test-multiplexer test-interaction test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-selector test-gpu test-features test-e2e
 
 # VT conformance suite (esctest2) driven inside a real Term pane; requires a GUI
 # session. Extra esctest flags: make esctest ESCTEST_ARGS="--include=CUP"
@@ -148,6 +148,12 @@ test-window:
 
 test-session:
 	$(ODIN) test src/features/session/tests $(TEST_FLAGS)
+
+test-control:
+	$(ODIN) test src/features/control/tests $(TEST_FLAGS)
+
+test-ipc:
+	$(ODIN) test src/platform/ipc/tests $(CHECK_FLAGS) $(TEST_FLAGS)
 
 test-tabs:
 	$(ODIN) test src/features/tabs/tests $(TEST_FLAGS)
@@ -239,6 +245,8 @@ check:
 	$(ODIN) check src/platform/gpu/wgpu $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/platform/window $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/platform/clipboard $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/platform/ipc $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/features/control $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/platform/font $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/core/render/atlas $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/core/render/terminal $(CHECK_FLAGS) -no-entry-point

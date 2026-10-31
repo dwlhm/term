@@ -60,7 +60,7 @@ test_session_registry_lifecycle :: proc(t: ^testing.T) {
 	defer term.terminal_destroy(&s1.term)
 
 	// Detach session 101
-	ok := session.session_registry_detach(&reg, 101, 1, "Dev Server", s1)
+	ok := session.session_registry_detach(&reg, 101, s1)
 	testing.expect(t, ok, "detach must succeed")
 	testing.expect_value(t, session.session_registry_count(&reg), 1)
 
