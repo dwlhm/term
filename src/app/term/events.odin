@@ -583,9 +583,11 @@ app_pty_wakeup_callback :: proc "contextless" (user_data: rawptr) {
 
 app_compute_wait_timeout_ms :: proc(app: ^Term_App, non_blocking: bool) -> i32 {
 	if app == nil || non_blocking do return 0
+	if intrinsics.atomic_load_explicit(&app.pty_wakeup_pending, .Acquire) do return 0
+	// Hidden: no frame can clear damage/force flags, so they must not keep the loop awake.
+	if app.window_hidden do return -1
 	if app.last_frame_acquire_failed do return FRAME_TICK_MS
 	if app.composer.sched.force_next || app.composer.sched.damage_pending do return 0
-	if intrinsics.atomic_load_explicit(&app.pty_wakeup_pending, .Acquire) do return 0
 	if app_needs_animation(app) || _app_any_pane_sync_output(app) do return FRAME_TICK_MS
 	if len(app.diag.grid_dump_dir) > 0 do return 16
 
@@ -633,11 +635,17 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 			ui_dirty = true
 			app_request_hide(app)
 		case .WINDOW_FOCUS_GAINED:
+			if app.window_hidden do app_show_window(app)
 			app.window_focused = true
 			cursor_reset_blink(&app.cursor, u64(time.duration_nanoseconds(time.since(app.start_time))))
 			pane := mux_feat.multiplexer_get_focused_pane(&app.mux)
 			if pane != nil && pane.session != nil {
 				mouse_protocol_report_focus(pane.session, true)
+			}
+		case .WINDOW_SHOWN:
+			if app.window_hidden {
+				app_show_window(app)
+				ui_dirty = true
 			}
 		case .WINDOW_FOCUS_LOST:
 			app.window_focused = false

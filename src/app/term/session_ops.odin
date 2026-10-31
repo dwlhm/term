@@ -71,16 +71,7 @@ _detach_handle_remaining :: proc(app: ^Term_App, tab_idx: int, has_other_panes: 
 	} else if len(app.tabs_mgr.entries) > 1 {
 		app_close_tab(app, tab_idx)
 	} else {
-		content_area := layout_compute_content_area(&app.layout)
-		term_cols := max(20, int((content_area[2] - 2.0 * app.layout.metrics.pane_pad_x) / app.layout.metrics.cell_w))
-		term_rows := max(10, int((content_area[3] - 2.0 * app.layout.metrics.pane_pad_y) / app.layout.metrics.cell_h))
-		new_p, ok := app_spawn_terminal_pane(app, term_rows, term_cols)
-		if ok {
-			tab.split_tree = chrome_splits.split_node_create_leaf(new_p, app.tabs_mgr.allocator)
-			tab.active_pane_id = new_p
-			tabs_feat.tabs_manager_set_title(&app.tabs_mgr, 0, "Shell")
-			mux_feat.multiplexer_focus_pane(&app.mux, new_p)
-		}
+		_ = app_spawn_default_tab(app)
 	}
 }
 
