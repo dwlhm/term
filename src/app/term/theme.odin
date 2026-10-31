@@ -113,3 +113,41 @@ COLOR_SELECTION_BG    := [4]f32{0.24, 0.45, 0.78, 0.55}
 // under the "theme" object).
 COLOR_HYPERLINK_OPENABLE_BG := [4]f32{0.141, 0.322, 0.220, 1.0}
 COLOR_HYPERLINK_BLOCKED_BG  := [4]f32{0.380, 0.161, 0.149, 1.0}
+
+// Chrome surface tokens (modals, palettes, pills). Dark-mode depth comes from
+// surface tint + a 1px inset border, not heavy shadows.
+COLOR_CHROME_BACKDROP      := [4]f32{0.00, 0.00, 0.00, 0.32}
+COLOR_CHROME_SURFACE       := [4]f32{0.105, 0.115, 0.140, 0.97}
+COLOR_CHROME_RAISED        := [4]f32{0.150, 0.165, 0.200, 1.00}
+COLOR_CHROME_HOVER         := [4]f32{1.00, 1.00, 1.00, 0.045}
+COLOR_CHROME_BORDER        := [4]f32{1.00, 1.00, 1.00, 0.08}
+COLOR_CHROME_SHADOW        := [4]f32{0.00, 0.00, 0.00, 0.35}
+COLOR_CHROME_TEXT          := [4]f32{0.92, 0.93, 0.95, 1.00}
+COLOR_CHROME_TEXT_MUTED    := [4]f32{0.62, 0.65, 0.71, 1.00}
+COLOR_CHROME_TEXT_FAINT    := [4]f32{0.42, 0.45, 0.51, 1.00}
+COLOR_CHROME_ACCENT        := [4]f32{0.43, 0.66, 1.00, 1.00}
+COLOR_CHROME_ACCENT_SOFT   := [4]f32{0.43, 0.66, 1.00, 0.16}
+COLOR_CHROME_SUCCESS       := [4]f32{0.55, 0.80, 0.52, 1.00}
+COLOR_CHROME_WARNING       := [4]f32{0.95, 0.75, 0.42, 1.00}
+COLOR_CHROME_DANGER        := [4]f32{0.95, 0.45, 0.48, 1.00}
+COLOR_CHROME_KEYCAP_BG     := [4]f32{1.00, 1.00, 1.00, 0.06}
+COLOR_CHROME_KEYCAP_BORDER := [4]f32{1.00, 1.00, 1.00, 0.10}
+
+// chrome_with_alpha scales a token's alpha (fade animations).
+chrome_with_alpha :: #force_inline proc "contextless" (c: [4]f32, a: f32) -> [4]f32 {
+	return {c[0], c[1], c[2], c[3] * a}
+}
+
+// chrome_text_advance is the per-rune advance of chrome text drawn at height
+// text_h; it mirrors the chrome renderer (glyph width = h * cell_w / cell_h).
+chrome_text_advance :: proc(m: Visual_Metrics, text_h: f32) -> f32 {
+	if m.cell_h <= 0 do return text_h * 0.5
+	return text_h * m.cell_w / m.cell_h
+}
+
+// chrome_text_width is the drawn width of text at height text_h.
+chrome_text_width :: proc(m: Visual_Metrics, text: string, text_h: f32) -> f32 {
+	n := 0
+	for _ in text do n += 1
+	return f32(n) * chrome_text_advance(m, text_h)
+}
