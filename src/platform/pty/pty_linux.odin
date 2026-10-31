@@ -12,15 +12,9 @@ foreign import libc "system:c"
 @(default_calling_convention="c")
 foreign libc {
 	ioctl     :: proc(fd: c.int, request: c.ulong, #c_vararg args: ..any) -> c.int ---
-	fcntl     :: proc(fd: c.int, cmd: c.int, #c_vararg args: ..rawptr) -> c.int ---
 }
 
 TIOCSWINSZ :: 0x5414
-F_SETFD    :: 2
-F_GETFL    :: 3
-F_SETFL    :: 4
-FD_CLOEXEC :: 1
-O_NONBLOCK :: 0x0800
 
 Winsize :: struct {
 	ws_row:    c.ushort,
@@ -92,14 +86,11 @@ _pty_spawn_platform :: proc(config: Pty_Config) -> (handle: ^Pty_Handle, err: Pt
 		return nil, .Pipe_Failed
 	}
 
-	fcntl(c.int(master), F_SETFD, rawptr(uintptr(FD_CLOEXEC)))
-	fcntl(c.int(pipe_fds[0]), F_SETFD, rawptr(uintptr(FD_CLOEXEC)))
-	fcntl(c.int(pipe_fds[1]), F_SETFD, rawptr(uintptr(FD_CLOEXEC)))
-
-	p0_flags := fcntl(c.int(pipe_fds[0]), F_GETFL)
-	if p0_flags >= 0 do fcntl(c.int(pipe_fds[0]), F_SETFL, rawptr(uintptr(p0_flags | O_NONBLOCK)))
-	p1_flags := fcntl(c.int(pipe_fds[1]), F_GETFL)
-	if p1_flags >= 0 do fcntl(c.int(pipe_fds[1]), F_SETFL, rawptr(uintptr(p1_flags | O_NONBLOCK)))
+	_fd_set_cloexec(posix.FD(master))
+	_fd_set_cloexec(pipe_fds[0])
+	_fd_set_cloexec(pipe_fds[1])
+	_fd_set_nonblocking(pipe_fds[0])
+	_fd_set_nonblocking(pipe_fds[1])
 
 	pid := posix.fork()
 	if pid < 0 {

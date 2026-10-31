@@ -1,5 +1,19 @@
 package platform_pty
 
+import "core:c"
+import "core:sys/posix"
+
+// fd flag helpers go through core:sys/posix on purpose: a second foreign
+// `fcntl` declaration with a different signature makes -o:speed builds panic
+// in the LLVM backend once another package also calls posix.fcntl.
+_fd_set_cloexec :: proc(fd: posix.FD) {
+	if flags := posix.fcntl(fd, .GETFD); flags >= 0 do posix.fcntl(fd, .SETFD, flags | c.int(posix.FD_CLOEXEC))
+}
+
+_fd_set_nonblocking :: proc(fd: posix.FD) {
+	if flags := posix.fcntl(fd, .GETFL); flags >= 0 do posix.fcntl(fd, .SETFL, flags | c.int(posix.O_NONBLOCK))
+}
+
 pty_spawn :: proc(config: Pty_Config) -> (handle: ^Pty_Handle, err: Pty_Error) {
 	return _pty_spawn_platform(config)
 }
