@@ -2,7 +2,6 @@ package terminal_tests
 
 import "core:encoding/base64"
 import "core:fmt"
-import "core:os"
 import "core:testing"
 import cursor "../../cursor"
 import term "../"
@@ -1415,8 +1414,7 @@ test_kitty_graphics_resize_placement_tracking :: proc(t: ^testing.T) {
 
 @test
 test_kitty_graphics_stbi_jpeg_decoding :: proc(t: ^testing.T) {
-	data, err := os.read_entire_file("image.jpg", context.temp_allocator)
-	if err != nil do return
+	data := #load("testdata/progressive.jpg")
 
 	terminal: term.Terminal
 	term.terminal_init(&terminal, 24, 80)
@@ -1434,7 +1432,7 @@ test_kitty_graphics_stbi_jpeg_decoding :: proc(t: ^testing.T) {
 		}
 	}
 
-	// Transmit image.jpg via Kitty direct stream chunks
+	// Transmit the fixture via Kitty direct stream chunks
 	b64_str, _ := base64.encode(data, base64.ENC_TABLE, context.temp_allocator)
 	chunk_size := 4096
 	total_len := len(b64_str)
@@ -1457,7 +1455,7 @@ test_kitty_graphics_stbi_jpeg_decoding :: proc(t: ^testing.T) {
 	}
 
 	img340 := extension.kitty_graphics_get_image(rawptr(var_kstate), 340)
-	testing.expect(t, img340 != nil, "image.jpg (progressive JPEG stream) must be successfully decoded by stb_image")
+	testing.expect(t, img340 != nil, "progressive JPEG fixture must be successfully decoded by stb_image")
 	if img340 != nil {
 		testing.expect_value(t, img340.width, 5000)
 		testing.expect_value(t, img340.height, 3327)

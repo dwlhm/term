@@ -1,66 +1,27 @@
-# Odin build artifacts
+# Build outputs (Makefile OUT_DIR, esctest/packaging scratch)
+bin/
+build/
+/src/build_info/version.odin
 *.o
 *.obj
 *.lib
 
-# Build artifacts & binaries
-/app
-/bench_app
-/fbbench
-/pressure_run
-/atlas_test
-/term_bench*
-/app_phase5
-/app_phase6
-/term-app
-/app.bin
-/app_hello
-/tests/*
-!/tests/e2e/
-/app_tests
-/render_tests
-bin/
-build/
-/src/build_info/version.odin
-
 # Debug artifacts & symbols
-*.dSYM
 *.dSYM/
 __pycache__/
 *.log
-debug.log
 
-# Scratch & patch leftovers
+# Local scratch, probes & patch debris
+scratch/
+/artifacts/
+/probe_*
+.pi/
 *.diff
 *.patch
-scratch_test.odin
-run_lldb.sh
-scratch/
-
-# Recovery & patch debris
 *.orig
 *.rej
-*.recovered
 
-# Root build leaks
-ui-*.o
-/app/
-
-# OS & Editor artifacts
+# OS & editor artifacts
 .DS_Store
 .vscode/
 .idea/
-
-# Scratch scripts and temporary binaries
-*.py
-!scripts/*.py
-!scripts/tests/*.py
-!tests/e2e/*.py
-term_test
-term_resize_repro
-test_slice.odin
-/artifacts/
-
-# Agent scratch & probe binaries
-.pi/
-/probe_*

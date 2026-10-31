@@ -206,6 +206,6 @@ To ensure a terminal is not dropping frames to inflate throughput:
 5. Inspect GPU Frame Time (target < 8.33ms for 120Hz, < 16.66ms for 60Hz)
    and verify zero dropped display frames during the replay.
 
-Full documentation and template tables are in: COMPARATIVE_BENCHMARKS.md
+Full documentation and template tables are in: docs/benchmarks/comparative.md
 ================================================================================
 EOF

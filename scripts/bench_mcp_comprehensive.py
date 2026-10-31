@@ -1267,7 +1267,7 @@ def main() -> int:
     script_dir = os.path.dirname(os.path.abspath(__file__))
     root_dir = os.path.dirname(script_dir)
     bin_path = os.path.join(root_dir, "bin", "term-mcp")
-    report_path = os.path.join(root_dir, "MCP_BENCHMARKS.md")
+    report_path = os.path.join(root_dir, "docs", "benchmarks", "mcp.md")
 
     if len(sys.argv) > 1 and sys.argv[1].startswith("--bin="):
         bin_path = sys.argv[1].split("=", 1)[1]

@@ -3,7 +3,7 @@ package terminal_cell
 import "core:unicode"
 
 // UAX #29 / UTS #51 Extended Grapheme Cluster (EGC) segmentation and cell
-// width. Ported from legacy/src/terminal/unicode_egc.odin.
+// width.
 
 Grapheme_Category :: enum u8 {
 	Other,
