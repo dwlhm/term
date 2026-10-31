@@ -4,6 +4,7 @@ package term
 // Part of Tier 3 Application Shell (src/app/term/*).
 // Invariant: Anti-God Module, Zero Monolithic Logic.
 
+import "base:intrinsics"
 import "core:fmt"
 import "core:os"
 import "core:strings"
@@ -263,6 +264,7 @@ app_init :: proc(app: ^Term_App, opts: Cli_Options = {}) -> bool {
 	app.window_focused = true
 	app.start_time = time.now()
 	plat_pty.pty_set_wakeup_callback(app_pty_wakeup_callback, app)
+	_ = signals_start(&app.signals, app)
 	_ = sdl3.AddEventWatch(app_event_watch, app)
 	return true
 }
@@ -271,6 +273,7 @@ app_destroy :: proc(app: ^Term_App) {
 	if app == nil do return
 	app.running = false
 	plat_pty.pty_set_wakeup_callback(nil, nil)
+	signals_stop(&app.signals)
 	sdl3.RemoveEventWatch(app_event_watch, app)
 
 	// Immediately hide the native window so clicking the red traffic light or pressing Cmd+Q
@@ -358,6 +361,10 @@ app_reset_font_size :: proc(app: ^Term_App) {
 app_run :: proc(app: ^Term_App) {
 	last_time := time.now()
 	for app.running {
+		if intrinsics.atomic_load(&app.quit_requested) {
+			app_request_quit(app)
+			break
+		}
 		has_pending := mux_feat.multiplexer_has_pending_data(&app.mux)
 		events_dirty := app_process_events(app, has_pending)
 		if !app.running do break
@@ -407,6 +414,7 @@ app_run :: proc(app: ^Term_App) {
 }
 
 main :: proc() {
+	_ = signals_block_quit_set()
 	opts, should_continue := app_parse_cli_args(os.args)
 	if !should_continue do return
 

@@ -105,6 +105,10 @@ _pty_spawn_platform :: proc(config: Pty_Config) -> (handle: ^Pty_Handle, err: Pt
 
 	if pid == 0 {
 		// --- CHILD PROCESS ---
+		empty: posix.sigset_t
+		posix.sigemptyset(&empty)
+		posix.sigprocmask(.SETMASK, &empty, nil)
+
 		posix.close(posix.FD(master))
 		posix.close(pipe_fds[0])
 		posix.close(pipe_fds[1])
