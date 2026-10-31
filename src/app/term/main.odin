@@ -393,6 +393,7 @@ app_run :: proc(app: ^Term_App) {
 
 		bg_drained := sess_feat.session_registry_drain_all(&app.session_reg)
 		if sess_feat.session_registry_poll(&app.session_reg, bg_drained > 0) {
+			app.layout.tab_bar_reveal_timer = 2.0
 			chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
 			term_dirty = true
 		}
