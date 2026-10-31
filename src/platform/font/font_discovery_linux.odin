@@ -45,3 +45,9 @@ linux_query_os_cascade_fonts :: proc(max_count: int, allocator := context.temp_a
 linux_query_font_by_name :: proc(name: string, allocator := context.temp_allocator) -> (path: string, ok: bool) {
 	return "", false
 }
+
+// Per-codepoint discovery needs Fontconfig (FcFontSort + FcCharSet), which is
+// not bound yet; Linux relies on the static cascade above.
+linux_query_font_for_codepoint :: proc(cp: u32, allocator := context.temp_allocator) -> (path: string, ok: bool) {
+	return "", false
+}

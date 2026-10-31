@@ -38,3 +38,13 @@ platform_query_font_by_name :: proc(name: string, allocator := context.temp_allo
 		return "", false
 	}
 }
+
+platform_query_font_for_codepoint :: proc(cp: u32, allocator := context.temp_allocator) -> (path: string, ok: bool) {
+	when ODIN_OS == .Darwin {
+		return darwin_query_font_for_codepoint(cp, allocator)
+	} else when ODIN_OS == .Linux {
+		return linux_query_font_for_codepoint(cp, allocator)
+	} else {
+		return "", false
+	}
+}

@@ -176,6 +176,8 @@ FT_LOAD_COLOR                       :: 1 << 20
 FT_LOAD_COMPUTE_METRICS             :: 1 << 21
 FT_LOAD_BITMAP_METRICS_ONLY         :: 1 << 22
 
+FT_FACE_FLAG_COLOR                  :: 1 << 14
+
 FT_LOAD_TARGET_NORMAL               :: 0 << 16
 FT_LOAD_TARGET_LIGHT                :: 1 << 16
 FT_LOAD_TARGET_MONO                 :: 2 << 16

@@ -85,3 +85,67 @@ test_arabic_harfbuzz_shaping :: proc(t: ^testing.T) {
 	testing.expect(t, cluster.glyphs[0].glyph_id != unshaped_beh || cluster.glyph_count != 2,
 		"HarfBuzz must shape connected Arabic contextual forms instead of isolated glyphs")
 }
+
+@test
+test_lazy_codepoint_discovery :: proc(t: ^testing.T) {
+	when ODIN_OS != .Darwin do return
+	fc: font.Font_Context
+	testing.expect(t, font.font_context_init(&fc, 24.0), "font_context_init must succeed")
+	defer font.font_context_destroy(&fc)
+	testing.expect(t, fc.fallback_count <= font.FALLBACK_INIT_LIMIT, "startup cascade must leave slots for lazy discovery")
+
+	// Media-control glyphs (U+23F4..23FA) live only in STIXTwoMath, outside the startup cascade.
+	for cp in ([]u32{0x23F5, 0x23F4, 0x23FA, 0x23BF}) {
+		testing.expectf(t, font.font_has_codepoint(&fc, cp), "U+%04X must resolve via per-codepoint discovery", cp)
+	}
+
+	pixels := make([]u8, 128 * 128)
+	defer delete(pixels)
+	font.font_rasterize_codepoint(&fc, 0x23F5, pixels, 128, 0, 0, 128, 128)
+	inked := false
+	for p in pixels do if p > 0 { inked = true; break }
+	testing.expect(t, inked, "U+23F5 must rasterize visible ink")
+}
+
+@test
+test_unresolvable_codepoint_is_cached_miss :: proc(t: ^testing.T) {
+	fc: font.Font_Context
+	testing.expect(t, font.font_context_init(&fc, 24.0), "font_context_init must succeed")
+	defer font.font_context_destroy(&fc)
+
+	before := fc.fallback_count
+	// U+0378 is unassigned: no font may claim it, and repeated lookups must not grow the chain.
+	for _ in 0..<3 {
+		testing.expect(t, !font.font_has_codepoint(&fc, 0x0378), "unassigned codepoint must miss")
+	}
+	testing.expect(t, !font.font_has_codepoint(&fc, 0xD800), "lone surrogate must miss")
+	testing.expect_value(t, fc.fallback_count, before)
+	testing.expect_value(t, fc.miss_cache[0x0378 % font.FONT_MISS_CACHE_SIZE], u32(0x0378 + 1))
+
+	// Cluster whose base has no face falls through to the codepoint path without re-locking.
+	pixels := make([]u8, 64 * 64)
+	defer delete(pixels)
+	font.font_rasterize_cluster_into(&fc, []rune{0x0378, 0x0301}, pixels, 64, 0, 0, 64, 64, false)
+}
+
+@test
+test_text_chain_excludes_color_faces :: proc(t: ^testing.T) {
+	fc: font.Font_Context
+	testing.expect(t, font.font_context_init(&fc, 24.0), "font_context_init must succeed")
+	defer font.font_context_destroy(&fc)
+
+	// Text-default symbols (⏺ ➡) must resolve to an outline face: sbix glyphs rasterize blank.
+	pixels := make([]u8, 128 * 128)
+	defer delete(pixels)
+	for cp in ([]u32{0x23FA, 0x27A1}) {
+		testing.expectf(t, font.font_has_codepoint(&fc, cp), "U+%04X must resolve", cp)
+		for &p in pixels do p = 0
+		font.font_rasterize_codepoint(&fc, cp, pixels, 128, 0, 0, 128, 128)
+		inked := false
+		for p in pixels do if p > 0 { inked = true; break }
+		testing.expectf(t, inked, "U+%04X must rasterize visible ink", cp)
+	}
+	for i in 0..<fc.fallback_count {
+		testing.expectf(t, fc.fallbacks[i].face.face_flags & font.FT_FACE_FLAG_COLOR == 0, "color face in text chain: %s", fc.fallback_paths[i])
+	}
+}

@@ -28,6 +28,11 @@ CTFontDescriptorRef :: distinct rawptr
 Boolean             :: u8
 @(private = "file")
 CFIndex             :: c.long
+@(private = "file")
+CFRange             :: struct {
+	location: CFIndex,
+	length:   CFIndex,
+}
 
 @(private = "file")
 kCFStringEncodingUTF8: u32 : 0x08000100
@@ -35,6 +40,8 @@ kCFStringEncodingUTF8: u32 : 0x08000100
 foreign CoreFoundation {
 	@(private = "file")
 	CFStringCreateWithCString        :: proc(alloc: rawptr, cStr: cstring, encoding: u32) -> CFStringRef ---
+	@(private = "file")
+	CFStringCreateWithCharacters     :: proc(alloc: rawptr, chars: [^]u16, numChars: CFIndex) -> CFStringRef ---
 	@(private = "file")
 	CFRelease                        :: proc(cf: CFTypeRef) ---
 	@(private = "file")
@@ -58,6 +65,10 @@ foreign CoreText {
 	CTFontDescriptorCopyAttribute         :: proc(descriptor: CTFontDescriptorRef, attribute: CFStringRef) -> CFTypeRef ---
 	@(private = "file")
 	CTFontDescriptorCreateWithNameAndSize :: proc(name: CFStringRef, size: f64) -> CTFontDescriptorRef ---
+	@(private = "file")
+	CTFontCreateForString                 :: proc(currentFont: CTFontRef, str: CFStringRef, range: CFRange) -> CTFontRef ---
+	@(private = "file")
+	CTFontCopyAttribute                   :: proc(font: CTFontRef, attribute: CFStringRef) -> CFTypeRef ---
 }
 
 @(private = "file")
@@ -140,4 +151,39 @@ darwin_query_os_cascade_fonts :: proc(max_count: int, allocator := context.temp_
 		}
 	}
 	return results[:]
+}
+
+// darwin_query_font_for_codepoint asks CoreText's per-character fallback which
+// installed font covers `cp`, rejecting the LastResort placeholder font.
+darwin_query_font_for_codepoint :: proc(cp: u32, allocator := context.temp_allocator) -> (path: string, ok: bool) {
+	units: [2]u16
+	n := 1
+	if cp >= 0x10000 {
+		v := cp - 0x10000
+		units = {u16(0xD800 + (v >> 10)), u16(0xDC00 + (v & 0x3FF))}
+		n = 2
+	} else {
+		units[0] = u16(cp)
+	}
+	str := CFStringCreateWithCharacters(nil, raw_data(units[:]), CFIndex(n))
+	if str == nil do return "", false
+	defer CFRelease(CFTypeRef(str))
+
+	base := CTFontCreateUIFontForLanguage(1, 14.0, nil)
+	if base == nil do return "", false
+	defer CFRelease(CFTypeRef(base))
+
+	font := CTFontCreateForString(base, str, CFRange{0, CFIndex(n)})
+	if font == nil do return "", false
+	defer CFRelease(CFTypeRef(font))
+
+	url := CTFontCopyAttribute(font, kCTFontURLAttribute)
+	if url == nil do return "", false
+	defer CFRelease(url)
+	path, ok = _darwin_url_to_path(CFURLRef(url), allocator)
+	if ok && strings.has_suffix(path, "LastResort.otf") {
+		delete(path, allocator)
+		return "", false
+	}
+	return path, ok
 }

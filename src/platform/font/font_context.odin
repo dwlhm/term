@@ -22,11 +22,10 @@ FONT_DISCOVERY_PATHS := []string{
 	"/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
 }
 
-MAX_FALLBACKS :: 16
+MAX_FALLBACKS :: 32
 
 FALLBACK_DISCOVERY_PATHS := []string{
 	"assets/fonts/SymbolsNerdFontMono-Regular.ttf",
-	"/System/Library/Fonts/Apple Color Emoji.ttc",
 	"/System/Library/Fonts/SFNSMono.ttf",
 	"/System/Library/Fonts/Apple Symbols.ttf",
 	"/System/Library/Fonts/Menlo.ttc",
@@ -44,6 +43,7 @@ Font_Context :: struct {
 	active_path:         string,
 	primary_cap_px:      int,
 	primary_baseline_px: int,
+	miss_cache:          [FONT_MISS_CACHE_SIZE]u32,
 	font_mutex:          sync.Mutex,
 }
 
@@ -89,26 +89,13 @@ resolve_font_path :: proc(path: string, allocator := context.temp_allocator) -> 
 	return "", false
 }
 
-@(private = "file")
-_try_append_fallback :: proc(fc: ^Font_Context, path: string, pixel_size: f32) {
-	if fc.fallback_count >= MAX_FALLBACKS || len(path) == 0 do return
-	if path == fc.active_path do return
-	for i in 0..<fc.fallback_count {
-		if fc.fallback_paths[i] == path do return
-	}
-	err: Font_Error
-	if font_rasterizer_init(&fc.fallbacks[fc.fallback_count], path, pixel_size, &err) {
-		fc.fallback_paths[fc.fallback_count] = strings.clone(path)
-		fc.fallback_count += 1
-	}
-}
-
 font_context_init :: proc(fc: ^Font_Context, pixel_size: f32 = 32.0) -> bool {
 	if fc == nil do return false
 	fc.pixel_size = pixel_size
 	fc.has_font = false
 	fc.active_path = ""
 	fc.fallback_count = 0
+	fc.miss_cache = {}
 
 	// 1. Discover Primary Font (Priority A: Bundled / User configured font)
 	for p in FONT_DISCOVERY_PATHS {
@@ -146,7 +133,7 @@ font_context_init :: proc(fc: ^Font_Context, pixel_size: f32 = 32.0) -> bool {
 	}
 
 	// Priority B: Dynamic Operating System cascade list (Arabic, CJK, etc.)
-	needed := MAX_FALLBACKS - fc.fallback_count
+	needed := FALLBACK_INIT_LIMIT - fc.fallback_count
 	if needed > 0 {
 		cascades := platform_query_os_cascade_fonts(needed, context.temp_allocator)
 		for path in cascades {
@@ -192,15 +179,9 @@ font_context_set_pixel_size :: proc(fc: ^Font_Context, pixel_size: f32) -> bool 
 
 font_has_codepoint :: proc(fc: ^Font_Context, cp: u32) -> bool {
 	if fc == nil do return false
-	if fc.has_font && font_rasterizer_find_glyph_index(&fc.rasterizer, cp) != 0 {
-		return true
-	}
-	for i in 0..<fc.fallback_count {
-		if font_rasterizer_find_glyph_index(&fc.fallbacks[i], cp) != 0 {
-			return true
-		}
-	}
-	return false
+	sync.mutex_lock(&fc.font_mutex)
+	defer sync.mutex_unlock(&fc.font_mutex)
+	return _font_face_for_codepoint(fc, cp) != nil
 }
 
 ATLAS_FALLBACK_MAX_SCALE : f32 : 4.0
@@ -332,29 +313,35 @@ font_rasterize_codepoint :: proc(
 	if fc == nil do return 0, 0
 	sync.mutex_lock(&fc.font_mutex)
 	defer sync.mutex_unlock(&fc.font_mutex)
+	return _rasterize_codepoint_locked(fc, cp, dst_pixels, pitch, px, py, slot_w, slot_h, is_wide)
+}
 
+@(private = "file")
+_rasterize_codepoint_locked :: proc(
+	fc: ^Font_Context,
+	cp: u32,
+	dst_pixels: []u8,
+	pitch: int,
+	px, py: int,
+	slot_w, slot_h: int,
+	is_wide: bool,
+) -> (draw_w: f32, offset_x: f32) {
 	cell_w := int(fc.rasterizer.metrics.cell_width) if fc.has_font && fc.rasterizer.metrics.cell_width > 0 else 19
 	cell_h := int(fc.rasterizer.metrics.cell_height) if fc.has_font && fc.rasterizer.metrics.cell_height > 0 else 43
 	target_w := cell_w * 2 if is_wide else cell_w
 	gw := f32(target_w)
 
+	face := _font_face_for_codepoint(fc, cp)
+	if face == nil do return gw, 0.0
+
 	// 1. Box drawing and block elements
 	if _is_box_or_block(cp) {
-		if fc.has_font && font_rasterizer_find_glyph_index(&fc.rasterizer, cp) != 0 {
-			font_rasterize_glyph_into(&fc.rasterizer, cp, dst_pixels, pitch, px, py, slot_w, slot_h)
-			return gw, 0.0
-		}
-		for i in 0..<fc.fallback_count {
-			if font_rasterizer_find_glyph_index(&fc.fallbacks[i], cp) != 0 {
-				font_rasterize_glyph_into(&fc.fallbacks[i], cp, dst_pixels, pitch, px, py, slot_w, slot_h)
-				return gw, 0.0
-			}
-		}
+		font_rasterize_glyph_into(face, cp, dst_pixels, pitch, px, py, slot_w, slot_h)
 		return gw, 0.0
 	}
 
 	// 2. Primary face
-	if fc.has_font && font_rasterizer_find_glyph_index(&fc.rasterizer, cp) != 0 {
+	if face == &fc.rasterizer {
 		slot := fc.rasterizer.face.glyph
 		gid := font_rasterizer_find_glyph_index(&fc.rasterizer, cp)
 		if FT_Load_Glyph(fc.rasterizer.face, gid, FT_LOAD_RENDER | FT_LOAD_TARGET_NORMAL) == 0 {
@@ -368,24 +355,8 @@ font_rasterize_codepoint :: proc(
 		return gw, 0.0
 	}
 
-	// 3. Fallback chain
-	center_w := cell_w * 2 if is_wide else cell_w
-	for i in 0..<fc.fallback_count {
-		if font_rasterizer_find_glyph_index(&fc.fallbacks[i], cp) != 0 {
-			return _rasterize_fallback_fitted(fc, &fc.fallbacks[i], cp, dst_pixels, pitch, px, py, slot_w, slot_h, cell_w, cell_h, center_w)
-		}
-	}
-
-	return gw, 0.0
-}
-
-_font_face_for_codepoint :: proc(fc: ^Font_Context, cp: u32) -> ^Font_Rasterizer {
-	if fc == nil do return nil
-	if fc.has_font && font_rasterizer_find_glyph_index(&fc.rasterizer, cp) != 0 do return &fc.rasterizer
-	for i in 0..<fc.fallback_count {
-		if font_rasterizer_find_glyph_index(&fc.fallbacks[i], cp) != 0 do return &fc.fallbacks[i]
-	}
-	return nil
+	// 3. Fallback face
+	return _rasterize_fallback_fitted(fc, face, cp, dst_pixels, pitch, px, py, slot_w, slot_h, cell_w, cell_h, target_w)
 }
 
 _blit_glyph_max :: proc(
@@ -442,7 +413,7 @@ font_rasterize_cluster_into :: proc(
 	}
 
 	// 2. Fallback base codepoint + stacked mark blitting
-	draw_w, offset_x = font_rasterize_codepoint(fc, u32(runes[0]), dst_pixels, pitch, px, py, slot_w, slot_h, is_wide)
+	draw_w, offset_x = _rasterize_codepoint_locked(fc, u32(runes[0]), dst_pixels, pitch, px, py, slot_w, slot_h, is_wide)
 	for i in 1..<len(runes) {
 		mark_cp := u32(runes[i])
 		mr := _font_face_for_codepoint(fc, mark_cp)
