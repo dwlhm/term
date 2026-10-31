@@ -34,6 +34,10 @@ Term_App :: struct {
 	queue:         contract.Gpu_Queue,
 	format:        contract.Gpu_Format,
 	running:       bool,
+	role:          Instance_Role,
+	window_hidden: bool, // set by app_request_hide; rendering and blink ticks stop while true
+	quit_requested: bool, // atomic; set by the signal thread, consumed by app_run
+	signals:       Signal_Router,
 	time_elapsed:  f32,
 	start_time:    time.Time,
 

@@ -16,6 +16,18 @@ Instance_Role :: enum u8 {
 	Standalone, // diagnostics/scripted run (--telemetry, --grid-dump, -e): close = quit
 }
 
+// app_resolve_role: Standalone iff any of --telemetry, --grid-dump or -e was
+// given (scripted/diagnostic runs must exit when their shell exits); else Primary.
+app_resolve_role :: proc(opts: Cli_Options) -> Instance_Role {
+	return .Primary // T4a
+}
+
+// app_spawn_default_tab spawns one shell pane sized to the content area,
+// creates a "Shell" tab for it, focuses it. Returns false if spawn failed.
+app_spawn_default_tab :: proc(app: ^Term_App) -> bool {
+	unimplemented("T4a")
+}
+
 // app_request_hide: Primary → hide the window (all tabs/sessions keep
 // running, the loop parks with zero rendering). Standalone → app_request_quit.
 app_request_hide :: proc(app: ^Term_App) {

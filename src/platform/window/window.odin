@@ -113,6 +113,13 @@ window_update_pixel_size :: proc(w: ^Window) {
 	}
 }
 
+// platform_hide_window hides Term without destroying the window. Darwin:
+// [NSApp hide:nil] (a Dock click unhides natively). Other OSes: SDL HideWindow.
+// nil-safe.
+platform_hide_window :: proc(sdl_window: ^sdl3.Window) {
+	unimplemented("T4a")
+}
+
 platform_bring_window_to_front :: proc(sdl_window: ^sdl3.Window) {
 	if sdl_window == nil do return
 	sdl3.ShowWindow(sdl_window)
