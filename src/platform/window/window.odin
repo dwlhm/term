@@ -27,6 +27,7 @@ Platform_Menu_Item :: struct {
 
 // window_init initializes SDL3 and creates a window with high pixel density and transparency.
 window_init :: proc(w: ^Window, title: string, width, height: i32) -> bool {
+	_ = sdl3.SetHint(sdl3.HINT_NO_SIGNAL_HANDLERS, "1")
 	if !sdl3.Init(sdl3.INIT_VIDEO) {
 		return false
 	}
