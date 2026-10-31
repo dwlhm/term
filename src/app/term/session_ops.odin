@@ -103,10 +103,4 @@ app_attach_background_session :: proc(app: ^Term_App, bg_id: u32) -> bool {
 	return true
 }
 
-// app_attach_latest_background_session pops and restores the most recently detached session.
-app_attach_latest_background_session :: proc(app: ^Term_App) -> bool {
-	if app == nil || sess_feat.session_registry_count(&app.session_reg) == 0 do return false
-	last_idx := len(app.session_reg.entries) - 1
-	bg_id := app.session_reg.entries[last_idx].id
-	return app_attach_background_session(app, bg_id)
-}
+

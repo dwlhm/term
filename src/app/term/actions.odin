@@ -317,10 +317,10 @@ app_show_pane_context_menu :: proc(app: ^Term_App, mx, my: f32) {
 app_execute_action :: proc(app: ^Term_App, act: Action_Id) {
 	#partial switch act {
 	case .Command_Center_Toggle:
-		command_center_toggle(&app.cmd_center, .Commands, &app.tabs_mgr)
+		command_center_toggle(&app.cmd_center, .Commands, app_command_center_sources(app))
 
 	case .Tab_Overview_Toggle:
-		command_center_toggle(&app.cmd_center, .Tabs, &app.tabs_mgr)
+		command_center_toggle(&app.cmd_center, .Tabs, app_command_center_sources(app))
 
 	case .Tab_New:
 		new_p, ok := app_spawn_terminal_pane(app, 24, 80)
@@ -506,8 +506,9 @@ app_execute_action :: proc(app: ^Term_App, act: Action_Id) {
 	case .Tab_Detach:
 		_ = app_detach_focused_pane(app)
 
-	case .Tab_Attach_Latest:
-		_ = app_attach_latest_background_session(app)
+	case .Sessions_Toggle:
+		_ = sess_feat.session_registry_clear_attention(&app.session_reg)
+		command_center_toggle(&app.cmd_center, .Sessions, app_command_center_sources(app))
 
 	case .App_Quit:
 		app_request_hide(app)

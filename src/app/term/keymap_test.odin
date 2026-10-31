@@ -17,7 +17,7 @@ test_keymap_detach_attach_shortcuts :: proc(t: ^testing.T) {
 
 	act_a, ok_a := keymap_evaluate(sdl3.K_A, mod_opt_cmd)
 	testing.expect(t, ok_a, "⌥⌘A must be recognized")
-	testing.expect_value(t, act_a, Action_Id.Tab_Attach_Latest)
+	testing.expect_value(t, act_a, Action_Id.Sessions_Toggle)
 
 	// Ensure standard ⌘A is Select_All
 	mod_cmd := sdl3.KMOD_GUI
@@ -30,7 +30,8 @@ test_keymap_detach_attach_shortcuts :: proc(t: ^testing.T) {
 	testing.expect(t, found_d, "Tab_Detach metadata must exist")
 	testing.expect_value(t, meta_detach.shortcut, "⌥⌘B")
 
-	meta_attach, found_a := action_get_metadata(.Tab_Attach_Latest)
-	testing.expect(t, found_a, "Tab_Attach_Latest metadata must exist")
+	meta_attach, found_a := action_get_metadata(.Sessions_Toggle)
+	testing.expect(t, found_a, "Sessions_Toggle metadata must exist")
 	testing.expect_value(t, meta_attach.shortcut, "⌥⌘A")
+	testing.expect_value(t, meta_attach.title, "Background Sessions")
 }

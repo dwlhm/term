@@ -118,10 +118,9 @@ app_handle_mouse_button_down :: proc(app: ^Term_App, ev: sdl3.MouseButtonEvent) 
 	my := f32(ev.y) * ratio
 
 	if app.cmd_center.visible {
-		res := command_center_handle_click(&app.cmd_center, mx, my)
+		res := command_center_handle_click(&app.cmd_center, mx, my, app_command_center_sources(app))
 		if res.handled {
-			if res.action != .None do app_execute_action(app, res.action)
-			if res.target_tab >= 0 do app_select_tab(app, res.target_tab)
+			app_apply_command_center_result(app, res)
 			return
 		}
 	}
@@ -371,7 +370,7 @@ app_handle_text_input :: proc(app: ^Term_App, text: string) {
 	if app.search.active {
 		app_search_append(app, text)
 	} else if app.cmd_center.visible {
-		command_center_handle_text(&app.cmd_center, text, &app.tabs_mgr)
+		command_center_handle_text(&app.cmd_center, text, app_command_center_sources(app))
 	} else {
 		p := mux_feat.multiplexer_get_focused_pane(&app.mux)
 		if p != nil && p.session != nil {
@@ -400,10 +399,9 @@ app_handle_key_down :: proc(app: ^Term_App, ev: sdl3.KeyboardEvent) {
 	}
 
 	if app.cmd_center.visible {
-		res := command_center_handle_key(&app.cmd_center, ev.key, ev.mod, &app.tabs_mgr)
+		res := command_center_handle_key(&app.cmd_center, ev.key, ev.mod, app_command_center_sources(app))
 		if res.handled {
-			if res.action != .None do app_execute_action(app, res.action)
-			if res.target_tab >= 0 do app_select_tab(app, res.target_tab)
+			app_apply_command_center_result(app, res)
 			return
 		}
 	}
@@ -671,6 +669,15 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 			app.mouse.pos = {mx, my}
 			if app.layout.is_fullscreen && ((prev_mouse_y <= app.layout.metrics.auto_hide_trigger_y) != (my <= app.layout.metrics.auto_hide_trigger_y)) {
 				ui_dirty = true
+			}
+
+			if app.cmd_center.visible {
+				if command_center_handle_motion(&app.cmd_center, mx, my) {
+					chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
+					ui_dirty = true
+				}
+				if !sdl3.PollEvent(&ev) do break
+				continue
 			}
 
 			// A0. Dragging the scrollback thumb

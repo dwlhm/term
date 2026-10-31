@@ -12,6 +12,7 @@ import chrome_splits "../../core/chrome/splits"
 import chrome_render "../../core/render/chrome"
 import tabs_feat "../../features/tabs"
 import mux_feat "../../features/multiplexer"
+import sess_feat "../../features/session"
 
 Chrome_View :: struct {
 	rend:         chrome_render.Chrome_Renderer,
@@ -106,6 +107,7 @@ chrome_view_build_draw_list :: proc(
 	hovered_scrollbar: u32 = 0,
 	dragged_scrollbar: u32 = 0,
 	drop_effect: ^Drop_Effect_State = nil,
+	sessions: ^sess_feat.Session_Registry = nil,
 ) -> (dirty: bool) {
 	if cv == nil do return false
 
@@ -373,7 +375,8 @@ chrome_view_build_draw_list :: proc(
 
 	// 4. Modal Overlay (Command Center or Tab Overview)
 	if cmd_center != nil && cmd_center.visible {
-		command_center_emit_draw_list(cmd_center, tabs, &cv.draw_list, layout.screen_w, layout.screen_h, layout.metrics.scale)
+		cc_src := Command_Center_Sources{tabs = tabs, sessions = sessions}
+		command_center_emit_draw_list(cmd_center, cc_src, &cv.draw_list, layout)
 	}
 
 	screen_w := layout.screen_w if layout != nil else f32(cv.rend.width)
@@ -415,21 +418,12 @@ chrome_view_build_and_render :: proc(
 
 _cursor_for_command_center :: proc(cc: ^Command_Center_State, pt: [2]f32) -> (cursor.Mouse_Cursor, bool) {
 	if cc == nil || !cc.visible do return .Default, false
-	mx, my := pt.x, pt.y
-	if mx >= cc.modal_rect[0] && mx <= cc.modal_rect[0] + cc.modal_rect[2] &&
-	   my >= cc.modal_rect[1] && my <= cc.modal_rect[1] + cc.modal_rect[3] {
-		input_top := cc.modal_rect[1] + 16.0
-		input_bot := input_top + 36.0
-		if my >= input_top && my <= input_bot do return .Text, true
-		if my >= cc.items_start_y && cc.item_h > 0 {
-			row_idx := int((my - cc.items_start_y) / cc.item_h)
-			if row_idx >= 0 && row_idx < 8 && (cc.scroll_offset + row_idx) < cc.filtered_count {
-				return .Pointer, true
-			}
-		}
-		return .Default, true
+	if tab_bar_point_in(cc.search_rect, pt.x, pt.y) do return .Text, true
+	for r in cc.chip_rects do if tab_bar_point_in(r, pt.x, pt.y) do return .Pointer, true
+	for i in 0..<cc.row_rect_count {
+		if tab_bar_point_in(cc.row_rects[i], pt.x, pt.y) do return .Pointer, true
 	}
-	return .Default, true
+	return .Default, true // modal is up: nothing underneath gets a cursor
 }
 
 _cursor_for_tab_bar :: proc(layout: ^Layout_State, tabs: ^tabs_feat.Tabs_Manager, pt: [2]f32) -> (cursor.Mouse_Cursor, bool) {

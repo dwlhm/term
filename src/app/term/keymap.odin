@@ -13,7 +13,7 @@ Action_Id :: enum {
 	Tab_New,
 	Tab_Close,
 	Tab_Detach,
-	Tab_Attach_Latest,
+	Sessions_Toggle,
 	Tab_Next,
 	Tab_Prev,
 	Tab_Overview_Toggle,
@@ -97,7 +97,7 @@ ACTION_CATALOG := []Action_Metadata{
 	{.Tab_New,               "New Tab",                    "⌘T",       "Open a new terminal tab", .Tabs},
 	{.Tab_Close,             "Close Tab",                  "⌘W",       "Close the active tab", .Tabs},
 	{.Tab_Detach,            "Detach Pane to Background",  "⌥⌘B",      "Move the focused pane to background sessions", .Sessions},
-	{.Tab_Attach_Latest,     "Attach Background Session",  "⌥⌘A",      "Restore the latest background session into a tab", .Sessions},
+	{.Sessions_Toggle,       "Background Sessions",        "⌥⌘A",      "Attach, inspect or kill background sessions", .Sessions},
 	{.Tab_Next,              "Next Tab",                   "^Tab",     "Switch to the next tab", .Tabs},
 	{.Tab_Prev,              "Previous Tab",               "⇧^Tab",    "Switch to previous tab", .Tabs},
 	{.Tab_Overview_Toggle,   "Show All Tabs",              "⇧⌘A / ⇧⌘O","Open tab overview and quick switcher", .Tabs},
@@ -164,7 +164,7 @@ keymap_evaluate :: proc(key: sdl3.Keycode, mod: sdl3.Keymod) -> (Action_Id, bool
 		} else if is_alt {
 			switch key {
 			case sdl3.K_B:                  return .Tab_Detach, true
-			case sdl3.K_A:                  return .Tab_Attach_Latest, true
+			case sdl3.K_A:                  return .Sessions_Toggle, true
 			}
 		} else {
 			switch key {
