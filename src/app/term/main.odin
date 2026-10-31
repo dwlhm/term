@@ -17,7 +17,7 @@ import plat_pty "../../platform/pty"
 import plat_ipc "../../platform/ipc"
 import contract "../../core/render/contract"
 import damage "../../core/terminal/damage"
-import chrome_modals "../../core/chrome/modals"
+import chrome_render "../../core/render/chrome"
 import wgpu_backend "../../platform/gpu/wgpu"
 import tabs_feat "../../features/tabs"
 import mux_feat "../../features/multiplexer"
@@ -60,10 +60,6 @@ Term_App :: struct {
 	diag:          Diagnostics,
 	sync_output:   Sync_Output_State,
 	session_reg:   sess_feat.Session_Registry,
-	session_dlg:   chrome_modals.Session_Dialog_State,
-	menu_bar:      rawptr,
-	last_mb_hash:  u64,
-	has_mb_hash:   bool,
 	last_title_sync: time.Time,
 	window_focused:            bool,
 	pty_wakeup_pending:        bool,
@@ -239,8 +235,6 @@ app_init :: proc(app: ^Term_App, opts: Cli_Options = {}) -> bool {
 	tabs_feat.tabs_manager_init(&app.tabs_mgr, layout_compute_tab_bar_rect(&app.layout))
 	mux_feat.multiplexer_init(&app.mux)
 	sess_feat.session_registry_init(&app.session_reg)
-	chrome_modals.session_dialog_init(&app.session_dlg)
-	app.menu_bar = plat_win.platform_menu_bar_init()
 
 	// Create initial terminal pane & tab strictly inside content_area (below top bar!)
 	content_area := layout_compute_content_area(&app.layout)
@@ -269,7 +263,6 @@ app_init :: proc(app: ^Term_App, opts: Cli_Options = {}) -> bool {
 	app.window_focused = true
 	app.start_time = time.now()
 	plat_pty.pty_set_wakeup_callback(app_pty_wakeup_callback, app)
-	app_sync_menu_bar(app)
 	_ = sdl3.AddEventWatch(app_event_watch, app)
 	return true
 }
@@ -287,11 +280,6 @@ app_destroy :: proc(app: ^Term_App) {
 		sdl3.PumpEvents()
 	}
 
-	if app.menu_bar != nil {
-		plat_win.platform_menu_bar_destroy(app.menu_bar)
-		app.menu_bar = nil
-	}
-	chrome_modals.session_dialog_destroy(&app.session_dlg)
 	sess_feat.session_registry_destroy(&app.session_reg)
 	diagnostics_shutdown(app)
 	mux_feat.multiplexer_destroy(&app.mux)
@@ -394,13 +382,10 @@ app_run :: proc(app: ^Term_App) {
 		if app_sync_layout_and_winsize(app, drained > 0) do term_dirty = true
 		diagnostics_poll(app)
 
-		if tag := plat_win.platform_menu_bar_take_action(); tag > 0 {
-			app_handle_menu_bar_action(app, tag)
-			term_dirty = true
-		}
 		bg_drained := sess_feat.session_registry_drain_all(&app.session_reg)
-		if drained > 0 || bg_drained > 0 || reaped {
-			app_sync_menu_bar(app)
+		if sess_feat.session_registry_poll(&app.session_reg, bg_drained > 0) {
+			chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
+			term_dirty = true
 		}
 
 		now_ns := u64(time.duration_nanoseconds(time.diff(app.start_time, now)))

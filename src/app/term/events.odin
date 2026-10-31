@@ -14,7 +14,6 @@ import contract "../../core/render/contract"
 import chrome_render "../../core/render/chrome"
 import chrome_hit "../../core/chrome/hit_test"
 import chrome_splits "../../core/chrome/splits"
-import chrome_modals "../../core/chrome/modals"
 import damage "../../core/terminal/damage"
 import core_terminal "../../core/terminal"
 import tabs_feat "../../features/tabs"
@@ -117,21 +116,6 @@ app_handle_mouse_button_down :: proc(app: ^Term_App, ev: sdl3.MouseButtonEvent) 
 	ratio := app.window.pixel_ratio
 	mx := f32(ev.x) * ratio
 	my := f32(ev.y) * ratio
-
-	if app.session_dlg.visible {
-		act := chrome_modals.session_dialog_handle_click(&app.session_dlg, mx, my)
-		switch act {
-		case .Repaint:
-			chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
-		case .Cancel:
-			app.session_dlg.visible = false
-			chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
-		case .Apply:
-			app_apply_safety_dialog(app)
-		case .None:
-		}
-		return
-	}
 
 	if app.cmd_center.visible {
 		res := command_center_handle_click(&app.cmd_center, mx, my)
@@ -401,19 +385,6 @@ app_handle_text_input :: proc(app: ^Term_App, text: string) {
 }
 
 app_handle_key_down :: proc(app: ^Term_App, ev: sdl3.KeyboardEvent) {
-	if app.session_dlg.visible {
-		switch ev.key {
-		case sdl3.K_ESCAPE:
-			app.session_dlg.visible = false
-			chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
-			return
-		case sdl3.K_RETURN, sdl3.K_KP_ENTER:
-			app_apply_safety_dialog(app)
-			return
-		}
-		return
-	}
-
 	if app.search.active {
 		switch ev.key {
 		case sdl3.K_ESCAPE:
@@ -660,9 +631,7 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 		#partial switch ev.type {
 		case .QUIT, .WINDOW_CLOSE_REQUESTED:
 			ui_dirty = true
-			if !app_check_and_show_safety_dialog(app) {
-				app.running = false
-			}
+			app_request_hide(app)
 		case .WINDOW_FOCUS_GAINED:
 			app.window_focused = true
 			cursor_reset_blink(&app.cursor, u64(time.duration_nanoseconds(time.since(app.start_time))))
@@ -791,7 +760,7 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 
 			// C. Autonomous Cursor Determination: Chrome View -> Hyperlink (Cmd-gated) -> Terminal/Session -> Window Default
 			if !divider_cursor_handled {
-				if cur, handled := chrome_view_cursor(&app.chrome_view, &app.layout, &app.tabs_mgr, &app.cmd_center, {mx, my}, &app.session_dlg); handled {
+				if cur, handled := chrome_view_cursor(&app.chrome_view, &app.layout, &app.tabs_mgr, &app.cmd_center, {mx, my}); handled {
 					if app.mouse.hover_link.active do ui_dirty = true
 					app.mouse.hover_link = {}
 					app_set_mouse_cursor(cur)
