@@ -116,7 +116,7 @@ _activate_row :: proc(cc: ^Command_Center_State, src: Command_Center_Sources, id
 		if entry == nil || entry.state == .Exited do return res
 		res.outcome = .Attach_Session
 	}
-	cc.visible = false
+	command_center_close(cc)
 	return res
 }
 
@@ -158,6 +158,8 @@ command_center_init :: proc(cc: ^Command_Center_State) {
 command_center_open :: proc(cc: ^Command_Center_State, mode: Command_Center_Mode, src: Command_Center_Sources) {
 	if cc == nil do return
 	cc.visible = true
+	cc.closing = false
+	cc.anim_t = 0
 	cc.mode = mode
 	text_input_clear(&cc.input)
 	_rebuild(cc, src)
@@ -172,6 +174,19 @@ command_center_toggle :: proc(cc: ^Command_Center_State, mode: Command_Center_Mo
 command_center_close :: proc(cc: ^Command_Center_State) {
 	if cc == nil do return
 	cc.visible = false
+	cc.closing = true
+}
+
+command_center_update :: proc(cc: ^Command_Center_State, dt: f32) -> (animating: bool) {
+	if cc == nil do return false
+	if cc.visible {
+		cc.anim_t = min(1.0, cc.anim_t + dt / 0.12)
+	} else if cc.closing {
+		cc.anim_t = max(0.0, cc.anim_t - dt / 0.09)
+		cc.closing = cc.anim_t > 0
+	}
+	animating = (cc.anim_t > 0 && cc.anim_t < 1) || cc.closing
+	return
 }
 
 // command_center_refresh rebuilds rows keeping the selected row when it survives.

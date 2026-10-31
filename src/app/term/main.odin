@@ -378,6 +378,7 @@ app_run :: proc(app: ^Term_App) {
 
 		layout_update(&app.layout, dt)
 		drop_effect_update(&app.drop_effect, dt)
+		_ = command_center_update(&app.cmd_center, dt)
 
 		drained := mux_feat.multiplexer_drain_all(&app.mux)
 		telemetry.telemetry_add_drain(&app.diag.tel, drained)

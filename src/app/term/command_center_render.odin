@@ -1,213 +1,250 @@
 package term
 
-// Command Center — rendering.
-
 import "core:fmt"
-
+import "core:strings"
 import chrome_dl "../../core/chrome/draw_list"
-import tabs_feat "../../features/tabs"
 import sess_feat "../../features/session"
 
-command_center_emit_draw_list :: proc(cc: ^Command_Center_State, src: Command_Center_Sources, dl: ^chrome_dl.Ui_Draw_List, layout: ^Layout_State) {
-	if cc == nil || dl == nil || layout == nil || !cc.visible do return
+@(private = "file") CC_LABELS := [Command_Center_Mode]string{.Commands = "Commands", .Tabs = "Tabs", .Sessions = "Sessions"}
+@(private = "file") CC_PLACEHOLDERS := [Command_Center_Mode]string{.Commands = "Search commands…", .Tabs = "Switch to tab…", .Sessions = "Filter background sessions…"}
+@(private = "file") CC_EMPTY := [Command_Center_Mode]string{.Commands = "No matching commands", .Tabs = "No matching tabs", .Sessions = "No background sessions — ⌥⌘B detaches the focused pane"}
 
-	s := max(1.0, layout.metrics.scale)
-	screen_w := layout.screen_w
-	screen_h := layout.screen_h
+@(private = "file")
+Cc_Ctx :: struct {
+	cc: ^Command_Center_State, src: Command_Center_Sources, dl: ^chrome_dl.Ui_Draw_List,
+	m: Visual_Metrics, s, e, modal_x, modal_y, modal_w, modal_h: f32,
+}
 
-	// Backdrop dimmer
-	chrome_dl.ui_draw_rect(dl, {0, 0, screen_w, screen_h}, {0.0, 0.0, 0.0, 0.40})
+@(private = "file")
+_cc_keycap_w :: proc(m: Visual_Metrics, label: string) -> f32 {
+	return max(20.0 * m.scale, chrome_text_width(m, label, 11.5 * m.scale) + 10.0 * m.scale)
+}
 
-	modal_w := 540.0 * s
+@(private = "file")
+_cc_draw_keycap :: proc(dl: ^chrome_dl.Ui_Draw_List, m: Visual_Metrics, e: f32, rect: [4]f32, label: string, lh: f32) {
+	s, tw := m.scale, chrome_text_width(m, label, lh)
+	chrome_dl.ui_draw_rounded_rect(dl, rect, chrome_with_alpha(COLOR_CHROME_KEYCAP_BG, e), 5.0 * s)
+	chrome_dl.ui_draw_border(dl, rect, chrome_with_alpha(COLOR_CHROME_KEYCAP_BORDER, e), 5.0 * s)
+	chrome_dl.ui_draw_text(dl, {rect[0] + (rect[2] - tw) * 0.5, rect[1] + (rect[3] - lh) * 0.5, tw, lh}, label, chrome_with_alpha(COLOR_CHROME_TEXT_MUTED, e))
+}
 
-	// compute visible row heights
-	vis := min(COMMAND_CENTER_VISIBLE_CAP, cc.row_count - cc.scroll_offset)
-	if vis < 0 do vis = 0
-	sum_h: f32 = 0
-	for r in 0..<vis {
+@(private = "file")
+_cc_split_keycaps :: proc(seg: string, allocator := context.temp_allocator) -> [dynamic]string {
+	out := make([dynamic]string, allocator)
+	s := seg
+	outer: for len(s) > 0 {
+		for m in ([]string{"⌘", "⌥", "⇧", "⌃", "^"}) {
+			if strings.has_prefix(s, m) { append(&out, m); s = s[len(m):]; continue outer }
+		}
+		append(&out, s); break
+	}
+	return out
+}
+
+@(private = "file")
+_cc_calc_list_h :: proc(cc: ^Command_Center_State, s, cap_h: f32) -> f32 {
+	if cc.row_count == 0 do return 36.0 * s
+	h: f32 = 0
+	for r in 0..<COMMAND_CENTER_VISIBLE_CAP {
 		idx := cc.scroll_offset + r
-		if idx < 0 || idx >= cc.row_count do break
-		if cc.rows[idx].kind == .Header {
-			sum_h += 26.0 * s
-		} else {
-			sum_h += 36.0 * s
+		if idx >= cc.row_count do break
+		rh: f32 = 28.0 * s if cc.rows[idx].kind == .Header else (36.0 * s if cc.rows[idx].kind == .Tab else 44.0 * s)
+		if h + rh > cap_h && h > 0 do break
+		h += rh
+	}
+	return max(36.0 * s, h)
+}
+
+@(private = "file")
+_cc_draw_chips :: proc(ctx: Cc_Ctx) {
+	cy, cx := ctx.modal_y + 10.0 * ctx.s, ctx.modal_x + 12.0 * ctx.s
+	n_sess := len(ctx.src.sessions.entries) if ctx.src.sessions != nil else 0
+	for mode in Command_Center_Mode {
+		lbl := fmt.tprintf("%s · %d", CC_LABELS[mode], n_sess) if mode == .Sessions && n_sess > 0 else CC_LABELS[mode]
+		tw, cw := chrome_text_width(ctx.m, lbl, 12.0 * ctx.s), chrome_text_width(ctx.m, lbl, 12.0 * ctx.s) + 20.0 * ctx.s
+		r := [4]f32{cx, cy, cw, 24.0 * ctx.s}
+		if ctx.cc.visible do ctx.cc.chip_rects[mode] = r
+		is_act := ctx.cc.mode == mode
+		if is_act do chrome_dl.ui_draw_rounded_rect(ctx.dl, r, chrome_with_alpha(COLOR_CHROME_ACCENT_SOFT, ctx.e), 12.0 * ctx.s)
+		tc := COLOR_CHROME_ACCENT if is_act else COLOR_CHROME_TEXT_MUTED
+		chrome_dl.ui_draw_text(ctx.dl, {cx + 10.0 * ctx.s, cy + 6.0 * ctx.s, tw, 12.0 * ctx.s}, lbl, chrome_with_alpha(tc, ctx.e))
+		cx += cw + 4.0 * ctx.s
+	}
+}
+
+@(private = "file")
+_cc_draw_search :: proc(ctx: Cc_Ctx, P: f32) {
+	sy, sh, th := ctx.modal_y + 34.0 * ctx.s, 44.0 * ctx.s, 15.0 * ctx.s
+	if ctx.cc.visible do ctx.cc.search_rect = {ctx.modal_x + P, sy, ctx.modal_w - 2.0 * P, sh}
+	tx, ty := ctx.modal_x + 18.0 * ctx.s, sy + (sh - th) * 0.5
+	q := text_input_as_string(&ctx.cc.input)
+	if s_idx, e_idx, sel := text_input_selection_range(&ctx.cc.input); sel {
+		sx, sw := tx + chrome_text_width(ctx.m, q[:s_idx], th), chrome_text_width(ctx.m, q[s_idx:e_idx], th)
+		chrome_dl.ui_draw_rounded_rect(ctx.dl, {sx, ty, sw, th}, chrome_with_alpha(COLOR_CHROME_ACCENT_SOFT, ctx.e), 3.0 * ctx.s)
+	} else {
+		cx := tx + chrome_text_width(ctx.m, q[:clamp(ctx.cc.input.cursor, 0, len(q))], th)
+		chrome_dl.ui_draw_rect(ctx.dl, {cx, ty - 2.0 * ctx.s, 2.0 * ctx.s, th + 4.0 * ctx.s}, chrome_with_alpha(COLOR_CHROME_ACCENT, ctx.e))
+	}
+	txt, col := q, COLOR_CHROME_TEXT
+	if len(q) == 0 do txt, col = CC_PLACEHOLDERS[ctx.cc.mode], COLOR_CHROME_TEXT_FAINT
+	chrome_dl.ui_draw_text(ctx.dl, {tx, ty, ctx.modal_w - 2.0 * P - 18.0 * ctx.s, th}, txt, chrome_with_alpha(col, ctx.e))
+	chrome_dl.ui_draw_rect(ctx.dl, {ctx.modal_x + P, sy + sh, ctx.modal_w - 2.0 * P, 1.0 * ctx.s}, chrome_with_alpha(COLOR_CHROME_BORDER, ctx.e))
+}
+
+@(private = "file")
+_cc_draw_action_row :: proc(ctx: Cc_Ctx, action: Action_Id, r: [4]f32) {
+	meta, ok := action_get_metadata(action)
+	if !ok do return
+	s, seg := ctx.s, meta.shortcut
+	if i := strings.index(seg, " / "); i >= 0 do seg = seg[:i]
+	labels := _cc_split_keycaps(seg)
+	total: f32 = 0
+	for lb in labels do total += _cc_keycap_w(ctx.m, lb)
+	if len(labels) > 1 do total += 3.0 * s * f32(len(labels) - 1)
+	kx := r[0] + r[2] - 14.0 * s - total
+	for lb in labels {
+		kw := _cc_keycap_w(ctx.m, lb)
+		_cc_draw_keycap(ctx.dl, ctx.m, ctx.e, {kx, r[1] + 5.0 * s, kw, 20.0 * s}, lb, 11.5 * s)
+		kx += kw + 3.0 * s
+	}
+	max_w := r[2] - 28.0 * s - (total + 10.0 * s if total > 0 else 0)
+	chrome_dl.ui_draw_text(ctx.dl, {r[0] + 14.0 * s, r[1] + 7.0 * s, max_w, 13.5 * s}, meta.title, chrome_with_alpha(COLOR_CHROME_TEXT, ctx.e))
+	if len(meta.description) > 0 do chrome_dl.ui_draw_text(ctx.dl, {r[0] + 14.0 * s, r[1] + 25.0 * s, max_w, 11.0 * s}, meta.description, chrome_with_alpha(COLOR_CHROME_TEXT_MUTED, ctx.e))
+}
+
+@(private = "file")
+_cc_draw_tab_row :: proc(ctx: Cc_Ctx, tab_idx: int, r: [4]f32) {
+	s := ctx.s
+	is_active := ctx.src.tabs != nil && tab_idx == ctx.src.tabs.model.active_idx
+	badge := fmt.tprintf("%d", tab_idx + 1)
+	bw := _cc_keycap_w(ctx.m, badge)
+	_cc_draw_keycap(ctx.dl, ctx.m, ctx.e, {r[0] + 12.0 * s, r[1] + 8.0 * s, bw, 20.0 * s}, badge, 11.5 * s)
+	title := "Shell"
+	if ctx.src.tabs != nil && tab_idx >= 0 && tab_idx < len(ctx.src.tabs.entries) {
+		if e := &ctx.src.tabs.entries[tab_idx]; e.title_len > 0 do title = string(e.title_buf[:e.title_len])
+	}
+	tx, cw := r[0] + 12.0 * s + bw + 10.0 * s, chrome_text_width(ctx.m, "current", 11.5 * s)
+	max_w := r[0] + r[2] - 14.0 * s - tx - (cw + 10.0 * s if is_active else 0.0)
+	chrome_dl.ui_draw_text(ctx.dl, {tx, r[1] + 11.25 * s, max_w, 13.5 * s}, title, chrome_with_alpha(COLOR_CHROME_TEXT, ctx.e))
+	if is_active do chrome_dl.ui_draw_text(ctx.dl, {r[0] + r[2] - 14.0 * s - cw, r[1] + 12.25 * s, cw, 11.5 * s}, "current", chrome_with_alpha(COLOR_CHROME_SUCCESS, ctx.e))
+}
+
+@(private = "file")
+_cc_draw_session_row :: proc(ctx: Cc_Ctx, sess_id: u32, r: [4]f32) {
+	s := ctx.s
+	entry := sess_feat.session_registry_find(ctx.src.sessions, sess_id)
+	title, state_str, dot_col := "shell", "idle", COLOR_CHROME_TEXT_FAINT
+	if entry != nil {
+		if tt := sess_feat.session_get_title(entry.session); len(tt) > 0 do title = tt
+		#partial switch entry.state {
+		case .Busy:   state_str, dot_col = "running", COLOR_CHROME_ACCENT
+		case .Idle:   state_str, dot_col = "idle", COLOR_CHROME_TEXT_FAINT
+		case .Exited: state_str, dot_col = "exited", COLOR_CHROME_DANGER
 		}
+		if entry.attention do dot_col = COLOR_CHROME_WARNING
 	}
-	if vis == 0 {
-		sum_h = 36.0 * s
-	}
-	modal_h := 66.0*s + sum_h + 12.0*s
-
-	modal_x := (screen_w - modal_w) * 0.5
-	modal_y := max(60.0 * s, screen_h * 0.15)
-	cc.modal_rect = {modal_x, modal_y, modal_w, modal_h}
-
-	// Modal shadow & body
-	chrome_dl.ui_draw_shadow(dl, {modal_x - 6 * s, modal_y - 4 * s, modal_w + 12 * s, modal_h + 12 * s}, {0.0, 0.0, 0.0, 0.65}, 16.0 * s)
-	chrome_dl.ui_draw_rounded_rect(dl, cc.modal_rect, {0.11, 0.13, 0.17, 0.98}, BORDER_RADIUS * s)
-	chrome_dl.ui_draw_border(dl, cc.modal_rect, {0.26, 0.32, 0.44, 0.90}, BORDER_RADIUS * s)
-
-	// Chips row (above search field)
-	chip_y := modal_y + 8.0 * s
-	chip_h := 20.0 * s
-	chip_x := modal_x + 18.0 * s
-	chip_labels := [3]string{"Commands", "Tabs", "Sessions"}
-	chip_modes := [3]Command_Center_Mode{.Commands, .Tabs, .Sessions}
-	for mi in 0..<3 {
-		label := chip_labels[mi]
-		mode := chip_modes[mi]
-		text_h := 14.0 * s
-		tw := chrome_text_width(layout.metrics, label, text_h)
-		cw := tw + 16.0 * s
-		cc.chip_rects[mode] = {chip_x, chip_y, cw, chip_h}
-		col: [4]f32
-		if cc.mode == mode {
-			col = {0.35, 0.65, 1.0, 1.0}
-		} else {
-			col = {0.55, 0.60, 0.70, 0.85}
+	chrome_dl.ui_draw_rounded_rect(ctx.dl, {r[0] + 14.0 * s, r[1] + 10.25 * s, 7.0 * s, 7.0 * s}, chrome_with_alpha(dot_col, ctx.e), 3.5 * s)
+	chrome_dl.ui_draw_text(ctx.dl, {r[0] + 30.0 * s, r[1] + 7.0 * s, r[2] - 120.0 * s, 13.5 * s}, title, chrome_with_alpha(COLOR_CHROME_TEXT, ctx.e))
+	if entry != nil {
+		snap := sess_feat.session_snapshot_make(entry.session, 0, sess_id, context.temp_allocator)
+		parts := make([dynamic]string, context.temp_allocator)
+		append(&parts, fmt.tprintf("#%d", sess_id))
+		if snap.pid > 0 do append(&parts, fmt.tprintf("pid %d", snap.pid))
+		if b := snap.cwd; len(b) > 0 {
+			if li := strings.last_index_byte(b, '/'); li >= 0 && li + 1 < len(b) do b = b[li+1:]
+			append(&parts, b)
 		}
-		chrome_dl.ui_draw_text(dl, {chip_x + 8.0 * s, chip_y + 3.0 * s, tw, text_h}, label, col)
-		chip_x += cw + 8.0 * s
+		if len(snap.status_msg) > 0 do append(&parts, snap.status_msg)
+		chrome_dl.ui_draw_text(ctx.dl, {r[0] + 30.0 * s, r[1] + 25.0 * s, r[2] - 120.0 * s, 11.0 * s}, strings.join(parts[:], " · ", context.temp_allocator), chrome_with_alpha(COLOR_CHROME_TEXT_MUTED, ctx.e))
 	}
+	sw := chrome_text_width(ctx.m, state_str, 11.5 * s)
+	chrome_dl.ui_draw_text(ctx.dl, {r[0] + r[2] - 14.0 * s - sw, r[1] + 7.0 * s, sw, 11.5 * s}, state_str, chrome_with_alpha(COLOR_CHROME_TEXT_MUTED, ctx.e))
+}
 
-	// Search bar prompt
-	prompt_icon := ">" if cc.mode == .Commands else "⊞"
-	chrome_dl.ui_draw_text(dl, {modal_x + 18.0 * s, modal_y + 32.0 * s, 20.0 * s, 24.0 * s}, prompt_icon, {0.35, 0.65, 1.0, 1.0})
-
-	placeholder := "Type a command or search action..." if cc.mode == .Commands else "Switch tab or type to filter..."
-	query_str := text_input_as_string(&cc.input)
-	has_query := len(query_str) > 0
-	label := query_str if has_query else placeholder
-	query_col: [4]f32 = {0.95, 0.96, 0.98, 1.0} if has_query else {0.45, 0.50, 0.60, 0.85}
-
-	input_x := modal_x + 38.0 * s
-	input_y := modal_y + 32.0 * s
-	input_w := modal_w - 60.0 * s
-	input_h := 24.0 * s
-	cc.search_rect = {input_x, input_y, input_w, input_h}
-
-	if has_query {
-		text_h := input_h
-		if s_idx, e_idx, sel_active := text_input_selection_range(&cc.input); sel_active {
-			prefix := query_str[:s_idx]
-			sel_x := input_x + chrome_text_width(layout.metrics, prefix, text_h)
-			sel_w := chrome_text_width(layout.metrics, query_str[s_idx:e_idx], text_h)
-			chrome_dl.ui_draw_rounded_rect(dl, {sel_x, input_y + 2.0 * s, sel_w, input_h - 4.0 * s}, {0.25, 0.45, 0.85, 0.45}, 2.0 * s)
-		} else {
-			prefix := query_str[:cc.input.cursor]
-			cur_x := input_x + chrome_text_width(layout.metrics, prefix, text_h)
-			chrome_dl.ui_draw_rect(dl, {cur_x, input_y + 4.0 * s, 1.5 * s, input_h - 8.0 * s}, {0.35, 0.65, 1.0, 0.90})
-		}
-	}
-	chrome_dl.ui_draw_text(dl, {input_x, input_y, input_w, input_h}, label, query_col)
-
-	// Divider
-	chrome_dl.ui_draw_rect(dl, {modal_x + 12.0 * s, modal_y + 60.0 * s, modal_w - 24.0 * s, 1.0 * s}, {0.18, 0.22, 0.30, 0.85})
-
-	// Items list
-	items_start_y := modal_y + 66.0 * s
-	if cc.row_count == 0 {
-		empty_msg := "No matching commands found" if cc.mode == .Commands else ("No matching tabs found" if cc.mode == .Tabs else "No matching sessions found")
-		chrome_dl.ui_draw_text(dl, {modal_x + 24.0 * s, items_start_y + 8.0 * s, modal_w - 48.0 * s, 20.0 * s}, empty_msg, {0.55, 0.58, 0.65, 0.7})
-		// scrollbar none
+@(private = "file")
+_cc_draw_list_rows :: proc(ctx: Cc_Ctx, P, row_start_y, cap_h, list_h: f32) {
+	s := ctx.s
+	if ctx.cc.row_count == 0 {
+		msg := CC_EMPTY[ctx.cc.mode]
+		tw := chrome_text_width(ctx.m, msg, 13.0 * s)
+		chrome_dl.ui_draw_text(ctx.dl, {ctx.modal_x + (ctx.modal_w - tw) * 0.5, row_start_y + (list_h - 13.0 * s) * 0.5, tw, 13.0 * s}, msg, chrome_with_alpha(COLOR_CHROME_TEXT_MUTED, ctx.e))
 		return
 	}
-
-	cc.row_rect_count = 0
-	y := items_start_y
-	draw_count := min(COMMAND_CENTER_VISIBLE_CAP, cc.row_count - cc.scroll_offset)
-	for r in 0..<draw_count {
-		idx := cc.scroll_offset + r
-		if idx < 0 || idx >= cc.row_count do break
-		row := cc.rows[idx]
-		row_h: f32 = 26.0 * s if row.kind == .Header else 36.0 * s
-		row_rect: [4]f32 = {modal_x + 8.0 * s, y, modal_w - 16.0 * s, row_h - 4.0 * s}
-
-		if cc.row_rect_count < COMMAND_CENTER_VISIBLE_CAP {
-			cc.row_rects[cc.row_rect_count] = row_rect
-			cc.row_rect_idx[cc.row_rect_count] = idx
-			cc.row_rect_count += 1
+	ctx.cc.row_rect_count = 0
+	y := row_start_y
+	for r in 0..<COMMAND_CENTER_VISIBLE_CAP {
+		idx := ctx.cc.scroll_offset + r
+		if idx >= ctx.cc.row_count do break
+		row := ctx.cc.rows[idx]
+		rh: f32 = 28.0 * s if row.kind == .Header else (36.0 * s if row.kind == .Tab else 44.0 * s)
+		if y + rh - row_start_y > cap_h && ctx.cc.row_rect_count > 0 do break
+		rrect := [4]f32{ctx.modal_x + P, y, ctx.modal_w - 2.0 * P, rh}
+		if ctx.cc.visible && ctx.cc.row_rect_count < COMMAND_CENTER_VISIBLE_CAP {
+			ctx.cc.row_rects[ctx.cc.row_rect_count], ctx.cc.row_rect_idx[ctx.cc.row_rect_count] = rrect, idx
+			ctx.cc.row_rect_count += 1
 		}
-
-		is_sel := idx == cc.selected_idx
-
-		if row.kind == .Header {
-			title := ACTION_CATEGORY_TITLES[row.category]
-			chrome_dl.ui_draw_text(dl, {row_rect[0] + 14.0 * s, row_rect[1] + 4.0 * s, row_rect[2] - 28.0 * s, 18.0 * s}, title, {0.50, 0.55, 0.65, 0.85})
-		} else {
-			if is_sel {
-				chrome_dl.ui_draw_rounded_rect(dl, row_rect, {0.20, 0.36, 0.65, 0.85}, 6.0 * s)
-			}
-			switch row.kind {
-			case .Action:
-				meta, ok := action_get_metadata(row.action)
-				if ok {
-					title_col: [4]f32 = {1.0, 1.0, 1.0, 1.0} if is_sel else {0.85, 0.88, 0.92, 0.95}
-					chrome_dl.ui_draw_text(dl, {row_rect[0] + 14.0 * s, row_rect[1] + 6.0 * s, row_rect[2] - 120.0 * s, 18.0 * s}, meta.title, title_col)
-					if len(meta.shortcut) > 0 {
-						badge_col: [4]f32 = {0.75, 0.88, 1.0, 1.0} if is_sel else {0.50, 0.56, 0.66, 0.90}
-						badge_x := row_rect[0] + row_rect[2] - 90.0 * s
-						chrome_dl.ui_draw_text(dl, {badge_x, row_rect[1] + 6.0 * s, 80.0 * s, 18.0 * s}, meta.shortcut, badge_col)
-					}
-				}
-			case .Tab:
-				tabs := src.tabs
-				tab_idx := row.tab_index
-				is_active := tabs != nil && tab_idx == tabs.model.active_idx
-
-				badge_str := fmt.tprintf("%d.", tab_idx + 1)
-				badge_col: [4]f32 = {0.45, 0.65, 0.95, 1.0} if is_sel else {0.50, 0.55, 0.65, 0.85}
-				chrome_dl.ui_draw_text(dl, {row_rect[0] + 12.0 * s, row_rect[1] + 6.0 * s, 24.0 * s, 18.0 * s}, badge_str, badge_col)
-
-				tab_title := "Shell"
-				if tabs != nil && tab_idx >= 0 && tab_idx < len(tabs.entries) {
-					if tabs.entries[tab_idx].title_len > 0 {
-						tab_title = string(tabs.entries[tab_idx].title_buf[:tabs.entries[tab_idx].title_len])
-					}
-				}
-				title_col: [4]f32 = {1.0, 1.0, 1.0, 1.0} if is_sel else ({0.90, 0.92, 0.96, 1.0} if is_active else {0.70, 0.74, 0.80, 0.90})
-				chrome_dl.ui_draw_text(dl, {row_rect[0] + 40.0 * s, row_rect[1] + 6.0 * s, row_rect[2] - 120.0 * s, 18.0 * s}, tab_title, title_col)
-
-				if is_active {
-					tag_col: [4]f32 = {0.35, 0.75, 0.55, 0.90}
-					tag_x := row_rect[0] + row_rect[2] - 65.0 * s
-					chrome_dl.ui_draw_text(dl, {tag_x, row_rect[1] + 6.0 * s, 55.0 * s, 18.0 * s}, "active", tag_col)
-				}
-			case .Session:
-				sessions := src.sessions
-				entry := sess_feat.session_registry_find(sessions, row.session_id)
-				label := "shell"
-				state_str := "idle"
-				if entry != nil {
-					t := sess_feat.session_get_title(entry.session)
-					if len(t) > 0 do label = t
-					switch entry.state {
-					case .Busy:   state_str = "busy"
-					case .Idle:   state_str = "idle"
-					case .Exited: state_str = "exited"
-					}
-				}
-				text := fmt.tprintf("%d  %s", row.session_id, label)
-				title_col: [4]f32 = {1.0, 1.0, 1.0, 1.0} if is_sel else {0.85, 0.88, 0.92, 0.95}
-				chrome_dl.ui_draw_text(dl, {row_rect[0] + 14.0 * s, row_rect[1] + 6.0 * s, row_rect[2] - 80.0 * s, 18.0 * s}, text, title_col)
-				state_col: [4]f32 = {0.95, 0.45, 0.48, 0.90} if state_str == "exited" else ({0.35, 0.75, 0.55, 0.90} if state_str == "busy" else {0.50, 0.55, 0.65, 0.85})
-				chrome_dl.ui_draw_text(dl, {row_rect[0] + row_rect[2] - 70.0 * s, row_rect[1] + 6.0 * s, 60.0 * s, 18.0 * s}, state_str, state_col)
-			case .Header:
-			}
+		is_sel := idx == ctx.cc.selected_idx
+		if row.kind != .Header {
+			if is_sel do chrome_dl.ui_draw_rounded_rect(ctx.dl, rrect, chrome_with_alpha(COLOR_CHROME_ACCENT_SOFT, ctx.e), 8.0 * s)
+			else if idx == ctx.cc.hover_idx do chrome_dl.ui_draw_rounded_rect(ctx.dl, rrect, chrome_with_alpha(COLOR_CHROME_HOVER, ctx.e), 8.0 * s)
 		}
-		y += row_h
+		switch row.kind {
+		case .Header:
+			t := ACTION_CATEGORY_TITLES[row.category]
+			chrome_dl.ui_draw_text(ctx.dl, {rrect[0] + 14.0 * s, rrect[1] + 12.0 * s, rrect[2] - 28.0 * s, 10.5 * s}, t, chrome_with_alpha(COLOR_CHROME_TEXT_FAINT, ctx.e))
+		case .Action:  _cc_draw_action_row(ctx, row.action, rrect)
+		case .Tab:     _cc_draw_tab_row(ctx, row.tab_index, rrect)
+		case .Session: _cc_draw_session_row(ctx, row.session_id, rrect)
+		}
+		y += rh
 	}
+}
 
-	// Scrollbar
+@(private = "file")
+_cc_draw_footer :: proc(ctx: Cc_Ctx, P, row_start_y, list_h: f32) {
+	s := ctx.s
+	fdiv_y := row_start_y + list_h
+	chrome_dl.ui_draw_rect(ctx.dl, {ctx.modal_x + P, fdiv_y, ctx.modal_w - 2.0 * P, 1.0 * s}, chrome_with_alpha(COLOR_CHROME_BORDER, ctx.e))
+	fy, fx := fdiv_y + 1.0 * s, ctx.modal_x + 14.0 * s
+	HINTS := [4][2]string{{"↵", "Open"}, {"⇥", "Mode"}, {"⌘⌫", "Kill"}, {"esc", "Close"}}
+	for h, i in HINTS {
+		if i == 2 && ctx.cc.mode != .Sessions do continue
+		k, l := h[0], h[1]
+		kw, lw := _cc_keycap_w(ctx.m, k), chrome_text_width(ctx.m, l, 11.0 * s)
+		_cc_draw_keycap(ctx.dl, ctx.m, ctx.e, {fx, fy + 8.0 * s, kw, 18.0 * s}, k, 10.0 * s)
+		chrome_dl.ui_draw_text(ctx.dl, {fx + kw + 4.0 * s, fy + 11.5 * s, lw, 11.0 * s}, l, chrome_with_alpha(COLOR_CHROME_TEXT_FAINT, ctx.e))
+		fx += kw + 4.0 * s + lw + 14.0 * s
+	}
+}
+
+command_center_emit_draw_list :: proc(cc: ^Command_Center_State, src: Command_Center_Sources, dl: ^chrome_dl.Ui_Draw_List, layout: ^Layout_State) {
+	if cc == nil || dl == nil || layout == nil || (!cc.visible && !cc.closing) do return
+	s := max(1.0, layout.metrics.scale)
+	e := 1.0 - (1.0 - cc.anim_t) * (1.0 - cc.anim_t) * (1.0 - cc.anim_t)
+	chrome_dl.ui_draw_rect(dl, {0, 0, layout.screen_w, layout.screen_h}, chrome_with_alpha(COLOR_CHROME_BACKDROP, e))
+
+	mw := min(clamp(layout.screen_w * 0.46, 560.0 * s, 720.0 * s), layout.screen_w - 32.0 * s)
+	mx, my := (layout.screen_w - mw) * 0.5, max(72.0 * s, layout.screen_h * 0.16) + (1.0 - e) * 8.0 * s
+	cap_h := layout.screen_h * 0.55
+	list_h := _cc_calc_list_h(cc, s, cap_h)
+	mh := 124.0 * s + list_h
+
+	if cc.visible do cc.modal_rect = {mx, my, mw, mh}
+	else do cc.modal_rect, cc.search_rect, cc.chip_rects, cc.row_rect_count = {}, {}, {}, 0
+
+	chrome_dl.ui_draw_shadow(dl, {mx - 4.0 * s, my + 4.0 * s, mw + 8.0 * s, mh + 8.0 * s}, chrome_with_alpha(COLOR_CHROME_SHADOW, e), 24.0 * s)
+	chrome_dl.ui_draw_rounded_rect(dl, {mx, my, mw, mh}, chrome_with_alpha(COLOR_CHROME_SURFACE, e), 14.0 * s)
+	chrome_dl.ui_draw_border(dl, {mx, my, mw, mh}, chrome_with_alpha(COLOR_CHROME_BORDER, e), 14.0 * s, 1.0 * s)
+
+	ctx := Cc_Ctx{cc = cc, src = src, dl = dl, m = layout.metrics, s = s, e = e, modal_x = mx, modal_y = my, modal_w = mw, modal_h = mh}
+	P := 6.0 * s
+	_cc_draw_chips(ctx)
+	_cc_draw_search(ctx, P)
+	row_start_y := my + 83.0 * s
+	_cc_draw_list_rows(ctx, P, row_start_y, cap_h, list_h)
 	if cc.row_count > COMMAND_CENTER_VISIBLE_CAP {
-		track_y := items_start_y
-		track_h := sum_h
-		if track_h <= 0 do track_h = f32(COMMAND_CENTER_VISIBLE_CAP) * 36.0 * s
-		thumb_h := max(24.0 * s, track_h * (f32(COMMAND_CENTER_VISIBLE_CAP) / f32(cc.row_count)))
-		max_scroll := f32(cc.row_count - COMMAND_CENTER_VISIBLE_CAP)
-		scroll_ratio := f32(cc.scroll_offset) / max_scroll if max_scroll > 0 else 0.0
-		thumb_y := track_y + (track_h - thumb_h) * scroll_ratio
-		thumb_x := modal_x + modal_w - 6.0 * s
-		chrome_dl.ui_draw_rounded_rect(dl, {thumb_x, thumb_y, 3.0 * s, thumb_h}, {0.55, 0.65, 0.85, 0.50}, 1.5 * s)
+		th, max_s := max(24.0 * s, list_h * (f32(COMMAND_CENTER_VISIBLE_CAP) / f32(cc.row_count))), f32(cc.row_count - COMMAND_CENTER_VISIBLE_CAP)
+		chrome_dl.ui_draw_rounded_rect(dl, {mx + mw - 5.0 * s, row_start_y + (list_h - th) * (f32(cc.scroll_offset) / max_s if max_s > 0 else 0), 3.0 * s, th}, chrome_with_alpha(COLOR_CHROME_TEXT_FAINT, e), 1.5 * s)
 	}
+	_cc_draw_footer(ctx, P, row_start_y, list_h)
 }

@@ -134,6 +134,7 @@ app_sync_layout_and_winsize :: proc(app: ^Term_App, sync_titles: bool = true) ->
 app_needs_animation :: proc(app: ^Term_App) -> bool {
 	if app.layout.tab_bar_anim_t > 0.0 && app.layout.tab_bar_anim_t < 1.0 do return true
 	if drop_effect_is_active(&app.drop_effect) do return true
+	if (app.cmd_center.visible && app.cmd_center.anim_t < 1.0) || app.cmd_center.closing do return true
 	return false
 }
 
@@ -319,6 +320,7 @@ app_render_frame :: proc(app: ^Term_App, term_dirty: bool = true) {
 			app.mouse.hovered_scrollbar,
 			app.mouse.scrollbar_pane_id,
 			&app.drop_effect,
+			&app.session_reg,
 		)
 	}
 
