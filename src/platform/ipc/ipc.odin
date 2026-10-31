@@ -27,7 +27,7 @@ import "core:thread"
 IPC_MAX_LINE          :: 4096
 IPC_MAX_REPLY         :: 64 * 1024
 IPC_MAX_CONNS         :: 8
-IPC_MAILBOX_CAP       :: 8    // max conns in .Queued + .Taken at once
+IPC_MAILBOX_CAP       :: 4    // max conns in .Queued + .Taken; must be < IPC_MAX_CONNS so overload gets "err busy" instead of queueing in the backlog
 IPC_LISTEN_BACKLOG    :: 16
 IPC_IO_DEADLINE_MS    :: 2000 // reading a request / writing a reply
 IPC_REPLY_DEADLINE_MS :: 3000 // main thread must reply within this after queueing
