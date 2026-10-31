@@ -178,7 +178,6 @@ app_apply_custom_font :: proc(app: ^Term_App, font_path: string, size: f32) -> b
 
 app_init :: proc(app: ^Term_App, opts: Cli_Options = {}) -> bool {
 	diagnostics_init(&app.diag, opts)
-	app.role = app_resolve_role(opts)
 	app.config = config_load()
 	app.default_cwd = app_resolve_initial_cwd(&app.config, opts)
 	win_w, win_h := config_resolve_window_dimensions(&app.config)
@@ -273,6 +272,7 @@ app_init :: proc(app: ^Term_App, opts: Cli_Options = {}) -> bool {
 app_destroy :: proc(app: ^Term_App) {
 	if app == nil do return
 	app.running = false
+	app_control_stop(app)
 	plat_pty.pty_set_wakeup_callback(nil, nil)
 	signals_stop(&app.signals)
 	sdl3.RemoveEventWatch(app_event_watch, app)
@@ -396,6 +396,8 @@ app_run :: proc(app: ^Term_App) {
 			term_dirty = true
 		}
 
+		if app.control != nil && app_control_poll(app) do term_dirty = true
+
 		now_ns := u64(time.duration_nanoseconds(time.diff(app.start_time, now)))
 		if term_dirty {
 			cursor_reset_blink(&app.cursor, now_ns)
@@ -416,11 +418,30 @@ app_run :: proc(app: ^Term_App) {
 
 main :: proc() {
 	_ = signals_block_quit_set()
+	if handled, code := app_run_control_cli(os.args); handled {
+		os.exit(code)
+	}
 	opts, should_continue := app_parse_cli_args(os.args)
 	if !should_continue do return
 
 	app := new(Term_App)
 	defer free(app)
+
+	app.role = app_resolve_role(opts)
+	if app.role == .Primary {
+		#partial switch err := app_control_start(app); err {
+		case .None:
+		case .Already_Running:
+			buf: [256]u8
+			path, _ := plat_ipc.ipc_default_socket_path(buf[:])
+			reply_buf: [512]u8
+			_, cerr := plat_ipc.ipc_client_request(path, "show", reply_buf[:])
+			os.exit(0 if cerr == .None else 1)
+		case:
+			fmt.eprintf("term: control socket unavailable (%v); running standalone\n", err)
+			app.role = .Standalone
+		}
+	}
 
 	if !app_init(app, opts) {
 		fmt.eprintln("Failed to initialize Term application")
