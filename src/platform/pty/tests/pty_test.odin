@@ -101,7 +101,7 @@ test_pty_resize :: proc(t: ^testing.T) {
 test_pty_foreground_process_and_cwd :: proc(t: ^testing.T) {
 	config := pty.Pty_Config{
 		shell = "/bin/sh",
-		argv  = []string{"-c", "sleep 1"},
+		argv  = []string{"-c", "/bin/sleep 1"}, // absolute: a PATH-resolved sleep may be a multicall coreutils binary
 		rows  = 24,
 		cols  = 80,
 	}
