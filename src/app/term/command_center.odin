@@ -1,86 +1,172 @@
 package term
 
-// Spotlight / Command Palette & Tab Overview Modal Component
+// Command Center: Commands / Tabs / Sessions palette (state + input).
 // Part of Tier 3 Application Shell (src/app/term/*).
-// Invariant: Steady-state zero heap allocations. Decoupled modal rendering via Ui_Draw_List.
+// Invariant: fixed-size row storage; rows are rebuilt only on open, mode
+// switch, query change or refresh (command_center_rank.odin).
 
-import "core:fmt"
-import "core:strings"
 import "vendor:sdl3"
-
-import chrome_dl "../../core/chrome/draw_list"
 import tabs_feat "../../features/tabs"
+import sess_feat "../../features/session"
 
-COMMAND_CENTER_MAX_FILTERED :: 128
-COMMAND_CENTER_VISIBLE_CAP  :: 8
+COMMAND_CENTER_MAX_ROWS     :: 160
+COMMAND_CENTER_VISIBLE_CAP :: 9
 
-Command_Center_Mode :: enum {
-	Commands,
-	Tabs,
+Command_Center_Mode :: enum u8 { Commands, Tabs, Sessions }
+Command_Center_Row_Kind :: enum u8 { Header, Action, Tab, Session }
+Command_Center_Row :: struct {
+	kind:       Command_Center_Row_Kind,
+	category:   Action_Category,
+	action:     Action_Id,
+	tab_index:  int,
+	session_id: u32,
+	score:      int,
 }
 
+Command_Center_Outcome :: enum u8 { None, Run_Action, Select_Tab, Attach_Session, Kill_Session }
+
 Command_Center_Result :: struct {
+	outcome:    Command_Center_Outcome,
 	action:     Action_Id,
-	target_tab: int,
+	tab_index:  int,
+	session_id: u32,
 	handled:    bool,
 }
 
+Command_Center_Sources :: struct {
+	tabs:     ^tabs_feat.Tabs_Manager,
+	sessions: ^sess_feat.Session_Registry,
+}
+
 Command_Center_State :: struct {
-	visible:          bool,
-	mode:             Command_Center_Mode,
-	input:            Text_Input,
-	selected_idx:     int,
-	scroll_offset:    int,
-	accum_wheel:      f32,
-	filtered_actions: [COMMAND_CENTER_MAX_FILTERED]Action_Id,
-	filtered_tabs:    [COMMAND_CENTER_MAX_FILTERED]int,
-	filtered_count:   int,
-	modal_rect:       [4]f32,
-	item_h:           f32,
-	items_start_y:    f32,
+	visible:       bool,
+	mode:          Command_Center_Mode,
+	input:         Text_Input,
+	rows:          [COMMAND_CENTER_MAX_ROWS]Command_Center_Row,
+	row_count:     int,
+	selected_idx:  int,
+	hover_idx:     int, // -1 when no row is hovered
+	scroll_offset: int,
+	accum_wheel:   f32,
+	anim_t:        f32,
+	closing:       bool,
+	// Written by the renderer on every emit, read by click/motion hit tests.
+	modal_rect:     [4]f32,
+	search_rect:    [4]f32,
+	chip_rects:     [Command_Center_Mode][4]f32,
+	row_rects:      [COMMAND_CENTER_VISIBLE_CAP][4]f32,
+	row_rect_idx:   [COMMAND_CENTER_VISIBLE_CAP]int,
+	row_rect_count: int,
+}
+
+// _first_selectable returns the first non-header row (0 when none).
+@(private = "file")
+_first_selectable :: proc(cc: ^Command_Center_State) -> int {
+	for i in 0..<cc.row_count do if cc.rows[i].kind != .Header do return i
+	return 0
+}
+
+@(private = "file")
+_adjust_scroll :: proc(cc: ^Command_Center_State) {
+	if cc.selected_idx < cc.scroll_offset do cc.scroll_offset = cc.selected_idx
+	if cc.selected_idx >= cc.scroll_offset + COMMAND_CENTER_VISIBLE_CAP {
+		cc.scroll_offset = cc.selected_idx - (COMMAND_CENTER_VISIBLE_CAP - 1)
+	}
+	cc.scroll_offset = clamp(cc.scroll_offset, 0, max(0, cc.row_count - COMMAND_CENTER_VISIBLE_CAP))
+}
+
+// _select_row selects idx, or the first selectable row when idx is a header or out of range.
+@(private = "file")
+_select_row :: proc(cc: ^Command_Center_State, idx: int) {
+	valid := idx >= 0 && idx < cc.row_count && cc.rows[idx].kind != .Header
+	cc.selected_idx = idx if valid else _first_selectable(cc)
+	cc.hover_idx = -1
+	_adjust_scroll(cc)
+}
+
+// _rebuild rebuilds rows for the current mode/query and selects the initial row
+// (the active tab in .Tabs, otherwise the first selectable row).
+@(private = "file")
+_rebuild :: proc(cc: ^Command_Center_State, src: Command_Center_Sources) {
+	command_center_build_rows(cc, src)
+	cc.scroll_offset, cc.accum_wheel = 0, 0
+	target := -1
+	if cc.mode == .Tabs && src.tabs != nil {
+		for i in 0..<cc.row_count do if cc.rows[i].tab_index == src.tabs.model.active_idx do target = i
+	}
+	_select_row(cc, target)
+}
+
+@(private = "file")
+_same_row :: proc(a, b: Command_Center_Row) -> bool {
+	return a.kind == b.kind && a.action == b.action && a.tab_index == b.tab_index && a.session_id == b.session_id
+}
+
+@(private = "file")
+_activate_row :: proc(cc: ^Command_Center_State, src: Command_Center_Sources, idx: int) -> Command_Center_Result {
+	if idx < 0 || idx >= cc.row_count do return {handled = true}
+	row := cc.rows[idx]
+	res := Command_Center_Result{handled = true, action = row.action, tab_index = row.tab_index, session_id = row.session_id}
+	switch row.kind {
+	case .Header:  return res
+	case .Action:  res.outcome = .Run_Action
+	case .Tab:     res.outcome = .Select_Tab
+	case .Session:
+		entry := sess_feat.session_registry_find(src.sessions, row.session_id)
+		if entry == nil || entry.state == .Exited do return res
+		res.outcome = .Attach_Session
+	}
+	cc.visible = false
+	return res
+}
+
+@(private = "file")
+_switch_mode :: proc(cc: ^Command_Center_State, src: Command_Center_Sources, back: bool) {
+	n := len(Command_Center_Mode)
+	cc.mode = Command_Center_Mode((int(cc.mode) + (n - 1 if back else 1)) % n)
+	text_input_clear(&cc.input)
+	_rebuild(cc, src)
+}
+
+// _step moves the selection by dir (±1) to the next non-header row, wrapping.
+@(private = "file")
+_step :: proc(cc: ^Command_Center_State, dir: int) {
+	if cc.row_count == 0 do return
+	idx := cc.selected_idx
+	for _ in 0..<cc.row_count {
+		idx = (idx + dir + cc.row_count) % cc.row_count
+		if cc.rows[idx].kind != .Header do break
+	}
+	_select_row(cc, idx)
+}
+
+@(private = "file")
+_row_at :: proc(cc: ^Command_Center_State, mx, my: f32) -> int {
+	for i in 0..<cc.row_rect_count {
+		if tab_bar_point_in(cc.row_rects[i], mx, my) do return cc.row_rect_idx[i]
+	}
+	return -1
 }
 
 command_center_init :: proc(cc: ^Command_Center_State) {
 	if cc == nil do return
-	cc.visible = false
-	cc.mode = .Commands
+	cc^ = {}
+	cc.hover_idx = -1
 	text_input_init(&cc.input)
-	cc.selected_idx = 0
-	cc.scroll_offset = 0
-	cc.accum_wheel = 0.0
-	cc.filtered_count = 0
 }
 
-command_center_open :: proc(cc: ^Command_Center_State, mode: Command_Center_Mode, tabs: ^tabs_feat.Tabs_Manager = nil) {
+command_center_open :: proc(cc: ^Command_Center_State, mode: Command_Center_Mode, src: Command_Center_Sources) {
 	if cc == nil do return
 	cc.visible = true
 	cc.mode = mode
 	text_input_clear(&cc.input)
-	cc.selected_idx = 0
-	cc.scroll_offset = 0
-	cc.accum_wheel = 0.0
-	command_center_filter(cc, tabs)
-
-	if mode == .Tabs && tabs != nil && tabs.model.active_idx >= 0 {
-		for i in 0..<cc.filtered_count {
-			if cc.filtered_tabs[i] == tabs.model.active_idx {
-				cc.selected_idx = i
-				if cc.selected_idx >= COMMAND_CENTER_VISIBLE_CAP {
-					cc.scroll_offset = cc.selected_idx - (COMMAND_CENTER_VISIBLE_CAP - 1)
-				}
-				break
-			}
-		}
-	}
+	_rebuild(cc, src)
 }
 
-command_center_toggle :: proc(cc: ^Command_Center_State, mode: Command_Center_Mode = .Commands, tabs: ^tabs_feat.Tabs_Manager = nil) {
+command_center_toggle :: proc(cc: ^Command_Center_State, mode: Command_Center_Mode, src: Command_Center_Sources) {
 	if cc == nil do return
-	if cc.visible && cc.mode == mode {
-		cc.visible = false
-	} else {
-		command_center_open(cc, mode, tabs)
-	}
+	if cc.visible && cc.mode == mode do command_center_close(cc)
+	else do command_center_open(cc, mode, src)
 }
 
 command_center_close :: proc(cc: ^Command_Center_State) {
@@ -88,288 +174,76 @@ command_center_close :: proc(cc: ^Command_Center_State) {
 	cc.visible = false
 }
 
-command_center_filter :: proc(cc: ^Command_Center_State, tabs: ^tabs_feat.Tabs_Manager = nil) {
+// command_center_refresh rebuilds rows keeping the selected row when it survives.
+command_center_refresh :: proc(cc: ^Command_Center_State, src: Command_Center_Sources) {
 	if cc == nil do return
-	q := strings.to_lower(text_input_as_string(&cc.input), context.temp_allocator)
-	cc.filtered_count = 0
-
-	switch cc.mode {
-	case .Commands:
-		for m in ACTION_CATALOG {
-			if cc.filtered_count >= COMMAND_CENTER_MAX_FILTERED do break
-			if m.id == .Command_Center_Toggle do continue
-
-			title_lower := strings.to_lower(m.title, context.temp_allocator)
-			desc_lower := strings.to_lower(m.description, context.temp_allocator)
-			if len(q) == 0 || strings.contains(title_lower, q) || strings.contains(desc_lower, q) {
-				cc.filtered_actions[cc.filtered_count] = m.id
-				cc.filtered_count += 1
-			}
-		}
-
-	case .Tabs:
-		if tabs != nil {
-			for i in 0..<len(tabs.entries) {
-				if cc.filtered_count >= COMMAND_CENTER_MAX_FILTERED do break
-
-				title := string(tabs.entries[i].title_buf[:tabs.entries[i].title_len]) if tabs.entries[i].title_len > 0 else "Shell"
-				title_lower := strings.to_lower(title, context.temp_allocator)
-				idx_str := fmt.tprintf("%d", i + 1)
-				if len(q) == 0 || strings.contains(title_lower, q) || strings.contains(idx_str, q) {
-					cc.filtered_tabs[cc.filtered_count] = i
-					cc.filtered_count += 1
-				}
-			}
-		}
-	}
-
-	max_scroll := max(0, cc.filtered_count - COMMAND_CENTER_VISIBLE_CAP)
-	cc.scroll_offset = clamp(cc.scroll_offset, 0, max_scroll)
-	if cc.selected_idx >= cc.filtered_count {
-		cc.selected_idx = max(0, cc.filtered_count - 1)
-	}
+	had := cc.selected_idx < cc.row_count
+	prev := cc.rows[cc.selected_idx] if had else Command_Center_Row{}
+	command_center_build_rows(cc, src)
+	target := -1
+	for i in 0..<cc.row_count do if had && _same_row(cc.rows[i], prev) do target = i
+	_select_row(cc, target)
 }
 
 command_center_handle_wheel :: proc(cc: ^Command_Center_State, dy: f32) {
-	if cc == nil || !cc.visible || cc.filtered_count <= COMMAND_CENTER_VISIBLE_CAP do return
-	max_scroll := max(0, cc.filtered_count - COMMAND_CENTER_VISIBLE_CAP)
-
+	if cc == nil || !cc.visible || cc.row_count <= COMMAND_CENTER_VISIBLE_CAP do return
 	cc.accum_wheel += dy
-	if cc.accum_wheel >= 1.0 {
-		step := int(cc.accum_wheel)
-		cc.accum_wheel -= f32(step)
-		cc.scroll_offset = max(0, cc.scroll_offset - step)
-	} else if cc.accum_wheel <= -1.0 {
-		step := int(-cc.accum_wheel)
-		cc.accum_wheel += f32(step)
-		cc.scroll_offset = min(max_scroll, cc.scroll_offset + step)
-	}
+	step := int(cc.accum_wheel)
+	if step == 0 do return
+	cc.accum_wheel -= f32(step)
+	cc.scroll_offset = clamp(cc.scroll_offset - step, 0, cc.row_count - COMMAND_CENTER_VISIBLE_CAP)
 }
 
-command_center_handle_key :: proc(cc: ^Command_Center_State, key: sdl3.Keycode, mod: sdl3.Keymod = sdl3.KMOD_NONE, tabs: ^tabs_feat.Tabs_Manager = nil) -> Command_Center_Result {
-	if cc == nil || !cc.visible do return {handled = false}
-
+command_center_handle_key :: proc(cc: ^Command_Center_State, key: sdl3.Keycode, mod: sdl3.Keymod, src: Command_Center_Sources) -> Command_Center_Result {
+	if cc == nil || !cc.visible do return {}
 	switch key {
 	case sdl3.K_ESCAPE:
-		cc.visible = false
+		command_center_close(cc)
 		return {handled = true}
-
-	case sdl3.K_DOWN:
-		if cc.filtered_count > 0 {
-			cc.selected_idx = (cc.selected_idx + 1) % cc.filtered_count
-			if cc.selected_idx >= cc.scroll_offset + COMMAND_CENTER_VISIBLE_CAP {
-				cc.scroll_offset = cc.selected_idx - (COMMAND_CENTER_VISIBLE_CAP - 1)
-			} else if cc.selected_idx < cc.scroll_offset {
-				cc.scroll_offset = cc.selected_idx
-			}
-		}
+	case sdl3.K_TAB:
+		_switch_mode(cc, src, (mod & sdl3.KMOD_SHIFT) != sdl3.KMOD_NONE)
 		return {handled = true}
-
-	case sdl3.K_UP:
-		if cc.filtered_count > 0 {
-			cc.selected_idx = (cc.selected_idx - 1 + cc.filtered_count) % cc.filtered_count
-			if cc.selected_idx < cc.scroll_offset {
-				cc.scroll_offset = cc.selected_idx
-			} else if cc.selected_idx >= cc.scroll_offset + COMMAND_CENTER_VISIBLE_CAP {
-				cc.scroll_offset = cc.selected_idx - (COMMAND_CENTER_VISIBLE_CAP - 1)
-			}
-		}
+	case sdl3.K_DOWN, sdl3.K_UP:
+		_step(cc, 1 if key == sdl3.K_DOWN else -1)
 		return {handled = true}
-
 	case sdl3.K_RETURN, sdl3.K_KP_ENTER:
-		if cc.filtered_count > 0 && cc.selected_idx < cc.filtered_count {
-			cc.visible = false
-			switch cc.mode {
-			case .Commands:
-				return {action = cc.filtered_actions[cc.selected_idx], handled = true}
-			case .Tabs:
-				return {target_tab = cc.filtered_tabs[cc.selected_idx], handled = true}
-			}
+		return _activate_row(cc, src, cc.selected_idx)
+	}
+	if cc.mode == .Sessions && key == sdl3.K_BACKSPACE && (mod & sdl3.KMOD_GUI) != sdl3.KMOD_NONE {
+		if cc.selected_idx < cc.row_count && cc.rows[cc.selected_idx].kind == .Session {
+			return {outcome = .Kill_Session, session_id = cc.rows[cc.selected_idx].session_id, handled = true}
 		}
-		cc.visible = false
 		return {handled = true}
 	}
-
 	changed, handled := text_input_handle_key(&cc.input, key, mod)
-	if changed {
-		command_center_filter(cc, tabs)
-	}
-	if handled {
-		return {handled = true}
-	}
-
-	return {handled = false}
+	if changed do command_center_refresh(cc, src)
+	return {handled = handled}
 }
 
-command_center_handle_text :: proc(cc: ^Command_Center_State, text: string, tabs: ^tabs_feat.Tabs_Manager = nil) {
+command_center_handle_text :: proc(cc: ^Command_Center_State, text: string, src: Command_Center_Sources) {
 	if cc == nil || !cc.visible do return
-	if text_input_insert(&cc.input, text) {
-		command_center_filter(cc, tabs)
-	}
+	if text_input_insert(&cc.input, text) do command_center_refresh(cc, src)
 }
 
-command_center_handle_click :: proc(cc: ^Command_Center_State, mx, my: f32) -> Command_Center_Result {
-	if cc == nil || !cc.visible do return {handled = false}
-
-	// Click outside modal bounds dismisses it
-	if mx < cc.modal_rect[0] || mx > cc.modal_rect[0] + cc.modal_rect[2] ||
-	   my < cc.modal_rect[1] || my > cc.modal_rect[1] + cc.modal_rect[3] {
-		cc.visible = false
+command_center_handle_click :: proc(cc: ^Command_Center_State, mx, my: f32, src: Command_Center_Sources) -> Command_Center_Result {
+	if cc == nil || !cc.visible do return {}
+	for m in Command_Center_Mode {
+		if !tab_bar_point_in(cc.chip_rects[m], mx, my) do continue
+		cc.mode = m
+		text_input_clear(&cc.input)
+		_rebuild(cc, src)
 		return {handled = true}
 	}
-
-	// Click on list item
-	if my >= cc.items_start_y && cc.item_h > 0 {
-		rel_y := my - cc.items_start_y
-		row_idx := int(rel_y / cc.item_h)
-		item_idx := cc.scroll_offset + row_idx
-		if item_idx >= 0 && item_idx < cc.filtered_count {
-			cc.visible = false
-			switch cc.mode {
-			case .Commands:
-				return {action = cc.filtered_actions[item_idx], handled = true}
-			case .Tabs:
-				return {target_tab = cc.filtered_tabs[item_idx], handled = true}
-			}
-		}
-	}
-
+	if idx := _row_at(cc, mx, my); idx >= 0 do return _activate_row(cc, src, idx)
+	if !tab_bar_point_in(cc.modal_rect, mx, my) do command_center_close(cc)
 	return {handled = true}
 }
 
-command_center_emit_draw_list :: proc(
-	cc: ^Command_Center_State,
-	tabs: ^tabs_feat.Tabs_Manager,
-	dl: ^chrome_dl.Ui_Draw_List,
-	screen_w, screen_h: f32,
-	scale: f32 = 1.0,
-) {
-	if cc == nil || dl == nil || !cc.visible do return
-
-	s := max(1.0, scale)
-
-	// Backdrop dimmer
-	chrome_dl.ui_draw_rect(dl, {0, 0, screen_w, screen_h}, {0.0, 0.0, 0.0, 0.40})
-
-	modal_w := 540.0 * s
-	cc.item_h = 36.0 * s
-	visible_count := min(COMMAND_CENTER_VISIBLE_CAP, cc.filtered_count)
-	modal_h := (56.0 + f32(max(1, visible_count)) * 36.0 + 12.0) * s
-
-	modal_x := (screen_w - modal_w) * 0.5
-	modal_y := max(60.0 * s, screen_h * 0.15)
-	cc.modal_rect = {modal_x, modal_y, modal_w, modal_h}
-
-	// Modal shadow & body
-	chrome_dl.ui_draw_shadow(dl, {modal_x - 6 * s, modal_y - 4 * s, modal_w + 12 * s, modal_h + 12 * s}, {0.0, 0.0, 0.0, 0.65}, 16.0 * s)
-	chrome_dl.ui_draw_rounded_rect(dl, cc.modal_rect, {0.11, 0.13, 0.17, 0.98}, BORDER_RADIUS * s)
-	chrome_dl.ui_draw_border(dl, cc.modal_rect, {0.26, 0.32, 0.44, 0.90}, BORDER_RADIUS * s)
-
-	// Search bar prompt
-	prompt_icon := ">" if cc.mode == .Commands else "⊞"
-	chrome_dl.ui_draw_text(dl, {modal_x + 18 * s, modal_y + 16 * s, 20 * s, 24 * s}, prompt_icon, {0.35, 0.65, 1.0, 1.0})
-
-	placeholder := "Type a command or search action..." if cc.mode == .Commands else "Switch tab or type to filter..."
-	query_str := text_input_as_string(&cc.input)
-	has_query := len(query_str) > 0
-	label := query_str if has_query else placeholder
-	query_col: [4]f32 = {0.95, 0.96, 0.98, 1.0} if has_query else {0.45, 0.50, 0.60, 0.85}
-
-	input_x := modal_x + 38 * s
-	input_y := modal_y + 16 * s
-	input_w := modal_w - 60 * s
-	input_h := 24 * s
-
-	if has_query {
-		char_w := 8.5 * s
-		if s_idx, e_idx, sel_active := text_input_selection_range(&cc.input); sel_active {
-			sel_x := input_x + f32(s_idx) * char_w
-			sel_w := f32(e_idx - s_idx) * char_w
-			chrome_dl.ui_draw_rounded_rect(dl, {sel_x, input_y + 2 * s, sel_w, input_h - 4 * s}, {0.25, 0.45, 0.85, 0.45}, 2.0 * s)
-		} else {
-			cur_x := input_x + f32(cc.input.cursor) * char_w
-			chrome_dl.ui_draw_rect(dl, {cur_x, input_y + 4 * s, 1.5 * s, input_h - 8 * s}, {0.35, 0.65, 1.0, 0.90})
-		}
-	}
-	chrome_dl.ui_draw_text(dl, {input_x, input_y, input_w, input_h}, label, query_col)
-
-	// Divider
-	chrome_dl.ui_draw_rect(dl, {modal_x + 12 * s, modal_y + 48 * s, modal_w - 24 * s, 1 * s}, {0.18, 0.22, 0.30, 0.85})
-
-	// Items list
-	cc.items_start_y = modal_y + 54.0 * s
-	if cc.filtered_count == 0 {
-		empty_msg := "No matching commands found" if cc.mode == .Commands else "No matching tabs found"
-		chrome_dl.ui_draw_text(dl, {modal_x + 24 * s, cc.items_start_y + 8 * s, modal_w - 48 * s, 20 * s}, empty_msg, {0.55, 0.58, 0.65, 0.7})
-		return
-	}
-
-	draw_count := min(COMMAND_CENTER_VISIBLE_CAP, cc.filtered_count - cc.scroll_offset)
-	for r in 0..<draw_count {
-		item_idx := cc.scroll_offset + r
-		row_y := cc.items_start_y + f32(r) * cc.item_h
-		is_sel := (item_idx == cc.selected_idx)
-		row_rect: [4]f32 = {modal_x + 8 * s, row_y, modal_w - 16 * s, cc.item_h - 4.0 * s}
-
-		switch cc.mode {
-		case .Commands:
-			act := cc.filtered_actions[item_idx]
-			meta, ok := action_get_metadata(act)
-			if !ok do continue
-
-			if is_sel {
-				chrome_dl.ui_draw_rounded_rect(dl, row_rect, {0.20, 0.36, 0.65, 0.85}, 6.0 * s)
-			}
-
-			title_col: [4]f32 = {1.0, 1.0, 1.0, 1.0} if is_sel else {0.85, 0.88, 0.92, 0.95}
-			chrome_dl.ui_draw_text(dl, {row_rect[0] + 14.0 * s, row_rect[1] + 6.0 * s, row_rect[2] - 120.0 * s, 18.0 * s}, meta.title, title_col)
-
-			if len(meta.shortcut) > 0 {
-				badge_col: [4]f32 = {0.75, 0.88, 1.0, 1.0} if is_sel else {0.50, 0.56, 0.66, 0.90}
-				badge_x := row_rect[0] + row_rect[2] - 90.0 * s
-				chrome_dl.ui_draw_text(dl, {badge_x, row_rect[1] + 6.0 * s, 80.0 * s, 18.0 * s}, meta.shortcut, badge_col)
-			}
-
-		case .Tabs:
-			tab_idx := cc.filtered_tabs[item_idx]
-			is_active := (tabs != nil && tab_idx == tabs.model.active_idx)
-
-			if is_sel {
-				chrome_dl.ui_draw_rounded_rect(dl, row_rect, {0.20, 0.36, 0.65, 0.85}, 6.0 * s)
-			} else if is_active {
-				chrome_dl.ui_draw_rounded_rect(dl, row_rect, {0.15, 0.19, 0.26, 0.60}, 6.0 * s)
-			}
-
-			badge_str := fmt.tprintf("%d.", tab_idx + 1)
-			badge_col: [4]f32 = {0.45, 0.65, 0.95, 1.0} if is_sel else {0.50, 0.55, 0.65, 0.85}
-			chrome_dl.ui_draw_text(dl, {row_rect[0] + 12.0 * s, row_rect[1] + 6.0 * s, 24.0 * s, 18.0 * s}, badge_str, badge_col)
-
-			tab_title := "Shell"
-			if tabs != nil && tab_idx < len(tabs.entries) {
-				if tabs.entries[tab_idx].title_len > 0 {
-					tab_title = string(tabs.entries[tab_idx].title_buf[:tabs.entries[tab_idx].title_len])
-				}
-			}
-			title_col: [4]f32 = {1.0, 1.0, 1.0, 1.0} if is_sel else ({0.90, 0.92, 0.96, 1.0} if is_active else {0.70, 0.74, 0.80, 0.90})
-			chrome_dl.ui_draw_text(dl, {row_rect[0] + 40.0 * s, row_rect[1] + 6.0 * s, row_rect[2] - 120.0 * s, 18.0 * s}, tab_title, title_col)
-
-			if is_active {
-				tag_col: [4]f32 = {0.35, 0.75, 0.55, 0.90}
-				tag_x := row_rect[0] + row_rect[2] - 65.0 * s
-				chrome_dl.ui_draw_text(dl, {tag_x, row_rect[1] + 6.0 * s, 55.0 * s, 18.0 * s}, "active", tag_col)
-			}
-		}
-	}
-
-	// Scrollbar indicator
-	if cc.filtered_count > COMMAND_CENTER_VISIBLE_CAP {
-		track_y := cc.items_start_y
-		track_h := f32(COMMAND_CENTER_VISIBLE_CAP) * cc.item_h
-		thumb_h := max(24.0 * s, track_h * (f32(COMMAND_CENTER_VISIBLE_CAP) / f32(cc.filtered_count)))
-		max_scroll := f32(cc.filtered_count - COMMAND_CENTER_VISIBLE_CAP)
-		scroll_ratio := f32(cc.scroll_offset) / max_scroll if max_scroll > 0 else 0.0
-		thumb_y := track_y + (track_h - thumb_h) * scroll_ratio
-		thumb_x := modal_x + modal_w - 6.0 * s
-		chrome_dl.ui_draw_rounded_rect(dl, {thumb_x, thumb_y, 3.0 * s, thumb_h}, {0.55, 0.65, 0.85, 0.50}, 1.5 * s)
-	}
+command_center_handle_motion :: proc(cc: ^Command_Center_State, mx, my: f32) -> (changed: bool) {
+	if cc == nil || !cc.visible do return false
+	idx := _row_at(cc, mx, my)
+	if idx >= 0 && cc.rows[idx].kind == .Header do idx = -1
+	changed = idx != cc.hover_idx
+	cc.hover_idx = idx
+	return
 }
