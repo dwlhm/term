@@ -149,3 +149,11 @@ test_text_chain_excludes_color_faces :: proc(t: ^testing.T) {
 		testing.expectf(t, fc.fallbacks[i].face.face_flags & font.FT_FACE_FLAG_COLOR == 0, "color face in text chain: %s", fc.fallback_paths[i])
 	}
 }
+
+@test
+test_emoji_cluster_presentation :: proc(t: ^testing.T) {
+	testing.expect(t, font.is_emoji_cluster([]rune{0x23FA, 0xFE0F}), "VS16 requests emoji presentation")
+	testing.expect(t, !font.is_emoji_cluster([]rune{0x231A, 0xFE0E}), "VS15 forces text presentation on ⌚")
+	testing.expect(t, !font.is_emoji_cluster([]rune{0x00A9, 0x0301}), "© with a combining mark stays text")
+	testing.expect(t, font.is_emoji_cluster([]rune{0x1F3F3, 0xFE0F, 0x200D, 0x1F308}), "ZWJ flag sequence is emoji")
+}

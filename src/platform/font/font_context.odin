@@ -427,12 +427,13 @@ font_rasterize_cluster_into :: proc(
 	return draw_w, offset_x
 }
 
+// is_emoji_cluster reports emoji presentation: an Emoji_Presentation rune, VS16,
+// ZWJ sequence or keycap, unless VS15 (U+FE0E) explicitly requests text.
 is_emoji_cluster :: proc(runes: []rune) -> bool {
+	for r in runes do if r == 0xFE0E do return false
 	for r in runes {
 		if is_emoji_codepoint(r) do return true
 		if r == 0x200D || r == 0x20E3 || r == 0xFE0F do return true
-		if r >= 0x1F1E6 && r <= 0x1F1FF do return true
-		if cell.is_emoji_vs16_eligible(r) do return true
 	}
 	return false
 }

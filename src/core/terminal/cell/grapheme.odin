@@ -1,5 +1,7 @@
 package terminal_cell
 
+import "core:unicode"
+
 // UAX #29 / UTS #51 Extended Grapheme Cluster (EGC) segmentation and cell
 // width. Ported from legacy/src/terminal/unicode_egc.odin.
 
@@ -7,19 +9,21 @@ Grapheme_Category :: enum u8 {
 	Other,
 	Extend,
 	ZWJ,
-	SpacingMark,
 	Emoji_Modifier,
 	Regional_Indicator,
 	Extended_Pictographic,
 }
 
 // grapheme_classify classifies a rune into its UAX #29 / UTS #51 category.
+// Extend is limited to zero-width runes: a rune that occupies a cell never joins
+// the previous cluster (no GB9a SpacingMark), otherwise the cursor would drift
+// from the application's wcwidth.
 grapheme_classify :: proc(r: rune) -> Grapheme_Category {
 	if r == 0x200D do return .ZWJ
-	if r >= 0x1F3FB && r <= 0x1F3FF do return .Emoji_Modifier
-	if r >= 0x1F1E6 && r <= 0x1F1FF do return .Regional_Indicator
+	if unicode.is_emoji_modifier(r) do return .Emoji_Modifier
+	if unicode.is_regional_indicator(r) do return .Regional_Indicator
 	if is_zero_width_extend(r) do return .Extend
-	if is_emoji_vs16_eligible(r) do return .Extended_Pictographic
+	if unicode.is_emoji_extended_pictographic(r) do return .Extended_Pictographic
 	return .Other
 }
 
@@ -40,9 +44,6 @@ grapheme_should_extend :: proc(cluster_runes: []rune, next: rune) -> bool {
 
 	// GB9: × (Extend | ZWJ)
 	if next_cat == .Extend || next_cat == .ZWJ do return true
-
-	// GB9a: × SpacingMark
-	if next_cat == .SpacingMark do return true
 
 	// Emoji modifier: extend only if cluster already contains an Extended_Pictographic.
 	if next_cat == .Emoji_Modifier {
@@ -92,17 +93,18 @@ grapheme_cluster_width :: proc(cluster_runes: []rune) -> int {
 	}
 	if ri_count >= 2 do return 2
 
-	// Emoji presentation (direct or via VS16) spans 2 cells.
+	// Emoji presentation spans 2 cells: a wide pictograph, or any pictograph turned
+	// into emoji by VS16 or a skin-tone modifier (UTS #51 emoji modifier sequence).
 	has_ep := false
-	has_vs16 := false
+	wants_emoji := false
 	for r in cluster_runes {
-		if r == 0xFE0F do has_vs16 = true
+		if r == 0xFE0F || unicode.is_emoji_modifier(r) do wants_emoji = true
 		if grapheme_classify(r) == .Extended_Pictographic {
 			has_ep = true
 			if wcwidth(r) == 2 do return 2
 		}
 	}
-	if has_ep && has_vs16 do return 2
+	if has_ep && wants_emoji do return 2
 
 	return wcwidth(cluster_runes[0])
 }
