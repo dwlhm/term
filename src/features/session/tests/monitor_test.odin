@@ -3,6 +3,7 @@ package feature_session_tests
 // Behavioral unit tests for Session Telemetry, Monitor & Detached Registry.
 
 import "core:testing"
+import "core:unicode/utf8"
 import term "../../../core/terminal"
 import extension "../../../core/terminal/extension"
 import session "../"
@@ -68,4 +69,18 @@ test_session_registry_lifecycle :: proc(t: ^testing.T) {
 	testing.expect(t, found, "pop must find detached session")
 	testing.expect_value(t, popped, s1)
 	testing.expect_value(t, session.session_registry_count(&reg), 0)
+}
+
+@test
+test_session_peek_last_line_resolves_egc_as_valid_utf8 :: proc(t: ^testing.T) {
+	sess: session.Terminal_Session
+	term.terminal_init(&sess.term, 4, 40)
+	defer term.terminal_destroy(&sess.term)
+
+	// VS16 cluster (EGC pool index ≥ U+110000) followed by a wide emoji (continuation cell).
+	term.terminal_feed_string(&sess.term, "⏺️ ok 😀!")
+	buf: [256]u8
+	line := session.session_peek_last_line(&sess, buf[:])
+	testing.expect(t, utf8.valid_string(line), "peeked line must be valid UTF-8 (NSString rejects invalid input)")
+	testing.expect_value(t, line, "⏺️ ok 😀!")
 }

@@ -28,6 +28,17 @@ Session_Snapshot :: struct {
 	elapsed_seconds: f32,
 }
 
+// _append_rune writes r as UTF-8 at idx. Odin's utf8.encode_rune emits an
+// invalid overlong sequence for r > U+10FFFF, so reject those explicitly.
+@(private = "file")
+_append_rune :: proc(out_buf: []u8, idx: int, r: rune) -> (next: int, ok: bool) {
+	if r < 0 || r > utf8.MAX_RUNE do return idx, true
+	buf, n := utf8.encode_rune(r)
+	if idx + n > len(out_buf) do return idx, false
+	copy(out_buf[idx:], buf[:n])
+	return idx + n, true
+}
+
 session_peek_last_line :: proc(sess: ^Terminal_Session, out_buf: []u8) -> string {
 	if sess == nil || len(out_buf) == 0 do return ""
 	cur_r, _ := terminal.terminal_cursor_pos(&sess.term)
@@ -46,12 +57,17 @@ session_peek_last_line :: proc(sess: ^Terminal_Session, out_buf: []u8) -> string
 		if non_empty {
 			idx := 0
 			for c in 0..<min(sess.term.cols, len(row.cells)) {
-				ch := row.cells[c].char
-				if ch == 0 do ch = ' '
-				buf, n := utf8.encode_rune(ch)
-				if idx + n > len(out_buf) do break
-				copy(out_buf[idx:], buf[:n])
-				idx += n
+				cl := row.cells[c]
+				if .Wide_Continuation in cl.flags do continue
+				ok := true
+				if .Has_Egc in cl.flags {
+					for rn in terminal.terminal_get_egc_runes(&sess.term, cl.char) {
+						if idx, ok = _append_rune(out_buf, idx, rn); !ok do break
+					}
+				} else {
+					idx, ok = _append_rune(out_buf, idx, cl.char if cl.char != 0 else ' ')
+				}
+				if !ok do break
 			}
 			return strings.trim_space(string(out_buf[:idx]))
 		}
