@@ -1,80 +1,17 @@
 package term
 
-// Background Sessions, Safety Confirmation Dialog & Pane Detach/Attach
+// Background Sessions & Pane Detach/Attach
 // Part of Tier 3 Application Shell (src/app/term/*).
 //
 // Invariant: Non-blocking PTY drain for background jobs and seamless
 // lifecycle transition between tabs and background session registry.
 
-import "core:time"
-import chrome_modals "../../core/chrome/modals"
 import chrome_render "../../core/render/chrome"
 import chrome_splits "../../core/chrome/splits"
 import mux_feat "../../features/multiplexer"
 import sess_feat "../../features/session"
 import tabs_feat "../../features/tabs"
 import damage "../../core/terminal/damage"
-
-_has_active_jobs :: proc(app: ^Term_App) -> bool {
-	for &pane in app.mux.panes {
-		if pane.kind == .Terminal && pane.session != nil {
-			if sess_feat.session_is_running_job(pane.session) do return true
-		}
-	}
-	return false
-}
-
-_populate_safety_dialog_items :: proc(app: ^Term_App) {
-	chrome_modals.session_dialog_reset(&app.session_dlg)
-	for i in 0..<len(app.tabs_mgr.entries) {
-		tab := &app.tabs_mgr.entries[i]
-		for &pane in app.mux.panes {
-			if pane.kind != .Terminal || pane.session == nil do continue
-			leaf := chrome_splits.split_tree_find_leaf(tab.split_tree, pane.id)
-			if tab.active_pane_id == pane.id || leaf != nil {
-				is_job := sess_feat.session_is_running_job(pane.session)
-				snap := sess_feat.session_snapshot_make(pane.session, i, pane.id, context.temp_allocator)
-				append(&app.session_dlg.items, chrome_modals.Dialog_Session_Item{
-					session_id    = pane.id,
-					tab_index     = i,
-					pane_id       = pane.id,
-					title         = snap.title,
-					process_name  = snap.process_name,
-					pid           = snap.pid,
-					is_active_job = is_job,
-					status_msg    = snap.status_msg,
-					choice        = .Background if is_job else .Kill,
-				})
-			}
-		}
-	}
-}
-
-// app_check_and_show_safety_dialog checks if any session is actively running a job.
-// Returns true and opens the confirmation modal if active jobs exist; false otherwise.
-app_check_and_show_safety_dialog :: proc(app: ^Term_App) -> bool {
-	if app == nil || !_has_active_jobs(app) do return false
-	_populate_safety_dialog_items(app)
-	app.session_dlg.visible = true
-	chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
-	return true
-}
-
-// app_apply_safety_dialog executes the user's choices: background sessions are
-// detached into session_reg, killed sessions are closed, and the window closes.
-app_apply_safety_dialog :: proc(app: ^Term_App) {
-	if app == nil do return
-	for item in app.session_dlg.items {
-		if item.choice == .Background {
-			if p := mux_feat.multiplexer_get_pane(&app.mux, item.pane_id); p != nil && p.session != nil {
-				sess_feat.session_registry_detach(&app.session_reg, item.pane_id, p.session)
-				p.session = nil
-			}
-		}
-	}
-	app.session_dlg.visible = false
-	app.running = false
-}
 
 // app_detach_focused_pane detaches the currently focused terminal pane into background sessions.
 // If it is part of a split, the split collapses. If it is the sole remaining pane,
@@ -119,7 +56,6 @@ app_detach_focused_pane :: proc(app: ^Term_App) -> bool {
 			damage.damage_mark_all(&pane.session.term.damage)
 		}
 	}
-	app_sync_menu_bar(app)
 	chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
 	return true
 }
@@ -148,9 +84,6 @@ _detach_handle_remaining :: proc(app: ^Term_App, tab_idx: int, has_other_panes: 
 	}
 }
 
-// Backward-compatible alias
-app_detach_current_tab :: app_detach_focused_pane
-
 // app_attach_background_session restores a specific detached background session into a new tab.
 app_attach_background_session :: proc(app: ^Term_App, bg_id: u32) -> bool {
 	if app == nil do return false
@@ -175,7 +108,6 @@ app_attach_background_session :: proc(app: ^Term_App, bg_id: u32) -> bool {
 		app_select_tab(app, new_tab_idx)
 	}
 	damage.damage_mark_all(&sess.term.damage)
-	app_sync_menu_bar(app)
 	chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
 	return true
 }

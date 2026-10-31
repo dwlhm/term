@@ -8,7 +8,6 @@ import "core:math"
 import cursor "../../core/cursor"
 import contract "../../core/render/contract"
 import chrome_dl "../../core/chrome/draw_list"
-import chrome_modals "../../core/chrome/modals"
 import chrome_splits "../../core/chrome/splits"
 import chrome_render "../../core/render/chrome"
 import tabs_feat "../../features/tabs"
@@ -106,7 +105,6 @@ chrome_view_build_draw_list :: proc(
 	dragged_divider: ^chrome_splits.Split_Node = nil,
 	hovered_scrollbar: u32 = 0,
 	dragged_scrollbar: u32 = 0,
-	session_dlg: ^chrome_modals.Session_Dialog_State = nil,
 	drop_effect: ^Drop_Effect_State = nil,
 ) -> (dirty: bool) {
 	if cv == nil do return false
@@ -378,11 +376,6 @@ chrome_view_build_draw_list :: proc(
 		command_center_emit_draw_list(cmd_center, tabs, &cv.draw_list, layout.screen_w, layout.screen_h, layout.metrics.scale)
 	}
 
-	// 5. Session Safety Confirmation Modal Sheet
-	if session_dlg != nil && session_dlg.visible {
-		chrome_modals.session_dialog_emit_draw_list(session_dlg, &cv.draw_list, layout.screen_w, layout.screen_h, layout.metrics.scale)
-	}
-
 	screen_w := layout.screen_w if layout != nil else f32(cv.rend.width)
 	screen_h := layout.screen_h if layout != nil else f32(cv.rend.height)
 	dl_hash := _chrome_draw_list_hash(&cv.draw_list, screen_w, screen_h)
@@ -477,37 +470,13 @@ _cursor_for_tab_bar :: proc(layout: ^Layout_State, tabs: ^tabs_feat.Tabs_Manager
 }
 
 // chrome_view_cursor determines the mouse cursor shape for all chrome elements.
-_cursor_for_session_dialog :: proc(dlg: ^chrome_modals.Session_Dialog_State, pt: [2]f32) -> (cursor.Mouse_Cursor, bool) {
-	if dlg == nil || !dlg.visible do return .Default, false
-
-	in_box :: #force_inline proc "contextless" (p: [2]f32, rect: [4]f32) -> bool {
-		return rect[2] > 0 && rect[3] > 0 &&
-		       p.x >= rect[0] && p.x <= rect[0] + rect[2] &&
-		       p.y >= rect[1] && p.y <= rect[1] + rect[3]
-	}
-
-	if in_box(pt, dlg.cancel_rect) do return .Pointer, true
-	if in_box(pt, dlg.apply_rect) do return .Pointer, true
-	if in_box(pt, dlg.toggle_rect) do return .Pointer, true
-
-	for item in dlg.items {
-		if in_box(pt, item.btn_rect) do return .Pointer, true
-	}
-
-	return .Default, true
-}
-
 chrome_view_cursor :: proc(
 	cv: ^Chrome_View,
 	layout: ^Layout_State,
 	tabs: ^tabs_feat.Tabs_Manager,
 	cmd_center: ^Command_Center_State,
 	pt: [2]f32,
-	session_dlg: ^chrome_modals.Session_Dialog_State = nil,
 ) -> (cursor_shape: cursor.Mouse_Cursor, handled: bool) {
-	if session_dlg != nil && session_dlg.visible {
-		return _cursor_for_session_dialog(session_dlg, pt)
-	}
 	if cv == nil || layout == nil do return .Default, false
 
 	if c, ok := _cursor_for_command_center(cmd_center, pt); ok do return c, true

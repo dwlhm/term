@@ -149,7 +149,7 @@ app_sync_cursor_layer :: proc(app: ^Term_App, now_ns: u64) -> (damaged: bool) {
 	can_show := p != nil && p.kind == .Terminal && p.session != nil &&
 	            p.rect[2] > 0 && p.rect[3] > 0 &&
 	            p.session.term.parser.cursor.visible &&
-	            !app.cmd_center.visible && !app.session_dlg.visible
+	            !app.cmd_center.visible
 
 	can_blink := can_show && app.window_focused && p.session.term.parser.cursor.blinking
 	_ = cursor_update_blink(&app.cursor, now_ns, can_blink)
@@ -318,7 +318,6 @@ app_render_frame :: proc(app: ^Term_App, term_dirty: bool = true) {
 			app.mouse.drag_split_node,
 			app.mouse.hovered_scrollbar,
 			app.mouse.scrollbar_pane_id,
-			&app.session_dlg,
 			&app.drop_effect,
 		)
 	}

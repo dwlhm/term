@@ -96,7 +96,7 @@ ACTION_CATALOG := []Action_Metadata{
 	{.Search_Toggle,         "Find in Terminal",           "⌘F",       "Search the visible grid and scrollback", .Search},
 	{.Tab_New,               "New Tab",                    "⌘T",       "Open a new terminal tab", .Tabs},
 	{.Tab_Close,             "Close Tab",                  "⌘W",       "Close the active tab", .Tabs},
-	{.Tab_Detach,            "Detach Tab to Background",   "⌥⌘B",      "Move current tab to background sessions", .Sessions},
+	{.Tab_Detach,            "Detach Pane to Background",  "⌥⌘B",      "Move the focused pane to background sessions", .Sessions},
 	{.Tab_Attach_Latest,     "Attach Background Session",  "⌥⌘A",      "Restore the latest background session into a tab", .Sessions},
 	{.Tab_Next,              "Next Tab",                   "^Tab",     "Switch to the next tab", .Tabs},
 	{.Tab_Prev,              "Previous Tab",               "⇧^Tab",    "Switch to previous tab", .Tabs},
@@ -125,7 +125,7 @@ ACTION_CATALOG := []Action_Metadata{
 	{.Font_Zoom_Out,         "Zoom Out Font",              "⌘-",       "Decrease terminal text size", .View},
 	{.Font_Zoom_Reset,       "Reset Font Zoom",            "⌘0",       "Reset terminal text size", .View},
 	{.Toggle_Fullscreen,     "Toggle Fullscreen",          "^⌘F",      "Toggle fullscreen mode", .View},
-	{.App_Quit,              "Quit Term",                  "⌘Q",       "Gracefully quit Term", .App},
+	{.App_Quit,              "Close Window",               "⌘Q",       "Hide Term; sessions keep running", .App},
 }
 
 action_get_metadata :: proc(id: Action_Id) -> (Action_Metadata, bool) {

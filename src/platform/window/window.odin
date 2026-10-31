@@ -25,13 +25,6 @@ Platform_Menu_Item :: struct {
 	action_tag:   int,
 }
 
-Platform_Menu_Bar_Item :: struct {
-	title:        string,
-	tag:          int,
-	is_enabled:   bool,
-	is_separator: bool,
-}
-
 // window_init initializes SDL3 and creates a window with high pixel density and transparency.
 window_init :: proc(w: ^Window, title: string, width, height: i32) -> bool {
 	if !sdl3.Init(sdl3.INIT_VIDEO) {
@@ -131,10 +124,6 @@ platform_bring_window_to_front :: proc(sdl_window: ^sdl3.Window) {
 }
 
 when ODIN_OS != .Darwin {
-	platform_menu_bar_init :: proc() -> rawptr { return nil }
-	platform_menu_bar_update :: proc(handle: rawptr, header: string, items: []Platform_Menu_Bar_Item) {}
-	platform_menu_bar_destroy :: proc(handle: rawptr) {}
-	platform_menu_bar_take_action :: proc() -> int { return 0 }
 	platform_show_context_menu :: proc(sdl_window: ^sdl3.Window, x, y: f32, items: []Platform_Menu_Item) -> int {
 		return 0
 	}
