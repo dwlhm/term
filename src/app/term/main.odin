@@ -177,6 +177,7 @@ app_apply_custom_font :: proc(app: ^Term_App, font_path: string, size: f32) -> b
 
 app_init :: proc(app: ^Term_App, opts: Cli_Options = {}) -> bool {
 	diagnostics_init(&app.diag, opts)
+	app.role = app_resolve_role(opts)
 	app.config = config_load()
 	app.default_cwd = app_resolve_initial_cwd(&app.config, opts)
 	win_w, win_h := config_resolve_window_dimensions(&app.config)
@@ -396,7 +397,7 @@ app_run :: proc(app: ^Term_App) {
 		needs_frame := term_dirty || cursor_damaged || app_needs_animation(app) || app.composer.sched.force_next || app.composer.sched.damage_pending
 
 		// Render only on real change, cursor toggle, or active animation; stay parked otherwise.
-		if needs_frame && !app_sync_output_hold(app, now) {
+		if needs_frame && !app.window_hidden && !app_sync_output_hold(app, now) {
 			frame_start := time.tick_now()
 			app_render_frame(app, term_dirty)
 			telemetry.telemetry_end_frame(&app.diag.tel, u64(time.tick_since(frame_start)))

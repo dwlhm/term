@@ -171,37 +171,47 @@ when ODIN_OS == .Darwin {
 		return 0, false
 	}
 
+	// _darwin_shared_app returns [NSApplication sharedApplication] or nil.
+	_darwin_shared_app :: proc() -> id {
+		cls_app := objc_getClass("NSApplication")
+		if cls_app == nil do return nil
+		sel_shared := sel_registerName("sharedApplication")
+		imp_shared := class_getMethodImplementation(object_getClass(id(cls_app)), sel_shared)
+		if imp_shared == nil do return nil
+		Get_App_Proc :: #type proc "c" (cls: Class, sel: SEL) -> id
+		return (Get_App_Proc(imp_shared))(cls_app, sel_shared)
+	}
+
+	// _darwin_send_nil sends a one-argument selector with a nil argument.
+	_darwin_send_nil :: proc(target: id, selector: cstring) {
+		if target == nil do return
+		sel := sel_registerName(selector)
+		imp := class_getMethodImplementation(object_getClass(target), sel)
+		if imp == nil do return
+		Send_Nil_Proc :: #type proc "c" (target: id, sel: SEL, arg: id)
+		(Send_Nil_Proc(imp))(target, sel, nil)
+	}
+
 	platform_darwin_bring_to_front :: proc(sdl_window: ^sdl3.Window) {
 		if sdl_window == nil do return
 		props := sdl3.GetWindowProperties(sdl_window)
-		nswindow := id(sdl3.GetPointerProperty(props, sdl3.PROP_WINDOW_COCOA_WINDOW_POINTER, nil))
-		if nswindow != nil {
-			cls_win := object_getClass(nswindow)
-			sel_make_key := sel_registerName("makeKeyAndOrderFront:")
-			imp_make_key := class_getMethodImplementation(cls_win, sel_make_key)
-			if imp_make_key != nil {
-				Send_Nil_Proc :: #type proc "c" (target: id, sel: SEL, arg: id)
-				(Send_Nil_Proc(imp_make_key))(nswindow, sel_make_key, nil)
-			}
-		}
+		_darwin_send_nil(id(sdl3.GetPointerProperty(props, sdl3.PROP_WINDOW_COCOA_WINDOW_POINTER, nil)), "makeKeyAndOrderFront:")
 
-		cls_app := objc_getClass("NSApplication")
-		if cls_app != nil {
-			sel_shared := sel_registerName("sharedApplication")
-			imp_shared := class_getMethodImplementation(object_getClass(id(cls_app)), sel_shared)
-			if imp_shared != nil {
-				Get_App_Proc :: #type proc "c" (cls: Class, sel: SEL) -> id
-				app := (Get_App_Proc(imp_shared))(cls_app, sel_shared)
-				if app != nil {
-					sel_activate := sel_registerName("activateIgnoringOtherApps:")
-					imp_activate := class_getMethodImplementation(object_getClass(app), sel_activate)
-					if imp_activate != nil {
-						Act_Proc :: #type proc "c" (target: id, sel: SEL, flag: BOOL)
-						(Act_Proc(imp_activate))(app, sel_activate, true)
-					}
-				}
-			}
+		app := _darwin_shared_app()
+		if app == nil do return
+		_darwin_send_nil(app, "unhide:")
+		sel_activate := sel_registerName("activateIgnoringOtherApps:")
+		imp_activate := class_getMethodImplementation(object_getClass(app), sel_activate)
+		if imp_activate != nil {
+			Act_Proc :: #type proc "c" (target: id, sel: SEL, flag: BOOL)
+			(Act_Proc(imp_activate))(app, sel_activate, true)
 		}
+	}
+
+	// platform_darwin_hide_app hides the whole app ([NSApp hide:nil]); a Dock
+	// click unhides it natively.
+	platform_darwin_hide_app :: proc() {
+		_darwin_send_nil(_darwin_shared_app(), "hide:")
 	}
 
 	_platform_configure_metal_layer :: proc(v: id, cf_top_left: rawptr, is_opaque: bool = false) {

@@ -110,7 +110,12 @@ window_update_pixel_size :: proc(w: ^Window) {
 // [NSApp hide:nil] (a Dock click unhides natively). Other OSes: SDL HideWindow.
 // nil-safe.
 platform_hide_window :: proc(sdl_window: ^sdl3.Window) {
-	unimplemented("T4a")
+	if sdl_window == nil do return
+	when ODIN_OS == .Darwin {
+		platform_darwin_hide_app()
+	} else {
+		sdl3.HideWindow(sdl_window)
+	}
 }
 
 platform_bring_window_to_front :: proc(sdl_window: ^sdl3.Window) {
