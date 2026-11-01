@@ -18,6 +18,7 @@ _stitch_reply :: proc(c: ^Core, s: ^Core_Session) {
 	b := strings.Builder{buf = c.text}
 	_stitch_write_history(&b, st.hist[:], min(st.got, st.want))
 	_stitch_write_page(&b, &st.pages[2])
+	if st.restore_failed do strings.write_string(&b, CORE_READ_RESTORE_NOTE)
 	c.text = b.buf
 	n := min(len(c.text), ipc.STREAM_MAX_PAYLOAD)
 	if core_viewer_current(c, st.viewer, st.seq) {

@@ -102,6 +102,15 @@ stitch_shift :: proc(new, old: []string, col: int) -> (shift: int, ok: bool) {
 	return best, best_matched > 0
 }
 
+// stitch_delta is how far `new` sits above `old` in lines: positive means the
+// view scrolled up (older rows at the top), negative that it scrolled down.
+// Both directions are tried, so one helper serves a probe and a restore.
+stitch_delta :: proc(new, old: []string, col: int) -> (shift: int, ok: bool) {
+	if d, found := stitch_shift(new, old, col); found do return d, true
+	if d, found := stitch_shift(old, new, col); found do return -d, true
+	return 0, false
+}
+
 // stitch_pinned counts the leading rows that stayed in place (a fixed header
 // above the scrolling region). They are chrome, not history. It may be taller
 // than the scroll distance when the program keeps several header rows.
