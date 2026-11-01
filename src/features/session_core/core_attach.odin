@@ -4,6 +4,7 @@ package feature_session_core
 // the size owner (the most recently active attachment that is not observing).
 
 import terminal "../../core/terminal"
+import extension "../../core/terminal/extension"
 import ipc "../../platform/ipc"
 import session "../session"
 
@@ -67,6 +68,8 @@ _attach_paint :: proc(c: ^Core, s: ^Core_Session, a: ^Core_Attach, history: int)
 		if len(c.paint) <= ipc.STREAM_MAX_PENDING / 2 || hist == 0 do break
 		hist /= 2
 	}
+	// The screen does not keep OSC 7501; the session does. A new viewer needs the latest report too.
+	extension.osc_7501_encode(&s.sess.program_status, &c.paint)
 	a.recovering = !ipc.stream_data(&v.conn, a.channel, c.paint[:])
 }
 

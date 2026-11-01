@@ -134,3 +134,44 @@ osc_7501_handler :: proc(user_data: rawptr, osc_id: int, payload: string, term: 
 
 	return ctx.sink(ctx.user_data, status)
 }
+
+// osc_7501_encode appends the report that reproduces p (a new viewer's first
+// paint carries the latest one). Nothing for .Clear. msg goes out base64.
+osc_7501_encode :: proc(p: ^Program_Status, out: ^[dynamic]u8) {
+	if p == nil || p.state == .Clear do return
+	STATES := [Program_State]string{.Clear = "clear", .Idle = "idle", .Working = "working", .Blocked = "blocked", .Done = "done", .Error = "error"}
+	append(out, "\x1b]7501;state=")
+	append(out, STATES[p.state])
+	_encode_field(out, "app", p.app_buf[:p.app_len])
+	_encode_field(out, "kind", p.kind_buf[:p.kind_len])
+	_encode_field(out, "title", p.title_buf[:p.title_len])
+	if p.msg_len > 0 {
+		append(out, ":msg=")
+		_append_base64(out, p.msg_buf[:p.msg_len])
+	}
+	append(out, "\x1b\\")
+}
+
+@(private = "file")
+_encode_field :: proc(out: ^[dynamic]u8, key: string, v: []u8) {
+	if len(v) == 0 do return
+	append(out, ":")
+	append(out, key)
+	append(out, "=")
+	append(out, ..v)
+}
+
+@(private = "file")
+_append_base64 :: proc(out: ^[dynamic]u8, src: []u8) {
+	ALPHABET := "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+	for i := 0; i < len(src); i += 3 {
+		n := min(3, len(src) - i)
+		v := u32(src[i]) << 16
+		if n > 1 do v |= u32(src[i + 1]) << 8
+		if n > 2 do v |= u32(src[i + 2])
+		for k in 0..<4 {
+			if k <= n do append(out, ALPHABET[(v >> (18 - 6 * u32(k))) & 63])
+			else do append(out, '=')
+		}
+	}
+}

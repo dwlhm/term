@@ -172,7 +172,7 @@ _kitty_load_shm :: proc(state: ^Kitty_Extension, shm_name: string) -> (pixels: [
 	if state == nil || len(shm_name) == 0 do return nil, 0, 0
 
 	c_name := strings.clone_to_cstring(shm_name, context.temp_allocator)
-	fd := posix.shm_open(c_name, posix.O_Flags{}, 0)
+	fd := posix.shm_open(c_name, posix.O_Flags{}, {})
 	if fd < 0 do return nil, 0, 0
 	defer {
 		posix.close(fd)
