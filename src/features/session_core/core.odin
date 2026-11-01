@@ -38,6 +38,7 @@ Core_Holder :: struct {
 	welcomed: bool,
 	current:  bool, // our build: new sessions go here
 	poisoned: bool, // its tails keep crashing cores: rebuild screens without them
+	handover: bool, // the last core left on purpose: tails are unanswered output
 	instance: u64,
 	conn:     ipc.Stream_Conn,
 }
@@ -125,7 +126,9 @@ core_run :: proc() -> int {
 	if core_current_holder(c) < 0 && !core_start_holder(c) do return 1
 	c.empty_since = _now()
 	for !sync.atomic_load(&_stop_requested) && !_core_done(c) do _core_step(c)
-	if !sync.atomic_load(&_stop_requested) {
+	if sync.atomic_load(&_stop_requested) {
+		core_handover(c)
+	} else {
 		core_shutdown_holders(c)
 		_remove_private_dir(c)
 	}
@@ -200,8 +203,8 @@ _stop_handler :: proc "c" (sig: posix.Signal) {
 	sync.atomic_store(&_stop_requested, true)
 }
 
-// SIGTERM/SIGINT end the core without telling holders: they keep every
-// program and the next core rebuilds screens from their tails.
+// SIGTERM/SIGINT are a planned restart: holders keep every program and the
+// next core restores the saved screens (core_handover).
 @(private = "file")
 _install_stop_signals :: proc() {
 	posix.signal(.SIGTERM, _stop_handler)

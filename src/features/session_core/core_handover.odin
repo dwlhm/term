@@ -1,0 +1,102 @@
+package feature_session_core
+
+// Planned restart (SIGTERM: an update, `make install`): every screen is saved
+// as a paint (terminal_paint + OSC 7501) and the holders are told GOODBYE
+// Handover, so they drop their tails. The next core restores each screen from
+// its snapshot, replays only what the program printed since and answers it
+// (nobody did), with no resize nudge. Without a snapshot it takes the crash path.
+
+import "core:fmt"
+import "core:os"
+import "core:time"
+import terminal "../../core/terminal"
+import extension "../../core/terminal/extension"
+import ipc "../../platform/ipc"
+
+CORE_SNAPSHOT_HISTORY :: 10_000 // scrollback lines kept across a planned restart
+
+core_handover :: proc(c: ^Core) {
+	for &s in c.sessions {
+		if !s.used || s.exited do continue
+		terminal.relay_flush(&s.relay, &s.sess.term)
+		terminal.terminal_paint(&s.sess.term, &c.paint, CORE_SNAPSHOT_HISTORY)
+		extension.osc_7501_encode(&s.sess.program_status, &c.paint)
+		_write_snapshot(c, s.id, c.paint[:])
+	}
+	mode := [1]u8{u8(ipc.Goodbye.Handover)}
+	for &h in c.holders {
+		if !h.used do continue
+		ipc.stream_send(&h.conn, ipc.MSG_GOODBYE, 0, mode[:])
+		deadline := _now() + 1_000_000_000
+		for ipc.stream_wants_write(&h.conn) && h.conn.err == .None && _now() < deadline {
+			ipc.stream_flush(&h.conn)
+			time.sleep(5 * time.Millisecond)
+		}
+	}
+}
+
+// core_restore_snapshot feeds a saved screen into a fresh Terminal (its
+// replies were answered before the restart) and removes the file. false = none.
+core_restore_snapshot :: proc(c: ^Core, s: ^Core_Session) -> bool {
+	path_buf: [256]u8
+	path, ok := _snapshot_path(c, path_buf[:], s.id)
+	if !ok do return false
+	data, err := os.read_entire_file_from_path(path, context.allocator)
+	if err != nil do return false
+	defer delete(data)
+	os.remove(path)
+	terminal.terminal_feed_bytes(&s.sess.term, data)
+	for terminal.terminal_drain_response(&s.sess.term, c.msg[:4096]) > 0 {}
+	_ = terminal.terminal_consume_damage(&s.sess.term)
+	return true
+}
+
+// core_sweep_snapshots removes snapshots no adopted session will claim
+// (their program ended between the handover and this core's start).
+core_sweep_snapshots :: proc(c: ^Core) {
+	dir, err := os.open(c.dir)
+	if err != nil do return
+	defer os.close(dir)
+	entries, _ := os.read_dir(dir, -1, context.temp_allocator)
+	defer free_all(context.temp_allocator)
+	for e in entries {
+		id: u32
+		if !_parse_snapshot_name(e.name, &id) || core_session_find(c, id) != nil do continue
+		path_buf: [256]u8
+		if path, ok := _snapshot_path(c, path_buf[:], id); ok do os.remove(path)
+	}
+}
+
+@(private = "file")
+_parse_snapshot_name :: proc(name: string, id: ^u32) -> bool {
+	if len(name) < len("snap.0.vt") || name[:5] != "snap." || name[len(name) - 3:] != ".vt" do return false
+	n: u32
+	for ch in name[5:len(name) - 3] {
+		if ch < '0' || ch > '9' do return false
+		n = n * 10 + u32(ch - '0')
+	}
+	id^ = n
+	return n > 0
+}
+
+@(private = "file")
+_snapshot_path :: proc(c: ^Core, buf: []u8, id: u32) -> (string, bool) {
+	name_buf: [32]u8
+	return ipc.ipc_session_path(buf, c.dir, fmt.bprintf(name_buf[:], "snap.%d.vt", id))
+}
+
+// _write_snapshot writes atomically (temp + rename, mode 0600): a restart
+// interrupted mid-write never leaves half a screen behind.
+@(private = "file")
+_write_snapshot :: proc(c: ^Core, id: u32, data: []u8) {
+	path_buf, tmp_buf: [256]u8
+	path, ok := _snapshot_path(c, path_buf[:], id)
+	if !ok do return
+	tmp := fmt.bprintf(tmp_buf[:], "%s.tmp", path)
+	f, err := os.open(tmp, {.Write, .Create, .Trunc}, {.Read_User, .Write_User})
+	if err != nil do return
+	_, werr := os.write(f, data)
+	os.close(f)
+	if werr == nil do _ = os.rename(tmp, path)
+	else do os.remove(tmp)
+}

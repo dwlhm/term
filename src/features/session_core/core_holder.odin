@@ -32,6 +32,7 @@ core_adopt_holders :: proc(c: ^Core) {
 	// Settle the handshakes so adopted sessions exist before viewers arrive.
 	deadline := _now() + 2 * 1_000_000_000
 	for _core_unwelcomed(c) && _now() < deadline do _core_step(c)
+	core_sweep_snapshots(c)
 }
 
 core_current_holder :: proc(c: ^Core) -> int {
@@ -143,6 +144,7 @@ _holder_welcome :: proc(c: ^Core, hi: int, r: ^ipc.Wire_Reader) -> bool {
 	if !r.ok || wel.version != ipc.STREAM_PROTO_VERSION do return false
 	h.welcomed, h.instance, h.current = true, wel.instance, wel.build == c.build
 	h.poisoned = wel.previous == 2 && wel.crashes >= CORE_POISON_CRASHES
+	h.handover = wel.previous == 1
 	if h.poisoned do fmt.eprintfln("core: %d core crashes in 5 min: screens start empty (tails not replayed)", wel.crashes)
 	// Another build keeps what it runs, takes nothing new and exits when empty.
 	if !h.current do ipc.stream_send(&h.conn, ipc.MSG_DRAIN, 0)

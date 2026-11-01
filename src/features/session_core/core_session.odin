@@ -76,19 +76,25 @@ core_session_adopt :: proc(c: ^Core, hi: int, held: ipc.Held_Session) {
 	if held.exited do core_session_exited(c, s, held.exit, "")
 }
 
-// core_session_adopt_tail rebuilds the screen from the holder's tail. Its
-// replies were sent by the previous core long ago: drop them, then nudge the
-// size so full-screen programs repaint what the tail missed.
+// core_session_adopt_tail rebuilds the screen: from the planned-restart
+// snapshot plus the tail since (output nobody answered yet: its replies go to
+// the program), or from the tail alone after a crash (its replies were sent
+// long ago: dropped) followed by a size nudge so full-screen programs repaint.
 core_session_adopt_tail :: proc(c: ^Core, s: ^Core_Session, tail: []u8) {
+	h := &c.holders[s.holder] if s.holder >= 0 else nil
 	// A tail that keeps crashing cores is skipped: programs keep running, their screens start empty.
-	if s.holder >= 0 && c.holders[s.holder].poisoned do return
+	if h != nil && h.poisoned do return
+	exact := core_restore_snapshot(c, s)
 	clear(&c.viewer_out)
 	clear(&c.replies)
 	terminal.relay_feed(&s.relay, &s.sess.term, tail, &c.viewer_out, &c.replies)
 	terminal.relay_flush(&s.relay, &s.sess.term)
 	for terminal.terminal_drain_response(&s.sess.term, c.msg[:4096]) > 0 {}
 	_ = terminal.terminal_consume_damage(&s.sess.term)
-	if s.exited do return
+	if exact && h != nil && h.handover && len(c.replies) > 0 && !s.exited {
+		core_holder_send(c, s.holder, ipc.MSG_INPUT, s.id, c.replies[:])
+	}
+	if s.exited || exact do return
 	size := ipc.Size_Msg{cols = u16(s.sess.term.cols), rows = u16(s.sess.term.rows)}
 	nudge := size
 	nudge.rows = max(1, size.rows - 1)
