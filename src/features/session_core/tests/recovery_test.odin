@@ -10,25 +10,25 @@ import session "../../session"
 import ipc "../../../platform/ipc"
 
 @(test)
-test_core_restart_rebuilds_from_tail :: proc(t: ^testing.T) {
+test_core_restart_restores_screen :: proc(t: ^testing.T) {
 	tiers := tiers_start()
 	v := view_open()
-	s := view_sh(v, "printf 'before-crash'; read x; printf 'after:%s' \"$x\"; sleep 30")
+	s := view_sh(v, "printf 'before-restart'; read x; printf 'after:%s' \"$x\"; sleep 30")
 	id := view_attached(v, s)
-	testing.expect(t, view_wait_screen(v, s, "before-crash"), "output before the crash")
-	tiers_core_crash(tiers)
+	testing.expect(t, view_wait_screen(v, s, "before-restart"), "output before the restart")
+	tiers_core_restart_stop(tiers)
 	testing.expect(t, view_wait(v, .Core_Lost) >= 0, "viewer notices the core is gone")
 	tiers_core_start(tiers)
 	testing.expect(t, client.client_reconnect(&v.c), "reconnect")
 	testing.expect(t, view_attached(v, s) == id, "the same session is attached again")
-	testing.expect(t, view_wait_screen(v, s, "before-crash"), "repaint keeps the screen")
+	testing.expect(t, view_wait_screen(v, s, "before-restart"), "repaint keeps the screen")
 	session.session_write_string(s, "x\n")
 	testing.expect(t, view_wait_screen(v, s, "after:x"), "input and output flow again")
 
 	w := view_open()
 	sw := client.client_attach(&w.c, {id = id, size = {cols = 80, rows = 24}})
 	testing.expect(t, view_attached(w, sw) == id, "a new viewer attaches")
-	testing.expect(t, view_wait_screen(w, sw, "before-crash"), "screen rebuilt from the holder tail")
+	testing.expect(t, view_wait_screen(w, sw, "before-restart"), "a new viewer sees the restored screen")
 	ids: [8]u32
 	testing.expect_value(t, len(cli_list_ids(ids[:])), 1)
 	view_close(w)

@@ -60,9 +60,10 @@ tiers_core_start :: proc(t: ^Tiers) {
 	_wait_socket(fmt.bprintf(buf[:], "%s/core.sock", t.dir))
 }
 
-// tiers_core_crash ends the core without telling the holder (like SIGTERM or
-// a crash): the holder keeps every program for the next core.
-tiers_core_crash :: proc(t: ^Tiers) {
+// tiers_core_restart_stop stops the core as SIGTERM does (a planned restart:
+// the holder keeps every program, the next core restores the screens).
+// kill -9 (the crash path) is covered by scripts/stress/session_tiers.py.
+tiers_core_restart_stop :: proc(t: ^Tiers) {
 	core.core_request_stop()
 	_join(&t.core_th)
 }
