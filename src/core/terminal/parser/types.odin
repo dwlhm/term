@@ -104,6 +104,7 @@ Parser :: struct {
 	tab_stops:        [256]bool,
 	last_print:       rune,
 	cursor_key_mode:  bool, // DECCKM (?1)
+	keypad_app:       bool, // DECKPAM (ESC =) / DECKPNM (ESC >)
 	origin_mode:      bool, // DECOM (?6) - Origin Mode
 	autowrap:         bool, // DECAWM (?7) - Auto-wrap Mode
 	bracketed_paste:       bool, // Bracketed Paste (?2004)

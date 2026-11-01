@@ -119,6 +119,7 @@ _parser_soft_reset :: proc(p: ^Parser, g: ^grid.Grid) {
 	p.scroll_top = 0
 	if g != nil do p.scroll_bottom = max(0, g.row_count - 1)
 	p.cursor_key_mode = false
+	p.keypad_app = false
 	p.origin_mode = false
 	p.autowrap = true
 	p.bracketed_paste = false

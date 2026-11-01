@@ -22,6 +22,9 @@ Terminal :: struct {
 	parser:     parser.Parser,
 	rows:       int,
 	cols:       int,
+	// Window title from OSC 0/2, kept as VT state so a paint can restore it.
+	title_buf:  [256]u8,
+	title_len:  int,
 	allocator:  runtime.Allocator,
 }
 
@@ -102,6 +105,10 @@ terminal_hyperlink_span :: proc(t: ^Terminal, row, col: int) -> (col_start, col_
 _terminal_on_osc :: proc(user_data: rawptr, osc_id: int, payload: string) -> bool {
 	if user_data == nil do return false
 	t := (^Terminal)(user_data)
+	if osc_id == 0 || osc_id == 2 {
+		t.title_len = min(len(payload), len(t.title_buf))
+		copy(t.title_buf[:t.title_len], payload[:t.title_len])
+	}
 	return extension.registry_dispatch_osc(&t.extensions, osc_id, payload, user_data)
 }
 
@@ -287,6 +294,18 @@ terminal_cursor_active_bg :: proc(t: ^Terminal) -> u8 {
 terminal_cursor_active_fg :: proc(t: ^Terminal) -> u8 {
 	if t == nil do return 0
 	return t.parser.cursor.active_fg
+}
+
+terminal_title :: proc(t: ^Terminal) -> string {
+	if t == nil do return ""
+	return string(t.title_buf[:t.title_len])
+}
+
+// terminal_parser_at_ground reports that no escape sequence, control string or
+// UTF-8 sequence is half-received, so a paint can be spliced into the stream.
+terminal_parser_at_ground :: proc(t: ^Terminal) -> bool {
+	if t == nil do return true
+	return t.parser.state == .Ground && t.parser.utf8_state == 0
 }
 
 terminal_in_alt_screen :: proc(t: ^Terminal) -> bool {

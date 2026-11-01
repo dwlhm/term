@@ -66,6 +66,7 @@ parser_init :: proc(p: ^Parser, rows, cols: int) {
 	p.gl_single = 0
 	p.esc_charset_slot = 0
 	p.cursor_key_mode = false
+	p.keypad_app = false
 	p.origin_mode = false
 	p.autowrap = true
 	p.bracketed_paste = false
@@ -183,6 +184,12 @@ _parser_dispatch_osc :: proc(p: ^Parser) {
 
 parser_parse_byte :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, b: u8) {
 	if p == nil do return
+	// CAN/SUB cancel any escape sequence or control string in progress (DEC
+	// STD 070), so a stream that ends mid-sequence can be resynchronised.
+	if b == 0x18 || b == 0x1A {
+		_parser_abort_sequence(p)
+		return
+	}
 
 	switch p.state {
 	case .Ground:
@@ -346,6 +353,7 @@ parser_parse_byte :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, 
 			p.cursor.pending_wrap = false
 			p.state = .Ground
 		case '=', '>': // DECKPAM / DECKPNM
+			p.keypad_app = b == '='
 			p.state = .Ground
 		case:
 			p.state = .Ground
@@ -478,6 +486,15 @@ parser_parse_byte :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, 
 			p.osc_overflow = false
 		}
 	}
+}
+
+_parser_abort_sequence :: proc(p: ^Parser) {
+	clear(&p.osc_buf)
+	clear(&p.apc_buf)
+	clear(&p.dcs_buf)
+	p.osc_overflow, p.apc_overflow, p.dcs_overflow = false, false, false
+	p.utf8_state, p.utf8_len = 0, 0
+	p.state = .Ground
 }
 
 parser_parse_bytes :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, data: []u8) {
