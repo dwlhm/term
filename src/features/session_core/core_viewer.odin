@@ -126,7 +126,9 @@ _kill :: proc(c: ^Core, vi: int, id: u32) {
 	ipc.stream_send(&c.viewers[vi].conn, ipc.MSG_OK, 0)
 }
 
-// _read answers the plain text of a session's screen (agents: `term session read`).
+// _read answers the plain text of a session's screen (agents: `term session
+// read`). A full-screen program keeps its history itself: asking for history
+// starts a stitch, and MSG_TEXT follows when the core has scrolled it.
 @(private = "file")
 _read :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 	id, history := ipc.wr_u32(r), ipc.wr_u32(r)
@@ -135,9 +137,21 @@ _read :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 		_fail(c, vi, 0, .Not_Found, "no such session")
 		return
 	}
+	start := core_stitch_begin(c, s, vi, int(history))
+	switch start {
+	case .Started:
+		return // MSG_TEXT comes from the stitch
+	case .Busy:
+		_fail(c, vi, 0, .Busy, "this session's history is already being read")
+		return
+	case .Screen, .Screen_Marked:
+	}
 	clear(&c.text)
 	b := strings.Builder{buf = c.text}
 	terminal.terminal_text(&s.sess.term, &b, int(min(history, CORE_PAINT_HISTORY_MAX)))
+	// A full-screen program that does not report the mouse cannot be scrolled:
+	// say so instead of pretending the screen is its history.
+	if start == .Screen_Marked do strings.write_string(&b, CORE_READ_ALT_NOTE)
 	c.text = b.buf
 	n := min(len(c.text), ipc.STREAM_MAX_PAYLOAD)
 	ipc.stream_send(&c.viewers[vi].conn, ipc.MSG_TEXT, 0, c.text[len(c.text) - n:])
@@ -173,4 +187,18 @@ _fail :: proc(c: ^Core, vi: int, token: u32, code: ipc.Fail_Code, reason: string
 	ipc.ww_u8(&w, u8(code))
 	ipc.ww_str(&w, reason)
 	ipc.stream_send(&c.viewers[vi].conn, ipc.MSG_FAIL, 0, ipc.wire_bytes_written(&w))
+}
+
+// core_viewer_current: the connection in that slot is still the one with seq
+// (a long request, a stitch, may outlive its connection).
+core_viewer_current :: proc(c: ^Core, vi: int, seq: u32) -> bool {
+	if vi < 0 || vi >= CORE_MAX_VIEWERS do return false
+	v := &c.viewers[vi]
+	return v.used && v.hello && v.seq == seq
+}
+
+// core_viewer_fail_seq answers a request that was accepted earlier.
+core_viewer_fail_seq :: proc(c: ^Core, vi: int, seq: u32, code: ipc.Fail_Code, reason: string) {
+	if !core_viewer_current(c, vi, seq) do return
+	_fail(c, vi, 0, code, reason)
 }

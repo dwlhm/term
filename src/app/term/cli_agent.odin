@@ -2,10 +2,17 @@ package term
 
 // Agent-facing session commands (served by the session core, no GUI needed):
 //   term session new [-d <dir>] [-- <program> <args>…]   → prints the new id
-//   term session read <id> [-n <history lines>]          → plain screen text
+//   term session read <id> [-n <history lines>]          → plain text: history + screen
 //   term session send <id> <text>                        → types text (\n \r \t \e \\ \xHH)
 //   term session wait <id> [-t <seconds>]                → until no CLI/TUI runs (exit 0), 3 = timeout
 // Exit codes: 0 ok · 1 error · 2 no session core running · 3 wait timed out.
+//
+// `read -n N` of a windowed program that keeps its own history (alternate
+// screen) scrolls it: the core sends mouse-wheel notches the way the program
+// asked for them, waits for each page to settle and glues the pages, then puts
+// the view back where it was. That takes up to a few seconds. A program that
+// does not report mouse input cannot be scrolled: its visible screen is
+// answered with a note saying so.
 
 import "core:fmt"
 import "core:os"

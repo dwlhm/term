@@ -92,6 +92,12 @@ core_apply_leader :: proc(c: ^Core, s: ^Core_Session) {
 	_ = terminal.terminal_consume_damage(t)
 }
 
+// core_attach_repaint gives every viewer of a session one fresh paint (used
+// after a stitch, which held the live frames back).
+core_attach_repaint :: proc(c: ^Core, s: ^Core_Session) {
+	for &a in s.attaches do if a.used do _attach_paint(c, s, &a, 0)
+}
+
 // core_attach_frame handles a viewer frame on an attach channel.
 core_attach_frame :: proc(c: ^Core, vi: int, f: ipc.Stream_Frame) {
 	s, a := core_attach_find(c, vi, f.channel)
@@ -101,6 +107,7 @@ core_attach_frame :: proc(c: ^Core, vi: int, f: ipc.Stream_Frame) {
 	case ipc.MSG_V_INPUT:
 		// The typist owns the size first: its input is read at its size.
 		core_attach_touch(c, s, a)
+		if core_stitch_hold(s, f.payload) do return // delivered when the stitch ends
 		if !s.exited do core_holder_send(c, s.holder, ipc.MSG_INPUT, s.id, f.payload)
 	case ipc.MSG_V_RESIZE:
 		size := ipc.dec_size(&r)

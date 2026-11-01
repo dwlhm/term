@@ -75,6 +75,7 @@ Core_Session :: struct {
 	sess:         ^session.Terminal_Session,
 	relay:        terminal.Relay,
 	link:         Core_Link,
+	stitch:       ^Stitch_State, // nil until a read asks for alt-screen history
 	attaches:     [CORE_MAX_ATTACH]Core_Attach,
 }
 
@@ -82,6 +83,7 @@ Core_Viewer :: struct {
 	used:         bool,
 	hello:        bool,
 	role:         ipc.Stream_Role,
+	seq:          u32, // per accepted connection: a stitch answers only its own reader
 	list_waiting: bool,
 	list_due_ns:  i64,
 	next_channel: u32,
@@ -98,6 +100,7 @@ Core :: struct {
 	listen_fd:   posix.FD,
 	listen_ino:  u64,
 	next_id:     u32,
+	viewer_seq:  u32,
 	empty_since: i64,
 	grace_ns:    i64,
 	stop_pipe:   [2]posix.FD, // core_request_stop / SIGTERM wake the poll

@@ -109,7 +109,13 @@ core_session_output :: proc(c: ^Core, s: ^Core_Session, bytes: []u8) {
 	terminal.relay_feed(&s.relay, &s.sess.term, bytes, &c.viewer_out, &c.replies)
 	_ = terminal.terminal_consume_damage(&s.sess.term)
 	if len(c.replies) > 0 do core_holder_send(c, s.holder, ipc.MSG_INPUT, s.id, c.replies[:])
-	for &a in s.attaches do if a.used do core_attach_push(c, s, &a, c.viewer_out[:])
+	if s.stitch != nil && s.stitch.active {
+		// A stitch is scrolling this screen: the viewers get one repaint at the
+		// end instead of every intermediate page.
+		s.stitch.last_out_ns = _now()
+	} else {
+		for &a in s.attaches do if a.used do core_attach_push(c, s, &a, c.viewer_out[:])
+	}
 	// A command starting or ending prints something: look at the foreground once it settles.
 	s.proc_due_ns = _now() + CORE_PROC_QUIET_MS * 1_000_000
 	core_row_changed(c, s)
@@ -160,6 +166,7 @@ core_session_kill :: proc(c: ^Core, s: ^Core_Session) {
 	hup := _i32_bytes(i32(posix.Signal.SIGHUP))
 	if !s.exited do core_holder_send(c, s.holder, ipc.MSG_SIGNAL, s.id, hup[:])
 	core_holder_send(c, s.holder, ipc.MSG_RELEASE, s.id)
+	core_stitch_abort(c, s)
 	for &a in s.attaches do if a.used do ipc.stream_channel_close(&c.viewers[a.viewer].conn, a.channel, "killed")
 	id := s.id
 	core_session_free(c, s)
@@ -168,6 +175,7 @@ core_session_kill :: proc(c: ^Core, s: ^Core_Session) {
 }
 
 core_session_free :: proc(c: ^Core, s: ^Core_Session) {
+	core_stitch_free(s)
 	if s.sess != nil do session.session_destroy(s.sess)
 	s^ = {}
 }
