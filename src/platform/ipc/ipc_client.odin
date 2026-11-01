@@ -114,3 +114,21 @@ _recv_all :: proc(fd: posix.FD, out: []u8, deadline_ns: i64) -> (received: int, 
 		if err = _wait_fd(fd, {.IN}, deadline_ns); err != .None do return received, err
 	}
 }
+
+// ipc_connect opens a non-blocking, close-on-exec connection to path within
+// timeout_ms (stream links). The caller owns the fd.
+ipc_connect :: proc(path: string, timeout_ms: int = IPC_CLIENT_TIMEOUT_MS) -> (fd: posix.FD, err: Ipc_Error) {
+	addr: posix.sockaddr_un
+	if !ipc_fill_sockaddr(path, &addr) do return -1, .Path_Too_Long
+	fd = posix.socket(.UNIX, .STREAM)
+	if fd == -1 do return -1, .Socket_Failed
+	if !ipc_set_nonblocking_cloexec(fd) {
+		posix.close(fd)
+		return -1, .Socket_Failed
+	}
+	if err = _connect(fd, &addr, time.tick_now()._nsec + i64(timeout_ms) * 1_000_000); err != .None {
+		posix.close(fd)
+		return -1, err
+	}
+	return fd, .None
+}

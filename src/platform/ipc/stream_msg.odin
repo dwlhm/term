@@ -29,11 +29,10 @@ MSG_PROC_INFO    :: u8(47) // Proc_Info_Msg
 
 // viewer/cli → core, channel 0
 MSG_LIST   :: u8(60) // → MSG_SESSIONS
-MSG_CREATE :: u8(61) // Spawn_Msg (channel ignored) → MSG_CREATED u32 id | MSG_FAIL
-MSG_KILL   :: u8(62) // u32 id
-MSG_ATTACH :: u8(63) // Attach_Msg → MSG_ATTACHED {u32 id, u32 channel} | MSG_FAIL
+MSG_CREATE :: u8(61) // u32 token + Spawn_Msg → MSG_ATTACHED (the creator is attached) | MSG_FAIL
+MSG_KILL   :: u8(62) // u32 id → MSG_OK | MSG_FAIL
+MSG_ATTACH :: u8(63) // u32 token + Attach_Msg → MSG_ATTACHED | MSG_FAIL
 MSG_DETACH :: u8(64) // u32 channel
-MSG_QUIT   :: u8(65) // the last viewer is leaving: u32 count + ids to keep; the rest are killed
 
 // viewer → core, on an attach channel
 MSG_V_INPUT  :: u8(70) // raw bytes typed into the session
@@ -43,11 +42,11 @@ MSG_V_FACTS  :: u8(73) // Facts_Msg
 
 // core → viewer/cli
 MSG_SESSIONS :: u8(80) // u32 count + Session_Row each
-MSG_CREATED  :: u8(81)
-MSG_ATTACHED :: u8(82)
+MSG_ATTACHED :: u8(82) // u32 token, u32 id, u32 channel; the first paint follows as DATA
 MSG_EVENT    :: u8(83) // Session_Row of a session that changed (added, state, title, exited)
-MSG_FAIL     :: u8(84) // u8 Fail_Code + reason text
+MSG_FAIL     :: u8(84) // u32 token + u8 Fail_Code + reason text
 MSG_OK       :: u8(85)
+MSG_REMOVED  :: u8(86) // u32 id: the session is gone
 
 Stream_Role :: enum u8 { Core = 1, Holder, Viewer, Cli }
 
@@ -66,12 +65,12 @@ STREAM_MAX_ARGV :: 64
 STREAM_MAX_ENV  :: 256
 
 Spawn_Msg :: struct {
-	argv:         [STREAM_MAX_ARGV]string,
-	argc:         int,
-	env:          [STREAM_MAX_ENV]string,
-	envc:         int,
-	cwd:          string,
-	using size:   Size_Msg,
+	argv:       [STREAM_MAX_ARGV]string,
+	argc:       int,
+	env:        [STREAM_MAX_ENV]string,
+	envc:       int,
+	cwd:        string,
+	using size: Size_Msg,
 }
 
 Size_Msg :: struct {
@@ -114,8 +113,8 @@ Attach_Msg :: struct {
 	observe: bool,
 }
 
+// Facts_Msg: what the size owner's display looks like (queries about pixels are answered with it).
 Facts_Msg :: struct {
-	fg, bg, cursor: u32, // 0xRRGGBB, 0xFFFFFFFF = unknown
 	cell_w, cell_h: u16,
 }
 

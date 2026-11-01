@@ -107,11 +107,11 @@ dec_attach :: proc(r: ^Wire_Reader) -> (m: Attach_Msg) {
 }
 
 enc_facts :: proc(w: ^Wire_Writer, m: Facts_Msg) {
-	ww_u32(w, m.fg); ww_u32(w, m.bg); ww_u32(w, m.cursor); ww_u16(w, m.cell_w); ww_u16(w, m.cell_h)
+	ww_u16(w, m.cell_w); ww_u16(w, m.cell_h)
 }
 
 dec_facts :: proc(r: ^Wire_Reader) -> (m: Facts_Msg) {
-	m.fg, m.bg, m.cursor, m.cell_w, m.cell_h = wr_u32(r), wr_u32(r), wr_u32(r), wr_u16(r), wr_u16(r)
+	m.cell_w, m.cell_h = wr_u16(r), wr_u16(r)
 	return
 }
 

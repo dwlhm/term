@@ -23,7 +23,7 @@ when ODIN_OS == .Darwin {
 	SO_PEERCRED :: 17
 }
 
-@(private = "file")
+@(private)
 cstring_from :: proc(buf: []u8, path: string) -> (cstring, bool) {
 	if len(path) + 1 > len(buf) do return "", false
 	copy(buf, path)
@@ -31,11 +31,11 @@ cstring_from :: proc(buf: []u8, path: string) -> (cstring, bool) {
 	return cstring(raw_data(buf)), true
 }
 
-@(private = "file")
+@(private)
 sun_path_len :: proc "contextless" () -> int { return len((posix.sockaddr_un{}).sun_path) }
 
 // group_other_access reports any permission bit outside the owner trio.
-@(private = "file")
+@(private)
 group_other_access :: proc "contextless" (m: posix.mode_t) -> bool {
 	return card(m & posix.mode_t{.IRGRP, .IWGRP, .IXGRP, .IROTH, .IWOTH, .IXOTH}) != 0
 }

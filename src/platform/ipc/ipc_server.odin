@@ -91,11 +91,7 @@ _listener :: proc(srv: ^Ipc_Server) {
 
 @(private = "file")
 _unlink_if_ours :: proc(srv: ^Ipc_Server) {
-	if srv.path_len == 0 || srv.path_len >= len(srv.path_buf) do return
-	srv.path_buf[srv.path_len] = 0
-	cpath := cstring(raw_data(srv.path_buf[:]))
-	st: posix.stat_t
-	if posix.lstat(cpath, &st) == .OK && u64(st.st_ino) == srv.listen_ino do posix.unlink(cpath)
+	ipc_unlink_if_ours(string(srv.path_buf[:srv.path_len]), srv.listen_ino)
 }
 
 @(private = "file")
