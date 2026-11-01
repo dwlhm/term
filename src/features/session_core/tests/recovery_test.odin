@@ -51,7 +51,7 @@ test_core_restart_preserves_elapsed :: proc(t: ^testing.T) {
 	tiers_core_start(tiers)
 
 	rows: [8]ipc.Session_Row
-	got_rows := cli_list_rows(rows[:])
+	got_rows := cli_wait_rows(rows[:])
 	testing.expect_value(t, len(got_rows), 1)
 	if len(got_rows) == 1 {
 		testing.expect_value(t, got_rows[0].id, id)
@@ -79,7 +79,9 @@ hostile_dropped :: proc(hello: bool, bytes: []u8) -> bool {
 	}
 	defer posix.close(fd)
 	posix.send(fd, raw_data(bytes), uint(len(bytes)), {.NOSIGNAL})
-	deadline := time.tick_now()._nsec + 2_000_000_000
+	// A drop under load may take the core a while to notice; the assertion is
+	// that it closes the socket, not that it is fast.
+	deadline := time.tick_now()._nsec + 5_000_000_000
 	for time.tick_now()._nsec < deadline {
 		pfd := posix.pollfd{fd = fd, events = {.IN}}
 		if posix.poll(&pfd, 1, 50) <= 0 do continue

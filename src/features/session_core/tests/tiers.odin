@@ -158,6 +158,16 @@ cli_list_rows :: proc(out: []ipc.Session_Row) -> []ipc.Session_Row {
 	return out[:n]
 }
 
+// cli_wait_rows waits until a core lists a row: a fresh core has to adopt the
+// holder's sessions first, so a single LIST right after it starts can be empty.
+cli_wait_rows :: proc(out: []ipc.Session_Row, ms := 3000) -> []ipc.Session_Row {
+	for _ in 0..<ms / 10 {
+		if n := cli_list_rows(out); len(n) > 0 do return n
+		time.sleep(10 * time.Millisecond)
+	}
+	return cli_list_rows(out)
+}
+
 // cli_kill: true = the core answered OK.
 cli_kill :: proc(id: u32) -> bool {
 	conn: ipc.Stream_Conn
