@@ -1,0 +1,191 @@
+package platform_ipc
+
+// One framed connection: input reassembly, a control queue of whole frames,
+// and credit-limited data channels. Contract: see stream.odin.
+
+import "base:runtime"
+import "core:c"
+import "core:sys/posix"
+
+Stream_Channel :: struct {
+	id:            u32,
+	used:          bool,
+	credited:      bool, // DATA limited by credit (viewer streams); false = control-queue speed
+	credit:        int,
+	pending:       Byte_Ring,
+	ending:        bool, // CLOSE once pending is out
+	needs_repaint: bool, // pending overflowed and was dropped; the owner sends a repaint
+}
+
+Stream_Conn :: struct {
+	fd:        posix.FD,
+	in_buf:    []u8, // STREAM_HEADER + STREAM_MAX_PAYLOAD
+	in_len:    int,
+	in_used:   int, // bytes of in_buf consumed by the last stream_next
+	ctl:       Byte_Ring,
+	out:       [STREAM_HEADER + STREAM_DATA_CHUNK]u8, // one DATA frame being written
+	out_len:   int,
+	out_off:   int,
+	chans:     [STREAM_MAX_CHANNELS]Stream_Channel,
+	turn:      int,
+	err:       Stream_Error,
+	allocator: runtime.Allocator,
+}
+
+// stream_conn_init takes ownership of fd (made O_NONBLOCK|FD_CLOEXEC).
+// ctl_cap bounds queued control frames (the holder link uses it as its backlog).
+stream_conn_init :: proc(s: ^Stream_Conn, fd: posix.FD, ctl_cap: int, allocator := context.allocator) -> bool {
+	s^ = {}
+	s.fd, s.allocator = fd, allocator
+	if !ipc_set_nonblocking_cloexec(fd) do return false
+	s.in_buf = make([]u8, STREAM_HEADER + STREAM_MAX_PAYLOAD, allocator)
+	s.ctl.buf = make([]u8, max(ctl_cap, STREAM_HEADER + STREAM_MAX_PAYLOAD), allocator)
+	return true
+}
+
+stream_conn_destroy :: proc(s: ^Stream_Conn) {
+	if s.fd >= 0 do posix.close(s.fd)
+	for &ch in s.chans do if ch.used do delete(ch.pending.buf, s.allocator)
+	delete(s.in_buf, s.allocator)
+	delete(s.ctl.buf, s.allocator)
+	s^ = {fd = -1}
+}
+
+// stream_send queues one whole control frame. false = control queue full
+// (.Overflow is recorded: the caller drops the peer or applies backpressure).
+stream_send :: proc(s: ^Stream_Conn, kind: u8, channel: u32, parts: ..[]u8) -> bool {
+	total := 0
+	for p in parts do total += len(p)
+	if total > STREAM_MAX_PAYLOAD do return false
+	hdr: [STREAM_HEADER]u8
+	stream_put_header(hdr[:], kind, channel, total)
+	if len(s.ctl.buf) - s.ctl.len < STREAM_HEADER + total {
+		s.err = .Overflow
+		return false
+	}
+	ring_push(&s.ctl, hdr[:])
+	for p in parts do ring_push(&s.ctl, p)
+	return true
+}
+
+stream_queued :: proc(s: ^Stream_Conn) -> int {
+	n := s.ctl.len + (s.out_len - s.out_off)
+	for &ch in s.chans do if ch.used do n += ch.pending.len
+	return n
+}
+
+stream_channel :: proc(s: ^Stream_Conn, id: u32) -> ^Stream_Channel {
+	for &ch in s.chans do if ch.used && ch.id == id do return &ch
+	return nil
+}
+
+// stream_channel_open allocates the channel's pending queue (STREAM_MAX_PENDING).
+stream_channel_open :: proc(s: ^Stream_Conn, id: u32, credited: bool) -> bool {
+	if stream_channel(s, id) != nil do return false
+	for &ch in s.chans {
+		if ch.used do continue
+		ch = {id = id, used = true, credited = credited, credit = STREAM_WINDOW}
+		ch.pending.buf = make([]u8, STREAM_MAX_PENDING, s.allocator)
+		return true
+	}
+	return false
+}
+
+// stream_channel_close drops what is queued and tells the peer now.
+stream_channel_close :: proc(s: ^Stream_Conn, id: u32, reason: string = "") {
+	if ch := stream_channel(s, id); ch != nil {
+		delete(ch.pending.buf, s.allocator)
+		ch^ = {}
+	}
+	stream_send(s, STREAM_CLOSE, id, transmute([]u8)reason)
+}
+
+// stream_channel_finish closes once queued data is out (a program's last output).
+stream_channel_finish :: proc(s: ^Stream_Conn, id: u32) {
+	if ch := stream_channel(s, id); ch != nil do ch.ending = true
+	else do stream_send(s, STREAM_CLOSE, id)
+}
+
+// stream_data queues DATA. false = the reader is too far behind: its backlog
+// is dropped and needs_repaint is set; the owner replaces it with a repaint.
+stream_data :: proc(s: ^Stream_Conn, id: u32, bytes: []u8) -> bool {
+	ch := stream_channel(s, id)
+	if ch == nil do return true
+	if !ring_push(&ch.pending, bytes) {
+		ring_clear(&ch.pending)
+		ch.needs_repaint = true
+		return false
+	}
+	return true
+}
+
+stream_wants_write :: proc(s: ^Stream_Conn) -> bool {
+	if s.out_off < s.out_len || s.ctl.len > 0 do return true
+	for &ch in s.chans {
+		if ch.used && ch.pending.len > 0 && (!ch.credited || ch.credit > 0) do return true
+		if ch.used && ch.ending do return true
+	}
+	return false
+}
+
+// stream_flush writes until the socket would block or nothing is left.
+stream_flush :: proc(s: ^Stream_Conn) -> Stream_Error {
+	for s.err == .None {
+		if s.out_off < s.out_len {
+			if !_write_some(s, s.out[s.out_off:s.out_len], &s.out_off) do break
+			continue
+		}
+		if s.ctl.len > 0 {
+			n := 0
+			if !_write_some(s, ring_front(&s.ctl), &n) do break
+			ring_consume(&s.ctl, n)
+			continue
+		}
+		if !_next_data_frame(s) do break
+	}
+	return s.err if s.err != .Overflow else .None
+}
+
+@(private = "file")
+_write_some :: proc(s: ^Stream_Conn, data: []u8, advanced: ^int) -> bool {
+	for {
+		n := posix.send(s.fd, raw_data(data), c.size_t(len(data)), {.NOSIGNAL})
+		if n > 0 {
+			advanced^ += int(n)
+			return true
+		}
+		e := posix.errno()
+		if n < 0 && e == .EINTR do continue
+		if n < 0 && e == .EAGAIN do return false
+		s.err = .Closed if e == .EPIPE || e == .ECONNRESET else .Socket_Failed
+		return false
+	}
+}
+
+// _next_data_frame builds the next DATA (or deferred CLOSE) frame into s.out,
+// round-robin over channels, each within its own credit.
+@(private = "file")
+_next_data_frame :: proc(s: ^Stream_Conn) -> bool {
+	for step in 0..<STREAM_MAX_CHANNELS {
+		i := (s.turn + 1 + step) % STREAM_MAX_CHANNELS
+		ch := &s.chans[i]
+		if !ch.used do continue
+		if ch.pending.len == 0 && ch.ending {
+			id := ch.id
+			delete(ch.pending.buf, s.allocator)
+			ch^ = {}
+			stream_send(s, STREAM_CLOSE, id)
+			s.turn = i
+			return true
+		}
+		budget := ch.credit if ch.credited else STREAM_DATA_CHUNK
+		n := min(ch.pending.len, budget, STREAM_DATA_CHUNK)
+		if n <= 0 do continue
+		stream_put_header(s.out[:], STREAM_DATA, ch.id, n)
+		ring_pop(&ch.pending, s.out[STREAM_HEADER:STREAM_HEADER + n])
+		if ch.credited do ch.credit -= n
+		s.out_len, s.out_off, s.turn = STREAM_HEADER + n, 0, i
+		return true
+	}
+	return false
+}
