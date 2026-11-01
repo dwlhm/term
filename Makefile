@@ -21,7 +21,7 @@ TEST_FLAGS ?= -define:ODIN_TEST_THREADS=1
 DEBUG_FLAGS ?= -debug
 RELEASE_FLAGS ?= -o:speed -no-bounds-check
 
-.PHONY: all term release run term-debug harness-features run-harness-features harness-render-chrome run-harness-render-chrome harness-render-terminal run-harness-render-terminal harness-render-composer run-harness-composer test test-app test-holder test-font test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-selector test-gpu check esctest clean help bench bench-quick bundle dmg portable dist install uninstall
+.PHONY: all term release run term-debug harness-features run-harness-features harness-render-chrome run-harness-render-chrome harness-render-terminal run-harness-render-terminal harness-render-composer run-harness-composer test test-app test-holder test-session-core test-font test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-selector test-gpu check esctest clean help bench bench-quick bundle dmg portable dist install uninstall
 
 all: term harness-features harness-render-chrome harness-render-terminal harness-composer
 
@@ -123,7 +123,7 @@ bench-session:
 	$(ODIN) build src/cmd/bench_session -out:$(OUT_DIR)/bench_session $(RELEASE_FLAGS) $(COMMON_FLAGS)
 	./$(OUT_DIR)/bench_session
 
-test: test-app test-terminal test-pty test-holder test-font test-window test-session test-control test-ipc test-tabs test-multiplexer test-interaction test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-selector test-gpu test-features test-e2e
+test: test-app test-terminal test-pty test-holder test-session-core test-font test-window test-session test-control test-ipc test-tabs test-multiplexer test-interaction test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-selector test-gpu test-features test-e2e
 
 # VT conformance suite (esctest2) driven inside a real Term pane; requires a GUI
 # session. Extra esctest flags: make esctest ESCTEST_ARGS="--include=CUP"
@@ -142,6 +142,9 @@ test-pty:
 
 test-holder:
 	$(ODIN) test src/features/holder/tests $(CHECK_FLAGS) $(TEST_FLAGS)
+
+test-session-core:
+	$(ODIN) test src/features/session_core/tests $(CHECK_FLAGS) $(TEST_FLAGS)
 
 test-font:
 	$(ODIN) test src/platform/font/tests $(TEST_FLAGS)
@@ -251,6 +254,8 @@ check:
 	$(ODIN) check src/platform/ipc $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/features/control $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/features/holder $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/features/session_core $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/features/session_core/tests $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/platform/pty $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/platform/font $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/core/render/atlas $(CHECK_FLAGS) -no-entry-point
