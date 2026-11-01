@@ -62,3 +62,26 @@ test_foreground_info_by_fd :: proc(t: ^testing.T) {
 	testing.expectf(t, strings.has_suffix(cwd, "/tmp"), "foreground cwd: %q", cwd)
 	testing.expect(t, pty.pty_set_size(master, 100, 40, 0, 0), "TIOCSWINSZ by fd")
 }
+
+@(test)
+test_spawn_raw_resolves_bare_name_on_path :: proc(t: ^testing.T) {
+	cfg := pty.Pty_Config{shell = "sh", argv = {"-c", "echo BARE_OK; sleep 30"}, cols = 80, rows = 24}
+	master, pid, err := pty.pty_spawn_raw(cfg, nil)
+	testing.expect_value(t, err, pty.Pty_Error.None)
+	out := read_until(master, "BARE_OK", 3000)
+	pty.pty_hangup(master, pid)
+	testing.expectf(t, strings.contains(out, "BARE_OK"), "bare `sh` runs from PATH: %q", out)
+
+	// The child's PATH (extra_env) decides, and a directory named like the
+	// program is skipped: /usr is searched first and has a `bin` directory.
+	cfg2 := pty.Pty_Config{shell = "bin", cols = 80, rows = 24}
+	master2, pid2, err2 := pty.pty_spawn_raw(cfg2, {"PATH=/usr:/nowhere"})
+	testing.expect_value(t, err2, pty.Pty_Error.None)
+	pty.pty_hangup(master2, -1)
+	status: c.int
+	for _ in 0..<300 {
+		if posix.waitpid(posix.pid_t(pid2), &status, {.NOHANG}) == posix.pid_t(pid2) do break
+		time.sleep(10 * time.Millisecond)
+	}
+	testing.expect(t, posix.WIFEXITED(status) && posix.WEXITSTATUS(status) == 127, "unresolved name exits 127")
+}

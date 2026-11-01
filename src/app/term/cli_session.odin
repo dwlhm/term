@@ -1,12 +1,15 @@
 package term
 
-// `term session ls` / `term session kill <id>`: synchronous requests to the
-// session core (it outlives every window, so these work with no GUI running).
+// `term session ls [--json]`: a synchronous LIST to the session core (it
+// outlives every window, so this works with no GUI running).
+// --json prints one JSON object per session (NDJSON), every Session_Row field.
 
+import "core:encoding/json"
 import "core:fmt"
 import "core:os"
+import "core:slice"
 import "core:strings"
-import ctrl_feat "../../features/control"
+import "core:sys/posix"
 import client_feat "../../features/session_client"
 import plat_ipc "../../platform/ipc"
 
@@ -16,45 +19,63 @@ CLI_COLUMNS :: 8
 @(private = "file")
 CLI_WAIT_MS :: 3000
 
-app_cli_session :: proc(req: ctrl_feat.Control_Request) -> int {
+app_cli_session_ls :: proc(args: []string) -> int {
+	as_json := len(args) == 1 && args[0] == "--json"
+	if len(args) > 0 && !as_json {
+		fmt.eprintln(APP_CLI_USAGE)
+		return 1
+	}
 	fd, ok := client_feat.client_dial(.Cli, false)
 	if !ok {
-		if req.verb == .List {
-			fmt.println("No sessions")
-			return 0
-		}
-		fmt.eprintln("term: no session is running")
-		return 2
+		if !as_json do fmt.println("No sessions")
+		return 0
 	}
-	conn: plat_ipc.Stream_Conn
-	if !plat_ipc.stream_conn_init(&conn, fd, 0) do return 1
-	defer plat_ipc.stream_conn_destroy(&conn)
-	if req.verb == .List {
-		plat_ipc.stream_send(&conn, plat_ipc.MSG_LIST, 0)
+	f, code := _cli_list(fd)
+	if code != 0 do return code
+	if as_json {
+		_cli_print_json(f.payload)
 	} else {
-		b: [4]u8
-		w := plat_ipc.wire_writer(b[:])
-		plat_ipc.ww_u32(&w, req.id)
-		plat_ipc.stream_send(&conn, plat_ipc.MSG_KILL, 0, b[:])
+		_cli_print_sessions(f.payload)
 	}
+	return 0
+}
+
+// _cli_list sends LIST and returns the SESSIONS answer
+// (the payload is copied to the temp allocator: the connection closes here).
+@(private = "file")
+_cli_list :: proc(fd: posix.FD) -> (frame: plat_ipc.Stream_Frame, code: int) {
+	conn: plat_ipc.Stream_Conn
+	if !plat_ipc.stream_conn_init(&conn, fd, 0) do return {}, 1
+	defer plat_ipc.stream_conn_destroy(&conn)
+	plat_ipc.stream_send(&conn, plat_ipc.MSG_LIST, 0)
 	for {
 		f, got := client_feat.client_wait_frame(&conn, CLI_WAIT_MS)
 		if !got {
 			fmt.eprintln("term: the session core did not answer")
-			return 1
+			return {}, 1
 		}
 		switch f.kind {
 		case plat_ipc.MSG_SESSIONS:
-			_cli_print_sessions(f.payload)
-			return 0
-		case plat_ipc.MSG_OK:
-			return 0
+			f.payload = slice.clone(f.payload, context.temp_allocator)
+			return f, 0
 		case plat_ipc.MSG_FAIL:
 			r := plat_ipc.wire_reader(f.payload)
 			_, _ = plat_ipc.wr_u32(&r), plat_ipc.wr_u8(&r)
 			fmt.eprintf("term: %s\n", plat_ipc.wr_str(&r))
-			return 1
+			return {}, 1
 		}
+	}
+}
+
+@(private = "file")
+_cli_print_json :: proc(payload: []u8) {
+	r := plat_ipc.wire_reader(payload)
+	count := int(plat_ipc.wr_u32(&r))
+	for _ in 0..<count {
+		row := plat_ipc.dec_row(&r)
+		if !r.ok do break
+		line, err := json.marshal(row, {use_enum_names = true}, context.temp_allocator)
+		if err == nil do fmt.println(string(line))
 	}
 }
 

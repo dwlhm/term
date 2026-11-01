@@ -11,7 +11,7 @@ MSG_HELLO :: u8(10)
 MSG_SPAWN      :: u8(20) // Spawn_Msg
 MSG_INPUT      :: u8(21) // raw bytes for the program
 MSG_RESIZE     :: u8(22) // Size_Msg
-MSG_SIGNAL     :: u8(23) // i32 signal number
+MSG_SIGNAL     :: u8(23) // i32 signal number, for the foreground process group
 MSG_RELEASE    :: u8(24) // forget the session (hang up leftovers)
 MSG_GOODBYE    :: u8(25) // channel 0, u8 Goodbye
 MSG_PROC_QUERY :: u8(26) // foreground process info please
@@ -35,6 +35,8 @@ MSG_ATTACH :: u8(63) // u32 token + Attach_Msg → MSG_ATTACHED | MSG_FAIL
 MSG_DETACH :: u8(64) // u32 channel
 MSG_READ   :: u8(66) // u32 id + u32 history lines → MSG_TEXT (plain screen text) | MSG_FAIL
 MSG_SEND   :: u8(67) // u32 id + raw bytes for the program → MSG_OK | MSG_FAIL
+MSG_SESSION_SIGNAL :: u8(68) // u32 id + i32 signal (foreground group) → MSG_OK | MSG_FAIL
+MSG_SESSION_SIZE   :: u8(69) // u32 id + Size_Msg (only while no window shows it) → MSG_OK | MSG_FAIL
 
 // viewer → core, on an attach channel
 MSG_V_INPUT  :: u8(70) // raw bytes typed into the session

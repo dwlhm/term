@@ -1,8 +1,8 @@
 package term
 
 // `term` control subcommands (client side; never creates a window).
-//   term session ls | term session attach <id> | term session kill <id>
-//   term show | term quit
+// Session verbs served by the core live in cli_agent.odin; this file sends
+// `term session attach <id>`, `term show` and `term quit` to the GUI.
 // Exit codes: 0 ok · 1 error reply / bad usage · 2 Term is not running.
 
 import "core:fmt"
@@ -12,12 +12,9 @@ import "core:time"
 import plat_ipc "../../platform/ipc"
 import ctrl_feat "../../features/control"
 
-@(private = "file")
-CLI_USAGE :: "usage: term session ls | attach <id> | kill <id> | new [-d dir] [-- prog args…] | read <id> [-n lines] | send <id> <text> | wait <id> [-t seconds] · term show · term quit"
-
 // app_run_control_cli: handled = false when args[1] is not "session",
-// "show" or "quit" (normal GUI startup continues). `session ls|kill` talk to
-// the session core (app_cli_session). attach/show/quit go to the GUI's
+// "show" or "quit" (normal GUI startup continues). Core verbs go to
+// app_cli_agent; attach/show/quit go to the GUI's
 // control socket with ipc_client_request and print nothing on success:
 //   err reply → stderr "term: <message or code>", exit 1
 //   Not_Running → stderr "term: Term is not running", exit 2
@@ -34,12 +31,10 @@ app_run_control_cli :: proc(args: []string) -> (handled: bool, exit_code: int) {
 	case:                return false, 0
 	}
 	req, perr := ctrl_feat.control_parse_request(line)
-	session_verb := req.verb == .List || req.verb == .Attach || req.verb == .Kill
-	if perr != .None || (args[1] == "session") != session_verb {
-		fmt.eprintln(CLI_USAGE)
+	if perr != .None || (args[1] == "session") != (req.verb == .Attach) {
+		fmt.eprintln(APP_CLI_USAGE)
 		return true, 1
 	}
-	if req.verb == .List || req.verb == .Kill do return true, app_cli_session(req)
 	path_buf: [256]u8
 	path, path_err := plat_ipc.ipc_default_socket_path(path_buf[:])
 	if path_err != .None do return true, _cli_fail(path_err)

@@ -40,7 +40,7 @@ _viewer_frame :: proc(c: ^Core, vi: int, f: ipc.Stream_Frame) -> bool {
 		if f.kind != ipc.MSG_HELLO do return false
 		m, code, ok := ipc.stream_hello_check(f.payload, {.Viewer, .Cli})
 		if !ok {
-			_fail(c, vi, 0, code, "unsupported protocol version or role")
+			core_viewer_fail(c, vi, 0, code, "unsupported protocol version or role")
 			ipc.stream_flush(&v.conn)
 			return false
 		}
@@ -59,9 +59,11 @@ _viewer_frame :: proc(c: ^Core, vi: int, f: ipc.Stream_Frame) -> bool {
 	case ipc.MSG_LIST:   core_list_request(c, vi)
 	case ipc.MSG_CREATE: _create(c, vi, &r)
 	case ipc.MSG_ATTACH: _attach(c, vi, &r)
-	case ipc.MSG_KILL:   _kill(c, vi, ipc.wr_u32(&r))
+	case ipc.MSG_KILL:   core_viewer_kill(c, vi, &r)
 	case ipc.MSG_READ:   _read(c, vi, &r)
-	case ipc.MSG_SEND:   _send_input(c, vi, &r)
+	case ipc.MSG_SEND:   core_viewer_send(c, vi, &r)
+	case ipc.MSG_SESSION_SIGNAL: core_viewer_signal(c, vi, &r)
+	case ipc.MSG_SESSION_SIZE:   core_viewer_resize(c, vi, &r)
 	case ipc.MSG_DETACH:
 		if s, a := core_attach_find(c, vi, ipc.wr_u32(&r)); s != nil do core_detach(c, s, a, true)
 	case:
@@ -77,17 +79,17 @@ _create :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 	spec: ipc.Spawn_Msg
 	ipc.dec_spawn(r, &spec)
 	if !ipc.wr_done(r) {
-		_fail(c, vi, token, .Bad_Request, "malformed spawn request")
+		core_viewer_fail(c, vi, token, .Bad_Request, "malformed spawn request")
 		return
 	}
 	s := core_session_create(c, spec_payload, spec.size)
 	if s == nil {
-		_fail(c, vi, token, .Spawn_Failed, "no holder or no free session slot")
+		core_viewer_fail(c, vi, token, .Spawn_Failed, "no holder or no free session slot")
 		return
 	}
 	channel, ok := core_attach(c, s, vi, {id = s.id, size = spec.size})
 	if !ok {
-		_fail(c, vi, token, .Busy, "no free attach slot")
+		core_viewer_fail(c, vi, token, .Busy, "no free attach slot")
 		return
 	}
 	_attached(c, vi, token, s.id, channel)
@@ -98,32 +100,21 @@ _attach :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 	token := ipc.wr_u32(r)
 	req := ipc.dec_attach(r)
 	if !ipc.wr_done(r) {
-		_fail(c, vi, token, .Bad_Request, "malformed attach request")
+		core_viewer_fail(c, vi, token, .Bad_Request, "malformed attach request")
 		return
 	}
 	s := core_session_find(c, req.id)
 	switch {
-	case s == nil:  _fail(c, vi, token, .Not_Found, "no such session")
-	case s.exited:  _fail(c, vi, token, .Exited, "session has exited")
+	case s == nil:  core_viewer_fail(c, vi, token, .Not_Found, "no such session")
+	case s.exited:  core_viewer_fail(c, vi, token, .Exited, "session has exited")
 	case:
 		channel, ok := core_attach(c, s, vi, req)
-		if !ok do _fail(c, vi, token, .Busy, "too many viewers on this session")
+		if !ok do core_viewer_fail(c, vi, token, .Busy, "too many viewers on this session")
 		else {
 			_attached(c, vi, token, s.id, channel)
 			core_broadcast_row(c, s)
 		}
 	}
-}
-
-@(private = "file")
-_kill :: proc(c: ^Core, vi: int, id: u32) {
-	s := core_session_find(c, id)
-	if s == nil {
-		_fail(c, vi, 0, .Not_Found, "no such session")
-		return
-	}
-	core_session_kill(c, s)
-	ipc.stream_send(&c.viewers[vi].conn, ipc.MSG_OK, 0)
 }
 
 // _read answers the plain text of a session's screen (agents: `term session
@@ -134,7 +125,7 @@ _read :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 	id, history := ipc.wr_u32(r), ipc.wr_u32(r)
 	s := core_session_find(c, id)
 	if !ipc.wr_done(r) || s == nil {
-		_fail(c, vi, 0, .Not_Found, "no such session")
+		core_viewer_fail(c, vi, 0, .Not_Found, "no such session")
 		return
 	}
 	start := core_stitch_begin(c, s, vi, int(history))
@@ -142,7 +133,7 @@ _read :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 	case .Started:
 		return // MSG_TEXT comes from the stitch
 	case .Busy:
-		_fail(c, vi, 0, .Busy, "this session's history is already being read")
+		core_viewer_fail(c, vi, 0, .Busy, "this session's history is already being read")
 		return
 	case .Screen, .Screen_Marked:
 	}
@@ -157,20 +148,6 @@ _read :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 	ipc.stream_send(&c.viewers[vi].conn, ipc.MSG_TEXT, 0, c.text[len(c.text) - n:])
 }
 
-// _send_input types bytes into a session without attaching (agents: `term session send`).
-@(private = "file")
-_send_input :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
-	id := ipc.wr_u32(r)
-	s := core_session_find(c, id)
-	switch {
-	case !r.ok || s == nil: _fail(c, vi, 0, .Not_Found, "no such session")
-	case s.exited:          _fail(c, vi, 0, .Exited, "session has exited")
-	case:
-		core_holder_send(c, s.holder, ipc.MSG_INPUT, s.id, r.buf[r.off:])
-		ipc.stream_send(&c.viewers[vi].conn, ipc.MSG_OK, 0)
-	}
-}
-
 @(private = "file")
 _attached :: proc(c: ^Core, vi: int, token, id, channel: u32) {
 	b: [12]u8
@@ -180,8 +157,8 @@ _attached :: proc(c: ^Core, vi: int, token, id, channel: u32) {
 	ipc.stream_send(&c.viewers[vi].conn, ipc.MSG_ATTACHED, 0, b[:])
 }
 
-@(private = "file")
-_fail :: proc(c: ^Core, vi: int, token: u32, code: ipc.Fail_Code, reason: string) {
+// core_viewer_fail answers a request with MSG_FAIL.
+core_viewer_fail :: proc(c: ^Core, vi: int, token: u32, code: ipc.Fail_Code, reason: string) {
 	w := ipc.wire_writer(c.msg)
 	ipc.ww_u32(&w, token)
 	ipc.ww_u8(&w, u8(code))
@@ -200,5 +177,5 @@ core_viewer_current :: proc(c: ^Core, vi: int, seq: u32) -> bool {
 // core_viewer_fail_seq answers a request that was accepted earlier.
 core_viewer_fail_seq :: proc(c: ^Core, vi: int, seq: u32, code: ipc.Fail_Code, reason: string) {
 	if !core_viewer_current(c, vi, seq) do return
-	_fail(c, vi, 0, code, reason)
+	core_viewer_fail(c, vi, 0, code, reason)
 }

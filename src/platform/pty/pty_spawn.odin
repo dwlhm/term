@@ -66,6 +66,8 @@ pty_spawn_raw :: proc(cfg: Pty_Config, extra_env: []string) -> (master_fd: i32, 
 	defer _free_cstrings(argv)
 	envp := _exec_env(extra_env)
 	defer _free_cstrings(envp)
+	exe := _exec_path(string(argv[0]), envp, cfg.cwd)
+	defer delete(exe)
 	cwd := strings.clone_to_cstring(cfg.cwd) if len(cfg.cwd) > 0 else nil
 	defer delete(cwd)
 
@@ -81,7 +83,7 @@ pty_spawn_raw :: proc(cfg: Pty_Config, extra_env: []string) -> (master_fd: i32, 
 		posix.close(pair.slave)
 		return -1, -1, .Fork_Failed
 	}
-	if child == 0 do _child_exec(&pair, &ws, cwd, argv, envp)
+	if child == 0 do _child_exec(&pair, &ws, cwd, exe, argv, envp)
 	posix.close(pair.slave)
 	return i32(pair.master), i32(child), .None
 }
@@ -89,7 +91,7 @@ pty_spawn_raw :: proc(cfg: Pty_Config, extra_env: []string) -> (master_fd: i32, 
 // _child_exec runs in the forked child: default signal state, the PTY as
 // controlling terminal on fds 0-2, nothing else inherited, then execve.
 @(private = "file")
-_child_exec :: proc(pair: ^_Pty_Pair, ws: ^Winsize, cwd: cstring, argv, envp: []cstring) -> ! {
+_child_exec :: proc(pair: ^_Pty_Pair, ws: ^Winsize, cwd, exe: cstring, argv, envp: []cstring) -> ! {
 	empty: posix.sigset_t
 	posix.sigemptyset(&empty)
 	posix.sigprocmask(.SETMASK, &empty, nil)
@@ -102,7 +104,7 @@ _child_exec :: proc(pair: ^_Pty_Pair, ws: ^Winsize, cwd: cstring, argv, envp: []
 	_child_attach_tty(pair, ws)
 	for fd in 3..<1024 do posix.close(posix.FD(fd))
 	if cwd != nil do posix.chdir(cwd)
-	posix.execve(argv[0], raw_data(argv), raw_data(envp))
+	posix.execve(exe, raw_data(argv), raw_data(envp))
 	posix._exit(127)
 }
 
@@ -118,6 +120,26 @@ _exec_argv :: proc(cfg: Pty_Config) -> []cstring {
 	if len(cfg.argv) == 0 do out[1] = strings.clone_to_cstring("-l")
 	for arg, i in cfg.argv do out[i + 1] = strings.clone_to_cstring(arg)
 	return out
+}
+
+// _exec_path resolves a bare program name against the PATH the child runs with
+// (envp), as execvp would: execve takes only a path. Relative PATH entries
+// count from the child's cwd. A name that is found nowhere stays as given, so
+// execve fails and the child exits 127.
+@(private = "file")
+_exec_path :: proc(prog: string, envp: []cstring, cwd: string) -> cstring {
+	if len(prog) == 0 || strings.index_byte(prog, '/') >= 0 do return strings.clone_to_cstring(prog)
+	search := "/usr/bin:/bin"
+	for e in envp do if e != nil && strings.has_prefix(string(e), "PATH=") do search = string(e)[5:]
+	for dir in strings.split_iterator(&search, ":") {
+		base := dir if len(dir) > 0 else "."
+		if base[0] != '/' && len(cwd) > 0 do base = strings.concatenate({cwd, "/", base}, context.temp_allocator)
+		full := strings.clone_to_cstring(strings.concatenate({base, "/", prog}, context.temp_allocator))
+		st: posix.stat_t
+		if posix.stat(full, &st) == .OK && posix.S_ISREG(st.st_mode) && posix.access(full, {.X_OK}) == .OK do return full
+		delete(full)
+	}
+	return strings.clone_to_cstring(prog)
 }
 
 // env = user environment minus foreign terminal identities, then TERM_ENV,
@@ -181,6 +203,17 @@ pty_set_size :: proc(master_fd: i32, cols, rows, xpixel, ypixel: u16) -> bool {
 	if master_fd < 0 do return false
 	ws := Winsize{ws_row = c.ushort(rows), ws_col = c.ushort(cols), ws_xpixel = c.ushort(xpixel), ws_ypixel = c.ushort(ypixel)}
 	return ioctl(c.int(master_fd), TIOCSWINSZ, &ws) == 0
+}
+
+// pty_signal delivers sig the way the terminal driver delivers ^C: to the
+// PTY's foreground process group, or to the child's group when the PTY has
+// none (master_fd < 0 once it hung up). false when no process got it.
+pty_signal :: proc(master_fd: i32, pid: i32, sig: posix.Signal) -> bool {
+	target := posix.pid_t(-pid)
+	if master_fd >= 0 {
+		if fg := tcgetpgrp(c.int(master_fd)); fg > 0 do target = posix.pid_t(-fg)
+	}
+	return posix.kill(target, sig) == .OK
 }
 
 // pty_foreground_info: the foreground process group of the PTY and the name

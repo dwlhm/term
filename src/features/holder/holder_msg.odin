@@ -90,7 +90,7 @@ _on_signal :: proc(h: ^Holder, f: ipc.Stream_Frame) -> bool {
 	r := ipc.wire_reader(f.payload)
 	sig := ipc.wr_i32(&r)
 	if !ipc.wr_done(&r) || sig < 1 || sig > 64 do return false
-	if s := _session_find(h, f.channel); s != nil && !s.reaped do posix.kill(posix.pid_t(s.pid), posix.Signal(sig))
+	if s := _session_find(h, f.channel); s != nil && !s.reaped do pty.pty_signal(-1 if s.eof else s.master, s.pid, posix.Signal(sig))
 	return true
 }
 

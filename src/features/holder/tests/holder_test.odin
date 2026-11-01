@@ -74,6 +74,27 @@ test_resize_seen_by_stty :: proc(t: ^testing.T) {
 	testing.expect_value(t, fixture_stop(f), 0)
 }
 
+// A signal goes where ^C goes: the foreground group, not only the child. The
+// shell traps INT and waits for sleep; signalling the shell alone would leave
+// sleep running for 30 s, so AFTER would never show in time.
+@(test)
+test_signal_reaches_foreground_group :: proc(t: ^testing.T) {
+	f := fixture_start()
+	c := client_connect(f.path)
+	client_spawn(c, 4, {"/bin/sh", "-c", "trap 'echo TRAPPED' INT; echo READY; /bin/sleep 30; echo AFTER"})
+	testing.expect(t, client_wait_kind(c, ipc.MSG_SPAWNED, 4, 3000) >= 0, "SPAWNED")
+	for _ in 0..<60 {
+		if contains(client_output(c, 4), "READY") do break
+		client_pump(c, 50)
+	}
+	time.sleep(100 * time.Millisecond) // sleep is exec'd
+	client_signal(c, 4, .SIGINT)
+	testing.expect(t, client_wait_kind(c, ipc.MSG_EXITED, 4, 3000) >= 0, "EXITED soon after SIGINT")
+	testing.expectf(t, contains(client_output(c, 4), "AFTER"), "sleep got INT: %q", client_output(c, 4))
+	client_close(c)
+	testing.expect_value(t, fixture_stop(f), 0)
+}
+
 @(test)
 test_signal_term :: proc(t: ^testing.T) {
 	f := fixture_start()
