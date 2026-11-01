@@ -9,8 +9,7 @@ import "core:strings"
 
 import session "../session"
 import terminal_grid "../../core/terminal/grid"
-import egc "../../core/terminal/egc"
-import cell "../../core/terminal/cell"
+import terminal "../../core/terminal"
 
 Clipboard_Set_Text_Proc :: proc(text: string, user_data: rawptr) -> bool
 Clipboard_Get_Text_Proc :: proc(allocator: runtime.Allocator, user_data: rawptr) -> (string, bool)
@@ -52,33 +51,6 @@ clipboard_init :: proc(
 	cb.guard     = DEFAULT_CLIPBOARD_GUARD
 }
 
-// row_last_content_col locates the index of the rightmost non-whitespace character in a row.
-row_last_content_col :: proc(row: ^terminal_grid.Row) -> int {
-	if row == nil do return -1
-	for i := len(row.cells) - 1; i >= 0; i -= 1 {
-		ch := row.cells[i].char
-		if ch != 0 && ch != ' ' do return i
-	}
-	return -1
-}
-
-// cell_append_utf8 resolves EGC clusters and encodes cell text into a strings.Builder.
-cell_append_utf8 :: proc(b: ^strings.Builder, pool: ^egc.Egc_Pool, c: cell.Semantic_Cell) {
-	if .Wide_Continuation in c.flags do return
-
-	if .Has_Egc in c.flags && pool != nil {
-		if runes := egc.egc_pool_get(pool, int(c.char - egc.EGC_INDEX_BASE)); runes != nil {
-			for rn in runes {
-				strings.write_rune(b, rn)
-			}
-			return
-		}
-	}
-
-	ch := c.char if (c.char != 0) else ' '
-	strings.write_rune(b, ch)
-}
-
 // session_extract_selection extracts clean UTF-8 text from the grid selection.
 // Decoupled from host OS facilities; reusable for drag & drop, text search, and headless tests.
 session_extract_selection :: proc(sess: ^session.Terminal_Session, sel: Mouse_Selection, allocator: runtime.Allocator = context.temp_allocator) -> (string, bool) {
@@ -107,7 +79,7 @@ session_extract_selection :: proc(sess: ^session.Terminal_Session, sel: Mouse_Se
 
 		// In stream mode, trim trailing empty cells on intermediate lines
 		if norm.mode == .Stream && r < end_row {
-			last_used := row_last_content_col(row)
+			last_used := terminal.terminal_row_last_content_col(row)
 			if last_used < start_c {
 				strings.write_byte(&b, '\n')
 				continue
@@ -116,7 +88,7 @@ session_extract_selection :: proc(sess: ^session.Terminal_Session, sel: Mouse_Se
 		}
 
 		for c in start_c..=end_c {
-			cell_append_utf8(&b, &sess.term.egc_pool, row.cells[c])
+			terminal.terminal_cell_append_utf8(&b, &sess.term.egc_pool, row.cells[c])
 		}
 
 		if r < end_row {

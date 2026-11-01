@@ -13,7 +13,7 @@ import plat_ipc "../../platform/ipc"
 import ctrl_feat "../../features/control"
 
 @(private = "file")
-CLI_USAGE :: "usage: term session ls | term session attach <id> | term session kill <id> | term show | term quit"
+CLI_USAGE :: "usage: term session ls | attach <id> | kill <id> | new [-d dir] [-- prog args…] | read <id> [-n lines] | send <id> <text> | wait <id> [-t seconds] · term show · term quit"
 
 // app_run_control_cli: handled = false when args[1] is not "session",
 // "show" or "quit" (normal GUI startup continues). `session ls|kill` talk to
@@ -28,7 +28,9 @@ app_run_control_cli :: proc(args: []string) -> (handled: bool, exit_code: int) {
 	line: string
 	switch args[1] {
 	case "show", "quit": line = strings.join(args[1:], " ", context.temp_allocator)
-	case "session":      line = strings.join(args[2:], " ", context.temp_allocator)
+	case "session":
+		if handled, code := app_cli_agent(args[2:]); handled do return true, code
+		line = strings.join(args[2:], " ", context.temp_allocator)
 	case:                return false, 0
 	}
 	req, perr := ctrl_feat.control_parse_request(line)

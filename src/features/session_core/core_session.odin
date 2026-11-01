@@ -109,7 +109,21 @@ core_session_output :: proc(c: ^Core, s: ^Core_Session, bytes: []u8) {
 	_ = terminal.terminal_consume_damage(&s.sess.term)
 	if len(c.replies) > 0 do core_holder_send(c, s.holder, ipc.MSG_INPUT, s.id, c.replies[:])
 	for &a in s.attaches do if a.used do core_attach_push(c, s, &a, c.viewer_out[:])
+	// A command starting or ending prints something: look at the foreground once it settles.
+	s.proc_due_ns = _now() + CORE_PROC_QUIET_MS * 1_000_000
 	core_row_changed(c, s)
+}
+
+// core_proc_refresh_due sends the PROC_QUERY of sessions whose output settled.
+core_proc_refresh_due :: proc(c: ^Core) {
+	now := _now()
+	for &s in c.sessions {
+		if !s.used || s.proc_due_ns == 0 || now < s.proc_due_ns do continue
+		s.proc_due_ns = 0
+		if s.exited || s.proc_pending do continue
+		s.proc_pending = true
+		core_holder_send(c, s.holder, ipc.MSG_PROC_QUERY, s.id)
+	}
 }
 
 core_session_spawned :: proc(c: ^Core, s: ^Core_Session, pid: i32) {

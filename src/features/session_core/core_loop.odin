@@ -43,6 +43,7 @@ _core_step :: proc(c: ^Core) {
 		}
 	}
 	core_lists_due(c)
+	core_proc_refresh_due(c)
 	for &h in c.holders do if h.used do ipc.stream_flush(&h.conn)
 	for &v in c.viewers do if v.used do ipc.stream_flush(&v.conn)
 }
@@ -52,6 +53,7 @@ _core_step :: proc(c: ^Core) {
 _timeout_ms :: proc(c: ^Core) -> int {
 	due := i64(-1)
 	for &v in c.viewers do if v.used && v.list_waiting do due = _earliest(due, v.list_due_ns)
+	for &s in c.sessions do if s.used && s.proc_due_ns != 0 do due = _earliest(due, s.proc_due_ns)
 	if c.empty_since > 0 do due = _earliest(due, c.empty_since + CORE_GRACE_MS * 1_000_000)
 	if due < 0 do return -1
 	return max(0, int((due - _now()) / 1_000_000) + 1)

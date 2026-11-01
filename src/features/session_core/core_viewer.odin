@@ -3,7 +3,9 @@ package feature_session_core
 // Viewer and CLI connections: handshake, control requests on channel 0,
 // attach-channel frames, and cleanup when a viewer goes away.
 
+import "core:strings"
 import "core:sys/posix"
+import terminal "../../core/terminal"
 import ipc "../../platform/ipc"
 
 core_viewer_service :: proc(c: ^Core, vi: int, rev: posix.Poll_Event) {
@@ -58,6 +60,8 @@ _viewer_frame :: proc(c: ^Core, vi: int, f: ipc.Stream_Frame) -> bool {
 	case ipc.MSG_CREATE: _create(c, vi, &r)
 	case ipc.MSG_ATTACH: _attach(c, vi, &r)
 	case ipc.MSG_KILL:   _kill(c, vi, ipc.wr_u32(&r))
+	case ipc.MSG_READ:   _read(c, vi, &r)
+	case ipc.MSG_SEND:   _send_input(c, vi, &r)
 	case ipc.MSG_DETACH:
 		if s, a := core_attach_find(c, vi, ipc.wr_u32(&r)); s != nil do core_detach(c, s, a, true)
 	case:
@@ -120,6 +124,37 @@ _kill :: proc(c: ^Core, vi: int, id: u32) {
 	}
 	core_session_kill(c, s)
 	ipc.stream_send(&c.viewers[vi].conn, ipc.MSG_OK, 0)
+}
+
+// _read answers the plain text of a session's screen (agents: `term session read`).
+@(private = "file")
+_read :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
+	id, history := ipc.wr_u32(r), ipc.wr_u32(r)
+	s := core_session_find(c, id)
+	if !ipc.wr_done(r) || s == nil {
+		_fail(c, vi, 0, .Not_Found, "no such session")
+		return
+	}
+	clear(&c.text)
+	b := strings.Builder{buf = c.text}
+	terminal.terminal_text(&s.sess.term, &b, int(min(history, CORE_PAINT_HISTORY_MAX)))
+	c.text = b.buf
+	n := min(len(c.text), ipc.STREAM_MAX_PAYLOAD)
+	ipc.stream_send(&c.viewers[vi].conn, ipc.MSG_TEXT, 0, c.text[len(c.text) - n:])
+}
+
+// _send_input types bytes into a session without attaching (agents: `term session send`).
+@(private = "file")
+_send_input :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
+	id := ipc.wr_u32(r)
+	s := core_session_find(c, id)
+	switch {
+	case !r.ok || s == nil: _fail(c, vi, 0, .Not_Found, "no such session")
+	case s.exited:          _fail(c, vi, 0, .Exited, "session has exited")
+	case:
+		core_holder_send(c, s.holder, ipc.MSG_INPUT, s.id, r.buf[r.off:])
+		ipc.stream_send(&c.viewers[vi].conn, ipc.MSG_OK, 0)
+	}
 }
 
 @(private = "file")

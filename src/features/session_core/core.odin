@@ -28,6 +28,7 @@ CORE_MAX_VIEWERS  :: 16
 CORE_MAX_ATTACH   :: 8
 CORE_GRACE_MS     :: 3000
 CORE_PROC_WAIT_MS :: 300 // LIST waits this long for fresh foreground info
+CORE_PROC_QUIET_MS :: 250 // output quiet this long → refresh the foreground process (titles, active)
 CORE_HOLDER_CTL   :: 2 << 20
 CORE_VIEWER_CTL   :: 2 << 20
 CORE_SOCKET_NAME  :: "core.sock"
@@ -62,6 +63,7 @@ Core_Session :: struct {
 	used:         bool,
 	exited:       bool,
 	proc_pending: bool,
+	proc_due_ns:  i64, // output settled: ask the holder for the foreground process then (0 = nothing due)
 	id:           u32,
 	holder:       int,
 	started_ns:   i64,
@@ -100,6 +102,7 @@ Core :: struct {
 	viewer_out:  [dynamic]u8,
 	replies:     [dynamic]u8,
 	paint:       [dynamic]u8,
+	text:        [dynamic]u8, // MSG_READ answer
 	msg:         []u8, // one encoded payload
 }
 
@@ -176,6 +179,7 @@ _core_destroy :: proc(c: ^Core) {
 	delete(c.viewer_out)
 	delete(c.replies)
 	delete(c.paint)
+	delete(c.text)
 	delete(c.msg)
 	free(c)
 }

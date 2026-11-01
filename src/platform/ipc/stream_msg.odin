@@ -33,6 +33,8 @@ MSG_CREATE :: u8(61) // u32 token + Spawn_Msg → MSG_ATTACHED (the creator is a
 MSG_KILL   :: u8(62) // u32 id → MSG_OK | MSG_FAIL
 MSG_ATTACH :: u8(63) // u32 token + Attach_Msg → MSG_ATTACHED | MSG_FAIL
 MSG_DETACH :: u8(64) // u32 channel
+MSG_READ   :: u8(66) // u32 id + u32 history lines → MSG_TEXT (plain screen text) | MSG_FAIL
+MSG_SEND   :: u8(67) // u32 id + raw bytes for the program → MSG_OK | MSG_FAIL
 
 // viewer → core, on an attach channel
 MSG_V_INPUT  :: u8(70) // raw bytes typed into the session
@@ -47,6 +49,7 @@ MSG_EVENT    :: u8(83) // Session_Row of a session that changed (added, state, t
 MSG_FAIL     :: u8(84) // u32 token + u8 Fail_Code + reason text
 MSG_OK       :: u8(85)
 MSG_REMOVED  :: u8(86) // u32 id: the session is gone
+MSG_TEXT     :: u8(87) // UTF-8 text (MSG_READ)
 
 Stream_Role :: enum u8 { Core = 1, Holder, Viewer, Cli }
 
