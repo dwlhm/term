@@ -462,7 +462,7 @@ bench_suite4_keystroke_roundtrip :: proc() -> Benchmark_Result {
 				}
 				if found do break
 			}
-			time.sleep(1 * time.Millisecond)
+			time.sleep(20 * time.Microsecond) // finer than the roundtrip being measured
 		}
 		dur := time.tick_since(start)
 		samples[i] = f64(time.duration_nanoseconds(dur)) / 1_000_000.0 // ms
