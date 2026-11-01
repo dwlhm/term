@@ -78,7 +78,7 @@ _tail_push :: proc(r: ^ipc.Byte_Ring, data: []u8) {
 
 _session_read :: proc(h: ^Holder, s: ^Session, now: i64) {
 	if _backlogged(h) do return
-	buf: [HOLDER_READ_CHUNK]u8
+	buf := h.read_buf[:]
 	n := posix.read(posix.FD(s.master), &buf[0], len(buf))
 	if n > 0 {
 		_tail_push(&s.tail, buf[:n])

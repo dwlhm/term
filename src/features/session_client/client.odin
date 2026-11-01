@@ -33,6 +33,7 @@ Client_Link :: struct {
 	sess:        ^session.Terminal_Session,
 	pending:     [CLIENT_PENDING_IN]u8,
 	pending_len: int,
+	observe:     bool,
 	cancelled:   bool, // released before the core answered: undo the attach when it does
 	cancel_kill: bool,
 }
@@ -85,7 +86,7 @@ client_reconnect :: proc(c: ^Client) -> bool {
 			w := ipc.wire_writer(msg[:])
 			ipc.ww_u32(&w, l.token)
 			size := ipc.Size_Msg{cols = u16(l.sess.term.cols), rows = u16(l.sess.term.rows)}
-			ipc.enc_attach(&w, {id = l.id, size = size})
+			ipc.enc_attach(&w, {id = l.id, size = size, observe = l.observe})
 			_send(c, ipc.MSG_ATTACH, 0, ipc.wire_bytes_written(&w))
 		case l.state == .Pending:
 			l.sess.info.alive = false // its CREATE died with the old core

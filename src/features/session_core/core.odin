@@ -12,10 +12,11 @@ package feature_session_core
 // 4. A viewer never blocks a program: a slow one loses its backlog and gets a
 //    repaint (stream overflow → recovering → paint at parser ground).
 // 5. Sessions outlive viewers. The core exits only when no session and no
-//    viewer is left for CORE_GRACE_MS, after telling every holder to shut down.
+//    viewer is left for its grace (CORE_GRACE_MS, env TERM_CORE_GRACE_MS),
+//    after telling every holder to shut down.
 
 import "core:os"
-import "core:sync"
+import "core:strconv"
 import "core:sys/posix"
 import "core:time"
 import terminal "../../core/terminal"
@@ -42,6 +43,8 @@ Core_Holder :: struct {
 	handover: bool, // the last core left on purpose: tails are unanswered output
 	instance: u64,
 	conn:     ipc.Stream_Conn,
+	path_buf: [128]u8,
+	path_len: int, // its socket: removed when the holder dies without unlinking it
 }
 
 Core_Attach :: struct {
@@ -96,6 +99,8 @@ Core :: struct {
 	listen_ino:  u64,
 	next_id:     u32,
 	empty_since: i64,
+	grace_ns:    i64,
+	stop_pipe:   [2]posix.FD, // core_request_stop / SIGTERM wake the poll
 	holders:     [CORE_MAX_HOLDERS]Core_Holder,
 	sessions:    [CORE_MAX_SESSIONS]Core_Session,
 	viewers:     [CORE_MAX_VIEWERS]Core_Viewer,
@@ -107,29 +112,35 @@ Core :: struct {
 }
 
 @(private)
-_stop_requested: bool
-
-@(private)
 _now :: proc() -> i64 { return time.tick_now()._nsec }
 
-// core_run serves until no session and no viewer is left. 0 = clean exit or
-// another core already serves this session dir.
-core_run :: proc() -> int {
+// core_new allocates a core and every buffer its loop uses (no sockets yet).
+core_new :: proc() -> ^Core {
 	c := new(Core)
-	defer _core_destroy(c)
-	if !_core_listen(c) do return 0 if c.listen_fd == -2 else 1
+	c.listen_fd, c.stop_pipe = -1, {-1, -1}
 	c.build = ipc.ipc_build_id(c.build_buf[:])
 	c.next_id = 1
+	c.grace_ns = _grace_ms() * 1_000_000
 	c.msg = make([]u8, ipc.STREAM_MAX_PAYLOAD)
 	reserve(&c.viewer_out, 256 * 1024)
 	reserve(&c.replies, 4096)
 	reserve(&c.paint, 1 << 20)
+	return c
+}
+
+// core_run serves until no session and no viewer is left. 0 = clean exit or
+// another core already serves this session dir.
+core_run :: proc() -> int {
+	c := core_new()
+	defer core_destroy(c)
+	if !_core_listen(c) do return 0 if c.listen_fd == -2 else 1
+	if !_stop_pipe_open(c) do return 1
 	_install_stop_signals()
 	core_adopt_holders(c)
 	if core_current_holder(c) < 0 && !core_start_holder(c) do return 1
 	c.empty_since = _now()
-	for !sync.atomic_load(&_stop_requested) && !_core_done(c) do _core_step(c)
-	if sync.atomic_load(&_stop_requested) {
+	for !_stop_is_requested() && !_core_done(c) do _core_step(c)
+	if _stop_is_requested() {
 		core_handover(c)
 	} else {
 		core_shutdown_holders(c)
@@ -168,7 +179,14 @@ _core_listen :: proc(c: ^Core) -> bool {
 }
 
 @(private = "file")
-_core_destroy :: proc(c: ^Core) {
+_grace_ms :: proc() -> i64 {
+	buf: [32]u8
+	if v, ok := strconv.parse_int(os.get_env(buf[:], "TERM_CORE_GRACE_MS")); ok && v >= 0 do return i64(v)
+	return CORE_GRACE_MS
+}
+
+core_destroy :: proc(c: ^Core) {
+	_stop_pipe_close(c)
 	if c.listen_fd >= 0 {
 		posix.close(c.listen_fd)
 		ipc.ipc_unlink_if_ours(c.sock, c.listen_ino)
@@ -192,7 +210,7 @@ _core_done :: proc(c: ^Core) -> bool {
 		return false
 	}
 	if c.empty_since == 0 do c.empty_since = _now()
-	return _now() - c.empty_since >= CORE_GRACE_MS * 1_000_000
+	return _now() - c.empty_since >= c.grace_ns
 }
 
 @(private = "file")
@@ -200,18 +218,4 @@ _viewer_count :: proc(c: ^Core) -> int {
 	n := 0
 	for &v in c.viewers do if v.used do n += 1
 	return n
-}
-
-@(private = "file")
-_stop_handler :: proc "c" (sig: posix.Signal) {
-	sync.atomic_store(&_stop_requested, true)
-}
-
-// SIGTERM/SIGINT are a planned restart: holders keep every program and the
-// next core restores the saved screens (core_handover).
-@(private = "file")
-_install_stop_signals :: proc() {
-	posix.signal(.SIGTERM, _stop_handler)
-	posix.signal(.SIGINT, _stop_handler)
-	posix.signal(.SIGPIPE, auto_cast posix.SIG_IGN)
 }

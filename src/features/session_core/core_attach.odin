@@ -99,8 +99,9 @@ core_attach_frame :: proc(c: ^Core, vi: int, f: ipc.Stream_Frame) {
 	r := ipc.wire_reader(f.payload)
 	switch f.kind {
 	case ipc.MSG_V_INPUT:
-		if !s.exited do core_holder_send(c, s.holder, ipc.MSG_INPUT, s.id, f.payload)
+		// The typist owns the size first: its input is read at its size.
 		core_attach_touch(c, s, a)
+		if !s.exited do core_holder_send(c, s.holder, ipc.MSG_INPUT, s.id, f.payload)
 	case ipc.MSG_V_RESIZE:
 		size := ipc.dec_size(&r)
 		if !ipc.wr_done(&r) || size.cols == 0 || size.rows == 0 do return

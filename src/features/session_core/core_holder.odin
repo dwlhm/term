@@ -71,6 +71,7 @@ _holder_connect :: proc(c: ^Core, path: string) -> bool {
 	if err != .None do return false
 	h := &c.holders[slot]
 	h^ = {used = true}
+	h.path_len = copy(h.path_buf[:], path)
 	if !ipc.stream_conn_init(&h.conn, fd, CORE_HOLDER_CTL) {
 		_holder_drop(c, slot)
 		return false
@@ -165,8 +166,12 @@ _holder_drop :: proc(c: ^Core, hi: int) {
 			if !s.exited do core_session_exited(c, &s, {code = -1}, "holder lost")
 		}
 	}
-	ipc.stream_conn_destroy(&c.holders[hi].conn)
-	c.holders[hi] = {}
+	h := &c.holders[hi]
+	ipc.stream_conn_destroy(&h.conn)
+	// A holder killed outright leaves its socket; nobody answers there any more.
+	path := string(h.path_buf[:h.path_len])
+	if len(path) > 0 && ipc.ipc_probe(path) == .Not_Running do _unlink_socket(path)
+	h^ = {}
 }
 
 // core_shutdown_holders: the last session and viewer are gone; holders exit too.

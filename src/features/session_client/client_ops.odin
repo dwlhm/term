@@ -37,13 +37,15 @@ client_create :: proc(c: ^Client, spec: ^ipc.Spawn_Msg) -> ^session.Terminal_Ses
 	return l.sess
 }
 
-client_attach :: proc(c: ^Client, id: u32, size: ipc.Size_Msg, history: u32) -> ^session.Terminal_Session {
-	l := _new_link(c, size)
+// client_attach shows session req.id. An observing attachment never owns the size.
+client_attach :: proc(c: ^Client, req: ipc.Attach_Msg) -> ^session.Terminal_Session {
+	l := _new_link(c, req.size)
 	if l == nil do return nil
+	l.observe = req.observe
 	msg: [64]u8
 	w := ipc.wire_writer(msg[:])
 	ipc.ww_u32(&w, l.token)
-	ipc.enc_attach(&w, {id = id, size = size, history = history})
+	ipc.enc_attach(&w, req)
 	if !_send(c, ipc.MSG_ATTACH, 0, ipc.wire_bytes_written(&w)) {
 		_free_link(l)
 		return nil

@@ -6,13 +6,13 @@ import "core:sys/posix"
 import ipc "../../platform/ipc"
 
 @(private = "file")
-Poll_Who :: enum u8 { Listener, Holder, Viewer }
+Poll_Who :: enum u8 { Stop, Listener, Holder, Viewer }
 
 @(private = "file")
 Poll_Set :: struct {
-	fds:   [1 + CORE_MAX_HOLDERS + CORE_MAX_VIEWERS]posix.pollfd,
-	who:   [1 + CORE_MAX_HOLDERS + CORE_MAX_VIEWERS]Poll_Who,
-	index: [1 + CORE_MAX_HOLDERS + CORE_MAX_VIEWERS]int,
+	fds:   [2 + CORE_MAX_HOLDERS + CORE_MAX_VIEWERS]posix.pollfd,
+	who:   [2 + CORE_MAX_HOLDERS + CORE_MAX_VIEWERS]Poll_Who,
+	index: [2 + CORE_MAX_HOLDERS + CORE_MAX_VIEWERS]int,
 	n:     int,
 }
 
@@ -28,6 +28,7 @@ _add :: proc(ps: ^Poll_Set, fd: posix.FD, conn: ^ipc.Stream_Conn, who: Poll_Who,
 @(private)
 _core_step :: proc(c: ^Core) {
 	ps: Poll_Set
+	_add(&ps, c.stop_pipe[0], nil, .Stop, 0)
 	_add(&ps, c.listen_fd, nil, .Listener, 0)
 	for &h, i in c.holders do if h.used do _add(&ps, h.conn.fd, &h.conn, .Holder, i)
 	for &v, i in c.viewers do if v.used do _add(&ps, v.conn.fd, &v.conn, .Viewer, i)
@@ -37,6 +38,7 @@ _core_step :: proc(c: ^Core) {
 		rev := ps.fds[i].revents
 		if rev == {} do continue
 		switch ps.who[i] {
+		case .Stop:     _stop_drain(c)
 		case .Listener: _accept_viewers(c)
 		case .Holder:   core_holder_service(c, ps.index[i], rev)
 		case .Viewer:   core_viewer_service(c, ps.index[i], rev)
@@ -54,7 +56,7 @@ _timeout_ms :: proc(c: ^Core) -> int {
 	due := i64(-1)
 	for &v in c.viewers do if v.used && v.list_waiting do due = _earliest(due, v.list_due_ns)
 	for &s in c.sessions do if s.used && s.proc_due_ns != 0 do due = _earliest(due, s.proc_due_ns)
-	if c.empty_since > 0 do due = _earliest(due, c.empty_since + CORE_GRACE_MS * 1_000_000)
+	if c.empty_since > 0 do due = _earliest(due, c.empty_since + c.grace_ns)
 	if due < 0 do return -1
 	return max(0, int((due - _now()) / 1_000_000) + 1)
 }

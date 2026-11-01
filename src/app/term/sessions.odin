@@ -125,7 +125,7 @@ app_attach_background_session :: proc(app: ^Term_App, id: u32) -> bool {
 		cols = u16(cols), rows = u16(rows),
 		xpixel = u16(f32(cols) * app.layout.metrics.cell_w), ypixel = u16(f32(rows) * app.layout.metrics.cell_h),
 	}
-	sess := client_feat.client_attach(&app.client, id, size, APP_ATTACH_HISTORY)
+	sess := client_feat.client_attach(&app.client, {id = id, size = size, history = APP_ATTACH_HISTORY})
 	if sess == nil do return false
 	sess_feat.session_set_clipboard_sink(sess, _app_osc_52_sink, rawptr(&app.clipboard))
 	pane_id := mux_feat.multiplexer_add_terminal_pane(&app.mux, sess)

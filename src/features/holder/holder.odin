@@ -109,6 +109,7 @@ Holder :: struct {
 	pfds:          [HOLDER_MAX_POLL]posix.pollfd,
 	tags:          [HOLDER_MAX_POLL]Poll_Tag,
 	msg_buf:       [16 * 1024]u8, // WELCOME / PROC_INFO encoding scratch
+	read_buf:      [HOLDER_READ_CHUNK]u8, // one PTY read (a stack array would be zeroed per read)
 }
 
 // holder_run serves socket_path until shut down, drained empty, or idle
