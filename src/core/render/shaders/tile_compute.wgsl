@@ -89,6 +89,8 @@ const LUT_SELECTION_WORD: u32 = 1024u;
 const LUT_HOVER_OPENABLE_WORD: u32 = 1025u;
 const LUT_HOVER_BLOCKED_WORD: u32 = 1026u;
 const OPAQUE_ALPHA: f32 = 1.0;
+// Colour stride mirrors terminal.COLOR_WORDS_PER_CELL (host buffers are sized
+// from terminal.COLOR_BYTES_PER_CELL): fg ARGB, bg ARGB, underline ARGB.
 const COLOR_WORDS_PER_CELL: u32 = 3u;
 const ARGB_A_SHIFT: u32 = 24u;
 const ARGB_R_SHIFT: u32 = 16u;

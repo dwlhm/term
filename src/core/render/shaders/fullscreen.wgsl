@@ -20,7 +20,8 @@
 //
 // Shader bindings (must match fullscreen.odin):
 //   0 params uniform, 1 cells ro storage, 2 lut ro storage,
-//   3 atlas texture, 4 sampler, 5 colors ro storage (per-cell fg/bg ARGB).
+//   3 atlas texture, 4 sampler, 5 colors ro storage (per-cell fg/bg/underline
+//   ARGB; stride = terminal.COLOR_WORDS_PER_CELL / COLOR_BYTES_PER_CELL).
 //   Direct-to-surface output keeps explicit and selected backgrounds opaque
 //   while params.bg_opacity scales only the default.
 
@@ -101,6 +102,8 @@ const LUT_SELECTION_WORD: u32 = 1024u;
 const LUT_HOVER_OPENABLE_WORD: u32 = 1025u;
 const LUT_HOVER_BLOCKED_WORD: u32 = 1026u;
 const OPAQUE_ALPHA: f32 = 1.0;
+// Colour stride mirrors terminal.COLOR_WORDS_PER_CELL (host buffers are sized
+// from terminal.COLOR_BYTES_PER_CELL): fg ARGB, bg ARGB, underline ARGB.
 const COLOR_WORDS_PER_CELL: u32 = 3u;
 const ARGB_A_SHIFT: u32 = 24u;
 const ARGB_R_SHIFT: u32 = 16u;
@@ -396,7 +399,7 @@ fn fullscreen_fs_main(input: Fullscreen_Output) -> @location(0) vec4<f32> {
                 }
             }
         }
-        if ((decor & CELL_DECOR_UNDERLINE) != 0u && ul_band(ul_style, px, py + 0.5, x0, cell_y0, params.cell_w, params.cell_h)) {
+        if ((decor & CELL_DECOR_UNDERLINE) != 0u && ul_band(ul_style, px, py, x0, cell_y0, params.cell_w, params.cell_h)) {
             col = select(ul_col * params.cell_opacity, ul_col, cell_is_selected(cflags));
             glyph_coverage = max(glyph_coverage, 1.0);
         } else if (strike_hit(decor, py + 0.5, cell_y0, params.cell_h)) {
@@ -437,7 +440,7 @@ fn fullscreen_fs_main(input: Fullscreen_Output) -> @location(0) vec4<f32> {
             }
         }
     }
-    if ((decor & CELL_DECOR_UNDERLINE) != 0u && ul_band(ul_style, px, py + 0.5, x0, cell_y0, params.cell_w, params.cell_h)) {
+    if ((decor & CELL_DECOR_UNDERLINE) != 0u && ul_band(ul_style, px, py, x0, cell_y0, params.cell_w, params.cell_h)) {
         col = select(ul_col * params.cell_opacity, ul_col, cell_is_selected(cflags));
         glyph_coverage = max(glyph_coverage, 1.0);
     } else if (strike_hit(decor, py + 0.5, cell_y0, params.cell_h)) {

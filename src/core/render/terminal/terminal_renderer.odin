@@ -258,7 +258,11 @@ GPU_CELL_DECOR_ITALIC    :: u64(1) << 51
 // cell's high word (bits 52..54 of the u64); 0 means single, matching plain
 // SGR 4 without per-cell side storage.
 GPU_CELL_UL_STYLE_SHIFT :: 52
-COLOR_WORDS_PER_CELL     :: 3 // fg ARGB, bg ARGB, underline ARGB (0 = use fg)
+// Colour layout shared by every render strategy and the GPU harness: one u32
+// word per channel set, in this order. The centre shaders mirror this stride
+// (COLOR_WORDS_PER_CELL in tile_compute.wgsl / fullscreen.wgsl).
+COLOR_WORDS_PER_CELL :: 3 // fg ARGB, bg ARGB, underline ARGB (0 = use fg)
+COLOR_BYTES_PER_CELL :: COLOR_WORDS_PER_CELL * size_of(u32)
 
 // Cell flags travel in the 7-bit cflags field of the packed cell (hi >> 1).
 GPU_CELL_FLAG_SELECTED      :: u32(2)
@@ -570,7 +574,7 @@ _terminal_renderer_ensure_resources :: proc(
 		r.fs_rend.cell_h = cell_h
 
 		cell_bytes := u64(cols * rows) * fullscreen.FULLSCREEN_CELL_BYTES
-		color_bytes := u64(cols * rows) * COLOR_WORDS_PER_CELL * size_of(u32)
+		color_bytes := u64(cols * rows) * COLOR_BYTES_PER_CELL
 		if grid_changed || rawptr(r.fs_rend.cell_buffer) == nil {
 			if rawptr(r.fs_rend.cell_buffer) != nil do contract.destroy_buffer(r.fs_rend.cell_buffer)
 			r.fs_rend.cell_buffer = contract.create_buffer(r.device, cell_bytes, .Storage | .Copy_Dst, false)
@@ -1521,7 +1525,7 @@ terminal_renderer_encode :: proc(
 		instance.instance_renderer_flush(&r.emoji_rend)
 
 		contract.write_buffer(r.queue, r.tile_rend.cell_buffer, 0, raw_data(r.packed_cells[:]), u64(total_cells * size_of(u64)))
-		contract.write_buffer(r.queue, r.fs_color_buffer, 0, raw_data(r.direct_colors[:]), u64(total_cells * COLOR_WORDS_PER_CELL * size_of(u32)))
+		contract.write_buffer(r.queue, r.fs_color_buffer, 0, raw_data(r.direct_colors[:]), u64(total_cells) * COLOR_BYTES_PER_CELL)
 
 		clear(&r.dirty_tiles)
 		full_tile_sync := !r.tile_fb_valid ||
@@ -1630,7 +1634,7 @@ terminal_renderer_encode :: proc(
 		instance.instance_renderer_flush(&r.emoji_rend)
 
 		contract.write_buffer(r.queue, r.fs_rend.cell_buffer, 0, raw_data(r.packed_cells[:]), u64(total_cells * size_of(u64)))
-		contract.write_buffer(r.queue, r.fs_color_buffer, 0, raw_data(r.direct_colors[:]), u64(total_cells * COLOR_WORDS_PER_CELL * size_of(u32)))
+		contract.write_buffer(r.queue, r.fs_color_buffer, 0, raw_data(r.direct_colors[:]), u64(total_cells) * COLOR_BYTES_PER_CELL)
 
 		fs_params := fullscreen.Fullscreen_Params{
 			screen_w      = screen_w,

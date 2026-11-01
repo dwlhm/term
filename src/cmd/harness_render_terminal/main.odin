@@ -94,8 +94,6 @@ TILE_BLIT_WGSL    :: #load("../../core/render/shaders/tile_blit.wgsl", string)
 FULLSCREEN_WGSL   :: #load("../../core/render/shaders/fullscreen.wgsl", string)
 
 // Locked Values
-FULLSCREEN_CELL_BYTES: u64 : 8
-TILE_CELL_BYTES:       u64 : 8
 UNRESOLVED_SLOT:       u32 : 0x1FF
 
 // Default grid dimensions
@@ -145,6 +143,9 @@ Synthetic_Terminal :: struct {
 	cols:   u32,
 	rows:   u32,
 	cells:  []u64,
+	// colours mirrors the production GPU layout: COLOR_WORDS_PER_CELL u32
+	// words per cell (fg ARGB, bg ARGB, underline ARGB; 0 = LUT/fallback).
+	colors: []u32,
 	damage: contract.Damage_Rect,
 }
 
@@ -152,6 +153,7 @@ synthetic_terminal_init :: proc(t: ^Synthetic_Terminal, cols, rows: u32) {
 	t.cols = cols
 	t.rows = rows
 	t.cells = make([]u64, int(cols * rows))
+	t.colors = make([]u32, int(cols * rows) * terminal.COLOR_WORDS_PER_CELL)
 	synthetic_terminal_clear(t)
 }
 
@@ -160,6 +162,10 @@ synthetic_terminal_destroy :: proc(t: ^Synthetic_Terminal) {
 		delete(t.cells)
 		t.cells = nil
 	}
+	if t.colors != nil {
+		delete(t.colors)
+		t.colors = nil
+	}
 }
 
 synthetic_terminal_clear :: proc(t: ^Synthetic_Terminal) {
@@ -167,7 +173,15 @@ synthetic_terminal_clear :: proc(t: ^Synthetic_Terminal) {
 	for i in 0..<len(t.cells) {
 		t.cells[i] = pack_cell(' ', 0, 1, 0, 0)
 	}
+	for i in 0..<len(t.colors) {
+		t.colors[i] = 0
+	}
 	t.damage = contract.damage_rect_make(0, 0, t.cols, t.rows)
+}
+
+synthetic_terminal_clear_cell_colors :: proc(t: ^Synthetic_Terminal, idx: int) {
+	base := idx * terminal.COLOR_WORDS_PER_CELL
+	for w in 0..<terminal.COLOR_WORDS_PER_CELL do t.colors[base + w] = 0
 }
 
 synthetic_terminal_write_text :: proc(t: ^Synthetic_Terminal, r, c: u32, text: string, style: u32) {
@@ -177,6 +191,7 @@ synthetic_terminal_write_text :: proc(t: ^Synthetic_Terminal, r, c: u32, text: s
 		if col >= t.cols do break
 		slot := UNRESOLVED_SLOT if ch != ' ' else u32(0)
 		t.cells[r * t.cols + col] = pack_cell(u32(ch), style, 1, 0, slot)
+		synthetic_terminal_clear_cell_colors(t, int(r * t.cols + col))
 		col += 1
 	}
 	span := col - c
@@ -209,6 +224,7 @@ synthetic_terminal_randomize :: proc(t: ^Synthetic_Terminal, rng: ^helper.Xoshir
 		style := u32(1 + (helper.xoshiro256pp_next(rng) % 15))
 
 		t.cells[idx] = pack_cell(ch, style, 1, 0, UNRESOLVED_SLOT)
+		synthetic_terminal_clear_cell_colors(t, int(idx))
 		t.damage = contract.damage_rect_union(t.damage, contract.damage_rect_make(c, r, 1, 1))
 	}
 }
@@ -224,6 +240,10 @@ synthetic_terminal_scroll :: proc(t: ^Synthetic_Terminal, rng: ^helper.Xoshiro25
 		src_start := (start_r + 1) * t.cols
 		copy_len := scroll_rows * t.cols
 		copy(t.cells[dst_start : dst_start + copy_len], t.cells[src_start : src_start + copy_len])
+		colors_len := int(copy_len) * terminal.COLOR_WORDS_PER_CELL
+		colors_dst := int(dst_start) * terminal.COLOR_WORDS_PER_CELL
+		colors_src := int(src_start) * terminal.COLOR_WORDS_PER_CELL
+		copy(t.colors[colors_dst : colors_dst + colors_len], t.colors[colors_src : colors_src + colors_len])
 	}
 
 	// Fill new bottom line with random colorful characters
@@ -233,6 +253,7 @@ synthetic_terminal_scroll :: proc(t: ^Synthetic_Terminal, rng: ^helper.Xoshiro25
 		style := u32(helper.xoshiro256pp_next(rng) % 16)
 		slot := UNRESOLVED_SLOT if ch != ' ' else u32(0)
 		t.cells[bottom_start + c] = pack_cell(ch, style, 1, 0, slot)
+		synthetic_terminal_clear_cell_colors(t, int(bottom_start + c))
 	}
 
 	t.damage = contract.damage_rect_make(0, start_r, t.cols, t.rows - start_r)
@@ -241,12 +262,14 @@ synthetic_terminal_scroll :: proc(t: ^Synthetic_Terminal, rng: ^helper.Xoshiro25
 synthetic_terminal_resize :: proc(t: ^Synthetic_Terminal, new_cols, new_rows: u32) {
 	if new_cols == t.cols && new_rows == t.rows do return
 	old_cells := t.cells
+	old_colors := t.colors
 	old_cols := t.cols
 	old_rows := t.rows
 
 	t.cols = new_cols
 	t.rows = new_rows
 	t.cells = make([]u64, int(new_cols * new_rows))
+	t.colors = make([]u32, int(new_cols * new_rows) * terminal.COLOR_WORDS_PER_CELL)
 
 	for i in 0..<len(t.cells) {
 		t.cells[i] = pack_cell(' ', 0, 1, 0, 0)
@@ -257,10 +280,14 @@ synthetic_terminal_resize :: proc(t: ^Synthetic_Terminal, new_cols, new_rows: u3
 	for r in 0..<copy_rows {
 		for c in 0..<copy_cols {
 			t.cells[r * new_cols + c] = old_cells[r * old_cols + c]
+			src := int(r * old_cols + c) * terminal.COLOR_WORDS_PER_CELL
+			dst := int(r * new_cols + c) * terminal.COLOR_WORDS_PER_CELL
+			copy(t.colors[dst:dst + terminal.COLOR_WORDS_PER_CELL], old_colors[src:src + terminal.COLOR_WORDS_PER_CELL])
 		}
 	}
 
 	delete(old_cells)
+	delete(old_colors)
 	t.damage = contract.damage_rect_make(0, 0, new_cols, new_rows)
 }
 
@@ -336,15 +363,6 @@ unpack_r5g6b5 :: #force_inline proc "contextless" (packed: u16) -> [4]f32 {
 	g := math.round(f32((packed >> 5) & 0x3F) / 63.0 * 255.0) / 255.0
 	b := math.round(f32(packed & 0x1F) / 31.0 * 255.0) / 255.0
 	return {r, g, b, 1.0}
-}
-
-palette_srgb_float :: #force_inline proc "contextless" (style: u32, is_fg: bool) -> [4]f32 {
-	s := style & 1023
-	if s == 0 {
-		return PALETTE_PRECOMPUTED[15] if is_fg else PALETTE_PRECOMPUTED[0]
-	}
-	idx := (s & 15) if is_fg else ((s >> 4) & 15)
-	return PALETTE_PRECOMPUTED[idx]
 }
 
 palette_style_colors :: #force_inline proc "contextless" (style: u32) -> (fg, bg: [4]f32) {
@@ -631,7 +649,7 @@ _rebuild_tile_resources :: proc(
 	}
 
 	// Reallocate cell and tile list buffers
-	cell_bytes := u64(cols * rows) * TILE_CELL_BYTES
+	cell_bytes := u64(cols * rows) * size_of(u64)
 	if rawptr(r.cell_buffer) != nil do contract.destroy_buffer(r.cell_buffer)
 	r.cell_buffer = contract.create_buffer(h.device, cell_bytes, .Storage | .Copy_Dst, false)
 
@@ -687,12 +705,15 @@ _rebuild_fullscreen_resources :: proc(
 	r.cell_w = cell_w
 	r.cell_h = cell_h
 
-	cell_bytes := u64(cols * rows) * FULLSCREEN_CELL_BYTES
+	cell_bytes := u64(cols * rows) * fullscreen.FULLSCREEN_CELL_BYTES
 	if rawptr(r.cell_buffer) != nil do contract.destroy_buffer(r.cell_buffer)
 	r.cell_buffer = contract.create_buffer(h.device, cell_bytes, .Storage | .Copy_Dst, false)
 
+	// Colour storage buffer is a separate layout: COLOR_WORDS_PER_CELL u32
+	// words per cell, never the 8-byte cell stride.
 	if rawptr(color_buf^) != nil do contract.destroy_buffer(color_buf^)
-	color_buf^ = contract.create_buffer(h.device, cell_bytes, .Storage | .Copy_Dst, false)
+	color_bytes := u64(cols * rows) * terminal.COLOR_BYTES_PER_CELL
+	color_buf^ = contract.create_buffer(h.device, color_bytes, .Storage | .Copy_Dst, false)
 
 	if rawptr(r.bind_group) != nil do contract.destroy_bind_group(r.bind_group)
 
@@ -716,6 +737,7 @@ _rebuild_instance_resources :: proc(
 	r: ^terminal_instance.Instance_Renderer,
 	cols, rows: u32,
 	pane_w, pane_h: f32,
+	capacity_per_cell: u32 = 1,
 ) -> bool {
 	cell_w := pane_w / f32(cols)
 	cell_h := pane_h / f32(rows)
@@ -726,7 +748,7 @@ _rebuild_instance_resources :: proc(
 
 	r.has_uniforms = false
 
-	max_instances := cols * rows
+	max_instances := cols * rows * capacity_per_cell
 	if r.max_instances >= max_instances && rawptr(r.instance_buffer) != nil && rawptr(r.bind_group) != nil do return true
 
 	r.max_instances = max(max_instances, 1024)
@@ -947,10 +969,13 @@ _render_frame :: proc(h: ^Harness_State) {
 	// Upload Cell Data for Pane 2 & Pane 3
 	contract.write_buffer(h.queue, h.tile2.cell_buffer, 0, raw_data(h.term2.cells), u64(len(h.term2.cells) * size_of(u64)))
 	contract.write_buffer(h.queue, h.fs3.cell_buffer, 0, raw_data(h.term3.cells), u64(len(h.term3.cells) * size_of(u64)))
+	_upload_color_words(h, h.fs2_color_buf, &h.term2)
+	_upload_color_words(h, h.fs3_color_buf, &h.term3)
 
 	// Upload Cell Data for Pane 4
 	contract.write_buffer(h.queue, h.tile4.cell_buffer, 0, raw_data(h.term4.cells), u64(len(h.term4.cells) * size_of(u64)))
 	contract.write_buffer(h.queue, h.fs4.cell_buffer, 0, raw_data(h.term4.cells), u64(len(h.term4.cells) * size_of(u64)))
+	_upload_color_words(h, h.fs4_color_buf, &h.term4)
 
 	// 1. Pane 2 Compute Dispatch
 	dirty_tiles2 := make([dynamic]u32, context.temp_allocator)
@@ -1047,22 +1072,7 @@ _render_frame :: proc(h: ^Harness_State) {
 
 		for r in 0..<rows {
 			for c in 0..<cols {
-				packed := h.term1.cells[r * cols + c]
-				content, style, _, _, slot := unpack_cell(packed)
-				if content == ' ' && style == 0 do continue
-
-				u0, v0, u1, v1 := atlas.atlas_slot_uv(slot, cell_w, cell_h)
-				if slot == UNRESOLVED_SLOT && content >= 32 && content <= 126 {
-					u0, v0, u1, v1 = atlas.atlas_slot_uv(content - 32, cell_w, cell_h)
-				}
-
-				rec := contract.Instance_Record{
-					pos_size = {f32(c) * cell_w, f32(r) * cell_h, cell_w, cell_h},
-					uv_rect  = {u0, v0, u1, v1},
-					fg_color = palette_srgb_float(style, true),
-					bg_color = palette_srgb_float(style, false),
-				}
-				terminal_instance.instance_renderer_push(&h.inst1, rec)
+				_push_cell_instance(&h.inst1, &h.term1, r, c, cell_w, cell_h, true)
 			}
 		}
 		terminal_instance.instance_renderer_flush(&h.inst1)
@@ -1126,22 +1136,7 @@ _render_frame :: proc(h: ^Harness_State) {
 				contract.write_buffer(h.queue, h.inst4.uniform_buffer, 0, &u_data, size_of([4]f32))
 				for r in 0..<rows {
 					for c in 0..<cols {
-						packed := h.term4.cells[r * cols + c]
-						content, style, _, _, slot := unpack_cell(packed)
-						if content == ' ' && style == 0 do continue
-
-						u0, v0, u1, v1 := atlas.atlas_slot_uv(slot, cell_w, cell_h)
-						if slot == UNRESOLVED_SLOT && content >= 32 && content <= 126 {
-							u0, v0, u1, v1 = atlas.atlas_slot_uv(content - 32, cell_w, cell_h)
-						}
-
-						rec := contract.Instance_Record{
-							pos_size = {f32(c) * cell_w, f32(r) * cell_h, cell_w, cell_h},
-							uv_rect  = {u0, v0, u1, v1},
-							fg_color = palette_srgb_float(style, true),
-							bg_color = palette_srgb_float(style, false),
-						}
-						terminal_instance.instance_renderer_push(&h.inst4, rec)
+						_push_cell_instance(&h.inst4, &h.term4, r, c, cell_w, cell_h, true)
 					}
 				}
 				terminal_instance.instance_renderer_flush(&h.inst4)
@@ -1396,32 +1391,13 @@ _fuzz_render_and_compare :: proc(
 
 	for r in y0..<y1 {
 		for c in x0..<x1 {
-			packed := term_a.cells[r * cols + c]
-			content, style, _, cflags, slot := unpack_cell(packed)
-
 			if defects.neg5_skip_attr_damage && is_attr_only {
 				continue
 			}
 			if defects.neg2_disable_space_bg && is_erase && !is_full_redraw {
 				continue
 			}
-
-			u0, v0, u1, v1 := atlas.atlas_slot_uv(slot, cell_w, cell_h)
-			if slot == UNRESOLVED_SLOT && content >= 32 && content <= 126 {
-				u0, v0, u1, v1 = atlas.atlas_slot_uv(content - 32, cell_w, cell_h)
-			}
-
-			is_selected := (cflags & 2) != 0
-			fg := unpack_r5g6b5(rgb_to_r5g6b5(255, 255, 255)) if is_selected else palette_srgb_float(style, true)
-			bg := unpack_r5g6b5(rgb_to_r5g6b5(60, 100, 180)) if is_selected else palette_srgb_float(style, false)
-
-			rec := contract.Instance_Record{
-				pos_size = {f32(c) * cell_w, f32(r) * cell_h, cell_w, cell_h},
-				uv_rect  = {u0, v0, u1, v1},
-				fg_color = fg,
-				bg_color = bg,
-			}
-			terminal_instance.instance_renderer_push(inst, rec)
+			_push_cell_instance(inst, term_a, r, c, cell_w, cell_h)
 		}
 	}
 	terminal_instance.instance_renderer_flush(inst)
@@ -1429,8 +1405,7 @@ _fuzz_render_and_compare :: proc(
 	// 2. Prepare Fullscreen Renderer (Target B)
 	contract.write_buffer(h.queue, fs.cell_buffer, 0, raw_data(term_b.cells), u64(len(term_b.cells) * size_of(u64)))
 	contract.write_buffer(h.queue, fs.lut_buffer, 0, &h.lut_words, size_of(h.lut_words))
-	zeros := make([]u8, len(term_b.cells) * int(FULLSCREEN_CELL_BYTES), context.temp_allocator)
-	contract.write_buffer(h.queue, fs_color_buf^, 0, raw_data(zeros), u64(len(zeros)))
+	_upload_color_words(h, fs_color_buf^, term_b)
 	fs_p := fullscreen.Fullscreen_Params{
 		screen_w     = f32(fuzz_w),
 		screen_h     = f32(fuzz_h),
@@ -1716,6 +1691,8 @@ _run_truth_fuzzer_and_negative_tests :: proc(h: ^Harness_State) -> bool {
 	fmt.println("================================================================================")
 	fmt.println("     RUNNING 6 NEGATIVE MUTATION TESTS (docs/HARNESS_BENCHMARK_PLAN.md §6.4)    ")
 	fmt.println("================================================================================")
+
+	if !_run_color_layout_regression(h) do return false
 
 	// Neg-1: ±1 column dilation disabled
 	fmt.println("  [Negative 1] ±1 column dilation disabled:")
@@ -2069,34 +2046,8 @@ _encode_pane_raster :: proc(
 			}
 
 			for r in y0..<y1 {
-				r_cols := r * cols
-				y_px := f32(r) * cell_h
 				for c in x0..<x1 {
-					packed := ctx.term.cells[r_cols + c]
-					content, style, _, cflags, slot := unpack_cell(packed)
-					if content == ' ' && style == 0 && (cflags & 2) == 0 do continue
-
-					u0, v0, u1, v1 := atlas.atlas_slot_uv(slot, cell_w, cell_h)
-					if slot == UNRESOLVED_SLOT && content >= 32 && content <= 126 {
-						u0, v0, u1, v1 = atlas.atlas_slot_uv(content - 32, cell_w, cell_h)
-					}
-
-					is_selected := (cflags & 2) != 0
-					fg, bg: [4]f32
-					if is_selected {
-						fg = SELECTED_FG_FLOAT
-						bg = SELECTED_BG_FLOAT
-					} else {
-						fg, bg = palette_style_colors(style)
-					}
-
-					rec := contract.Instance_Record{
-						pos_size = {f32(c) * cell_w, y_px, cell_w, cell_h},
-						uv_rect  = {u0, v0, u1, v1},
-						fg_color = fg,
-						bg_color = bg,
-					}
-					terminal_instance.instance_renderer_push(ctx.inst, rec)
+					_push_cell_instance(ctx.inst, ctx.term, r, c, cell_w, cell_h, true)
 				}
 			}
 			terminal_instance.instance_renderer_flush(ctx.inst)
@@ -2125,6 +2076,7 @@ _encode_pane_raster :: proc(
 			return
 		}
 		contract.write_buffer(h.queue, ctx.tile.cell_buffer, 0, raw_data(ctx.term.cells), u64(len(ctx.term.cells) * size_of(u64)))
+		_upload_color_words(h, ctx.color_buf^, ctx.term)
 		tx_s := ctx.term.damage.x / ctx.tile.tile_w
 		ty_s := ctx.term.damage.y / ctx.tile.tile_h
 		tx_e := min((ctx.term.damage.x + ctx.term.damage.w + ctx.tile.tile_w - 1) / ctx.tile.tile_w, ctx.tile.tiles_x)
@@ -2179,6 +2131,7 @@ _encode_pane_raster :: proc(
 			return
 		}
 		contract.write_buffer(h.queue, ctx.fs.cell_buffer, 0, raw_data(ctx.term.cells), u64(len(ctx.term.cells) * size_of(u64)))
+		_upload_color_words(h, ctx.color_buf^, ctx.term)
 		fs_p := fullscreen.Fullscreen_Params{
 			screen_w     = h.pane_w,
 			screen_h     = h.pane_h,
