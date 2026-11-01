@@ -100,6 +100,21 @@ test_stitch_top_and_threshold :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_stitch_delta_both_directions :: proc(t: ^testing.T) {
+	a, b: [16]string
+	start := numbered(a[:], _num_a[:], 10, 12)
+	up := numbered(b[:], _num_b[:], 7, 12) // the view scrolled up three lines
+	if d, ok := core.stitch_delta(up, start, -1); testing.expect(t, ok, "an upward move is measured") {
+		testing.expect_value(t, d, 3)
+	}
+	if d, ok := core.stitch_delta(start, up, -1); testing.expect(t, ok, "a downward move is measured") {
+		testing.expect_value(t, d, -3)
+	}
+	_, ok := core.stitch_delta(start, start, -1)
+	testing.expect(t, !ok, "an unchanged page has no direction")
+}
+
+@(test)
 test_stitch_short_page_has_no_shift :: proc(t: ^testing.T) {
 	a: [4]string = {"x1", "x2", "x3", "x4"}
 	b: [4]string = {"y1", "y2", "y3", "y4"}

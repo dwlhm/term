@@ -13,8 +13,9 @@ import "core:testing"
 import "core:time"
 import client "../../session_client"
 import ipc "../../../platform/ipc"
+import core ".."
 
-@(private = "file")
+@(private)
 wait_data :: proc(conn: ^ipc.Stream_Conn, ch: u32) -> ([]u8, bool) {
 	for {
 		f, got := client.client_wait_frame(conn, 4000)
@@ -27,7 +28,7 @@ wait_data :: proc(conn: ^ipc.Stream_Conn, ch: u32) -> ([]u8, bool) {
 }
 
 // wait_text waits for MSG_TEXT and counts the live frames and FAILs before it.
-@(private = "file")
+@(private)
 wait_text :: proc(conn: ^ipc.Stream_Conn, ch: u32) -> (text: []u8, live: int, fails: int, ok: bool) {
 	for {
 		f, got := client.client_wait_frame(conn, 8000)
@@ -42,7 +43,7 @@ wait_text :: proc(conn: ^ipc.Stream_Conn, ch: u32) -> (text: []u8, live: int, fa
 	}
 }
 
-@(private = "file")
+@(private)
 cli_attach_channel :: proc(conn: ^ipc.Stream_Conn, id: u32) -> (u32, bool) {
 	b: [64]u8
 	w := ipc.wire_writer(b[:])
@@ -71,7 +72,7 @@ cli_read :: proc(conn: ^ipc.Stream_Conn, id: u32, history: u32) -> ([]u8, bool) 
 }
 
 // l_numbers lists the "L<nnn>" lines of a text in order.
-@(private = "file")
+@(private)
 l_numbers :: proc(text: string) -> []int {
 	out := make([dynamic]int, context.temp_allocator)
 	for line in strings.split(text, "\n", context.temp_allocator) {
@@ -81,24 +82,23 @@ l_numbers :: proc(text: string) -> []int {
 	return out[:]
 }
 
-// first_l waits until the visible screen starts with line `want`.
-@(private = "file")
-first_l :: proc(conn: ^ipc.Stream_Conn, id: u32, want: string, ms := 4000) -> bool {
+// wait_screen waits for a data frame that shows `needle`: the viewer state
+// proves the step, so the test never sleeps on a guess.
+@(private)
+wait_screen :: proc(conn: ^ipc.Stream_Conn, ch: u32, needle: string, ms := 4000) -> (frame: []u8, ok: bool) {
 	deadline := time.tick_now()._nsec + i64(ms) * 1_000_000
 	for time.tick_now()._nsec < deadline {
-		if text, ok := cli_read(conn, id, 0); ok {
-			lines := l_numbers(string(text))
-			found := len(lines) > 0 && fmt.bprintf(_tl[:], "L%03d", lines[0]) == want
-			delete(text)
-			if found do return true
-		}
-		time.sleep(20 * time.Millisecond)
+		left := int((deadline - time.tick_now()._nsec) / 1_000_000) + 1
+		f, got := client.client_wait_frame(conn, left)
+		if !got do return nil, false
+		if f.kind != ipc.STREAM_DATA || f.channel != ch do continue
+		if !contains(string(f.payload), needle) do continue
+		out := make([]u8, len(f.payload))
+		copy(out, f.payload)
+		return out, true
 	}
-	return false
+	return nil, false
 }
-
-@(private = "file")
-_tl: [8]u8
 
 @(test)
 test_read_stitches_full_screen_history :: proc(t: ^testing.T) {
@@ -149,19 +149,22 @@ test_read_stitches_full_screen_history :: proc(t: ^testing.T) {
 		testing.expect_value(t, bad, 0) // every line once, in order
 	}
 	testing.expect(t, contains(string(text), "LIST 300"), "the screen the read started on ends the text")
+	testing.expect(t, !contains(string(text), core.CORE_READ_RESTORE_NOTE), "the answer does not claim a failed restore")
 
-	// One repaint replaces the frames the viewer did not get.
-	if repaint, got := wait_data(&conn, ch); got {
+	// The repaint comes only after the verified restore: it must be the page the
+	// read started on, not the scrolled one the scan stopped on.
+	if repaint, got := wait_screen(&conn, ch, "L300"); got {
 		defer delete(repaint)
-		testing.expect(t, contains(string(repaint), "LIST 300"), "the repaint carries the screen")
+		testing.expect(t, contains(string(repaint), "L278"), "the repaint starts on the page the read found")
 	} else {
 		testing.expect(t, false, "one repaint after the stitch")
 	}
-	// The held input reached the program, and the view came back to the bottom.
-	testing.expect(t, first_l(&conn, id, "L278"), "the app ends at the bottom again")
-	if end, ok := cli_read(&conn, id, 0); ok {
-		defer delete(end)
-		testing.expect(t, contains(string(end), "KEY k"), "the held input was delivered")
+	// The held input was delivered after that restore; its redraw is the proof.
+	if typed, got := wait_screen(&conn, ch, "KEY k"); got {
+		defer delete(typed)
+		testing.expect(t, true, "the held input was delivered")
+	} else {
+		testing.expect(t, false, "the held input reached the program")
 	}
 
 	ipc.stream_conn_destroy(&conn)

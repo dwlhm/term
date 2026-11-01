@@ -5,15 +5,19 @@ package feature_session_core_tests
 // lines, three lines per wheel notch, a fixed header.
 
 // STITCH_FIXTURE is a full-screen program: alternate screen, SGR mouse
-// reports, 300 numbered lines, three lines per wheel notch.
-STITCH_FIXTURE :: `import os, termios, tty
+// reports, 300 numbered lines, three lines per wheel notch. An optional argv[1]
+// (milliseconds) makes every repaint late, like a program on a loaded machine.
+STITCH_FIXTURE :: `import os, sys, termios, time, tty
 
 LINES = ["L%03d" % i for i in range(1, 301)]
 BODY = 0
 OFF = 0
 KEY = ""
+DELAY = float(sys.argv[1]) / 1000.0 if len(sys.argv) > 1 else 0.0
 
 def draw():
+    if DELAY > 0:
+        time.sleep(DELAY)
     rows = ["LIST 300" + KEY]
     for i in range(OFF, OFF + BODY):
         rows.append(LINES[i] if i < len(LINES) else "")
