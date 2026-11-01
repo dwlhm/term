@@ -2,16 +2,13 @@
 package platform_pty
 
 import "core:c"
-import "core:os"
-import "core:strings"
 import "core:sync"
-import "core:thread"
 import posix "core:sys/posix"
 
 foreign import libc "system:c"
 @(default_calling_convention="c")
 foreign libc {
-	ioctl     :: proc(fd: c.int, request: c.ulong, #c_vararg args: ..any) -> c.int ---
+	ioctl :: proc(fd: c.int, request: c.ulong, #c_vararg args: ..any) -> c.int ---
 }
 
 TIOCSWINSZ :: 0x5414
@@ -25,281 +22,45 @@ Winsize :: struct {
 
 _spawn_mutex: sync.Mutex
 
-_pty_spawn_platform :: proc(config: Pty_Config) -> (handle: ^Pty_Handle, err: Pty_Error) {
-	rows := max(1, config.rows)
-	cols := max(1, config.cols)
-
-	prog := config.shell
-	if len(prog) == 0 {
-		prog = os.get_env("SHELL", context.temp_allocator)
-		if len(prog) == 0 {
-			prog = "/bin/sh"
-		}
-	}
-
+// _pty_open: posix_openpt + the slave path (ptsname is not thread-safe). The
+// parent holds the slave open too until after fork, so the master never reads
+// EIO before the child has attached.
+_pty_open :: proc(pair: ^_Pty_Pair, ws: ^Winsize) -> Pty_Error {
 	sync.mutex_lock(&_spawn_mutex)
+	defer sync.mutex_unlock(&_spawn_mutex)
 	master := posix.posix_openpt({.RDWR, .NOCTTY, .NONBLOCK})
-	if int(master) < 0 {
-		sync.mutex_unlock(&_spawn_mutex)
-		return nil, .Master_Open_Failed
-	}
-
-	_ = posix.grantpt(master)
+	if int(master) < 0 do return .Master_Open_Failed
+	posix.grantpt(master)
 	if posix.unlockpt(master) != .OK {
-		sync.mutex_unlock(&_spawn_mutex)
 		posix.close(master)
-		return nil, .Master_Open_Failed
+		return .Master_Open_Failed
 	}
-
-	slave_name := posix.ptsname(master)
-	if slave_name == nil {
-		sync.mutex_unlock(&_spawn_mutex)
+	name := string(posix.ptsname(master))
+	if len(name) == 0 || len(name) >= len(pair.slave_path) {
 		posix.close(master)
-		return nil, .Slave_Open_Failed
+		return .Slave_Open_Failed
 	}
-
-	slave_buf: [128]u8
-	name := string(slave_name)
-	if len(name) == 0 || len(name) >= len(slave_buf) {
-		sync.mutex_unlock(&_spawn_mutex)
+	copy(pair.slave_path[:], name)
+	pair.slave_path[len(name)] = 0
+	pair.slave = posix.open(cstring(&pair.slave_path[0]), {.RDWR, .NOCTTY, .CLOEXEC})
+	if int(pair.slave) < 0 {
 		posix.close(master)
-		return nil, .Slave_Open_Failed
+		return .Slave_Open_Failed
 	}
-	copy(slave_buf[:], name)
-	slave_buf[len(name)] = 0
-	slave_path := cstring(&slave_buf[0])
-	sync.mutex_unlock(&_spawn_mutex)
-
-	xp := config.xpixel if config.xpixel > 0 else cols * 10
-	yp := config.ypixel if config.ypixel > 0 else rows * 20
-
-	ws := Winsize{
-		ws_row    = c.ushort(rows),
-		ws_col    = c.ushort(cols),
-		ws_xpixel = c.ushort(xp),
-		ws_ypixel = c.ushort(yp),
-	}
-
-	pipe_fds: [2]posix.FD
-	if posix.pipe(&pipe_fds) != .OK {
-		posix.close(master)
-		return nil, .Pipe_Failed
-	}
-
-	_fd_set_cloexec(posix.FD(master))
-	_fd_set_cloexec(pipe_fds[0])
-	_fd_set_cloexec(pipe_fds[1])
-	_fd_set_nonblocking(pipe_fds[0])
-	_fd_set_nonblocking(pipe_fds[1])
-
-	pid := posix.fork()
-	if pid < 0 {
-		posix.close(pipe_fds[0])
-		posix.close(pipe_fds[1])
-		posix.close(master)
-		return nil, .Fork_Failed
-	}
-
-	if pid == 0 {
-		empty: posix.sigset_t
-		posix.sigemptyset(&empty)
-		posix.sigprocmask(.SETMASK, &empty, nil)
-
-		posix.close(master)
-		posix.close(pipe_fds[0])
-		posix.close(pipe_fds[1])
-		_ = posix.setsid()
-
-		slave := posix.open(slave_path, {.RDWR})
-		if int(slave) >= 0 {
-			_ = ioctl(c.int(slave), TIOCSWINSZ, &ws)
-			_ = posix.dup2(slave, posix.STDIN_FILENO)
-			_ = posix.dup2(slave, posix.STDOUT_FILENO)
-			_ = posix.dup2(slave, posix.STDERR_FILENO)
-			if int(slave) > 2 {
-				posix.close(slave)
-			}
-		}
-
-		for fd in 3..<1024 {
-			posix.close(posix.FD(fd))
-		}
-
-		if len(config.cwd) > 0 {
-			c_cwd := strings.clone_to_cstring(config.cwd)
-			_ = posix.chdir(c_cwd)
-			delete(c_cwd)
-		}
-
-		c_argv := make([]cstring, len(config.argv) + 2)
-		c_argv[0] = strings.clone_to_cstring(prog)
-		for arg, i in config.argv {
-			c_argv[i + 1] = strings.clone_to_cstring(arg)
-		}
-		c_argv[len(c_argv) - 1] = nil
-
-		c_env: [dynamic]cstring
-		append(&c_env, strings.clone_to_cstring("TERM=xterm-256color"))
-		append(&c_env, strings.clone_to_cstring("COLORTERM=truecolor"))
-		append(&c_env, strings.clone_to_cstring("TERM_PROGRAM=term"))
-		append(&c_env, strings.clone_to_cstring("TERM_PROGRAM_VERSION=0.1.0"))
-		append(&c_env, strings.clone_to_cstring("KITTY_WINDOW_ID=1"))
-		append(&c_env, strings.clone_to_cstring("PATH=/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin"))
-		append(&c_env, strings.clone_to_cstring("LANG=en_US.UTF-8"))
-		append(&c_env, nil)
-
-		_ = posix.execve(c_argv[0], &c_argv[0], &c_env[0])
-		posix.exit(127)
-	}
-
-	h := new(Pty_Handle)
-	h.master_fd = i32(master)
-	h.child_pid = i32(pid)
-	h.shutdown_pipe = [2]i32{i32(pipe_fds[0]), i32(pipe_fds[1])}
-	h.rows = rows
-	h.cols = cols
-	h.is_running = true
-	h.exit_code = 0
-	ring_init(&h.ring)
-
-	h.drain_thread = thread.create_and_start_with_data(rawptr(h), proc(data: rawptr) {
-		handle := (^Pty_Handle)(data)
-		buf: [65536]u8
-
-		pfds := [2]posix.pollfd{
-			{fd = posix.FD(handle.master_fd), events = {.IN}},
-			{fd = posix.FD(handle.shutdown_pipe[0]), events = {.IN}},
-		}
-
-		for handle.is_running {
-			ret := posix.poll(&pfds[0], 2, -1)
-			if ret < 0 {
-				if posix.errno() == .EINTR do continue
-				break
-			}
-			if !handle.is_running do break
-			if .IN in pfds[1].revents || .HUP in pfds[1].revents || .ERR in pfds[1].revents {
-				break
-			}
-			if .IN in pfds[0].revents {
-				n := posix.read(posix.FD(handle.master_fd), &buf[0], len(buf))
-				if n > 0 {
-					ring_write(&handle.ring, buf[:n])
-				} else if n == 0 {
-					break
-				} else {
-					err_no := posix.errno()
-					if err_no == .EAGAIN || err_no == .EINTR do continue
-					break
-				}
-			} else if .HUP in pfds[0].revents || .ERR in pfds[0].revents {
-				break
-			}
-		}
-
-		status: c.int = 0
-		_ = posix.waitpid(posix.pid_t(handle.child_pid), &status, {.NOHANG})
-		handle.exit_code = int(status >> 8)
-		handle.is_running = false
-		pty_notify_wakeup()
-	})
-
-	return h, .None
+	pair.master = master
+	return .None
 }
 
-_pty_close_platform :: proc(h: ^Pty_Handle) {
-	if h == nil do return
-	h.is_running = false
-
-	if h.shutdown_pipe[1] >= 0 {
-		sig: u8 = 1
-		_ = posix.write(posix.FD(h.shutdown_pipe[1]), &sig, 1)
-	}
-
-	master_fd := h.master_fd
-	h.master_fd = -1
-	if master_fd >= 0 {
-		fg_pg := tcgetpgrp(c.int(master_fd))
-		if fg_pg > 0 && fg_pg != c.int(h.child_pid) {
-			_ = posix.kill(posix.pid_t(-fg_pg), .SIGCONT)
-			_ = posix.kill(posix.pid_t(-fg_pg), .SIGHUP)
-			_ = posix.kill(posix.pid_t(-fg_pg), .SIGKILL)
-		}
-		posix.close(posix.FD(master_fd))
-	}
-
-	if h.child_pid > 0 {
-		_ = posix.kill(posix.pid_t(-h.child_pid), .SIGCONT)
-		_ = posix.kill(posix.pid_t(-h.child_pid), .SIGHUP)
-		_ = posix.kill(posix.pid_t(-h.child_pid), .SIGKILL)
-		_ = posix.kill(posix.pid_t(h.child_pid), .SIGCONT)
-		_ = posix.kill(posix.pid_t(h.child_pid), .SIGHUP)
-		_ = posix.kill(posix.pid_t(h.child_pid), .SIGKILL)
-		status: c.int = 0
-		_ = posix.waitpid(posix.pid_t(h.child_pid), &status, {.NOHANG})
-	}
-
-	if h.drain_thread != nil {
-		thread.join(h.drain_thread)
-		thread.destroy(h.drain_thread)
-		h.drain_thread = nil
-	}
-
-	if h.shutdown_pipe[0] >= 0 {
-		posix.close(posix.FD(h.shutdown_pipe[0]))
-		h.shutdown_pipe[0] = -1
-	}
-	if h.shutdown_pipe[1] >= 0 {
-		posix.close(posix.FD(h.shutdown_pipe[1]))
-		h.shutdown_pipe[1] = -1
-	}
-
-	ring_destroy(&h.ring)
-	free(h)
-}
-
-_pty_resize_platform :: proc(h: ^Pty_Handle, cols, rows: u16, xpixel: u16 = 0, ypixel: u16 = 0) -> bool {
-	if h == nil || h.master_fd < 0 do return false
-	h.cols = int(cols)
-	h.rows = int(rows)
-
-	xp := xpixel if xpixel > 0 else cols * 10
-	yp := ypixel if ypixel > 0 else rows * 20
-
-	ws := Winsize{
-		ws_row    = c.ushort(rows),
-		ws_col    = c.ushort(cols),
-		ws_xpixel = c.ushort(xp),
-		ws_ypixel = c.ushort(yp),
-	}
-	res := ioctl(c.int(h.master_fd), TIOCSWINSZ, &ws)
-	return res == 0
-}
-
-_pty_write_platform :: proc(h: ^Pty_Handle, data: []u8) -> (int, Pty_Error) {
-	if h == nil || h.master_fd < 0 do return 0, .Closed
-	if len(data) == 0 do return 0, .None
-
-	fd := posix.FD(h.master_fd)
-	total := 0
-	for total < len(data) {
-		rem := len(data) - total
-		n := posix.write(fd, &data[total], uint(rem))
-		if n > 0 {
-			total += int(n)
-			continue
-		}
-		if n < 0 {
-			err_no := posix.errno()
-			if err_no == .EINTR do continue
-			if err_no == .EAGAIN {
-				pfd := posix.pollfd{fd = fd, events = {.OUT}}
-				if posix.poll(&pfd, 1, 2) <= 0 do break
-				continue
-			}
-		}
-		if total > 0 do return total, .None
-		return 0, .Write_Failed
-	}
-	return total, .None
+// _child_attach_tty: new session, open the slave (it becomes the controlling
+// tty), apply the size, dup to 0-2.
+_child_attach_tty :: proc(pair: ^_Pty_Pair, ws: ^Winsize) {
+	posix.setsid()
+	posix.close(pair.slave)
+	slave := posix.open(cstring(&pair.slave_path[0]), {.RDWR})
+	if int(slave) < 0 do return
+	ioctl(c.int(slave), TIOCSWINSZ, ws)
+	posix.dup2(slave, posix.STDIN_FILENO)
+	posix.dup2(slave, posix.STDOUT_FILENO)
+	posix.dup2(slave, posix.STDERR_FILENO)
+	if int(slave) > 2 do posix.close(slave)
 }

@@ -419,6 +419,7 @@ app_run :: proc(app: ^Term_App) {
 }
 
 main :: proc() {
+	if handled, code := app_run_holder_cli(os.args); handled do os.exit(code)
 	_ = signals_block_quit_set()
 	if handled, code := app_run_control_cli(os.args); handled {
 		os.exit(code)
