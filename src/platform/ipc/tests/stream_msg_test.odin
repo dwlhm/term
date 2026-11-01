@@ -61,3 +61,28 @@ test_msg_hello_check :: proc(t: ^testing.T) {
 	_, code, ok2 = ipc.stream_hello_check(encode(buf[:], {version = ipc.STREAM_PROTO_VERSION, role = .Holder}), {.Viewer})
 	testing.expect(t, !ok2 && code == .Bad_Request)
 }
+
+@(test)
+test_msg_held_roundtrip :: proc(t: ^testing.T) {
+	orig := ipc.Held_Session{
+		id           = 42,
+		pid          = 12345,
+		started_unix = 1700000000,
+		size         = {cols = 80, rows = 24, xpixel = 640, ypixel = 480},
+		exited       = true,
+		exit         = {code = 0, signal = 0, signaled = false},
+	}
+	buf: [256]u8
+	w := ipc.wire_writer(buf[:])
+	ipc.enc_held(&w, orig)
+	testing.expect(t, w.ok, "enc_held ok")
+	r := ipc.wire_reader(ipc.wire_bytes_written(&w))
+	got := ipc.dec_held(&r)
+	testing.expect(t, ipc.wr_done(&r), "dec_held wr_done")
+	testing.expect(t, got.id == orig.id, "id matches")
+	testing.expect(t, got.pid == orig.pid, "pid matches")
+	testing.expect(t, got.started_unix == orig.started_unix, "started_unix matches")
+	testing.expect(t, got.size == orig.size, "size matches")
+	testing.expect(t, got.exited == orig.exited, "exited matches")
+	testing.expect(t, got.exit == orig.exit, "exit matches")
+}

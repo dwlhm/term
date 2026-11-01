@@ -24,7 +24,7 @@ core_row_write :: proc(w: ^ipc.Wire_Writer, c: ^Core, s: ^Core_Session) {
 		active    = active,
 		attached  = attached,
 		pid       = u32(max(sess.info.pid, 0)),
-		elapsed_s = u32((_now() - s.started_ns) / 1_000_000_000),
+		elapsed_s = u32(max(i64(0), _now_unix() - s.started_unix)) if s.started_unix > 0 else 0,
 		exit_code = s.exit.code,
 		process   = process,
 		cwd       = session.session_get_cwd_path(sess) if sess.cwd_len > 0 else session.session_process_cwd(sess),

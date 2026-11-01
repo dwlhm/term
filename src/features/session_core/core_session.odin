@@ -23,7 +23,7 @@ core_session_count :: proc(c: ^Core) -> int {
 _session_new :: proc(c: ^Core, id: u32, holder: int, size: ipc.Size_Msg) -> ^Core_Session {
 	for &s in c.sessions {
 		if s.used do continue
-		s = {used = true, id = id, holder = holder, started_ns = _now()}
+		s = {used = true, id = id, holder = holder, started_unix = _now_unix()}
 		s.link = {core = c, id = id}
 		s.sess = session.session_create(size, {write = _link_write, resize = _link_resize, user = &s.link})
 		c.next_id = max(c.next_id, id + 1)
@@ -72,6 +72,7 @@ core_session_adopt :: proc(c: ^Core, hi: int, held: ipc.Held_Session) {
 	}
 	s := _session_new(c, held.id, hi, held.size)
 	if s == nil do return
+	s.started_unix = held.started_unix
 	s.sess.info.pid = i32(held.pid)
 	if held.exited do core_session_exited(c, s, held.exit, "")
 }
@@ -126,8 +127,9 @@ core_proc_refresh_due :: proc(c: ^Core) {
 	}
 }
 
-core_session_spawned :: proc(c: ^Core, s: ^Core_Session, pid: i32) {
+core_session_spawned :: proc(c: ^Core, s: ^Core_Session, pid: i32, started_unix: i64) {
 	s.sess.info.pid = pid
+	if started_unix > 0 do s.started_unix = started_unix
 	core_broadcast_row(c, s)
 }
 

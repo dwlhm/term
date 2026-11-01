@@ -105,7 +105,7 @@ _send_welcome :: proc(h: ^Holder) {
 	})
 	for &s in h.sessions {
 		if !s.used do continue
-		ipc.enc_held(&w, {id = s.id, pid = u32(s.pid), size = s.size, exited = s.exit_final, exit = s.exit})
+		ipc.enc_held(&w, {id = s.id, pid = u32(s.pid), started_unix = s.started_unix, size = s.size, exited = s.exit_final, exit = s.exit})
 		s.tailed, s.exit_sent = false, s.exit_final
 	}
 	h.tail_cursor = 0

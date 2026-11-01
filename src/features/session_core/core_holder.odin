@@ -123,7 +123,11 @@ _holder_frame :: proc(c: ^Core, hi: int, f: ipc.Stream_Frame) -> bool {
 	case ipc.MSG_OUTPUT:
 		if s := core_session_find(c, f.channel); s != nil do core_session_output(c, s, f.payload)
 	case ipc.MSG_SPAWNED:
-		if s := core_session_find(c, f.channel); s != nil do core_session_spawned(c, s, i32(ipc.wr_u32(&r)))
+		pid := i32(ipc.wr_u32(&r))
+		started_unix := i64(ipc.wr_u64(&r))
+		if s := core_session_find(c, f.channel); s != nil && r.ok {
+			core_session_spawned(c, s, pid, started_unix)
+		}
 	case ipc.MSG_SPAWN_FAILED:
 		if s := core_session_find(c, f.channel); s != nil do core_session_exited(c, s, {code = 127}, string(f.payload))
 	case ipc.MSG_EXITED:

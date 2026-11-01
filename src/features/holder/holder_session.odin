@@ -36,12 +36,13 @@ _session_spawn :: proc(h: ^Holder, id: u32, m: ^ipc.Spawn_Msg) -> (s: ^Session, 
 	free_all(context.temp_allocator)
 	if err != .None do return nil, fmt.bprintf(h.msg_buf[:], "spawn failed: %v", err)
 	s^ = {
-		used   = true,
-		id     = id,
-		pid    = pid,
-		master = master,
-		size   = m.size,
-		tailed = h.core_state == .Linked,
+		used         = true,
+		id           = id,
+		pid          = pid,
+		started_unix = _now_unix(),
+		master       = master,
+		size         = m.size,
+		tailed       = h.core_state == .Linked,
 	}
 	s.tail.buf = make([]u8, HOLDER_TAIL_BYTES)
 	s.input.buf = make([]u8, HOLDER_INPUT_BYTES)

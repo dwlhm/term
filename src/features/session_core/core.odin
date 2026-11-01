@@ -69,7 +69,7 @@ Core_Session :: struct {
 	proc_due_ns:  i64, // output settled: ask the holder for the foreground process then (0 = nothing due)
 	id:           u32,
 	holder:       int,
-	started_ns:   i64,
+	started_unix: i64,
 	row_hash:     u64,
 	exit:         ipc.Exit_Msg,
 	sess:         ^session.Terminal_Session,
@@ -113,6 +113,9 @@ Core :: struct {
 
 @(private)
 _now :: proc() -> i64 { return time.tick_now()._nsec }
+
+@(private)
+_now_unix :: proc() -> i64 { return time.to_unix_seconds(time.now()) }
 
 // core_new allocates a core and every buffer its loop uses (no sockets yet).
 core_new :: proc() -> ^Core {

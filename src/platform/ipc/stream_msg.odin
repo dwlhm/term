@@ -21,7 +21,7 @@ MSG_DRAIN      :: u8(27) // channel 0: take no new sessions, exit when empty
 MSG_WELCOME      :: u8(40) // channel 0, Welcome_Msg header + Held_Session per session
 MSG_TAIL         :: u8(41) // the session's recent raw output (≤ HOLDER_TAIL_BYTES)
 MSG_OUTPUT       :: u8(42) // raw program output
-MSG_SPAWNED      :: u8(43) // u32 pid
+MSG_SPAWNED      :: u8(43) // u32 pid + i64 started_unix
 MSG_SPAWN_FAILED :: u8(44) // reason text
 MSG_EXITED       :: u8(45) // Exit_Msg
 MSG_BYE          :: u8(46) // channel 0: last frame before the holder lets go
@@ -93,11 +93,12 @@ Proc_Info_Msg :: struct {
 }
 
 Held_Session :: struct {
-	id:     u32,
-	pid:    u32,
-	size:   Size_Msg,
-	exited: bool,
-	exit:   Exit_Msg,
+	id:           u32,
+	pid:          u32,
+	started_unix: i64,
+	size:         Size_Msg,
+	exited:       bool,
+	exit:         Exit_Msg,
 }
 
 Welcome_Msg :: struct {

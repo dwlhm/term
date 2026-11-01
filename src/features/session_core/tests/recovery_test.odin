@@ -36,6 +36,32 @@ test_core_restart_restores_screen :: proc(t: ^testing.T) {
 	testing.expect(t, tiers_stop(tiers), "tiers end")
 }
 
+@(test)
+test_core_restart_preserves_elapsed :: proc(t: ^testing.T) {
+	tiers := tiers_start()
+	v := view_open()
+	s := view_sh(v, "sleep 30")
+	id := view_attached(v, s)
+	testing.expect(t, id > 0, "session attached")
+
+	time.sleep(1200 * time.Millisecond)
+
+	tiers_core_restart_stop(tiers)
+	testing.expect(t, view_wait(v, .Core_Lost) >= 0, "viewer notices the core is gone")
+	tiers_core_start(tiers)
+
+	rows: [8]ipc.Session_Row
+	got_rows := cli_list_rows(rows[:])
+	testing.expect_value(t, len(got_rows), 1)
+	if len(got_rows) == 1 {
+		testing.expect_value(t, got_rows[0].id, id)
+		testing.expect(t, got_rows[0].elapsed_s >= 1, "elapsed_s survives restart and is >= 1")
+	}
+
+	view_close(v)
+	testing.expect(t, tiers_stop(tiers), "tiers end")
+}
+
 // hostile_dropped sends bytes on a fresh link (after HELLO when hello is set)
 // and reports whether the core closed it.
 @(private = "file")

@@ -64,10 +64,11 @@ _on_spawn :: proc(h: ^Holder, f: ipc.Stream_Frame) -> bool {
 		_send_text(h, ipc.MSG_SPAWN_FAILED, f.channel, reason)
 		return true
 	}
-	pid: [4]u8
-	w := ipc.wire_writer(pid[:])
+	buf: [12]u8
+	w := ipc.wire_writer(buf[:])
 	ipc.ww_u32(&w, u32(s.pid))
-	_core_send(h, ipc.MSG_SPAWNED, f.channel, pid[:])
+	ipc.ww_u64(&w, u64(s.started_unix))
+	_core_send(h, ipc.MSG_SPAWNED, f.channel, ipc.wire_bytes_written(&w))
 	return true
 }
 

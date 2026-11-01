@@ -178,6 +178,41 @@ test_handover_clears_tails :: proc(t: ^testing.T) {
 	testing.expect_value(t, fixture_stop(f), 0)
 }
 
+@(test)
+test_welcome_carries_original_started_unix :: proc(t: ^testing.T) {
+	f := fixture_start()
+	a := client_connect(f.path)
+	t0 := time.to_unix_seconds(time.now())
+	client_spawn(a, 9, {"/bin/sh", "-c", "sleep 30"})
+	si := client_wait_kind(a, ipc.MSG_SPAWNED, 9, 3000)
+	testing.expect(t, si >= 0, "SPAWNED")
+	r_sp := ipc.wire_reader(a.log[si].data)
+	pid := ipc.wr_u32(&r_sp)
+	spawn_started := i64(ipc.wr_u64(&r_sp))
+	testing.expect(t, ipc.wr_done(&r_sp), "SPAWNED decoded")
+	testing.expect(t, spawn_started >= t0, "spawn_started >= t0")
+
+	time.sleep(1200 * time.Millisecond)
+	client_close(a)
+
+	b := client_connect(f.path)
+	wi := client_wait_kind(b, ipc.MSG_WELCOME, 0, 3000)
+	testing.expect(t, wi >= 0, "WELCOME")
+	if wi >= 0 {
+		r_wel := ipc.wire_reader(b.log[wi].data)
+		_ = ipc.dec_welcome(&r_wel)
+		held := ipc.dec_held(&r_wel)
+		testing.expect(t, ipc.wr_done(&r_wel), "WELCOME decodes")
+		testing.expect_value(t, held.id, u32(9))
+		testing.expect_value(t, held.pid, pid)
+		testing.expect_value(t, held.started_unix, spawn_started)
+		now_unix := time.to_unix_seconds(time.now())
+		testing.expect(t, held.started_unix < now_unix, "started_unix is the original spawn time, not now")
+	}
+	client_close(b)
+	testing.expect_value(t, fixture_stop(f), 0)
+}
+
 wait_count :: proc(c: ^Client, kind: u8, channel: u32, want: int) -> bool {
 	for _ in 0..<60 {
 		n := 0

@@ -10,6 +10,7 @@ import ipc "../../platform/ipc"
 NO_DEADLINE :: max(i64)
 
 _now :: proc() -> i64 { return time.tick_now()._nsec }
+_now_unix :: proc() -> i64 { return time.to_unix_seconds(time.now()) }
 
 _ms :: proc(ms: int) -> i64 { return i64(ms) * 1_000_000 }
 

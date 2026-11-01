@@ -87,12 +87,12 @@ dec_welcome :: proc(r: ^Wire_Reader) -> (m: Welcome_Msg) {
 }
 
 enc_held :: proc(w: ^Wire_Writer, m: Held_Session) {
-	ww_u32(w, m.id); ww_u32(w, m.pid); enc_size(w, m.size)
+	ww_u32(w, m.id); ww_u32(w, m.pid); ww_u64(w, u64(m.started_unix)); enc_size(w, m.size)
 	ww_bool(w, m.exited); enc_exit(w, m.exit)
 }
 
 dec_held :: proc(r: ^Wire_Reader) -> (m: Held_Session) {
-	m.id, m.pid, m.size = wr_u32(r), wr_u32(r), dec_size(r)
+	m.id, m.pid, m.started_unix, m.size = wr_u32(r), wr_u32(r), i64(wr_u64(r)), dec_size(r)
 	m.exited, m.exit = wr_bool(r), dec_exit(r)
 	return
 }

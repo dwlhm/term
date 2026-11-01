@@ -144,6 +144,20 @@ cli_list_ids :: proc(out: []u32) -> []u32 {
 	return out[:n]
 }
 
+cli_list_rows :: proc(out: []ipc.Session_Row) -> []ipc.Session_Row {
+	conn: ipc.Stream_Conn
+	if !cli_conn(&conn) do return nil
+	defer ipc.stream_conn_destroy(&conn)
+	r, count, ok := cli_list(&conn)
+	n := 0
+	for _ in 0..<count {
+		if !ok || n == len(out) do break
+		out[n] = ipc.dec_row(&r)
+		n += 1
+	}
+	return out[:n]
+}
+
 // cli_kill: true = the core answered OK.
 cli_kill :: proc(id: u32) -> bool {
 	conn: ipc.Stream_Conn

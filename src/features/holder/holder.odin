@@ -43,6 +43,7 @@ Session :: struct {
 	used:          bool,
 	id:            u32,
 	pid:           i32,
+	started_unix:  i64,
 	master:        i32,
 	size:          ipc.Size_Msg,
 	tail:          ipc.Byte_Ring, // last HOLDER_TAIL_BYTES of output, overwrite-oldest
