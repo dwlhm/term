@@ -52,13 +52,14 @@ class TermDriverClient:
         if self.proc and self.proc.poll() is None:
             try:
                 self.send_cmd({"action": "quit"})
+                # quit kills the driver's sessions on its way out: let it finish
+                self.proc.wait(timeout=3.0)
             except Exception:
-                pass
-            self.proc.terminate()
-            try:
-                self.proc.wait(timeout=1.0)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
+                self.proc.terminate()
+                try:
+                    self.proc.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    self.proc.kill()
         self.proc = None
 
 

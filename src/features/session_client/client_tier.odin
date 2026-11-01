@@ -34,11 +34,11 @@ client_tier_main :: proc(args: []string) -> (handled: bool, code: int) {
 
 // client_use_private_session points this process (and the core and holder it
 // starts) at a session dir of its own: a scripted run never touches the user's
-// sessions, and its tiers end with it.
+// sessions, and its tiers end with it, however it ends (SESSION_OWNED_ENV).
 client_use_private_session :: proc() -> bool {
 	buf, name_buf, path_buf: [256]u8
 	dir, err := ipc.ipc_session_dir(buf[:])
 	if err != .None do return false
 	path, ok := ipc.ipc_session_path(path_buf[:], dir, fmt.bprintf(name_buf[:], "s%d", int(posix.getpid())))
-	return ok && os.set_env(ipc.SESSION_DIR_ENV, path) == nil
+	return ok && os.set_env(ipc.SESSION_DIR_ENV, path) == nil && os.set_env(ipc.SESSION_OWNED_ENV, "1") == nil
 }

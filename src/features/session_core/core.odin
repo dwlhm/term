@@ -103,6 +103,7 @@ Core :: struct {
 	viewer_seq:  u32,
 	empty_since: i64,
 	grace_ns:    i64,
+	owned:       bool, // SESSION_OWNED_ENV: sessions end with the owner's last viewer
 	stop_pipe:   [2]posix.FD, // core_request_stop / SIGTERM wake the poll
 	holders:     [CORE_MAX_HOLDERS]Core_Holder,
 	sessions:    [CORE_MAX_SESSIONS]Core_Session,
@@ -127,6 +128,8 @@ core_new :: proc() -> ^Core {
 	c.build = ipc.ipc_build_id(c.build_buf[:])
 	c.next_id = 1
 	c.grace_ns = _grace_ms() * 1_000_000
+	owned_buf: [64]u8 // lookup_env also stores the key here
+	c.owned = os.get_env(owned_buf[:], ipc.SESSION_OWNED_ENV) == "1"
 	c.msg = make([]u8, ipc.STREAM_MAX_PAYLOAD)
 	reserve(&c.viewer_out, 256 * 1024)
 	reserve(&c.replies, 4096)

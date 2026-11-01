@@ -9,6 +9,9 @@ import "core:os"
 import "core:sys/posix"
 
 SESSION_DIR_ENV :: "TERM_SESSION_DIR" // a private session (Standalone runs, tests)
+// "1": one viewer process owns the session dir (client_use_private_session):
+// the core ends every session when that owner's last viewer link goes.
+SESSION_OWNED_ENV :: "TERM_SESSION_OWNED"
 
 when ODIN_OS == .Darwin {
 	foreign import libc "system:System.framework"

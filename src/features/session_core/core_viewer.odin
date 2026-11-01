@@ -21,15 +21,25 @@ core_viewer_service :: proc(c: ^Core, vi: int, rev: posix.Poll_Event) {
 	if gone || v.conn.err != .None do _viewer_drop(c, vi)
 }
 
-// _viewer_drop: its attachments end; its sessions keep running (background).
+// _viewer_drop: its attachments end; its sessions keep running (background),
+// unless the session dir is owned and this was the owner's last viewer link:
+// the kernel closes it however the owner ended, and nobody else can show them.
 @(private = "file")
 _viewer_drop :: proc(c: ^Core, vi: int) {
 	for &s in c.sessions {
 		if !s.used do continue
 		for &a in s.attaches do if a.used && a.viewer == vi do core_detach(c, &s, &a, false)
 	}
+	was_viewer := c.viewers[vi].hello && c.viewers[vi].role == .Viewer
 	ipc.stream_conn_destroy(&c.viewers[vi].conn)
 	c.viewers[vi] = {}
+	if c.owned && was_viewer && !_any_viewer(c) do for &s in c.sessions do if s.used do core_session_kill(c, &s)
+}
+
+@(private = "file")
+_any_viewer :: proc(c: ^Core) -> bool {
+	for &v in c.viewers do if v.used && v.hello && v.role == .Viewer do return true
+	return false
 }
 
 // _viewer_frame: false = protocol violation (the connection is dropped).
