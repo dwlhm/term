@@ -142,6 +142,8 @@ _holder_welcome :: proc(c: ^Core, hi: int, r: ^ipc.Wire_Reader) -> bool {
 	wel := ipc.dec_welcome(r)
 	if !r.ok || wel.version != ipc.STREAM_PROTO_VERSION do return false
 	h.welcomed, h.instance, h.current = true, wel.instance, wel.build == c.build
+	h.poisoned = wel.previous == 2 && wel.crashes >= CORE_POISON_CRASHES
+	if h.poisoned do fmt.eprintfln("core: %d core crashes in 5 min: screens start empty (tails not replayed)", wel.crashes)
 	// Another build keeps what it runs, takes nothing new and exits when empty.
 	if !h.current do ipc.stream_send(&h.conn, ipc.MSG_DRAIN, 0)
 	for _ in 0..<wel.count {

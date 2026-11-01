@@ -100,6 +100,7 @@ _send_welcome :: proc(h: ^Holder) {
 		pid      = u32(os.get_pid()),
 		build    = h.build,
 		previous = h.previous,
+		crashes  = _recent_crashes(h, _now()),
 		count    = u32(h.count),
 	})
 	for &s in h.sessions {
@@ -165,8 +166,23 @@ _core_begin_close :: proc(h: ^Holder, now: i64) {
 
 // _core_drop ends a link that failed or misbehaved: a crash for the next core.
 _core_drop :: proc(h: ^Holder, now: i64) {
-	if h.core_state == .Linked do h.previous = PREVIOUS_CRASH
+	if h.core_state == .Linked {
+		h.previous = PREVIOUS_CRASH
+		h.crash_times[h.crash_next] = now
+		h.crash_next = (h.crash_next + 1) % HOLDER_CRASH_MEMORY
+	}
 	_core_closed(h, now)
+}
+
+// HOLDER_CRASH_MEMORY crashes are remembered; WELCOME reports those of the last 5 minutes
+// so a core can stop replaying tails that keep crashing it.
+HOLDER_CRASH_MEMORY :: 8
+
+@(private = "file")
+_recent_crashes :: proc(h: ^Holder, now: i64) -> u32 {
+	n: u32
+	for t in h.crash_times do if t != 0 && now - t < _ms(HOLDER_RESTART_WINDOW) do n += 1
+	return n
 }
 
 _core_closed :: proc(h: ^Holder, now: i64) {

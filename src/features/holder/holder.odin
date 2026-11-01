@@ -94,6 +94,8 @@ Holder :: struct {
 	core_deadline: i64, // Closing: linger end
 	tail_cursor:   int, // sessions below this index have been offered their TAIL
 	previous:      u8, // how the last core link ended, for the next WELCOME
+	crash_times:   [HOLDER_CRASH_MEMORY]i64, // when core links ended in a crash (ring)
+	crash_next:    int,
 	instance:      u64,
 	paused:        bool, // PTY reads paused by core backpressure
 	pause_start:   i64,

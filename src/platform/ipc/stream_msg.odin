@@ -103,6 +103,7 @@ Welcome_Msg :: struct {
 	pid:      u32,
 	build:    string,
 	previous: u8, // 0 none, 1 handover, 2 crash
+	crashes:  u32, // core links that ended in a crash in the last 5 minutes
 	count:    u32, // Held_Session records follow in the same payload
 }
 

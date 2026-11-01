@@ -80,6 +80,8 @@ core_session_adopt :: proc(c: ^Core, hi: int, held: ipc.Held_Session) {
 // replies were sent by the previous core long ago: drop them, then nudge the
 // size so full-screen programs repaint what the tail missed.
 core_session_adopt_tail :: proc(c: ^Core, s: ^Core_Session, tail: []u8) {
+	// A tail that keeps crashing cores is skipped: programs keep running, their screens start empty.
+	if s.holder >= 0 && c.holders[s.holder].poisoned do return
 	clear(&c.viewer_out)
 	clear(&c.replies)
 	terminal.relay_feed(&s.relay, &s.sess.term, tail, &c.viewer_out, &c.replies)

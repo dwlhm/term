@@ -31,11 +31,13 @@ CORE_PROC_WAIT_MS :: 300 // LIST waits this long for fresh foreground info
 CORE_HOLDER_CTL   :: 2 << 20
 CORE_VIEWER_CTL   :: 2 << 20
 CORE_SOCKET_NAME  :: "core.sock"
+CORE_POISON_CRASHES :: 3 // recent core crashes after which tails are not replayed
 
 Core_Holder :: struct {
 	used:     bool,
 	welcomed: bool,
 	current:  bool, // our build: new sessions go here
+	poisoned: bool, // its tails keep crashing cores: rebuild screens without them
 	instance: u64,
 	conn:     ipc.Stream_Conn,
 }

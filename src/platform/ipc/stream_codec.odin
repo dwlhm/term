@@ -77,12 +77,12 @@ dec_proc_info :: proc(r: ^Wire_Reader) -> (m: Proc_Info_Msg) {
 
 enc_welcome :: proc(w: ^Wire_Writer, m: Welcome_Msg) {
 	ww_u32(w, m.version); ww_u64(w, m.instance); ww_u32(w, m.pid)
-	ww_str(w, m.build); ww_u8(w, m.previous); ww_u32(w, m.count)
+	ww_str(w, m.build); ww_u8(w, m.previous); ww_u32(w, m.crashes); ww_u32(w, m.count)
 }
 
 dec_welcome :: proc(r: ^Wire_Reader) -> (m: Welcome_Msg) {
 	m.version, m.instance, m.pid = wr_u32(r), wr_u64(r), wr_u32(r)
-	m.build, m.previous, m.count = wr_str(r), wr_u8(r), wr_u32(r)
+	m.build, m.previous, m.crashes, m.count = wr_str(r), wr_u8(r), wr_u32(r), wr_u32(r)
 	return
 }
 
