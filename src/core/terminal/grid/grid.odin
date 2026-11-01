@@ -139,7 +139,7 @@ grid_set_cell :: proc(g: ^Grid, d: ^damage.Damage_Tracker, row, col: int, c: cel
 	}
 	phys := grid_physical_row(g, row)
 	r := &g.rows[phys]
-	tracks_decoration := .Has_Direct_Color in c.flags || .Has_Hyperlink in c.flags
+	tracks_decoration := .Has_Direct_Color in c.flags || .Has_Hyperlink in c.flags || .Has_Underline_Decor in c.flags
 	if r.cells[col] != c || (tracks_decoration && r.direct_colors[col] != dc) {
 		r.cells[col] = c
 		if tracks_decoration {

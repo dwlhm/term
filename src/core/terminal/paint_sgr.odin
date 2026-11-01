@@ -54,6 +54,10 @@ _paint_pen_of_cell :: proc(c: cell.Semantic_Cell, dc: cell.Direct_Color) -> Pain
 	if .Has_Direct_Color in c.flags {
 		pen.dc = cell.Direct_Color{fg = dc.fg, bg = dc.bg, has_fg = dc.has_fg, has_bg = dc.has_bg}
 	}
+	if .Has_Underline_Decor in c.flags {
+		pen.dc.underline_style = dc.underline_style
+		pen.dc.underline = dc.underline
+	}
 	if .Has_Hyperlink in c.flags do pen.link = dc.link_id
 	return pen
 }
@@ -88,13 +92,44 @@ SGR_STYLE_CODES := [cell.Style_Flag]int {
 _paint_sgr :: proc(out: ^[dynamic]u8, pen: Paint_Pen) {
 	_paint_str(out, "\x1b[0")
 	for flag in cell.Style_Flag {
-		if flag not_in pen.style do continue
+		if flag not_in pen.style || flag == .Underline do continue
 		_paint_str(out, ";")
 		_paint_int(out, SGR_STYLE_CODES[flag])
 	}
+	if .Underline in pen.style do _paint_sgr_underline_style(out, pen.dc.underline_style)
 	_paint_sgr_color(out, pen.dc.has_fg, pen.dc.fg, pen.fg, 7, 30, 90, "38")
 	_paint_sgr_color(out, pen.dc.has_bg, pen.dc.bg, pen.bg, 0, 40, 100, "48")
+	_paint_sgr_underline_color(out, pen)
 	_paint_str(out, "m")
+}
+
+// _paint_sgr_underline_style emits `4` for a single underline and `4:n` for
+// every other shape, which is the form the parser understands on the other side.
+_paint_sgr_underline_style :: proc(out: ^[dynamic]u8, style: cell.Underline_Style) {
+	_paint_str(out, ";4")
+	if style == .None || style == .Single do return
+	_paint_str(out, ":")
+	_paint_int(out, int(style))
+}
+
+// _paint_sgr_underline_color emits SGR 58/59. Each SGR starts from reset, so a
+// default underline colour only needs the explicit reset when an underline is
+// actually being drawn.
+_paint_sgr_underline_color :: proc(out: ^[dynamic]u8, pen: Paint_Pen) {
+	switch pen.dc.underline.mode {
+	case .Rgb:
+		_paint_str(out, ";58:2::")
+		_paint_int(out, int(pen.dc.underline.rgb[0]))
+		_paint_str(out, ":")
+		_paint_int(out, int(pen.dc.underline.rgb[1]))
+		_paint_str(out, ":")
+		_paint_int(out, int(pen.dc.underline.rgb[2]))
+	case .Palette:
+		_paint_str(out, ";58;5;")
+		_paint_int(out, int(pen.dc.underline.index))
+	case .Default:
+		if .Underline in pen.style do _paint_str(out, ";59")
+	}
 }
 
 _paint_sgr_color :: proc(out: ^[dynamic]u8, has_rgb: bool, rgb: [3]u8, idx, default_idx: u8, base, bright_base: int, ext: string) {

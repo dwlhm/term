@@ -254,6 +254,11 @@ Terminal_Renderer :: struct {
 GPU_CELL_DECOR_UNDERLINE :: u64(1) << 49
 GPU_CELL_DECOR_STRIKE    :: u64(1) << 50
 GPU_CELL_DECOR_ITALIC    :: u64(1) << 51
+// Underline shape (cell.Underline_Style) occupies bits 20..22 of the packed
+// cell's high word (bits 52..54 of the u64); 0 means single, matching plain
+// SGR 4 without per-cell side storage.
+GPU_CELL_UL_STYLE_SHIFT :: 52
+COLOR_WORDS_PER_CELL     :: 3 // fg ARGB, bg ARGB, underline ARGB (0 = use fg)
 
 // Cell flags travel in the 7-bit cflags field of the packed cell (hi >> 1).
 GPU_CELL_FLAG_SELECTED      :: u32(2)
@@ -425,7 +430,7 @@ terminal_renderer_init_with_pipelines :: proc(
 
 	initial_capacity := 500 * 200
 	r.packed_cells = make([dynamic]u64, 80 * 24, initial_capacity, allocator)
-	r.direct_colors = make([dynamic]u32, 80 * 24 * 2, initial_capacity * 2, allocator)
+	r.direct_colors = make([dynamic]u32, 80 * 24 * COLOR_WORDS_PER_CELL, initial_capacity * COLOR_WORDS_PER_CELL, allocator)
 	r.dirty_tiles = make([dynamic]u32, 0, initial_capacity / 16, allocator)
 
 	r.bound_atlas_view = atlas_view
@@ -522,8 +527,8 @@ _terminal_renderer_ensure_resources :: proc(
 	if len(r.packed_cells) < total_cells {
 		resize(&r.packed_cells, total_cells)
 	}
-	if len(r.direct_colors) < total_cells * 2 {
-		resize(&r.direct_colors, total_cells * 2)
+	if len(r.direct_colors) < total_cells * COLOR_WORDS_PER_CELL {
+		resize(&r.direct_colors, total_cells * COLOR_WORDS_PER_CELL)
 	}
 
 	atlas_changed := rawptr(atlas_view) != nil && atlas_view != r.bound_atlas_view
@@ -565,13 +570,14 @@ _terminal_renderer_ensure_resources :: proc(
 		r.fs_rend.cell_h = cell_h
 
 		cell_bytes := u64(cols * rows) * fullscreen.FULLSCREEN_CELL_BYTES
+		color_bytes := u64(cols * rows) * COLOR_WORDS_PER_CELL * size_of(u32)
 		if grid_changed || rawptr(r.fs_rend.cell_buffer) == nil {
 			if rawptr(r.fs_rend.cell_buffer) != nil do contract.destroy_buffer(r.fs_rend.cell_buffer)
 			r.fs_rend.cell_buffer = contract.create_buffer(r.device, cell_bytes, .Storage | .Copy_Dst, false)
 		}
 		if grid_changed || rawptr(r.fs_color_buffer) == nil {
 			if rawptr(r.fs_color_buffer) != nil do contract.destroy_buffer(r.fs_color_buffer)
-			r.fs_color_buffer = contract.create_buffer(r.device, cell_bytes, .Storage | .Copy_Dst, false)
+			r.fs_color_buffer = contract.create_buffer(r.device, color_bytes, .Storage | .Copy_Dst, false)
 		}
 
 		if rawptr(r.fs_rend.bind_group) != nil do contract.destroy_bind_group(r.fs_rend.bind_group)
@@ -697,6 +703,22 @@ _terminal_renderer_resolve_colors :: #force_inline proc(
 	return fg, bg
 }
 
+// _terminal_renderer_underline_rgb resolves the stored SGR 58 colour, falling
+// back to the cell's foreground for the default pen colour (SGR 59).
+_terminal_renderer_underline_rgb :: #force_inline proc(
+	dc: cell.Direct_Color,
+	fg: [4]f32,
+) -> [4]f32 {
+	switch dc.underline.mode {
+	case .Rgb:
+		return {f32(dc.underline.rgb[0]) / 255.0, f32(dc.underline.rgb[1]) / 255.0, f32(dc.underline.rgb[2]) / 255.0, fg[3]}
+	case .Palette:
+		return PALETTE_PRECOMPUTED[dc.underline.index & 15]
+	case .Default:
+	}
+	return fg
+}
+
 _terminal_renderer_push_emoji_quad_only :: #force_inline proc(
 	r: ^Terminal_Renderer,
 	eg: plat_font.Emoji_Glyph,
@@ -752,21 +774,62 @@ _terminal_renderer_push_decoration :: #force_inline proc(
 	instance.instance_renderer_push(&r.inst_rend, rec)
 }
 
+// _terminal_renderer_push_underline draws the stored SGR 4:n shape. Geometry
+// mirrors ul_band() in the cell shaders (single/double/dotted/dashed/curly).
+_terminal_renderer_push_underline :: proc(
+	r: ^Terminal_Renderer,
+	ul_style: cell.Underline_Style,
+	x, y, w, cell_h: f32,
+	color: [4]f32,
+) {
+	thickness := max(1.0, math.floor(cell_h * 0.06))
+	base_y := y + cell_h - thickness
+	switch ul_style {
+	case .Double:
+		_terminal_renderer_push_decoration(r, x, base_y, w, thickness, color)
+		_terminal_renderer_push_decoration(r, x, base_y - thickness * 2.0, w, thickness, color)
+	case .Curly:
+		n := max(1, int(w / max(1.0, thickness * 2.0)))
+		seg_w := w / f32(n)
+		for i in 0 ..< n {
+			fx := (f32(i) + 0.5) / f32(n)
+			wave := math.sin(fx * 6.2831853) * cell_h * 0.08
+			_terminal_renderer_push_decoration(r, x + f32(i) * seg_w, base_y - thickness + wave, seg_w, thickness, color)
+		}
+	case .Dotted:
+		n := max(1, int(w / 3.0))
+		seg_w := w / f32(n)
+		for i in 0 ..< n {
+			_terminal_renderer_push_decoration(r, x + f32(i) * seg_w, base_y, seg_w * 0.5, thickness, color)
+		}
+	case .Dashed:
+		n := max(1, int(w / 4.0))
+		seg_w := w / f32(n)
+		for i in 0 ..< n {
+			_terminal_renderer_push_decoration(r, x + f32(i) * seg_w, base_y, seg_w * 0.6, thickness, color)
+		}
+	case .Single, .None:
+		_terminal_renderer_push_decoration(r, x, base_y, w, thickness, color)
+	}
+}
+
 // _terminal_renderer_push_decorations renders underline and strikethrough rules
-// in the foreground colour, matching the cell's own span and height.
+// for one cell. The underline uses the stored per-cell shape and colour; the
+// strike keeps the foreground colour.
 _terminal_renderer_push_decorations :: #force_inline proc(
 	r: ^Terminal_Renderer,
 	style: cell.Style_Flags,
+	dc: cell.Direct_Color,
 	x, y, w, cell_h: f32,
 	fg: [4]f32,
 ) {
-	// Geometry matches decor_hit() in the cell shaders exactly, so the sparse
-	// instance path and the tiled paths produce identical pixels.
-	thickness := max(1.0, math.floor(cell_h * 0.06))
 	if .Underline in style {
-		_terminal_renderer_push_decoration(r, x, y + cell_h - thickness, w, thickness, fg)
+		ul_style := dc.underline_style
+		if ul_style == .None do ul_style = .Single
+		_terminal_renderer_push_underline(r, ul_style, x, y, w, cell_h, _terminal_renderer_underline_rgb(dc, fg))
 	}
 	if .Strike in style {
+		thickness := max(1.0, math.floor(cell_h * 0.06))
 		_terminal_renderer_push_decoration(r, x, y + cell_h * 0.55, w, thickness, fg)
 	}
 }
@@ -905,6 +968,31 @@ _pack_f32_to_r5g6b5 :: #force_inline proc "contextless" (col: [4]f32) -> u16 {
 	)
 }
 
+// _pack_underline_decor writes the underline shape bits and the per-cell SGR 58
+// colour word for a packed cell. Plain single/default underlines add no side
+// storage beyond the existing decor bit.
+_pack_underline_decor :: #force_inline proc(
+	r: ^Terminal_Renderer,
+	row: ^grid.Row,
+	src, ci: int,
+	style: cell.Style_Flags,
+) {
+	if .Underline not_in style || src < 0 || src >= len(row.cells) do return
+	cell_val := row.cells[src]
+	dc: cell.Direct_Color
+	if .Has_Underline_Decor in cell_val.flags && src < len(row.direct_colors) {
+		dc = row.direct_colors[src]
+	}
+	ul := cell.Underline_Style.Single
+	if .Has_Underline_Decor in cell_val.flags && dc.underline_style > .None do ul = dc.underline_style
+	r.packed_cells[ci] |= GPU_CELL_DECOR_UNDERLINE
+	if ul != .Single do r.packed_cells[ci] |= u64(ul) << GPU_CELL_UL_STYLE_SHIFT
+	if dc.underline.mode != .Default {
+		fg := PALETTE_PRECOMPUTED[cell_val.fg & 15]
+		r.direct_colors[ci * COLOR_WORDS_PER_CELL + 2] = _float_to_argb(_terminal_renderer_underline_rgb(dc, fg))
+	}
+}
+
 _terminal_renderer_pack_grid :: proc(
 	r: ^Terminal_Renderer,
 	term: ^core_terminal.Terminal,
@@ -933,8 +1021,9 @@ _terminal_renderer_pack_grid :: proc(
 			for c in 0..<cols {
 				ci := row_base + c
 				r.packed_cells[ci] = blank_packed
-				r.direct_colors[ci * 2] = 0
-				r.direct_colors[ci * 2 + 1] = 0
+				r.direct_colors[ci * COLOR_WORDS_PER_CELL] = 0
+				r.direct_colors[ci * COLOR_WORDS_PER_CELL + 1] = 0
+				r.direct_colors[ci * COLOR_WORDS_PER_CELL + 2] = 0
 			}
 			continue
 		}
@@ -950,8 +1039,9 @@ _terminal_renderer_pack_grid :: proc(
 			ci := row_base + c
 			if c >= len(row.cells) {
 				r.packed_cells[ci] = blank_packed
-				r.direct_colors[ci * 2] = 0
-				r.direct_colors[ci * 2 + 1] = 0
+				r.direct_colors[ci * COLOR_WORDS_PER_CELL] = 0
+				r.direct_colors[ci * COLOR_WORDS_PER_CELL + 1] = 0
+				r.direct_colors[ci * COLOR_WORDS_PER_CELL + 2] = 0
 				continue
 			}
 
@@ -974,9 +1064,6 @@ _terminal_renderer_pack_grid :: proc(
 			cell_style := cell_val.style
 			if .Has_Hyperlink in cell_val.flags do cell_style += {.Underline}
 			style_val := fg_idx | (bg_idx << 4)
-			decor: u64 = 0
-			if .Underline in cell_style do decor |= GPU_CELL_DECOR_UNDERLINE
-			if .Strike in cell_style do decor |= GPU_CELL_DECOR_STRIKE
 			if style_val == 0 && (.Invert in cell_val.style || (cell_val.fg == 0 && cell_val.char > ' ')) {
 				style_val |= 256
 			}
@@ -990,7 +1077,7 @@ _terminal_renderer_pack_grid :: proc(
 			bg_argb: u32 = 0
 
 			dc: cell.Direct_Color
-			if .Has_Direct_Color in cell_val.flags && c < len(row.direct_colors) {
+			if (.Has_Direct_Color in cell_val.flags || .Has_Underline_Decor in cell_val.flags) && c < len(row.direct_colors) {
 				dc = row.direct_colors[c]
 			}
 			if dc.has_fg || dc.has_bg || .Dim in cell_val.style {
@@ -1003,8 +1090,9 @@ _terminal_renderer_pack_grid :: proc(
 					bg_argb = _float_to_argb(bg_col)
 				}
 			}
-			r.direct_colors[ci * 2] = fg_argb
-			r.direct_colors[ci * 2 + 1] = bg_argb
+			r.direct_colors[ci * COLOR_WORDS_PER_CELL] = fg_argb
+			r.direct_colors[ci * COLOR_WORDS_PER_CELL + 1] = bg_argb
+			r.direct_colors[ci * COLOR_WORDS_PER_CELL + 2] = 0
 
 			if .Wide_Continuation in cell_val.flags && c > 0 && .Wide_Lead in row.cells[c - 1].flags {
 				r.packed_cells[ci] = _pack_gpu_cell(' ', style_val, 0, cflags, 0)
@@ -1076,17 +1164,16 @@ _terminal_renderer_pack_grid :: proc(
 		// Apply decorations and concealment once per row so every early-exit cell
 		// (blank, wide continuation, emoji placeholder) is covered uniformly.
 		for c in 0..<min(cols, len(row.cells)) {
-			style := row.cells[c].style
-			if .Has_Hyperlink in row.cells[c].flags do style += {.Underline}
 			// A wide glyph's right half must inherit its lead's rules so the
 			// underline is continuous across both cells.
-			if .Wide_Continuation in row.cells[c].flags && c > 0 {
-				style = row.cells[c - 1].style
-			}
+			src := c
+			if .Wide_Continuation in row.cells[c].flags && c > 0 do src = c - 1
+			style := row.cells[src].style
+			if .Has_Hyperlink in row.cells[src].flags do style += {.Underline}
 			ci := row_base + c
-			if .Underline in style do r.packed_cells[ci] |= GPU_CELL_DECOR_UNDERLINE
 			if .Strike in style do r.packed_cells[ci] |= GPU_CELL_DECOR_STRIKE
 			if .Italic in style do r.packed_cells[ci] |= GPU_CELL_DECOR_ITALIC
+			_pack_underline_decor(r, row, src, ci, style)
 			if .Hidden in style {
 				r.packed_cells[ci] = (r.packed_cells[ci] & ~u64(0x1FFFFF)) | u64(' ')
 			}
@@ -1294,7 +1381,7 @@ terminal_renderer_encode :: proc(
 				}
 
 				dc: cell.Direct_Color
-				if .Has_Direct_Color in cell_val.flags && c < len(row.direct_colors) {
+				if (.Has_Direct_Color in cell_val.flags || .Has_Underline_Decor in cell_val.flags) && c < len(row.direct_colors) {
 					dc = row.direct_colors[c]
 				}
 
@@ -1303,6 +1390,11 @@ terminal_renderer_encode :: proc(
 					selected_logical_r_start, selected_c_start, selected_logical_r_end, selected_c_end,
 				)
 				is_hovered := !is_selected && _terminal_renderer_is_cell_hovered(logical_r, c, hover)
+				// Hyperlinked and hovered cells are underlined by default. This
+				// one style value feeds every glyph branch below.
+				cell_style := cell_val.style
+				if is_hovered do cell_style += {.Underline}
+				if .Has_Hyperlink in cell_val.flags do cell_style += {.Underline}
 
 				if !is_selected && (cell_val.char == 0 || cell_val.char == ' ') && cell_val.bg == 0 && cell_val.style == {} && .Has_Hyperlink not_in cell_val.flags && !dc.has_bg {
 					continue
@@ -1330,11 +1422,8 @@ terminal_renderer_encode :: proc(
 					slot, ok := plat_font.glyph_atlas_get_or_rasterize(gam, rune(lig_cp), false)
 					if !ok do slot = 0
 					_terminal_renderer_push_glyph(r, gam, slot, x_pos, y_pos, cell_h, fg, bg)
-					cell_style := cell_val.style
-					if is_hovered do cell_style += {.Underline}
-					if .Has_Hyperlink in cell_val.flags do cell_style += {.Underline}
 					if .Underline in cell_style || .Strike in cell_style {
-						_terminal_renderer_push_decorations(r, cell_style, x_pos, y_pos, gw, cell_h, fg)
+						_terminal_renderer_push_decorations(r, cell_style, dc, x_pos, y_pos, gw, cell_h, fg)
 					}
 					continue
 				}
@@ -1352,7 +1441,7 @@ terminal_renderer_encode :: proc(
 						if !handled {
 							if slot, sok := plat_font.glyph_atlas_get_or_rasterize_cluster(gam, runes, is_wide); sok {
 								_terminal_renderer_push_glyph(r, gam, slot, x_pos, y_pos, cell_h, fg, bg)
-								_terminal_renderer_push_decorations(r, cell_val.style, x_pos, y_pos, gw, cell_h, fg)
+								_terminal_renderer_push_decorations(r, cell_style, dc, x_pos, y_pos, gw, cell_h, fg)
 								handled = true
 							}
 						}
@@ -1375,10 +1464,8 @@ terminal_renderer_encode :: proc(
 				slot, ok := plat_font.glyph_atlas_get_or_rasterize(gam, ch, is_wide)
 				if !ok do slot = 0
 				_terminal_renderer_push_glyph(r, gam, slot, x_pos, y_pos, cell_h, fg, bg)
-				cell_style := cell_val.style
-				if .Has_Hyperlink in cell_val.flags do cell_style += {.Underline}
 				if .Underline in cell_style || .Strike in cell_style {
-					_terminal_renderer_push_decorations(r, cell_style, x_pos, y_pos, gw, cell_h, fg)
+					_terminal_renderer_push_decorations(r, cell_style, dc, x_pos, y_pos, gw, cell_h, fg)
 				}
 			}
 		}
@@ -1434,7 +1521,7 @@ terminal_renderer_encode :: proc(
 		instance.instance_renderer_flush(&r.emoji_rend)
 
 		contract.write_buffer(r.queue, r.tile_rend.cell_buffer, 0, raw_data(r.packed_cells[:]), u64(total_cells * size_of(u64)))
-		contract.write_buffer(r.queue, r.fs_color_buffer, 0, raw_data(r.direct_colors[:]), u64(total_cells * 2 * size_of(u32)))
+		contract.write_buffer(r.queue, r.fs_color_buffer, 0, raw_data(r.direct_colors[:]), u64(total_cells * COLOR_WORDS_PER_CELL * size_of(u32)))
 
 		clear(&r.dirty_tiles)
 		full_tile_sync := !r.tile_fb_valid ||
@@ -1543,7 +1630,7 @@ terminal_renderer_encode :: proc(
 		instance.instance_renderer_flush(&r.emoji_rend)
 
 		contract.write_buffer(r.queue, r.fs_rend.cell_buffer, 0, raw_data(r.packed_cells[:]), u64(total_cells * size_of(u64)))
-		contract.write_buffer(r.queue, r.fs_color_buffer, 0, raw_data(r.direct_colors[:]), u64(total_cells * 2 * size_of(u32)))
+		contract.write_buffer(r.queue, r.fs_color_buffer, 0, raw_data(r.direct_colors[:]), u64(total_cells * COLOR_WORDS_PER_CELL * size_of(u32)))
 
 		fs_params := fullscreen.Fullscreen_Params{
 			screen_w      = screen_w,

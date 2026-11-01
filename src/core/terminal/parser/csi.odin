@@ -49,6 +49,42 @@ _sgr_read_extended :: proc(p: ^Parser, idx: ^int, colon_syntax: bool) -> (color:
 	return {}, false
 }
 
+// _sgr_underline_style maps an SGR 4:<n> sub-parameter to a shape. Values
+// outside 0..5 (and the bare `4` form) mean a single underline.
+_sgr_underline_style :: proc(code: int) -> cell.Underline_Style {
+	switch code {
+	case 0: return .None
+	case 2: return .Double
+	case 3: return .Curly
+	case 4: return .Dotted
+	case 5: return .Dashed
+	}
+	return .Single
+}
+
+// _sgr_sync_underline_flag mirrors the pen's underline shape/colour into the
+// cell side storage flag, so plain single/default underlines add no side cost.
+_sgr_sync_underline_flag :: proc(p: ^Parser) {
+	needed := cell.underline_decor_needed(p.cursor.underline_style, p.cursor.direct_color.underline)
+	if needed {
+		p.cursor.active_flags += {.Has_Underline_Decor}
+		p.cursor.direct_color.underline_style = p.cursor.underline_style
+	} else {
+		p.cursor.active_flags -= {.Has_Underline_Decor}
+		p.cursor.direct_color.underline_style = .None
+	}
+}
+
+_sgr_set_underline :: proc(p: ^Parser, style: cell.Underline_Style) {
+	p.cursor.underline_style = style
+	if style == .None {
+		p.cursor.active_style -= {.Underline}
+	} else {
+		p.cursor.active_style += {.Underline}
+	}
+	_sgr_sync_underline_flag(p)
+}
+
 _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, cmd: u8) {
 	if g == nil do return
 
@@ -226,6 +262,7 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 			p.cursor.active_bg = 0
 			p.cursor.active_style = {}
 			p.cursor.active_flags = {}
+			p.cursor.underline_style = .None
 			p.cursor.direct_color = {}
 			return
 		}
@@ -240,6 +277,7 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 				p.cursor.active_bg = 0
 				p.cursor.active_style = {}
 				p.cursor.active_flags = {}
+				p.cursor.underline_style = .None
 				p.cursor.direct_color = {}
 			case 1: p.cursor.active_style += {.Bold}
 			case 2: p.cursor.active_style += {.Dim}
@@ -248,7 +286,7 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 			case 9: p.cursor.active_style += {.Strike}
 			case 22: p.cursor.active_style -= {.Bold, .Dim}
 			case 23: p.cursor.active_style -= {.Italic}
-			case 24: p.cursor.active_style -= {.Underline}
+			case 24: _sgr_set_underline(p, .None)
 			case 27: p.cursor.active_style -= {.Invert}
 			case 29: p.cursor.active_style -= {.Strike}
 			case 30..=37: // Standard FG (0..7)
@@ -319,21 +357,26 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 						p.cursor.active_flags += {.Has_Direct_Color}
 					}
 				}
-			case 58: // Underline colour (consumed; decoration colour is not yet rendered)
+			case 58: // Underline colour: RGB (`58:2::r:g:b`) or 256 colour (`58;5;n`)
 				colon := idx >= 1 && p.csi_sep[idx - 1] == ':'
-				_, _ = _sgr_read_extended(p, &idx, colon)
+				if color, ok := _sgr_read_extended(p, &idx, colon); ok {
+					if color.has_rgb {
+						p.cursor.direct_color.underline = {mode = .Rgb, rgb = color.rgb}
+					} else if color.has_palette {
+						p.cursor.direct_color.underline = {mode = .Palette, index = color.palette}
+					}
+					_sgr_sync_underline_flag(p)
+				}
 			case 59: // Default underline colour
+				p.cursor.direct_color.underline = {}
+				_sgr_sync_underline_flag(p)
 			case 4: // Underline, optionally with a colon sub-parameter (4:0..4:5)
 				if idx >= 1 && p.csi_sep[idx - 1] == ':' {
 					style := p.csi_params[idx] if idx < p.csi_count else 1
 					idx += 1
-					if style == 0 {
-						p.cursor.active_style -= {.Underline}
-					} else {
-						p.cursor.active_style += {.Underline}
-					}
+					_sgr_set_underline(p, _sgr_underline_style(style))
 				} else {
-					p.cursor.active_style += {.Underline}
+					_sgr_set_underline(p, .Single)
 				}
 			case 5: // Blink (slow)
 				p.cursor.active_style += {.Blink}
@@ -341,8 +384,8 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 				p.cursor.active_style += {.Blink}
 			case 8: // Conceal
 				p.cursor.active_style += {.Hidden}
-			case 21: // Double underline, folded into the underline flag
-				p.cursor.active_style += {.Underline}
+			case 21: // Double underline
+				_sgr_set_underline(p, .Double)
 			case 25: // No blink
 				p.cursor.active_style -= {.Blink}
 			case 28: // Reveal

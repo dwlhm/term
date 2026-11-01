@@ -23,7 +23,11 @@ _parser_erase_cell :: proc(p: ^Parser) -> (c: cell.Semantic_Cell, dc: cell.Direc
 	flags: cell.Cell_Flags = {}
 	if .Has_Direct_Color in p.cursor.active_flags && p.cursor.direct_color.has_bg {
 		flags += {.Has_Direct_Color}
-		dc = p.cursor.direct_color
+		// Erasing keeps the background (BCE) but never the pen's underline.
+		dc = cell.Direct_Color{
+			bg     = p.cursor.direct_color.bg,
+			has_bg = true,
+		}
 	}
 	c = cell.cell_make(' ', p.cursor.active_fg, p.cursor.active_bg, {}, flags)
 	return c, dc

@@ -45,7 +45,9 @@ _paint_expect_rows_equal :: proc(t: ^testing.T, a, b: ^term.Terminal, ga, gb: ^g
 			testing.expectf(t, ca == cb, "row %d col %d: %v != %v", r, c, ca, cb)
 			testing.expectf(t, term.terminal_link_uri(a, da.link_id) == term.terminal_link_uri(b, db.link_id), "row %d col %d link differs", r, c)
 			da.link_id, db.link_id = 0, 0
-			if .Has_Direct_Color in ca.flags do testing.expectf(t, da == db, "row %d col %d: %v != %v", r, c, da, db)
+			if .Has_Direct_Color in ca.flags || .Has_Underline_Decor in ca.flags {
+				testing.expectf(t, da == db, "row %d col %d: %v != %v", r, c, da, db)
+			}
 		}
 	}
 }
@@ -70,6 +72,7 @@ _paint_expect_state_equal :: proc(t: ^testing.T, a, b: ^term.Terminal) {
 	testing.expect_value(t, pb.cursor.visible, pa.cursor.visible)
 	testing.expect_value(t, pb.cursor.active_fg, pa.cursor.active_fg)
 	testing.expect_value(t, pb.cursor.active_style, pa.cursor.active_style)
+	testing.expect_value(t, pb.cursor.underline_style, pa.cursor.underline_style)
 	testing.expect_value(t, pb.cursor.direct_color, pa.cursor.direct_color)
 	testing.expect_value(t, pb.scroll_top, pa.scroll_top)
 	testing.expect_value(t, pb.scroll_bottom, pa.scroll_bottom)

@@ -45,6 +45,7 @@ parser_init :: proc(p: ^Parser, rows, cols: int) {
 		active_bg    = 0,
 		active_style = {},
 		active_flags = {},
+		underline_style = .None,
 		direct_color = {},
 		visible      = true,
 		pending_wrap = false,

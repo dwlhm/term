@@ -101,7 +101,7 @@ const LUT_SELECTION_WORD: u32 = 1024u;
 const LUT_HOVER_OPENABLE_WORD: u32 = 1025u;
 const LUT_HOVER_BLOCKED_WORD: u32 = 1026u;
 const OPAQUE_ALPHA: f32 = 1.0;
-const COLOR_WORDS_PER_CELL: u32 = 2u;
+const COLOR_WORDS_PER_CELL: u32 = 3u;
 const ARGB_A_SHIFT: u32 = 24u;
 const ARGB_R_SHIFT: u32 = 16u;
 const ARGB_G_SHIFT: u32 = 8u;
@@ -126,17 +126,50 @@ fn italic_shift(decor: u32, fy: f32) -> f32 {
     return (0.5 - fy) * 0.22;
 }
 
-// decor_hit reports whether a pixel row belongs to an underline/strike rule.
-fn decor_hit(decor: u32, y: f32, cell_y0: f32, cell_h: f32) -> bool {
+// ul_band reports whether a pixel belongs to the stored SGR 4:n underline
+// shape (0 = single). Geometry mirrors render_terminal._terminal_renderer_push_underline.
+fn ul_band(ul_style: u32, px: f32, py: f32, cell_x0: f32, cell_y0: f32, cell_w: f32, cell_h: f32) -> bool {
+    let style = select(1u, ul_style, ul_style != 0u);
     let thickness = max(1.0, floor(cell_h * 0.06));
-    if ((decor & CELL_DECOR_UNDERLINE) != 0u) {
-        if (y >= cell_y0 + cell_h - thickness) { return true; }
+    let bottom = cell_y0 + cell_h - thickness;
+    let gw = max(cell_w, 1.0);
+    let fx = (px - cell_x0) / gw;
+    switch style {
+        case 2u: {
+            return py >= bottom || (py >= bottom - thickness * 2.0 && py < bottom - thickness);
+        }
+        case 3u: {
+            let wave = cell_y0 + cell_h - thickness * 2.0 + sin(fx * 6.2831853) * cell_h * 0.08;
+            return abs(py - wave) < thickness * 0.5;
+        }
+        case 4u: {
+            let n = max(1.0, floor(gw / 3.0));
+            let seg = fract(clamp(fx, 0.0, 0.999) * n);
+            return py >= bottom && seg < 0.5;
+        }
+        case 5u: {
+            let n = max(1.0, floor(gw / 4.0));
+            let seg = fract(clamp(fx, 0.0, 0.999) * n);
+            return py >= bottom && seg < 0.6;
+        }
+        default: {
+            return py >= bottom;
+        }
     }
-    if ((decor & CELL_DECOR_STRIKE) != 0u) {
-        let strike_y = cell_y0 + cell_h * 0.55;
-        if (y >= strike_y && y < strike_y + thickness) { return true; }
-    }
-    return false;
+}
+
+// strike_hit reports whether a pixel row belongs to the strikethrough rule.
+fn strike_hit(decor: u32, y: f32, cell_y0: f32, cell_h: f32) -> bool {
+    if ((decor & CELL_DECOR_STRIKE) == 0u) { return false; }
+    let thickness = max(1.0, floor(cell_h * 0.06));
+    let strike_y = cell_y0 + cell_h * 0.55;
+    return y >= strike_y && y < strike_y + thickness;
+}
+
+// underline_rgb picks the per-cell SGR 58 colour, or the foreground for SGR 59.
+fn underline_rgb(ul_argb: u32, fg_rgb: vec3<f32>) -> vec3<f32> {
+    if (ul_argb == 0u) { return fg_rgb; }
+    return unpack_argb(ul_argb).rgb;
 }
 
 fn cell_is_selected(cflags: u32) -> bool {
@@ -263,6 +296,7 @@ fn fullscreen_fs_main(input: Fullscreen_Output) -> @location(0) vec4<f32> {
     let cflags = (hi >> 1u) & 0x7Fu;
     let slot = (hi >> 8u) & 0x1FFu;
     let decor = (hi >> 17u) & 0x7u;
+    let ul_style = (hi >> 20u) & 0x7u;
     let cell_y0 = params.pad_y + f32(lr) * params.cell_h;
 
     // Direct-color cells read per-cell fg/bg ARGB words; a zero word falls
@@ -301,6 +335,8 @@ fn fullscreen_fs_main(input: Fullscreen_Output) -> @location(0) vec4<f32> {
 
     let x0 = params.pad_x + f32(lc) * params.cell_w;
     let y0 = params.pad_y + f32(lr) * params.cell_h;
+    let ul_argb = colors[ci * COLOR_WORDS_PER_CELL + 2u];
+    let ul_col = underline_rgb(ul_argb, fg_rgb);
 
     // Continuation cell: authored background plus the left neighbor's
     // wide-lead right half when present (instance-path parity).
@@ -360,7 +396,10 @@ fn fullscreen_fs_main(input: Fullscreen_Output) -> @location(0) vec4<f32> {
                 }
             }
         }
-        if (decor_hit(decor, py + 0.5, cell_y0, params.cell_h)) {
+        if ((decor & CELL_DECOR_UNDERLINE) != 0u && ul_band(ul_style, px, py + 0.5, x0, cell_y0, params.cell_w, params.cell_h)) {
+            col = select(ul_col * params.cell_opacity, ul_col, cell_is_selected(cflags));
+            glyph_coverage = max(glyph_coverage, 1.0);
+        } else if (strike_hit(decor, py + 0.5, cell_y0, params.cell_h)) {
             col = select(fg_rgb * params.cell_opacity, fg_rgb, cell_is_selected(cflags));
             glyph_coverage = max(glyph_coverage, 1.0);
         }
@@ -398,7 +437,10 @@ fn fullscreen_fs_main(input: Fullscreen_Output) -> @location(0) vec4<f32> {
             }
         }
     }
-    if (decor_hit(decor, py + 0.5, cell_y0, params.cell_h)) {
+    if ((decor & CELL_DECOR_UNDERLINE) != 0u && ul_band(ul_style, px, py + 0.5, x0, cell_y0, params.cell_w, params.cell_h)) {
+        col = select(ul_col * params.cell_opacity, ul_col, cell_is_selected(cflags));
+        glyph_coverage = max(glyph_coverage, 1.0);
+    } else if (strike_hit(decor, py + 0.5, cell_y0, params.cell_h)) {
         col = select(fg_rgb * params.cell_opacity, fg_rgb, cell_is_selected(cflags));
         glyph_coverage = max(glyph_coverage, 1.0);
     }

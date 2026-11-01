@@ -115,6 +115,7 @@ _parser_soft_reset :: proc(p: ^Parser, g: ^grid.Grid) {
 	p.cursor.active_bg = 0
 	p.cursor.active_style = {}
 	p.cursor.active_flags = {}
+	p.cursor.underline_style = .None
 	p.cursor.direct_color = {}
 	p.scroll_top = 0
 	if g != nil do p.scroll_bottom = max(0, g.row_count - 1)

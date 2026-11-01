@@ -48,6 +48,7 @@ Cursor :: struct {
 	active_bg:    u8,
 	active_style: cell.Style_Flags,
 	active_flags: cell.Cell_Flags,
+	underline_style: cell.Underline_Style, // SGR 4:n shape for newly written cells
 	direct_color: cell.Direct_Color,
 	visible:      bool,
 	pending_wrap: bool,

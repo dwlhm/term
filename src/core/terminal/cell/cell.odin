@@ -20,8 +20,34 @@ Cell_Flag :: enum u8 {
 	Has_Egc           = 2, // References an Extended Grapheme Cluster in egc pool
 	Has_Direct_Color  = 3, // Uses 24-bit TrueColor stored in parallel row extension
 	Has_Hyperlink     = 4, // References an active OSC 8 hyperlink ID
+	Has_Underline_Decor = 5, // Uses the underline style/colour in the parallel row extension
 }
 Cell_Flags :: distinct bit_set[Cell_Flag; u8]
+
+// Underline_Style is the SGR 4:<n> underline shape stored beside a cell.
+// `.None` means no underline; every other value implies the Underline flag.
+Underline_Style :: enum u8 {
+	None   = 0,
+	Single = 1,
+	Double = 2,
+	Curly  = 3,
+	Dotted = 4,
+	Dashed = 5,
+}
+
+// Underline_Color_Mode distinguishes the default pen colour (SGR 59), a
+// 256-colour palette index (SGR 58;5;n) and a 24-bit RGB value (SGR 58;2::r:g:b).
+Underline_Color_Mode :: enum u8 {
+	Default = 0,
+	Palette = 1,
+	Rgb     = 2,
+}
+
+Underline_Color :: struct {
+	mode:  Underline_Color_Mode,
+	index: u8,
+	rgb:   [3]u8,
+}
 
 // Semantic_Cell is the canonical 64-bit monospace character cell representation.
 // Target size: exactly 8 bytes (fits in a single 64-bit machine word/register).
@@ -41,6 +67,23 @@ Direct_Color :: struct {
 	has_fg: bool,
 	has_bg: bool,
 	link_id: u16, // OSC 8 hyperlink id (0 = none), stored beside the cell
+	underline_style: Underline_Style, // SGR 4:n shape (None unless Has_Underline_Decor)
+	underline:       Underline_Color, // SGR 58/59 underline colour
+}
+
+// underline_decor_needed reports whether the cell's underline needs the side
+// storage: a non-single shape or a non-default colour. Plain `SGR 4` stays in
+// the 8-byte cell alone, keeping the ASCII fast path free of side reads.
+underline_decor_needed :: proc(style: Underline_Style, color: Underline_Color) -> bool {
+	return style > .Single || color.mode != .Default
+}
+
+// cell_underline_style resolves the effective underline shape for a cell,
+// falling back to Single when only the Underline flag is present.
+cell_underline_style :: proc(c: Semantic_Cell, dc: Direct_Color) -> Underline_Style {
+	if .Underline not_in c.style do return .None
+	if .Has_Underline_Decor in c.flags && dc.underline_style > .None do return dc.underline_style
+	return .Single
 }
 
 // CELL_DEFAULT represents a blank terminal cell with default attributes.

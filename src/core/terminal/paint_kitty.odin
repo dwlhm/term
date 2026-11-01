@@ -18,6 +18,8 @@ _paint_kitty :: proc(t: ^Terminal, out: ^[dynamic]u8) {
 	for &img in ks.images {
 		if img.id == 0 || !_paint_kitty_image_used(ks, &img, screen, t.rows) do continue
 		if !_paint_kitty_transmit(out, &img) do continue
+		_paint_kitty_frames(out, &img)
+		_paint_kitty_anim_ctrl(out, &img)
 		if img.is_virtual {
 			_paint_kitty_key(out, "\x1b_Ga=p,U=1,q=2,i", int(img.id))
 			_paint_kitty_key(out, ",c", img.cols)
@@ -56,14 +58,21 @@ _paint_kitty_transmit :: proc(out: ^[dynamic]u8, img: ^extension.Kitty_Image) ->
 	size := img.width * img.height * 4
 	if !extension.kitty_dims_valid(img.width, img.height) || len(img.pixels) < size do return false
 	if (size + 2) / 3 * 4 > extension.KITTY_MAX_PAYLOAD_BYTES do return false
-	px := img.pixels[:size]
-	for off := 0; off < size; off += PAINT_KITTY_CHUNK {
-		chunk := px[off:min(off + PAINT_KITTY_CHUNK, size)]
-		more := 1 if off + PAINT_KITTY_CHUNK < size else 0
+	_paint_kitty_key(out, "\x1b_Ga=t,f=32,t=d,q=2,i", int(img.id))
+	_paint_kitty_key(out, ",s", img.width)
+	_paint_kitty_key(out, ",v", img.height)
+	_paint_kitty_payload(out, img.pixels[:size])
+	return true
+}
+
+// _paint_kitty_payload writes RGBA bytes as base64 chunks. `m=1` continues the
+// APC transfer, `m=0` finishes it; the caller has already written the first
+// chunk's control keys (up to but not including `,m`).
+_paint_kitty_payload :: proc(out: ^[dynamic]u8, px: []u8) {
+	for off := 0; off < len(px); off += PAINT_KITTY_CHUNK {
+		chunk := px[off:min(off + PAINT_KITTY_CHUNK, len(px))]
+		more := 1 if off + PAINT_KITTY_CHUNK < len(px) else 0
 		if off == 0 {
-			_paint_kitty_key(out, "\x1b_Ga=t,f=32,t=d,q=2,i", int(img.id))
-			_paint_kitty_key(out, ",s", img.width)
-			_paint_kitty_key(out, ",v", img.height)
 			_paint_kitty_key(out, ",m", more)
 		} else {
 			_paint_kitty_key(out, "\x1b_Gm", more)
@@ -72,7 +81,49 @@ _paint_kitty_transmit :: proc(out: ^[dynamic]u8, img: ^extension.Kitty_Image) ->
 		_paint_base64(out, chunk)
 		_paint_str(out, "\x1b\\")
 	}
-	return true
+}
+
+// _paint_kitty_frames re-transmits every stored animation frame. Each frame is
+// its own kitty `a=f` transmission with the recorded source rect, gap and
+// composition; frames that would exceed the receiver limits are skipped.
+_paint_kitty_frames :: proc(out: ^[dynamic]u8, img: ^extension.Kitty_Image) {
+	for &frame in img.animation.frames {
+		size := frame.width * frame.height * 4
+		if !extension.kitty_dims_valid(frame.width, frame.height) || len(frame.pixels) < size do continue
+		if (size + 2) / 3 * 4 > extension.KITTY_MAX_PAYLOAD_BYTES do continue
+		_paint_kitty_key(out, "\x1b_Ga=f,q=2,i", int(img.id))
+		_paint_kitty_key(out, ",r", frame.frame_num)
+		_paint_kitty_key(out, ",s", frame.width)
+		_paint_kitty_key(out, ",v", frame.height)
+		if frame.composition != 0 do _paint_kitty_key(out, ",c", int(frame.composition))
+		_paint_kitty_key(out, ",z", frame.duration_ms)
+		_paint_kitty_src_rect(out, frame.x, frame.y, frame.w, frame.h)
+		if frame.offset_x != 0 do _paint_kitty_key(out, ",X", frame.offset_x)
+		if frame.offset_y != 0 do _paint_kitty_key(out, ",Y", frame.offset_y)
+		_paint_kitty_payload(out, frame.pixels[:size])
+	}
+}
+
+_paint_kitty_src_rect :: proc(out: ^[dynamic]u8, x, y, w, h: int) {
+	if x != 0 do _paint_kitty_key(out, ",x", x)
+	if y != 0 do _paint_kitty_key(out, ",y", y)
+	if w != 0 do _paint_kitty_key(out, ",w", w)
+	if h != 0 do _paint_kitty_key(out, ",h", h)
+}
+
+// _paint_kitty_anim_ctrl restores the animation state machine after the frames:
+// `s` state (1 stop / 2 load / 3 run), `v` loop count, `c` current frame
+// (1-based, as the parser maps it back to an index) and `z` the frame gap.
+_paint_kitty_anim_ctrl :: proc(out: ^[dynamic]u8, img: ^extension.Kitty_Image) {
+	anim := &img.animation
+	if len(anim.frames) == 0 do return
+	_paint_kitty_key(out, "\x1b_Ga=a,q=2,i", int(img.id))
+	_paint_kitty_key(out, ",s", int(anim.state))
+	_paint_kitty_key(out, ",v", anim.loop_count)
+	_paint_kitty_key(out, ",c", anim.current_frame + 1)
+	idx := clamp(anim.current_frame, 0, len(anim.frames) - 1)
+	_paint_kitty_key(out, ",z", anim.frames[idx].duration_ms)
+	_paint_str(out, "\x1b\\")
 }
 
 _paint_kitty_place :: proc(out: ^[dynamic]u8, pl: ^extension.Kitty_Placement) {
