@@ -52,14 +52,14 @@ _signal_thread_entry :: proc "c" (arg: rawptr) -> rawptr {
 		}
 		if sig == SIGNAL_SHUTDOWN_SENTINEL do break
 		intrinsics.atomic_store(&r.app.quit_requested, true)
-		app_pty_wakeup_callback(r.app)
+		app_wakeup_callback(r.app)
 	}
 	return nil
 }
 
 // signals_start spawns a pthread looping on sigwait(quit set):
 // SIGTERM/SIGINT/SIGHUP → atomic store app.quit_requested = true, then
-// app_pty_wakeup_callback(app); SIGUSR2 → leave the loop.
+// app_wakeup_callback(app); SIGUSR2 → leave the loop.
 signals_start :: proc(r: ^Signal_Router, app: ^Term_App) -> bool {
 	if r == nil || app == nil do return false
 	if r.running do return true

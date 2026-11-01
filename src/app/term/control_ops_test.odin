@@ -90,7 +90,7 @@ test_control_ping :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_control_ls_empty_and_one :: proc(t: ^testing.T) {
+test_control_ls_and_kill_belong_to_the_core :: proc(t: ^testing.T) {
 	sock := unique_ctl_sock()
 	os.set_env("TERM_CTL_SOCK", sock)
 	defer os.unset_env("TERM_CTL_SOCK")
@@ -106,63 +106,11 @@ test_control_ls_empty_and_one :: proc(t: ^testing.T) {
 	if err != .None do return
 	defer app_control_stop(app)
 
-	// empty
-	reply, cerr := run_client(app, sock, "ls")
-	testing.expect_value(t, cerr, plat_ipc.Ipc_Error.None)
-	testing.expect_value(t, reply, "ok\n")
-
-	// detach one real session with id 77
-	cfg := sess_feat.Session_Config{shell = "/bin/sh", rows = 24, cols = 80}
-	sess, serr := sess_feat.session_create(cfg)
-	testing.expect(t, serr == .None, "session_create failed")
-	testing.expect(t, sess != nil, "session")
-	if sess == nil do return
-	ok := sess_feat.session_registry_detach(&app.session_reg, 77, sess)
-	testing.expect(t, ok, "detach")
-
-	reply2, cerr2 := run_client(app, sock, "ls")
-	testing.expect_value(t, cerr2, plat_ipc.Ipc_Error.None)
-	// reply has ok\n + one row
-	testing.expect(t, strings.has_prefix(reply2, "ok\n"), "prefix")
-	// extract row line
-	body := reply2[len("ok\n"):]
-	line := strings.trim_right(body, "\n") // empty trailing fields end in '\t'; keep them
-	row, rok := ctrl_feat.control_parse_session_row(line)
-	testing.expect(t, rok, "parse row")
-	testing.expect_value(t, row.id, u32(77))
-}
-
-@(test)
-test_control_kill_and_not_found :: proc(t: ^testing.T) {
-	sock := unique_ctl_sock()
-	os.set_env("TERM_CTL_SOCK", sock)
-	defer os.unset_env("TERM_CTL_SOCK")
-
-	app := new(Term_App)
-	defer free(app)
-	app.role = .Primary
-	sess_feat.session_registry_init(&app.session_reg)
-	defer sess_feat.session_registry_destroy(&app.session_reg)
-
-	cfg := sess_feat.Session_Config{shell = "/bin/sh", rows = 24, cols = 80}
-	sess, serr := sess_feat.session_create(cfg)
-	testing.expect(t, serr == .None, "session_create failed")
-	if sess == nil do return
-	_ = sess_feat.session_registry_detach(&app.session_reg, 77, sess)
-
-	err := app_control_start(app)
-	testing.expect_value(t, err, plat_ipc.Ipc_Error.None)
-	if err != .None do return
-	defer app_control_stop(app)
-
-	reply, cerr := run_client(app, sock, "kill 77")
-	testing.expect_value(t, cerr, plat_ipc.Ipc_Error.None)
-	testing.expect_value(t, reply, "ok\n")
-	testing.expect_value(t, sess_feat.session_registry_count(&app.session_reg), 0)
-
-	reply2, cerr2 := run_client(app, sock, "kill 77")
-	testing.expect_value(t, cerr2, plat_ipc.Ipc_Error.None)
-	testing.expect(t, strings.has_prefix(reply2, "err not_found"), "not found")
+	for line in ([]string{"ls", "kill 77"}) {
+		reply, cerr := run_client(app, sock, line)
+		testing.expect_value(t, cerr, plat_ipc.Ipc_Error.None)
+		testing.expect(t, strings.has_prefix(reply, "err bad_request"), "served by the session core")
+	}
 }
 
 @(test)

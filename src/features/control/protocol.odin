@@ -5,13 +5,11 @@ package feature_control
 //
 // Requests (single spaces, lowercase verbs, ids are decimal u32 > 0):
 //   ping | show | quit | ls | attach <id> | kill <id>
+// ls and kill are parsed here (the CLI shares this grammar) but served by the
+// session core over the stream protocol, not by this line protocol.
 // Reply:
-//   "ok\n" [body]            success; body only for ls / ping
+//   "ok\n" [body]            success; body only for ping
 //   "err <code> <message>\n" failure; <code> is a Control_Err_Code name in snake_case
-// ls body: one row per session, fields separated by '\t', row ends with '\n':
-//   id  state  pid  elapsed_s  process  cwd  status
-//   state ∈ {idle, busy, exited}; elapsed_s integer seconds (0 if unknown);
-//   any '\t' / '\n' / '\r' inside text fields is replaced with ' '.
 // ping body: "term <version>\n".
 
 import "core:fmt"
@@ -48,24 +46,6 @@ Control_Err_Code :: enum u8 {
 	Internal,    // → "internal"
 }
 
-Control_Session_State :: enum u8 {
-	Idle,   // → "idle"
-	Busy,   // → "busy"
-	Exited, // → "exited"
-}
-
-Control_Session_Row :: struct {
-	id:        u32,
-	state:     Control_Session_State,
-	pid:       int,
-	elapsed_s: int,
-	process:   string,
-	cwd:       string,
-	status:    string,
-}
-
-@(private = "file")
-_STATE_NAMES := [Control_Session_State]string{.Idle = "idle", .Busy = "busy", .Exited = "exited"}
 @(private = "file")
 _ERR_CODES := [Control_Err_Code]string{.Bad_Request = "bad_request", .Not_Found = "not_found", .Exited = "exited", .Internal = "internal"}
 @(private = "file")
@@ -126,44 +106,6 @@ control_write_err :: proc(b: ^strings.Builder, code: Control_Err_Code, message: 
 		_write_sanitized(b, message)
 	}
 	strings.write_byte(b, '\n')
-}
-
-control_write_session_row :: proc(b: ^strings.Builder, row: Control_Session_Row) {
-	_ = fmt.sbprintf(b, "%d\t%s\t%d\t%d\t", row.id, _STATE_NAMES[row.state], row.pid, row.elapsed_s)
-	_write_sanitized(b, row.process)
-	strings.write_byte(b, '\t')
-	_write_sanitized(b, row.cwd)
-	strings.write_byte(b, '\t')
-	_write_sanitized(b, row.status)
-	strings.write_byte(b, '\n')
-}
-
-// control_parse_session_row parses one ls row (no trailing '\n'); string
-// fields alias line. false on wrong field count / bad numbers / bad state.
-control_parse_session_row :: proc(line: string) -> (row: Control_Session_Row, ok: bool) {
-	fields: [7]string
-	count, start := 0, 0
-	for i in 0..=len(line) {
-		if i < len(line) && line[i] != '\t' do continue
-		if count >= 7 do return {}, false
-		fields[count] = line[start:i]
-		count += 1
-		start = i + 1
-	}
-	if count != 7 do return {}, false
-
-	id_num, id_ok := strconv.parse_uint(fields[0], 10)
-	state, state_ok := _parse_state(fields[1])
-	pid, pid_ok := strconv.parse_int(fields[2], 10)
-	elapsed, elapsed_ok := strconv.parse_int(fields[3], 10)
-	if !id_ok || id_num == 0 || id_num > uint(0xFFFF_FFFF) || !state_ok || !pid_ok || pid < 0 || !elapsed_ok || elapsed < 0 {
-		return {}, false
-	}
-
-	return Control_Session_Row {
-		id = u32(id_num), state = state, pid = pid, elapsed_s = elapsed,
-		process = fields[4], cwd = fields[5], status = fields[6],
-	}, true
 }
 
 // control_parse_error_message returns a short human message for err.
@@ -243,14 +185,4 @@ _write_sanitized :: proc(b: ^strings.Builder, s: string) {
 		start = i + 1
 	}
 	if start < len(s) do strings.write_string(b, s[start:])
-}
-
-@(private = "file")
-_parse_state :: proc(s: string) -> (state: Control_Session_State, ok: bool) {
-	switch s {
-	case "idle":   return .Idle, true
-	case "busy":   return .Busy, true
-	case "exited": return .Exited, true
-	}
-	return {}, false
 }

@@ -3,6 +3,7 @@ package main
 // Term Headless E2E Test Driver: CLI Dispatcher & JSON-RPC Protocol (<250 lines)
 // Part of Tier 4 Harnesses & Automation (src/cmd/term_driver/*).
 
+import client_feat "../../features/session_client"
 import "core:encoding/json"
 import "core:fmt"
 import "core:os"
@@ -174,8 +175,11 @@ read_line_from_stdin :: proc(buf: ^[dynamic]u8) -> bool {
 }
 
 main :: proc() {
-	d: Driver
-	defer driver_destroy(&d)
+	if handled, code := client_feat.client_tier_main(os.args); handled do os.exit(code)
+	if !client_feat.client_use_private_session() do os.exit(1)
+	d := new(Driver) // holds the session client's fixed link table
+	defer free(d)
+	defer driver_destroy(d)
 
 	line_buf: [dynamic]u8
 	defer delete(line_buf)
@@ -194,6 +198,6 @@ main :: proc() {
 			continue
 		}
 
-		if !dispatch_command(&d, cmd) do break
+		if !dispatch_command(d, cmd) do break
 	}
 }

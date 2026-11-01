@@ -117,6 +117,10 @@ app_handle_mouse_button_down :: proc(app: ^Term_App, ev: sdl3.MouseButtonEvent) 
 	mx := f32(ev.x) * ratio
 	my := f32(ev.y) * ratio
 
+	if quit_dialog_handle_click(app, mx, my) {
+		chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
+		return
+	}
 	if app.cmd_center.visible {
 		res := command_center_handle_click(&app.cmd_center, mx, my, app_command_center_sources(app))
 		if res.handled {
@@ -282,6 +286,7 @@ app_handle_mouse_button_down :: proc(app: ^Term_App, ev: sdl3.MouseButtonEvent) 
 }
 
 app_handle_mouse_wheel :: proc(app: ^Term_App, ev: sdl3.MouseWheelEvent) {
+	if app.quit.dialog.visible do return
 	ratio := app.window.pixel_ratio
 	mx := ev.mouse_x * ratio
 	my := ev.mouse_y * ratio
@@ -365,6 +370,7 @@ app_handle_mouse_wheel :: proc(app: ^Term_App, ev: sdl3.MouseWheelEvent) {
 }
 
 app_handle_text_input :: proc(app: ^Term_App, text: string) {
+	if app.quit.dialog.visible do return // modal: typing never reaches a pane
 	if app.suppress_text_input {
 		app.suppress_text_input = false
 		return
@@ -386,6 +392,10 @@ app_handle_text_input :: proc(app: ^Term_App, text: string) {
 }
 
 app_handle_key_down :: proc(app: ^Term_App, ev: sdl3.KeyboardEvent) {
+	if quit_dialog_handle_key(app, ev.key) {
+		chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
+		return
+	}
 	if app.search.active {
 		switch ev.key {
 		case sdl3.K_ESCAPE:
@@ -448,7 +458,7 @@ app_handle_key_down :: proc(app: ^Term_App, ev: sdl3.KeyboardEvent) {
 					mouse_clear_selection(&app.mouse)
 				}
 				p.session.scroll_offset = 0 // Auto-scroll to bottom on input
-				_, _ = sess_feat.session_write(p.session, res.bytes[:res.len])
+				sess_feat.session_write(p.session, res.bytes[:res.len])
 				// A keystroke that SDL also reports as TEXT_INPUT must not be
 				// delivered twice: Option combos arrive as ESC+char and, under the
 				// Kitty "report all keys" flag, plain printable keys arrive as
@@ -477,7 +487,7 @@ app_handle_key_up :: proc(app: ^Term_App, ev: sdl3.KeyboardEvent) {
 
 	res, encoded := input_encode_key(ev.key, ev.mod, false, flags, INPUT_EVENT_RELEASE)
 	if !encoded do return
-	_, _ = sess_feat.session_write(p.session, res.bytes[:res.len])
+	sess_feat.session_write(p.session, res.bytes[:res.len])
 }
 
 // app_update_hyperlink_hover synchronizes the OSC 8 hover highlight and mouse
@@ -571,10 +581,10 @@ app_handle_drop_file :: proc(app: ^Term_App, drop: sdl3.DropEvent, is_text: bool
 	}
 }
 
-app_pty_wakeup_callback :: proc "contextless" (user_data: rawptr) {
+app_wakeup_callback :: proc "contextless" (user_data: rawptr) {
 	if user_data == nil do return
 	app := (^Term_App)(user_data)
-	if !intrinsics.atomic_exchange_explicit(&app.pty_wakeup_pending, true, .Acq_Rel) {
+	if !intrinsics.atomic_exchange_explicit(&app.wakeup_pending, true, .Acq_Rel) {
 		ev: sdl3.Event
 		ev.type = .USER
 		_ = sdl3.PushEvent(&ev)
@@ -583,17 +593,16 @@ app_pty_wakeup_callback :: proc "contextless" (user_data: rawptr) {
 
 app_compute_wait_timeout_ms :: proc(app: ^Term_App, non_blocking: bool) -> i32 {
 	if app == nil || non_blocking do return 0
-	if intrinsics.atomic_load_explicit(&app.pty_wakeup_pending, .Acquire) do return 0
-	// Hidden: no frame can clear damage/force flags, so they must not keep the loop awake.
-	if app.window_hidden do return -1
+	if intrinsics.atomic_load_explicit(&app.wakeup_pending, .Acquire) do return 0
 	if app.last_frame_acquire_failed do return FRAME_TICK_MS
 	if app.composer.sched.force_next || app.composer.sched.damage_pending do return 0
 	if app_needs_animation(app) || _app_any_pane_sync_output(app) do return FRAME_TICK_MS
 	if len(app.diag.grid_dump_dir) > 0 do return 16
 
-	timeout_ms: i32 = -1
+	timeout_ms := app_quit_wait_ms(app)
 	if app.layout.is_fullscreen && app.layout.tab_bar_reveal_timer > 0.0 {
-		timeout_ms = max(1, i32(app.layout.tab_bar_reveal_timer * 1000.0) + 1)
+		reveal_ms := max(1, i32(app.layout.tab_bar_reveal_timer * 1000.0) + 1)
+		if timeout_ms < 0 || reveal_ms < timeout_ms do timeout_ms = reveal_ms
 	}
 
 	if app.composer.sched.next_deadline > 0 {
@@ -612,40 +621,34 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 	timeout_ms := app_compute_wait_timeout_ms(app, non_blocking)
 	if timeout_ms == 0 {
 		if !sdl3.PollEvent(&ev) {
-			intrinsics.atomic_store_explicit(&app.pty_wakeup_pending, false, .Release)
+			intrinsics.atomic_store_explicit(&app.wakeup_pending, false, .Release)
 			return false
 		}
 	} else if timeout_ms < 0 {
 		if !sdl3.WaitEvent(&ev) {
-			intrinsics.atomic_store_explicit(&app.pty_wakeup_pending, false, .Release)
+			intrinsics.atomic_store_explicit(&app.wakeup_pending, false, .Release)
 			return false
 		}
 	} else {
 		if !sdl3.WaitEventTimeout(&ev, timeout_ms) {
-			intrinsics.atomic_store_explicit(&app.pty_wakeup_pending, false, .Release)
+			intrinsics.atomic_store_explicit(&app.wakeup_pending, false, .Release)
 			return false
 		}
 	}
-	intrinsics.atomic_store_explicit(&app.pty_wakeup_pending, false, .Release)
+	intrinsics.atomic_store_explicit(&app.wakeup_pending, false, .Release)
 
 	ui_dirty := false
 	for {
 		#partial switch ev.type {
 		case .QUIT, .WINDOW_CLOSE_REQUESTED:
 			ui_dirty = true
-			app_request_hide(app)
+			app_request_quit_flow(app)
 		case .WINDOW_FOCUS_GAINED:
-			if app.window_hidden do app_show_window(app)
 			app.window_focused = true
 			cursor_reset_blink(&app.cursor, u64(time.duration_nanoseconds(time.since(app.start_time))))
 			pane := mux_feat.multiplexer_get_focused_pane(&app.mux)
 			if pane != nil && pane.session != nil {
 				mouse_protocol_report_focus(pane.session, true)
-			}
-		case .WINDOW_SHOWN:
-			if app.window_hidden {
-				app_show_window(app)
-				ui_dirty = true
 			}
 		case .WINDOW_FOCUS_LOST:
 			app.window_focused = false
@@ -673,6 +676,14 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 				ui_dirty = true
 			}
 
+			if app.quit.dialog.visible {
+				if quit_dialog_handle_motion(app, mx, my) {
+					chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
+					ui_dirty = true
+				}
+				if !sdl3.PollEvent(&ev) do break
+				continue
+			}
 			if app.cmd_center.visible {
 				if command_center_handle_motion(&app.cmd_center, mx, my) {
 					chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)

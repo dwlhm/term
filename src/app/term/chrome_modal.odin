@@ -1,0 +1,41 @@
+package term
+
+// Shared modal chrome (Command Center, quit confirmation): backdrop, lifted
+// surface and keycaps, all from COLOR_CHROME_* tokens.
+
+import chrome_dl "../../core/chrome/draw_list"
+
+// chrome_modal_ease maps a 0..1 open animation to the cubic ease-out every modal uses.
+chrome_modal_ease :: proc(t: f32) -> f32 { return 1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t) }
+
+chrome_draw_modal_frame :: proc(dl: ^chrome_dl.Ui_Draw_List, layout: ^Layout_State, rect: [4]f32, e: f32) {
+	s := max(1.0, layout.metrics.scale)
+	chrome_dl.ui_draw_rect(dl, {0, 0, layout.screen_w, layout.screen_h}, chrome_with_alpha(COLOR_CHROME_BACKDROP, e))
+	// Same corner radius as the body, dropped 6 px: a soft lift below the modal, not a ring around it.
+	chrome_dl.ui_draw_shadow(dl, {rect[0], rect[1] + 6.0 * s, rect[2], rect[3]}, chrome_with_alpha(COLOR_CHROME_SHADOW, e), 14.0 * s)
+	chrome_dl.ui_draw_rounded_rect(dl, rect, chrome_with_alpha(COLOR_CHROME_SURFACE, e), 14.0 * s)
+	chrome_dl.ui_draw_border(dl, rect, chrome_with_alpha(COLOR_CHROME_BORDER, e), 14.0 * s, 1.0 * s)
+}
+
+chrome_keycap_w :: proc(m: Visual_Metrics, label: string) -> f32 {
+	return max(20.0 * m.scale, chrome_text_width(m, label, 11.5 * m.scale) + 10.0 * m.scale)
+}
+
+chrome_draw_keycap :: proc(dl: ^chrome_dl.Ui_Draw_List, m: Visual_Metrics, e: f32, rect: [4]f32, label: string, lh: f32) {
+	s, tw := m.scale, chrome_text_width(m, label, lh)
+	chrome_dl.ui_draw_rounded_rect(dl, rect, chrome_with_alpha(COLOR_CHROME_KEYCAP_BG, e), 5.0 * s)
+	chrome_dl.ui_draw_border(dl, rect, chrome_with_alpha(COLOR_CHROME_KEYCAP_BORDER, e), 5.0 * s)
+	chrome_dl.ui_draw_text(dl, {rect[0] + (rect[2] - tw) * 0.5, rect[1] + (rect[3] - lh) * 0.5, tw, lh}, label, chrome_with_alpha(COLOR_CHROME_TEXT_MUTED, e))
+}
+
+// chrome_draw_key_hints draws "keycap label" pairs left to right from x; returns the end x.
+chrome_draw_key_hints :: proc(dl: ^chrome_dl.Ui_Draw_List, m: Visual_Metrics, e, x, y: f32, hints: [][2]string) -> f32 {
+	s, fx := m.scale, x
+	for h in hints {
+		kw, lw := chrome_keycap_w(m, h[0]), chrome_text_width(m, h[1], 11.0 * s)
+		chrome_draw_keycap(dl, m, e, {fx, y, kw, 18.0 * s}, h[0], 10.0 * s)
+		chrome_dl.ui_draw_text(dl, {fx + kw + 4.0 * s, y + 3.5 * s, lw, 11.0 * s}, h[1], chrome_with_alpha(COLOR_CHROME_TEXT_FAINT, e))
+		fx += kw + 4.0 * s + lw + 14.0 * s
+	}
+	return fx
+}

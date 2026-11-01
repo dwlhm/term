@@ -7,7 +7,6 @@ package feature_multiplexer
 // Supports both Terminal PTY panes and 3D Canvas panes as first-class citizens.
 
 import "base:runtime"
-import pty "../../platform/pty"
 import chrome_splits "../../core/chrome/splits"
 import session "../session"
 import three_d "../../core/render/three_d"
@@ -33,11 +32,13 @@ Multiplexer :: struct {
 	focused_pane_id: u32,
 	next_pane_id:    u32,
 	zoomed_pane_id:  u32, // 0 if no pane zoomed
+	provider:        session.Session_Provider,
 	allocator:       runtime.Allocator,
 }
 
-multiplexer_init :: proc(m: ^Multiplexer, allocator := context.allocator) {
+multiplexer_init :: proc(m: ^Multiplexer, provider: session.Session_Provider, allocator := context.allocator) {
 	if m == nil do return
+	m.provider = provider
 	m.allocator = allocator
 	m.next_pane_id = 1
 	m.focused_pane_id = 0
@@ -45,13 +46,13 @@ multiplexer_init :: proc(m: ^Multiplexer, allocator := context.allocator) {
 	m.panes = make([dynamic]Pane_Entry, allocator)
 }
 
-multiplexer_destroy :: proc(m: ^Multiplexer) {
+// multiplexer_destroy releases every pane's session; kill_sessions = false
+// leaves their programs running in the background (a viewer that goes away).
+multiplexer_destroy :: proc(m: ^Multiplexer, kill_sessions: bool) {
 	if m == nil do return
 	for &p in m.panes {
-		if p.session != nil {
-			session.session_destroy(p.session)
-			p.session = nil
-		}
+		session.session_provider_release(&m.provider, p.session, kill_sessions)
+		p.session = nil
 	}
 	delete(m.panes)
 	m.panes = nil
@@ -59,14 +60,17 @@ multiplexer_destroy :: proc(m: ^Multiplexer) {
 	m.zoomed_pane_id = 0
 }
 
-multiplexer_create_terminal_pane :: proc(m: ^Multiplexer, config: session.Session_Config) -> (pane_id: u32, err: pty.Pty_Error) {
-	if m == nil do return 0, .Closed
+// multiplexer_create_terminal_pane starts config's program through the provider. 0 = it could not.
+multiplexer_create_terminal_pane :: proc(m: ^Multiplexer, config: session.Session_Config) -> (pane_id: u32) {
+	if m == nil || m.provider.spawn == nil do return 0
+	sess := m.provider.spawn(m.provider.user, config)
+	if sess == nil do return 0
+	return multiplexer_add_terminal_pane(m, sess)
+}
 
-	sess, s_err := session.session_create(config, m.allocator)
-	if s_err != .None {
-		return 0, s_err
-	}
-
+// multiplexer_add_terminal_pane shows an existing session (an attached background one) in a new pane.
+multiplexer_add_terminal_pane :: proc(m: ^Multiplexer, sess: ^session.Terminal_Session) -> (pane_id: u32) {
+	if m == nil || sess == nil do return 0
 	pane_id = m.next_pane_id
 	m.next_pane_id += 1
 
@@ -82,7 +86,7 @@ multiplexer_create_terminal_pane :: proc(m: ^Multiplexer, config: session.Sessio
 		m.focused_pane_id = pane_id
 	}
 
-	return pane_id, .None
+	return pane_id
 }
 
 multiplexer_create_3d_pane :: proc(m: ^Multiplexer) -> u32 {
@@ -119,10 +123,8 @@ multiplexer_close_pane :: proc(m: ^Multiplexer, pane_id: u32) -> bool {
 	}
 	if idx < 0 do return false
 
-	if m.panes[idx].session != nil {
-		session.session_destroy(m.panes[idx].session)
-		m.panes[idx].session = nil
-	}
+	session.session_provider_release(&m.provider, m.panes[idx].session, true)
+	m.panes[idx].session = nil
 
 	ordered_remove(&m.panes, idx)
 
@@ -239,10 +241,8 @@ multiplexer_drain_all :: proc(m: ^Multiplexer) -> int {
 multiplexer_has_pending_data :: proc(m: ^Multiplexer) -> bool {
 	if m == nil do return false
 	for &p in m.panes {
-		if p.session != nil && p.session.pty != nil {
-			if pty.ring_available(&p.session.pty.ring) > 0 {
-				return true
-			}
+		if p.session != nil && session.session_inbox_pending(p.session) {
+			return true
 		}
 	}
 	return false

@@ -47,31 +47,6 @@ test_session_is_running_job_osc133 :: proc(t: ^testing.T) {
 }
 
 @test
-test_session_registry_lifecycle :: proc(t: ^testing.T) {
-	reg: session.Session_Registry
-	session.session_registry_init(&reg)
-	defer session.session_registry_destroy(&reg)
-
-	testing.expect_value(t, session.session_registry_count(&reg), 0)
-
-	s1, err := session.session_create(session.Session_Config{shell = "/bin/sh", rows = 24, cols = 80})
-	testing.expect(t, err == .None, "session_create failed")
-	testing.expect(t, s1 != nil, "session_create returned nil session")
-
-	// Detach session 101
-	ok := session.session_registry_detach(&reg, 101, s1)
-	testing.expect(t, ok, "detach must succeed")
-	testing.expect_value(t, session.session_registry_count(&reg), 1)
-
-	// Pop session 101 back
-	popped, found := session.session_registry_pop(&reg, 101)
-	testing.expect(t, found, "pop must find detached session")
-	testing.expect_value(t, popped, s1)
-	testing.expect_value(t, session.session_registry_count(&reg), 0)
-	session.session_destroy(popped)
-}
-
-@test
 test_session_peek_last_line_resolves_egc_as_valid_utf8 :: proc(t: ^testing.T) {
 	sess: session.Terminal_Session
 	term.terminal_init(&sess.term, 4, 40)

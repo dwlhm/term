@@ -13,6 +13,7 @@ import tabs_feat "../../features/tabs"
 import mux_feat "../../features/multiplexer"
 import inter_feat "../../features/interaction"
 import sess_feat "../../features/session"
+import client_feat "../../features/session_client"
 import chrome_splits "../../core/chrome/splits"
 import chrome_dl "../../core/chrome/draw_list"
 import core_term "../../core/terminal"
@@ -20,6 +21,7 @@ import telemetry "../../features/telemetry"
 
 Driver :: struct {
 	tm:             tabs_feat.Tabs_Manager,
+	client:         client_feat.Client,
 	mux:            mux_feat.Multiplexer,
 	inter:          inter_feat.Interaction_State,
 	dl:             chrome_dl.Ui_Draw_List,
@@ -39,8 +41,9 @@ driver_init :: proc(d: ^Driver, cols, rows: int, shell: string) -> bool {
 	d.cols = cols if cols > 0 else 80
 	d.rows = rows if rows > 0 else 24
 
+	if !client_feat.client_connect(&d.client, nil, nil) do return false
 	tabs_feat.tabs_manager_init(&d.tm, {0, 0, d.screen_w, d.chrome_h})
-	mux_feat.multiplexer_init(&d.mux)
+	mux_feat.multiplexer_init(&d.mux, client_feat.client_provider(&d.client))
 	inter_feat.interaction_init(&d.inter, cell_w = 9.0, cell_h = 18.0)
 	chrome_dl.ui_draw_list_init(&d.dl)
 
@@ -48,11 +51,12 @@ driver_init :: proc(d: ^Driver, cols, rows: int, shell: string) -> bool {
 	if len(sh) == 0 do sh = "/bin/sh"
 
 	term_cfg := sess_feat.Session_Config{shell = sh, rows = d.rows, cols = d.cols}
-	p_term, err := mux_feat.multiplexer_create_terminal_pane(&d.mux, term_cfg)
-	if err != .None {
+	p_term := mux_feat.multiplexer_create_terminal_pane(&d.mux, term_cfg)
+	if p_term == 0 {
 		chrome_dl.ui_draw_list_destroy(&d.dl)
 		tabs_feat.tabs_manager_destroy(&d.tm)
-		mux_feat.multiplexer_destroy(&d.mux)
+		mux_feat.multiplexer_destroy(&d.mux, true)
+		client_feat.client_disconnect(&d.client)
 		return false
 	}
 
@@ -71,15 +75,17 @@ driver_destroy :: proc(d: ^Driver) {
 	if !d.initialized do return
 	chrome_dl.ui_draw_list_destroy(&d.dl)
 	tabs_feat.tabs_manager_destroy(&d.tm)
-	mux_feat.multiplexer_destroy(&d.mux)
+	mux_feat.multiplexer_destroy(&d.mux, true)
+	client_feat.client_disconnect(&d.client)
 	d.initialized = false
 }
 
 driver_send :: proc(d: ^Driver, text: string) -> bool {
 	pane := mux_feat.multiplexer_get_pane(&d.mux, d.active_pane_id)
 	if pane == nil || pane.session == nil do return false
-	_, err := sess_feat.session_write_string(pane.session, text)
-	return err == .None
+	sess_feat.session_write_string(pane.session, text)
+	alive, _ := sess_feat.session_is_alive(pane.session)
+	return alive
 }
 
 driver_drain :: proc(d: ^Driver, timeout_ms: int, wait_text: string) -> (found: bool) {
@@ -88,6 +94,7 @@ driver_drain :: proc(d: ^Driver, timeout_ms: int, wait_text: string) -> (found: 
 	found = len(wait_text) == 0
 
 	for time.duration_milliseconds(time.since(start)) < f64(to) {
+		client_feat.client_pump(&d.client)
 		n := mux_feat.multiplexer_drain_all(&d.mux)
 		if len(wait_text) > 0 {
 			grid_str := driver_get_grid_text(d, context.temp_allocator)
@@ -119,8 +126,8 @@ driver_split :: proc(d: ^Driver, direction: string, ratio: f32) -> (new_id: u32,
 	sh := os.get_env("SHELL", context.temp_allocator)
 	if len(sh) == 0 do sh = "/bin/sh"
 	term_cfg := sess_feat.Session_Config{shell = sh, rows = d.rows, cols = d.cols}
-	p_new, err := mux_feat.multiplexer_create_terminal_pane(&d.mux, term_cfg)
-	if err != .None do return 0, false
+	p_new := mux_feat.multiplexer_create_terminal_pane(&d.mux, term_cfg)
+	if p_new == 0 do return 0, false
 
 	_, tab := tabs_feat.tabs_manager_get_active(&d.tm)
 	if tab == nil || tab.split_tree == nil do return 0, false
@@ -138,8 +145,8 @@ driver_tab_new :: proc(d: ^Driver) -> (tab_id: u32, ok: bool) {
 	sh := os.get_env("SHELL", context.temp_allocator)
 	if len(sh) == 0 do sh = "/bin/sh"
 	term_cfg := sess_feat.Session_Config{shell = sh, rows = d.rows, cols = d.cols}
-	p_new, err := mux_feat.multiplexer_create_terminal_pane(&d.mux, term_cfg)
-	if err != .None do return 0, false
+	p_new := mux_feat.multiplexer_create_terminal_pane(&d.mux, term_cfg)
+	if p_new == 0 do return 0, false
 
 	tid, _ := tabs_feat.tabs_manager_create_tab(&d.tm, "Shell", p_new)
 	content_area: [4]f32 = {0.0, d.chrome_h, d.screen_w, d.screen_h - d.chrome_h}

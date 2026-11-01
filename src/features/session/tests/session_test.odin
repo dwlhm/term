@@ -1,213 +1,169 @@
 package feature_session_tests
 
-import "core:testing"
-import "core:time"
 import "core:strings"
-import session "../"
+import "core:testing"
+import ipc "../../../platform/ipc"
 import extension "../../../core/terminal/extension"
+import terminal "../../../core/terminal"
+import session "../"
 
-@test
-test_session_lifecycle_and_drain :: proc(t: ^testing.T) {
-	cfg := session.Session_Config{
-		shell = "/bin/sh",
-		rows  = 24,
-		cols  = 80,
-	}
-
-	sess, err := session.session_create(cfg)
-	testing.expect(t, err == .None, "session_create failed")
-	testing.expect(t, sess != nil, "sess is nil")
-	defer session.session_destroy(sess)
-
-	// Write command to real shell
-	_, w_err := session.session_write_string(sess, "echo REAL_SESSION_OK\n")
-	testing.expect(t, w_err == .None, "session_write failed")
-
-	// Wait and drain output
-	found := false
-	start := time.now()
-
-	for time.since(start) < 800 * time.Millisecond {
-		n := session.session_drain(sess)
-		if n > 0 {
-			// Scan row 0 to 5 for "REAL_SESSION_OK"
-			for r in 0..<5 {
-				line_chars: [80]u8
-				for c in 0..<80 {
-					ch := session.session_get_cell(sess, r, c).char
-					line_chars[c] = u8(ch) if ch >= 32 && ch <= 126 else ' '
-				}
-				s := string(line_chars[:])
-				if contains_substring(s, "REAL_SESSION_OK") {
-					found = true
-					break
-				}
-			}
-			if found do break
-		}
-		time.sleep(20 * time.Millisecond)
-	}
-
-	testing.expect(t, found, "Expected 'REAL_SESSION_OK' rendered on terminal grid from live PTY")
+// Loopback_Link records what a session sends to its program.
+Loopback_Link :: struct {
+	written:  [dynamic]u8,
+	size:     ipc.Size_Msg,
+	resized:  int,
+	consumed: int,
 }
 
-contains_substring :: proc(haystack, needle: string) -> bool {
-	if len(needle) == 0 do return true
-	if len(haystack) < len(needle) do return false
-	for i in 0..=(len(haystack) - len(needle)) {
-		if haystack[i : i + len(needle)] == needle {
-			return true
-		}
+loopback_session :: proc(l: ^Loopback_Link, cols: u16 = 80, rows: u16 = 24) -> ^session.Terminal_Session {
+	return session.session_create({cols = cols, rows = rows}, {
+		write    = proc(user: rawptr, data: []u8) { append(&(^Loopback_Link)(user).written, ..data) },
+		resize   = proc(user: rawptr, size: ipc.Size_Msg) {
+			l := (^Loopback_Link)(user)
+			l.size, l.resized = size, l.resized + 1
+		},
+		consumed = proc(user: rawptr, n: int) { (^Loopback_Link)(user).consumed += n },
+		user     = l,
+	})
+}
+
+// feed delivers program output the way the link's IO thread does, then drains it.
+feed :: proc(sess: ^session.Terminal_Session, s: string) -> int {
+	session.session_inbox_push(sess, transmute([]u8)s)
+	return session.session_drain(sess)
+}
+
+row_text :: proc(sess: ^session.Terminal_Session, r: int) -> string {
+	b := strings.builder_make(context.temp_allocator)
+	for c in 0..<sess.term.cols {
+		ch := session.session_get_cell(sess, r, c).char
+		strings.write_byte(&b, u8(ch) if ch >= 32 && ch <= 126 else ' ')
 	}
-	return false
+	return strings.trim_right_space(strings.to_string(b))
+}
+
+@test
+test_session_drain_feeds_terminal_and_credits_link :: proc(t: ^testing.T) {
+	l: Loopback_Link
+	defer delete(l.written)
+	sess := loopback_session(&l)
+	defer session.session_destroy(sess)
+	n := feed(sess, "REAL_SESSION_OK\r\n")
+	testing.expect_value(t, n, 17)
+	testing.expect_value(t, l.consumed, 17)
+	testing.expect_value(t, row_text(sess, 0), "REAL_SESSION_OK")
+	testing.expect_value(t, feed(sess, ""), 0)
+}
+
+@test
+test_session_replies_go_back_through_the_link :: proc(t: ^testing.T) {
+	l: Loopback_Link
+	defer delete(l.written)
+	sess := loopback_session(&l)
+	defer session.session_destroy(sess)
+	feed(sess, "ab\x1b[6n")
+	testing.expect_value(t, string(l.written[:]), "\x1b[1;3R")
+	session.session_write_string(sess, "ls\n")
+	testing.expect(t, strings.has_suffix(string(l.written[:]), "ls\n"), "typed input reaches the link")
+}
+
+@test
+test_session_inbox_is_bounded :: proc(t: ^testing.T) {
+	l: Loopback_Link
+	defer delete(l.written)
+	sess := loopback_session(&l)
+	defer session.session_destroy(sess)
+	big := make([]u8, session.SESSION_INBOX_BYTES)
+	defer delete(big)
+	testing.expect(t, session.session_inbox_push(sess, big), "one window fits")
+	testing.expect(t, !session.session_inbox_push(sess, big[:1]), "past the window is refused, never grown")
+	testing.expect(t, session.session_inbox_pending(sess))
 }
 
 @test
 test_session_osc_extensions :: proc(t: ^testing.T) {
-	cfg := session.Session_Config{
-		shell = "/bin/sh",
-		rows  = 24,
-		cols  = 80,
-	}
-
-	sess, err := session.session_create(cfg)
-	testing.expect(t, err == .None, "session_create failed")
+	l: Loopback_Link
+	defer delete(l.written)
+	sess := loopback_session(&l)
 	defer session.session_destroy(sess)
-
-	// Test OSC 0 Title
-	session.session_write_string(sess, "printf '\\033]0;My Cool Window\\007'\n")
-	// Test OSC 7 Working Directory
-	session.session_write_string(sess, "printf '\\033]7;file:///Users/dwlhm/project/term\\007'\n")
-	// Test OSC 133 Prompt Start
-	session.session_write_string(sess, "printf '\\033]133;A\\007'\n")
-
-	start := time.now()
-	for time.since(start) < 600 * time.Millisecond {
-		session.session_drain(sess)
-		if session.session_get_title(sess) == "My Cool Window" &&
-		   session.session_get_cwd(sess) == "file:///Users/dwlhm/project/term" &&
-		   session.session_is_in_prompt(sess) {
-			break
-		}
-		time.sleep(20 * time.Millisecond)
-	}
-
+	feed(sess, "\x1b]0;My Cool Window\x07\x1b]7;file:///Users/dwlhm/project/term\x07\x1b]133;A\x07")
 	testing.expect_value(t, session.session_get_title(sess), "My Cool Window")
 	testing.expect_value(t, session.session_get_cwd(sess), "file:///Users/dwlhm/project/term")
 	testing.expect_value(t, session.session_get_cwd_path(sess), "/Users/dwlhm/project/term")
 	testing.expect(t, session.session_is_in_prompt(sess), "Expected in_prompt == true from OSC 133;A")
 
-	// Test OSC 52 Clipboard Sink
 	copied_clipboard: string
 	session.session_set_clipboard_sink(sess, proc(user_data: rawptr, text: string) -> bool {
-		s_ptr := (^string)(user_data)
-		s_ptr^ = strings.clone(text)
+		(^string)(user_data)^ = strings.clone(text)
 		return true
 	}, &copied_clipboard)
-
-	session.session_write_string(sess, "printf '\\033]52;c;TmVvdmltQ2xpcA==\\007'\n")
-	start = time.now()
-	for time.since(start) < 600 * time.Millisecond {
-		session.session_drain(sess)
-		if copied_clipboard == "NeovimClip" do break
-		time.sleep(20 * time.Millisecond)
-	}
+	feed(sess, "\x1b]52;c;TmVvdmltQ2xpcA==\x07")
 	testing.expect_value(t, copied_clipboard, "NeovimClip")
 	delete(copied_clipboard)
 
-	// Test OSC 22 Pointer Shape
-	session.session_write_string(sess, "printf '\\033]22;pointer\\007'\n")
-	// Test OSC 1337 ScrollSpeed
-	session.session_write_string(sess, "printf '\\033]1337;ScrollSpeed=0.75\\007'\n")
-
-	start = time.now()
-	for time.since(start) < 600 * time.Millisecond {
-		session.session_drain(sess)
-		if session.session_get_pointer_shape(sess) == "pointer" && sess.custom_scroll_speed == 0.75 do break
-		time.sleep(20 * time.Millisecond)
-	}
+	feed(sess, "\x1b]22;pointer\x07\x1b]1337;ScrollSpeed=0.75\x07")
 	testing.expect_value(t, session.session_get_pointer_shape(sess), "pointer")
 	testing.expect_value(t, sess.custom_scroll_speed, 0.75)
 }
 
 @test
-test_session_resize :: proc(t: ^testing.T) {
-	cfg := session.Session_Config{
-		shell = "/bin/sh",
-		rows  = 24,
-		cols  = 80,
-	}
-
-	sess, err := session.session_create(cfg)
-	testing.expect(t, err == .None, "session_create failed")
+test_session_resize_reaches_terminal_and_link :: proc(t: ^testing.T) {
+	l: Loopback_Link
+	defer delete(l.written)
+	sess := loopback_session(&l)
 	defer session.session_destroy(sess)
-
-	session.session_resize(sess, 120, 40)
+	session.session_resize(sess, 120, 40, 1200, 800)
 	testing.expect_value(t, sess.term.cols, 120)
 	testing.expect_value(t, sess.term.rows, 40)
-	testing.expect_value(t, sess.pty.cols, 120)
-	testing.expect_value(t, sess.pty.rows, 40)
+	testing.expect_value(t, l.resized, 1)
+	testing.expect_value(t, l.size, ipc.Size_Msg{cols = 120, rows = 40, xpixel = 1200, ypixel = 800})
 }
 
 @test
 test_session_title_resolution :: proc(t: ^testing.T) {
-	cfg := session.Session_Config{
-		shell = "/bin/sh",
-		rows  = 24,
-		cols  = 80,
-	}
-
-	sess, err := session.session_create(cfg)
-	testing.expect(t, err == .None, "session_create failed")
+	l: Loopback_Link
+	defer delete(l.written)
+	sess := loopback_session(&l)
 	defer session.session_destroy(sess)
-
-	time.sleep(50 * time.Millisecond)
-
 	buf: [256]u8
-	title := session.session_resolve_title(sess, buf[:], "Fallback")
-	testing.expect(t, len(title) > 0, "Resolved title should not be empty")
-
-	// When OSC 0 is sent, it overrides process/cwd
-	copy(sess.title_buf[:10], "Custom OSC")
-	sess.title_len = 10
-	osc_title := session.session_resolve_title(sess, buf[:], "Fallback")
-	testing.expect_value(t, osc_title, "Custom OSC")
+	testing.expect_value(t, session.session_resolve_title(sess, buf[:], "Fallback"), "Fallback")
+	session.session_set_info(sess, 42, 42, true, 0, "nvim", "/tmp")
+	testing.expect_value(t, session.session_resolve_title(sess, buf[:], "Fallback"), "nvim")
+	session.session_set_info(sess, 42, 42, true, 0, "zsh", "/tmp")
+	testing.expect_value(t, session.session_resolve_title(sess, buf[:], "Fallback"), "/tmp")
+	feed(sess, "\x1b]0;Custom OSC\x07")
+	testing.expect_value(t, session.session_resolve_title(sess, buf[:], "Fallback"), "Custom OSC")
 }
 
 @test
 test_session_kitty_graphics_stream :: proc(t: ^testing.T) {
-	cfg := session.Session_Config{
-		shell = "/bin/sh",
-		rows  = 24,
-		cols  = 80,
-	}
-
-	sess, err := session.session_create(cfg)
-	testing.expect(t, err == .None, "session_create failed")
+	l: Loopback_Link
+	defer delete(l.written)
+	sess := loopback_session(&l)
 	defer session.session_destroy(sess)
-
-	// Stream 2x2 RGBA image via printf in live shell over PTY
-	cmd := "printf '\\033_Ga=T,i=400,f=32,s=2,v=2,m=1;AAAA\\033\\\\\\033_Gm=0;AAAA\\033\\\\'\n"
-	_, w_err := session.session_write_string(sess, cmd)
-	testing.expect(t, w_err == .None, "session_write_string failed")
-
-	start := time.now()
+	feed(sess, "\x1b_Ga=T,i=400,f=32,s=2,v=2,m=1;AAAA\x1b\\\x1b_Gm=0;AAAA\x1b\\")
 	found_image := false
-	for time.since(start) < 800 * time.Millisecond {
-		session.session_drain(sess)
-		for i in 0..<sess.term.extensions.ext_count {
-			e := &sess.term.extensions.extensions[i]
-			if e.name == "kitty_graphics" && e.user_data != nil {
-				img := extension.kitty_graphics_get_image(e.user_data, 400)
-				if img != nil && img.is_active {
-					found_image = true
-					break
-				}
-			}
-		}
-		if found_image do break
-		time.sleep(20 * time.Millisecond)
+	for i in 0..<sess.term.extensions.ext_count {
+		e := &sess.term.extensions.extensions[i]
+		if e.name != "kitty_graphics" || e.user_data == nil do continue
+		img := extension.kitty_graphics_get_image(e.user_data, 400)
+		found_image = img != nil && img.is_active
 	}
+	testing.expect(t, found_image, "Image 400 must be streamed and activated")
+}
 
-	testing.expect(t, found_image, "Image 400 must be streamed and activated via live PTY session")
+@test
+test_session_takes_a_core_paint :: proc(t: ^testing.T) {
+	l: Loopback_Link
+	defer delete(l.written)
+	src := loopback_session(&l)
+	defer session.session_destroy(src)
+	feed(src, "\x1b[31mred\x1b[0m prompt$ ")
+	paint: [dynamic]u8
+	defer delete(paint)
+	terminal.terminal_paint(&src.term, &paint, 100)
+	dst := loopback_session(&l)
+	feed(dst, string(paint[:]))
+	testing.expect_value(t, row_text(dst, 0), "red prompt$")
+	session.session_destroy(dst)
 }

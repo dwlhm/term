@@ -1,12 +1,11 @@
 package term
 
-// Control Socket Bridge (term session ls/attach/kill, show, quit)
+// Control Socket Bridge (term session attach, show, quit)
 // Part of Tier 3 Application Shell (src/app/term/*).
 //
 // Invariant: runs entirely on the UI thread inside app_run; never blocks
 // (ipc_server_poll/reply are non-blocking). Every request gets exactly one
-// reply. Only `ls` lists background (detached) sessions; ids are the
-// registry ids (former pane ids).
+// reply. `term session ls|kill` talk to the session core, not to this socket.
 
 import "core:fmt"
 import "core:strings"
@@ -17,7 +16,7 @@ import sess_feat "../../features/session"
 
 // app_control_start (Primary only, called from main() BEFORE app_init):
 // resolve ipc_default_socket_path, allocate app.control with new(), and
-// ipc_server_start(app.control, path, app_pty_wakeup_callback, app).
+// ipc_server_start(app.control, path, app_wakeup_callback, app).
 // On any error app.control is freed and set to nil; the error is returned.
 app_control_start :: proc(app: ^Term_App) -> plat_ipc.Ipc_Error {
 	if app == nil do return .Socket_Failed
@@ -25,7 +24,7 @@ app_control_start :: proc(app: ^Term_App) -> plat_ipc.Ipc_Error {
 	path, perr := plat_ipc.ipc_default_socket_path(buf[:])
 	if perr != .None do return perr
 	app.control = new(plat_ipc.Ipc_Server)
-	serr := plat_ipc.ipc_server_start(app.control, path, app_pty_wakeup_callback, app)
+	serr := plat_ipc.ipc_server_start(app.control, path, app_wakeup_callback, app)
 	if serr != .None {
 		free(app.control)
 		app.control = nil
@@ -39,14 +38,11 @@ app_control_start :: proc(app: ^Term_App) -> plat_ipc.Ipc_Error {
 // memory comes from context.temp_allocator. Returns true if UI state changed.
 //   ping   → ok + "term <VERSION>\n"
 //   show   → app_show_window; ok
-//   quit   → reply ok FIRST, then app_request_quit
-//   ls     → ok + one control_write_session_row per registry entry
-//            (session_snapshot_make for pid/process/cwd/status/elapsed;
-//            state from entry.state)
+//   quit   → reply ok FIRST, then app_request_quit_flow (asks about running programs)
 //   attach → unknown id: err not_found "no such session"; .Exited: err
 //            exited "session has exited"; else app_attach_background_session
 //            then app_show_window; ok
-//   kill   → session_registry_remove; unknown: err not_found; ok
+//   ls/kill → err bad_request (served by the session core)
 //   parse error → err bad_request control_parse_error_message(err)
 app_control_poll :: proc(app: ^Term_App) -> (dirty: bool) {
 	if app == nil || app.control == nil do return false
@@ -64,7 +60,7 @@ app_control_poll :: proc(app: ^Term_App) -> (dirty: bool) {
 			dirty ||= changed
 		}
 		plat_ipc.ipc_server_reply(app.control, req.ticket, strings.to_string(b))
-		if quit do app_request_quit(app) // after the reply is queued, so the client gets "ok"
+		if quit do app_request_quit_flow(app) // after the reply is queued, so the client gets "ok"
 	}
 	return dirty
 }
@@ -83,15 +79,10 @@ _control_dispatch :: proc(app: ^Term_App, req: ctrl_feat.Control_Request, b: ^st
 	case .Quit:
 		ctrl_feat.control_write_ok(b)
 		quit = true
-	case .List:
-		ctrl_feat.control_write_ok(b)
-		for &entry in app.session_reg.entries do ctrl_feat.control_write_session_row(b, _control_row(&entry))
+	case .List, .Kill:
+		ctrl_feat.control_write_err(b, .Bad_Request, "served by the session core: term session ls|kill")
 	case .Attach:
 		dirty = _control_attach(app, req.id, b)
-	case .Kill:
-		dirty = sess_feat.session_registry_remove(&app.session_reg, req.id)
-		if dirty do ctrl_feat.control_write_ok(b)
-		else do ctrl_feat.control_write_err(b, .Not_Found, "no such session")
 	}
 	return
 }
@@ -110,21 +101,6 @@ _control_attach :: proc(app: ^Term_App, id: u32, b: ^strings.Builder) -> bool {
 	app_show_window(app)
 	ctrl_feat.control_write_ok(b)
 	return true
-}
-
-@(private = "file")
-_control_row :: proc(entry: ^sess_feat.Detached_Session_Entry) -> ctrl_feat.Control_Session_Row {
-	snap := sess_feat.session_snapshot_make(entry.session, 0, entry.id, context.temp_allocator)
-	state: ctrl_feat.Control_Session_State
-	switch entry.state {
-	case .Idle:   state = .Idle
-	case .Busy:   state = .Busy
-	case .Exited: state = .Exited
-	}
-	return {
-		id = entry.id, state = state, pid = snap.pid, elapsed_s = int(snap.elapsed_seconds),
-		process = snap.process_name, cwd = snap.cwd, status = snap.status_msg,
-	}
 }
 
 // app_control_stop: nil-safe; ipc_server_stop, free, set nil.

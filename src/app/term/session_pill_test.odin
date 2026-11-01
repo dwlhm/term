@@ -19,11 +19,8 @@ test_pill_label_and_width :: proc(t: ^testing.T) {
 	layout_init(&layout, 2.0, 8, 8, 1.0)
 	testing.expect_value(t, session_pill_width(&layout, &reg), f32(0))
 
-	sess, err := sess_feat.session_create(sess_feat.Session_Config{shell = "/bin/sh", rows = 24, cols = 80})
-	testing.expect(t, err == .None, "session_create failed")
-	testing.expect(t, sess != nil, "session_create returned nil")
-	ok := sess_feat.session_registry_detach(&reg, 1, sess)
-	testing.expect(t, ok, "detach must succeed")
+	ok := sess_feat.session_registry_apply_row(&reg, {id = 1, state = .Busy, title = "make"}, false)
+	testing.expect(t, ok, "a background row must be mirrored")
 
 	label = session_pill_label(&reg, buf[:])
 	testing.expect_value(t, label, "1 background")

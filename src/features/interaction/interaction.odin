@@ -296,7 +296,7 @@ interaction_on_key_press :: proc(
 		buf: [4]u8
 		if key_char >= 0 && key_char <= 127 {
 			buf[0] = u8(key_char)
-			_, _ = session.session_write(pane.session, buf[:1])
+			session.session_write(pane.session, buf[:1])
 		}
 	}
 

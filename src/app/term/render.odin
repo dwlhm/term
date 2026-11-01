@@ -135,6 +135,7 @@ app_needs_animation :: proc(app: ^Term_App) -> bool {
 	if app.layout.tab_bar_anim_t > 0.0 && app.layout.tab_bar_anim_t < 1.0 do return true
 	if drop_effect_is_active(&app.drop_effect) do return true
 	if (app.cmd_center.visible && app.cmd_center.anim_t < 1.0) || app.cmd_center.closing do return true
+	if (app.quit.dialog.visible && app.quit.dialog.anim_t < 1.0) || app.quit.dialog.closing do return true
 	return false
 }
 
@@ -150,7 +151,7 @@ app_sync_cursor_layer :: proc(app: ^Term_App, now_ns: u64) -> (damaged: bool) {
 	can_show := p != nil && p.kind == .Terminal && p.session != nil &&
 	            p.rect[2] > 0 && p.rect[3] > 0 &&
 	            p.session.term.parser.cursor.visible &&
-	            !app.cmd_center.visible
+	            !app.cmd_center.visible && !app.quit.dialog.visible
 
 	can_blink := can_show && app.window_focused && p.session.term.parser.cursor.blinking
 	_ = cursor_update_blink(&app.cursor, now_ns, can_blink)
@@ -321,6 +322,7 @@ app_render_frame :: proc(app: ^Term_App, term_dirty: bool = true) {
 			app.mouse.scrollbar_pane_id,
 			&app.drop_effect,
 			&app.session_reg,
+			&app.quit,
 		)
 	}
 

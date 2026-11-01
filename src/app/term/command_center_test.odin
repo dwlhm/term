@@ -108,11 +108,8 @@ test_sessions_rows_and_outcomes :: proc(t: ^testing.T) {
 	sess_feat.session_registry_init(&reg)
 	defer sess_feat.session_registry_destroy(&reg)
 
-	cfg := sess_feat.Session_Config{shell = "/bin/sh"}
-	s5, _ := sess_feat.session_create(cfg)
-	s9, _ := sess_feat.session_create(cfg)
-	sess_feat.session_registry_detach(&reg, 5, s5)
-	sess_feat.session_registry_detach(&reg, 9, s9)
+	sess_feat.session_registry_apply_row(&reg, {id = 5, state = .Idle, title = "five"}, false)
+	sess_feat.session_registry_apply_row(&reg, {id = 9, state = .Idle, title = "nine"}, false)
 
 	if e := sess_feat.session_registry_find(&reg, 9); e != nil {
 		e.attention = true

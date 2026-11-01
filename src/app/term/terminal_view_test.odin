@@ -84,9 +84,9 @@ test_wait_timeout_parked_when_idle_and_wakes_on_pty :: proc(t: ^testing.T) {
 	testing.expect_value(t, app_compute_wait_timeout_ms(app, false), i32(-1))
 
 	// Pending PTY wakeup -> 0 (immediate non-blocking poll)
-	app.pty_wakeup_pending = true
+	app.wakeup_pending = true
 	testing.expect_value(t, app_compute_wait_timeout_ms(app, false), i32(0))
-	app.pty_wakeup_pending = false
+	app.wakeup_pending = false
 
 	// Active tab-bar slide animation -> FRAME_TICK_MS (8ms)
 	app.layout.tab_bar_anim_t = 0.5

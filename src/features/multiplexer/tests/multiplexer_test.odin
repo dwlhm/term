@@ -4,11 +4,19 @@ import "core:testing"
 import feature ".."
 import session "../../session"
 
+
+// test_provider gives panes Terminal-only sessions: no program behind them.
+test_provider :: proc() -> session.Session_Provider {
+	return {spawn = proc(user: rawptr, config: session.Session_Config) -> ^session.Terminal_Session {
+		return session.session_create(session.session_config_size(config), {})
+	}}
+}
+
 @test
 test_multiplexer_lifecycle :: proc(t: ^testing.T) {
 	m: feature.Multiplexer
-	feature.multiplexer_init(&m)
-	defer feature.multiplexer_destroy(&m)
+	feature.multiplexer_init(&m, test_provider())
+	defer feature.multiplexer_destroy(&m, true)
 
 	cfg := session.Session_Config{
 		shell = "/bin/sh",
@@ -17,8 +25,8 @@ test_multiplexer_lifecycle :: proc(t: ^testing.T) {
 	}
 
 	// 1. Create Terminal pane
-	id1, err1 := feature.multiplexer_create_terminal_pane(&m, cfg)
-	testing.expect(t, err1 == .None, "Create terminal pane 1 failed")
+	id1 := feature.multiplexer_create_terminal_pane(&m, cfg)
+	testing.expect(t, id1 != 0, "Create terminal pane 1 failed")
 	testing.expect_value(t, id1, u32(1))
 	testing.expect_value(t, m.focused_pane_id, u32(1))
 

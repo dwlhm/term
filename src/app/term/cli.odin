@@ -5,8 +5,6 @@ package term
 import "core:fmt"
 import "core:strconv"
 
-import holder_feat "../../features/holder"
-
 Cli_Options :: struct {
 	initial_cmd:      string, // -e: command typed into the initial shell
 	telemetry_path:   string, // --telemetry: per-frame NDJSON stream
@@ -16,17 +14,6 @@ Cli_Options :: struct {
 	pane_opacity_override: f32,    // -1.0 = no override, >= 0.0 = override (--pane-opacity <val>)
 	scroll_speed_override: f32, // -1.0 = no override, > 0.0 = override (--scroll-speed <val>)
 	working_dir_override:  string, // -d, --working-directory: initial working directory
-}
-
-// app_run_holder_cli runs `term --holder <socket>` (the session holder
-// process; no window, no SDL). handled = false for every other invocation.
-app_run_holder_cli :: proc(args: []string) -> (handled: bool, code: int) {
-	if len(args) < 2 || args[1] != "--holder" do return false, 0
-	if len(args) != 3 {
-		fmt.eprintln("usage: term --holder <socket>")
-		return true, 2
-	}
-	return true, holder_feat.holder_run(args[2])
 }
 
 // app_parse_cli_args parses command-line arguments.

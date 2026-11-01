@@ -105,16 +105,16 @@ _build_tabs :: proc(cc: ^Command_Center_State, src: Command_Center_Sources, q: s
 }
 
 // command_center_session_label is the display/filter label of a background session.
-command_center_session_label :: proc(sess: ^sess_feat.Terminal_Session) -> string {
-	label := sess_feat.session_get_title(sess)
+command_center_session_label :: proc(e: ^sess_feat.Detached_Session_Entry) -> string {
+	label := sess_feat.registry_text(&e.title)
 	return label if len(label) > 0 else "shell"
 }
 
 @(private = "file")
 _build_sessions :: proc(cc: ^Command_Center_State, src: Command_Center_Sources, q: string) {
 	if src.sessions == nil do return
-	for e in src.sessions.entries {
-		if sc := command_center_score(q, command_center_session_label(e.session), ""); sc > 0 {
+	for &e in src.sessions.entries {
+		if sc := command_center_score(q, command_center_session_label(&e), ""); sc > 0 {
 			_ = _push(cc, {kind = .Session, session_id = e.id, score = sc})
 		}
 	}

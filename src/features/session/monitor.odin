@@ -12,7 +12,6 @@ import "core:time"
 import "core:unicode/utf8"
 import extension "../../core/terminal/extension"
 import terminal "../../core/terminal"
-import pty "../../platform/pty"
 
 Session_Snapshot :: struct {
 	session_id:      u32,
@@ -92,8 +91,7 @@ session_snapshot_make :: proc(
 	}
 
 	// 1. Process name & PID
-	scratch_proc: [128]u8
-	proc_str := pty.pty_get_foreground_process_name(sess.pty, scratch_proc[:])
+	proc_str := session_process_name(sess)
 	if len(proc_str) > 0 {
 		snap.process_name = strings.clone(proc_str, allocator)
 	} else if sess.program_status.app_len > 0 {
@@ -101,16 +99,10 @@ session_snapshot_make :: proc(
 	} else {
 		snap.process_name = "shell"
 	}
-	if sess.pty != nil do snap.pid = int(sess.pty.child_pid)
+	snap.pid = int(sess.info.pid)
 
 	// 2. Working directory
-	scratch_cwd: [512]u8
-	cwd_str := ""
-	if sess.cwd_len > 0 {
-		cwd_str = string(sess.cwd_buf[:sess.cwd_len])
-	} else if sess.pty != nil {
-		cwd_str = pty.pty_get_foreground_cwd(sess.pty, scratch_cwd[:])
-	}
+	cwd_str := string(sess.cwd_buf[:sess.cwd_len]) if sess.cwd_len > 0 else session_process_cwd(sess)
 	if len(cwd_str) > 0 do snap.cwd = strings.clone(cwd_str, allocator)
 
 	// 3. Title

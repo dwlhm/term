@@ -25,6 +25,7 @@ import tabs_feat "../../features/tabs"
 import mux_feat "../../features/multiplexer"
 import inter_feat "../../features/interaction"
 import sess_feat "../../features/session"
+import client_feat "../../features/session_client"
 
 CHROME_BAR_HEIGHT: f32 : 36.0
 
@@ -80,16 +81,16 @@ run_headless_verification :: proc() -> bool {
 	// 2. Feature Multiplexer & Session Verification
 	{
 		m: mux_feat.Multiplexer
-		mux_feat.multiplexer_init(&m)
-		defer mux_feat.multiplexer_destroy(&m)
+		mux_feat.multiplexer_init(&m, client_feat.client_provider(_client))
+		defer mux_feat.multiplexer_destroy(&m, true)
 
 		shell_path := os.get_env("SHELL", context.temp_allocator)
 		if len(shell_path) == 0 do shell_path = "/bin/sh"
 
 		cfg := sess_feat.Session_Config{shell = shell_path, rows = 24, cols = 80}
-		p_term, s_err := mux_feat.multiplexer_create_terminal_pane(&m, cfg)
-		if s_err != .None {
-			fmt.eprintfln("[FAIL] Terminal pane creation failed: %v", s_err)
+		p_term := mux_feat.multiplexer_create_terminal_pane(&m, cfg)
+		if p_term == 0 {
+			fmt.eprintln("[FAIL] Terminal pane creation failed")
 			return false
 		}
 		p_3d := mux_feat.multiplexer_create_3d_pane(&m)
@@ -102,9 +103,12 @@ run_headless_verification :: proc() -> bool {
 		// Write test command through session
 		term_pane := mux_feat.multiplexer_get_pane(&m, p_term)
 		sess_feat.session_write_string(term_pane.session, "echo PHASE4_VERIFY_OK\n")
-		time.sleep(150 * time.Millisecond)
-
-		drained := mux_feat.multiplexer_drain_all(&m)
+		drained := 0
+		for tries := 0; drained <= 0 && tries < 100; tries += 1 {
+			time.sleep(20 * time.Millisecond)
+			client_feat.client_pump(_client)
+			drained = mux_feat.multiplexer_drain_all(&m)
+		}
 		if drained <= 0 {
 			fmt.eprintln("[FAIL] session drain failed")
 			return false
@@ -119,15 +123,15 @@ run_headless_verification :: proc() -> bool {
 		inter: inter_feat.Interaction_State
 
 		tabs_feat.tabs_manager_init(&tm, {0, 0, 1024, 36})
-		mux_feat.multiplexer_init(&m)
+		mux_feat.multiplexer_init(&m, client_feat.client_provider(_client))
 		inter_feat.interaction_init(&inter)
 
 		defer {
 			tabs_feat.tabs_manager_destroy(&tm)
-			mux_feat.multiplexer_destroy(&m)
+			mux_feat.multiplexer_destroy(&m, true)
 		}
 
-		p1, _ := mux_feat.multiplexer_create_terminal_pane(&m, {shell = "/bin/sh", rows = 24, cols = 80})
+		p1 := mux_feat.multiplexer_create_terminal_pane(&m, {shell = "/bin/sh", rows = 24, cols = 80})
 		p2 := mux_feat.multiplexer_create_3d_pane(&m)
 		tabs_feat.tabs_manager_create_tab(&tm, "Main Workspace", p1)
 
@@ -162,7 +166,19 @@ run_headless_verification :: proc() -> bool {
 	return true
 }
 
+// _client runs every pane's program as a session of this harness's private session core.
+_client: ^client_feat.Client
+
 main :: proc() {
+	if handled, code := client_feat.client_tier_main(os.args); handled do os.exit(code)
+	if !client_feat.client_use_private_session() do os.exit(1)
+	_client = new(client_feat.Client)
+	defer free(_client)
+	if !client_feat.client_connect(_client, nil, nil) {
+		fmt.eprintln("[FAIL] cannot start the session core")
+		os.exit(1)
+	}
+	defer client_feat.client_disconnect(_client)
 	for arg in os.args[1:] {
 		if arg == "--test" {
 			if !run_headless_verification() {
@@ -206,8 +222,8 @@ main :: proc() {
 	tabs_feat.tabs_manager_init(&state.tabs_mgr, tabs_bar)
 	defer tabs_feat.tabs_manager_destroy(&state.tabs_mgr)
 
-	mux_feat.multiplexer_init(&state.mux)
-	defer mux_feat.multiplexer_destroy(&state.mux)
+	mux_feat.multiplexer_init(&state.mux, client_feat.client_provider(_client))
+	defer mux_feat.multiplexer_destroy(&state.mux, true)
 
 	inter_feat.interaction_init(&state.inter)
 
@@ -216,9 +232,9 @@ main :: proc() {
 	if len(shell_path) == 0 do shell_path = "/bin/sh"
 
 	term_cfg := sess_feat.Session_Config{shell = shell_path, rows = 36, cols = 80}
-	p_term, err := mux_feat.multiplexer_create_terminal_pane(&state.mux, term_cfg)
-	if err != .None {
-		fmt.eprintfln("Failed to spawn shell: %v", err)
+	p_term := mux_feat.multiplexer_create_terminal_pane(&state.mux, term_cfg)
+	if p_term == 0 {
+		fmt.eprintln("Failed to spawn shell")
 		return
 	}
 	state.pane_terminal = p_term
@@ -281,7 +297,7 @@ main :: proc() {
 				key_r := rune(event.key.key)
 				act := inter_feat.interaction_on_key_press(&state.inter, &state.tabs_mgr, &state.mux, key_r, mods)
 				if act.kind == .Tab_New_Requested {
-					new_pane, _ := mux_feat.multiplexer_create_terminal_pane(&state.mux, term_cfg)
+					new_pane := mux_feat.multiplexer_create_terminal_pane(&state.mux, term_cfg)
 					tabs_feat.tabs_manager_create_tab(&state.tabs_mgr, "New Shell", new_pane)
 				}
 			case .MOUSE_BUTTON_DOWN:
@@ -304,6 +320,7 @@ main :: proc() {
 		}
 
 		// Drain shell PTY output
+		client_feat.client_pump(_client)
 		_ = mux_feat.multiplexer_drain_all(&state.mux)
 
 		// Sync layout

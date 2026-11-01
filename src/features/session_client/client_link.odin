@@ -1,0 +1,67 @@
+package feature_session_client
+
+// Session_Link procs of an attached session: input, resize and credit go to
+// the core on the session's channel.
+
+import "core:sync"
+import ipc "../../platform/ipc"
+
+@(private)
+_link_write :: proc(user: rawptr, data: []u8) {
+	l := (^Client_Link)(user)
+	c := l.client
+	sync.mutex_lock(&c.mutex)
+	switch l.state {
+	case .Pending:
+		l.pending_len += copy(l.pending[l.pending_len:], data)
+	case .Attached:
+		for off := 0; off < len(data); off += ipc.STREAM_DATA_CHUNK {
+			ipc.stream_send(&c.conn, ipc.MSG_V_INPUT, l.channel, data[off:min(len(data), off + ipc.STREAM_DATA_CHUNK)])
+		}
+	case .Free, .Closed:
+	}
+	sync.mutex_unlock(&c.mutex)
+	_poke(c)
+}
+
+@(private)
+_link_resize :: proc(user: rawptr, size: ipc.Size_Msg) {
+	l := (^Client_Link)(user)
+	b: [8]u8
+	w := ipc.wire_writer(b[:])
+	ipc.enc_size(&w, size)
+	_channel_send(l, ipc.MSG_V_RESIZE, ipc.wire_bytes_written(&w))
+}
+
+@(private)
+_link_consumed :: proc(user: rawptr, n: int) {
+	l := (^Client_Link)(user)
+	c := l.client
+	sync.mutex_lock(&c.mutex)
+	if l.state == .Attached do ipc.stream_ack(&c.conn, l.channel, n)
+	sync.mutex_unlock(&c.mutex)
+	_poke(c)
+}
+
+// client_focus / client_facts report the viewer's focus and cell size for sess.
+client_focus :: proc(l: ^Client_Link, focused: bool) {
+	b := [1]u8{1 if focused else 0}
+	_channel_send(l, ipc.MSG_V_FOCUS, b[:])
+}
+
+client_facts :: proc(l: ^Client_Link, cell_w, cell_h: u16) {
+	b: [4]u8
+	w := ipc.wire_writer(b[:])
+	ipc.enc_facts(&w, {cell_w = cell_w, cell_h = cell_h})
+	_channel_send(l, ipc.MSG_V_FACTS, b[:])
+}
+
+@(private = "file")
+_channel_send :: proc(l: ^Client_Link, kind: u8, payload: []u8) {
+	if l == nil do return
+	c := l.client
+	sync.mutex_lock(&c.mutex)
+	if l.state == .Attached do ipc.stream_send(&c.conn, kind, l.channel, payload)
+	sync.mutex_unlock(&c.mutex)
+	_poke(c)
+}

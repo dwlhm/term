@@ -20,6 +20,7 @@ import tabs_feat "../../features/tabs"
 import mux_feat "../../features/multiplexer"
 import inter_feat "../../features/interaction"
 import sess_feat "../../features/session"
+import client_feat "../../features/session_client"
 import chrome_splits "../../core/chrome/splits"
 import chrome_dl "../../core/chrome/draw_list"
 import three_d "../../core/render/three_d"
@@ -38,6 +39,13 @@ contains_str :: proc(haystack, needle: string) -> bool {
 }
 
 main :: proc() {
+	if handled, code := client_feat.client_tier_main(os.args); handled do os.exit(code)
+	if !client_feat.client_use_private_session() do os.exit(1)
+	client := new(client_feat.Client)
+	if !client_feat.client_connect(client, nil, nil) {
+		fmt.eprintln("[FAIL] cannot start the session core")
+		os.exit(1)
+	}
 	fmt.println("================================================================================")
 	fmt.println("            TERM GROUND-UP REWRITE: REAL END-TO-END (E2E) TEST                  ")
 	fmt.println("================================================================================")
@@ -52,14 +60,16 @@ main :: proc() {
 	dl: chrome_dl.Ui_Draw_List
 
 	tabs_feat.tabs_manager_init(&tm, {0, 0, SCREEN_W, CHROME_H})
-	mux_feat.multiplexer_init(&mux)
+	mux_feat.multiplexer_init(&mux, client_feat.client_provider(client))
 	inter_feat.interaction_init(&inter, cell_w = 9.0, cell_h = 18.0)
 	chrome_dl.ui_draw_list_init(&dl)
 
 	defer {
 		chrome_dl.ui_draw_list_destroy(&dl)
 		tabs_feat.tabs_manager_destroy(&tm)
-		mux_feat.multiplexer_destroy(&mux)
+		mux_feat.multiplexer_destroy(&mux, true)
+		client_feat.client_disconnect(client)
+		free(client)
 	}
 
 	shell_path := os.get_env("SHELL", context.temp_allocator)
@@ -67,9 +77,9 @@ main :: proc() {
 
 	fmt.printfln("[BOOTSTRAP] Spawning real shell PTY (%s)...", shell_path)
 	term_cfg := sess_feat.Session_Config{shell = shell_path, rows = 36, cols = 80}
-	p_term, s_err := mux_feat.multiplexer_create_terminal_pane(&mux, term_cfg)
-	if s_err != .None {
-		fmt.eprintfln("[FAIL] Failed to spawn PTY: %v", s_err)
+	p_term := mux_feat.multiplexer_create_terminal_pane(&mux, term_cfg)
+	if p_term == 0 {
+		fmt.eprintln("[FAIL] Failed to start the shell session")
 		os.exit(1)
 	}
 
@@ -93,16 +103,17 @@ main :: proc() {
 
 	// User types: echo 'REAL_E2E_TOKEN_99' + enter
 	fmt.println("  1. User types command: echo 'REAL_E2E_TOKEN_99'")
-	_, _ = sess_feat.session_write_string(term_pane.session, "echo 'REAL_E2E_TOKEN_99'\n")
+	sess_feat.session_write_string(term_pane.session, "echo 'REAL_E2E_TOKEN_99'\n")
 
 	// User types OSC 0 to change title
 	fmt.println("  2. User changes window title via OSC 0: \\033]0;Proyek Odin Real E2E\\007")
-	_, _ = sess_feat.session_write_string(term_pane.session, "printf '\\033]0;Proyek Odin Real E2E\\007'\n")
+	sess_feat.session_write_string(term_pane.session, "printf '\\033]0;Proyek Odin Real E2E\\007'\n")
 
 	// Wait and drain live PTY
 	found_token := false
 	start_drain := time.now()
 	for time.since(start_drain) < 1000 * time.Millisecond {
+		client_feat.client_pump(client)
 		n := mux_feat.multiplexer_drain_all(&mux)
 		if n > 0 {
 			for r in 0..<10 {
@@ -252,7 +263,7 @@ main :: proc() {
 		os.exit(1)
 	}
 
-	p_term2, _ := mux_feat.multiplexer_create_terminal_pane(&mux, term_cfg)
+	p_term2 := mux_feat.multiplexer_create_terminal_pane(&mux, term_cfg)
 	tab2_id, tab2_idx := tabs_feat.tabs_manager_create_tab(&tm, "Secondary Shell", p_term2)
 	fmt.printfln("     -> Tab 2 created with ID=%d, Index=%d", tab2_id, tab2_idx)
 	if tabs_feat.tabs_manager_tab_count(&tm) != 2 {
@@ -297,8 +308,9 @@ main :: proc() {
 	mux_feat.multiplexer_sync_split_rects(&mux, act_tab_now.split_tree)
 
 	active_pane := mux_feat.multiplexer_get_pane(&mux, act_tab_now.active_pane_id)
-	_, _ = sess_feat.session_write_string(active_pane.session, "echo 'SELECTED_TEXT_E2E'\n")
+	sess_feat.session_write_string(active_pane.session, "echo 'SELECTED_TEXT_E2E'\n")
 	time.sleep(150 * time.Millisecond)
+	client_feat.client_pump(client)
 	_ = mux_feat.multiplexer_drain_all(&mux)
 
 	// User selects text in terminal pane
@@ -344,9 +356,9 @@ main :: proc() {
 		os.exit(1)
 	}
 
-	// Teardown multiplexer (closes all PTY handles, sends SIGHUP, joins drain threads)
-	mux_feat.multiplexer_destroy(&mux)
-	fmt.println("  [PASS] All child shells received SIGHUP, joined drain threads, and exited cleanly.")
+	// Teardown multiplexer: every session is killed in the core (its holder hangs up the shells)
+	mux_feat.multiplexer_destroy(&mux, true)
+	fmt.println("  [PASS] All child shells were killed through the session core.")
 
 	// -----------------------------------------------------------------------------------------
 	// FINAL VERDICT

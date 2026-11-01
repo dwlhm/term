@@ -89,59 +89,6 @@ test_format_roundtrip :: proc(t: ^testing.T) {
 }
 
 @test
-test_row_roundtrip_and_sanitize :: proc(t: ^testing.T) {
-	row := control.Control_Session_Row {
-		id        = 9,
-		state     = .Busy,
-		pid       = 1234,
-		elapsed_s = 56,
-		process   = "a\tb",
-		cwd       = "/tmp/x",
-		status    = "x\ny",
-	}
-
-	b: strings.Builder
-	strings.builder_init(&b)
-	defer strings.builder_destroy(&b)
-	control.control_write_session_row(&b, row)
-	line := strings.to_string(b)
-
-	testing.expect(t, strings.has_suffix(line, "\n"), "row must end with a newline")
-	tabs := 0
-	for i in 0..<len(line) {
-		if line[i] == '\t' {
-			tabs += 1
-		}
-	}
-	testing.expect_value(t, tabs, 6)
-
-	parsed, ok := control.control_parse_session_row(line[:len(line) - 1])
-	testing.expect(t, ok, "written row must parse back")
-	testing.expect_value(t, parsed.id, row.id)
-	testing.expect_value(t, parsed.state, row.state)
-	testing.expect_value(t, parsed.pid, row.pid)
-	testing.expect_value(t, parsed.elapsed_s, row.elapsed_s)
-	testing.expect_value(t, parsed.process, "a b")
-	testing.expect_value(t, parsed.cwd, "/tmp/x")
-	testing.expect_value(t, parsed.status, "x y")
-}
-
-@test
-test_row_parse_rejects :: proc(t: ^testing.T) {
-	bad := []string{
-		"1\tidle\t10\t5\tproc\tcwd",
-		"1\tidle\t10\t5\tproc\tcwd\tstatus\textra",
-		"1\tzzz\t10\t5\tproc\tcwd\tstatus",
-		"1\tidle\tx\t5\tproc\tcwd\tstatus",
-		"0\tidle\t10\t5\tproc\tcwd\tstatus",
-	}
-	for line in bad {
-		_, ok := control.control_parse_session_row(line)
-		testing.expectf(t, !ok, "expected reject: %q", line)
-	}
-}
-
-@test
 test_write_err_and_split_reply :: proc(t: ^testing.T) {
 	b: strings.Builder
 	strings.builder_init(&b)

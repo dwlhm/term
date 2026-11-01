@@ -130,3 +130,18 @@ ipc_unlink_if_ours :: proc(path: string, ino: u64) {
 	st: posix.stat_t
 	if ok && posix.lstat(cpath, &st) == .OK && u64(st.st_ino) == ino do posix.unlink(cpath)
 }
+
+// ipc_log_path is where a detached tier appends its stdout/stderr: the shared
+// $TMPDIR/term-<uid> dir even for a private session, so a private session dir
+// holds nothing but sockets and is removed when its last tier exits.
+ipc_log_path :: proc(buf: []u8, name: string) -> string {
+	sock_buf: [256]u8
+	path, err := ipc_default_socket_path(sock_buf[:])
+	if err != .None do return "/dev/null"
+	for i := len(path) - 1; i > 0; i -= 1 {
+		if path[i] != '/' do continue
+		if p, ok := ipc_session_path(buf, path[:i], name); ok do return p
+		break
+	}
+	return "/dev/null"
+}

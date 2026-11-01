@@ -108,6 +108,7 @@ chrome_view_build_draw_list :: proc(
 	dragged_scrollbar: u32 = 0,
 	drop_effect: ^Drop_Effect_State = nil,
 	sessions: ^sess_feat.Session_Registry = nil,
+	quit: ^App_Quit_State = nil,
 ) -> (dirty: bool) {
 	if cv == nil do return false
 
@@ -378,6 +379,7 @@ chrome_view_build_draw_list :: proc(
 		cc_src := Command_Center_Sources{tabs = tabs, sessions = sessions}
 		command_center_emit_draw_list(cmd_center, cc_src, &cv.draw_list, layout)
 	}
+	if quit != nil do quit_dialog_emit_draw_list(&quit.dialog, quit.candidates[:quit.count], &cv.draw_list, layout)
 
 	screen_w := layout.screen_w if layout != nil else f32(cv.rend.width)
 	screen_h := layout.screen_h if layout != nil else f32(cv.rend.height)

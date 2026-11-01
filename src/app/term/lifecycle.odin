@@ -4,9 +4,10 @@ package term
 // Part of Tier 3 Application Shell (src/app/term/*).
 //
 // Invariant: the ONLY procs allowed to set app.running = false are
-// app_request_quit (control `quit`, SIGTERM/SIGINT/SIGHUP) and app_destroy.
-// Every "close" gesture (⌘Q, window close button, last tab closed, last shell
-// exited) goes through app_request_hide.
+// app_request_quit (SIGTERM/SIGINT/SIGHUP, the end of the quit flow) and
+// app_destroy. Every "close" gesture (⌘Q, Dock Quit, window close button,
+// `term quit`) goes through app_request_quit_flow (quit_flow.odin); closing
+// the last tab or the last shell exiting quits the viewer (nothing is shown).
 
 import plat_win "../../platform/window"
 import chrome_render "../../core/render/chrome"
@@ -17,8 +18,8 @@ import damage "../../core/terminal/damage"
 
 // Instance_Role decides what "close" means for this process.
 Instance_Role :: enum u8 {
-	Primary,    // owns the control socket; close = hide, sessions persist
-	Standalone, // diagnostics/scripted run (--telemetry, --grid-dump, -e): close = quit
+	Primary,    // owns the control socket; quit asks before killing running programs
+	Standalone, // diagnostics/scripted run (--telemetry, --grid-dump, -e): private session, quit kills it
 }
 
 // app_resolve_role: Standalone iff any of --telemetry, --grid-dump or -e was
@@ -54,29 +55,13 @@ app_spawn_default_tab :: proc(app: ^Term_App) -> bool {
 	return true
 }
 
-// app_request_hide: Primary → hide the window (all tabs/sessions keep
-// running, the loop parks with zero rendering). Standalone → app_request_quit.
-app_request_hide :: proc(app: ^Term_App) {
-	if app == nil do return
-	if app.role == .Standalone {
-		app_request_quit(app)
-		return
-	}
-	if app.window_hidden do return
-	app.window_hidden = true
-	app.window_focused = false
-	command_center_close(&app.cmd_center)
-	plat_win.platform_hide_window(app.window.handle)
-}
-
-// app_show_window makes the window visible, raises and focuses it. If no tab
-// exists (all were closed while hidden) a fresh shell tab is spawned first.
+// app_show_window raises and focuses the window (`term show`, a second launch,
+// `term session attach`). If no tab exists a fresh shell tab is spawned first.
 app_show_window :: proc(app: ^Term_App) {
 	if app == nil do return
 	if len(app.tabs_mgr.entries) == 0 {
 		_ = app_spawn_default_tab(app)
 	}
-	app.window_hidden = false
 	plat_win.platform_bring_window_to_front(app.window.handle)
 	app_sync_layout_and_winsize(app)
 	for &pane in app.mux.panes {

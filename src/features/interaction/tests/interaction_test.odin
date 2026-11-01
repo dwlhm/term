@@ -11,6 +11,14 @@ import terminal "../../../core/terminal"
 import terminal_grid "../../../core/terminal/grid"
 import cell "../../../core/terminal/cell"
 
+
+// test_provider gives panes Terminal-only sessions: no program behind them.
+test_provider :: proc() -> session.Session_Provider {
+	return {spawn = proc(user: rawptr, config: session.Session_Config) -> ^session.Terminal_Session {
+		return session.session_create(session.session_config_size(config), {})
+	}}
+}
+
 @test
 test_interaction_lifecycle :: proc(t: ^testing.T) {
 	tm: tabs.Tabs_Manager
@@ -19,12 +27,12 @@ test_interaction_lifecycle :: proc(t: ^testing.T) {
 
 	bar_rect: [4]f32 = {0.0, 0.0, 800.0, 36.0}
 	tabs.tabs_manager_init(&tm, bar_rect)
-	multiplexer.multiplexer_init(&mux)
+	multiplexer.multiplexer_init(&mux, test_provider())
 	feature.interaction_init(&inter)
 
 	defer {
 		tabs.tabs_manager_destroy(&tm)
-		multiplexer.multiplexer_destroy(&mux)
+		multiplexer.multiplexer_destroy(&mux, true)
 	}
 
 	cfg := session.Session_Config{
@@ -34,8 +42,8 @@ test_interaction_lifecycle :: proc(t: ^testing.T) {
 	}
 
 	// 1. Create a terminal pane and tab
-	pane_id, err := multiplexer.multiplexer_create_terminal_pane(&mux, cfg)
-	testing.expect(t, err == .None, "Create terminal pane failed")
+	pane_id := multiplexer.multiplexer_create_terminal_pane(&mux, cfg)
+	testing.expect(t, pane_id != 0, "Create terminal pane failed")
 	tabs.tabs_manager_create_tab(&tm, "Shell", pane_id)
 
 	content_rect: [4]f32 = {0.0, 36.0, 800.0, 564.0}
@@ -183,12 +191,12 @@ test_double_triple_click_and_select_all :: proc(t: ^testing.T) {
 
 	bar_rect: [4]f32 = {0.0, 0.0, 800.0, 36.0}
 	tabs.tabs_manager_init(&tm, bar_rect)
-	multiplexer.multiplexer_init(&mux)
+	multiplexer.multiplexer_init(&mux, test_provider())
 	feature.interaction_init(&inter)
 
 	defer {
 		tabs.tabs_manager_destroy(&tm)
-		multiplexer.multiplexer_destroy(&mux)
+		multiplexer.multiplexer_destroy(&mux, true)
 	}
 
 	cfg := session.Session_Config{
@@ -197,8 +205,8 @@ test_double_triple_click_and_select_all :: proc(t: ^testing.T) {
 		cols  = 80,
 	}
 
-	pane_id, err := multiplexer.multiplexer_create_terminal_pane(&mux, cfg)
-	testing.expect(t, err == .None, "Create terminal pane failed")
+	pane_id := multiplexer.multiplexer_create_terminal_pane(&mux, cfg)
+	testing.expect(t, pane_id != 0, "Create terminal pane failed")
 	tabs.tabs_manager_create_tab(&tm, "Shell", pane_id)
 
 	content_rect: [4]f32 = {0.0, 36.0, 800.0, 564.0}
@@ -273,12 +281,12 @@ test_selection_canceled_on_user_input :: proc(t: ^testing.T) {
 
 	bar_rect: [4]f32 = {0.0, 0.0, 800.0, 36.0}
 	tabs.tabs_manager_init(&tm, bar_rect)
-	multiplexer.multiplexer_init(&mux)
+	multiplexer.multiplexer_init(&mux, test_provider())
 	feature.interaction_init(&inter)
 
 	defer {
 		tabs.tabs_manager_destroy(&tm)
-		multiplexer.multiplexer_destroy(&mux)
+		multiplexer.multiplexer_destroy(&mux, true)
 	}
 
 	cfg := session.Session_Config{
@@ -287,8 +295,8 @@ test_selection_canceled_on_user_input :: proc(t: ^testing.T) {
 		cols  = 80,
 	}
 
-	pane_id, err := multiplexer.multiplexer_create_terminal_pane(&mux, cfg)
-	testing.expect(t, err == .None, "Create terminal pane failed")
+	pane_id := multiplexer.multiplexer_create_terminal_pane(&mux, cfg)
+	testing.expect(t, pane_id != 0, "Create terminal pane failed")
 	tabs.tabs_manager_create_tab(&tm, "Shell", pane_id)
 
 	content_rect: [4]f32 = {0.0, 36.0, 800.0, 564.0}

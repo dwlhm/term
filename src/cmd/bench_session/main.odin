@@ -10,10 +10,12 @@ import "core:time"
 
 import terminal "../../core/terminal"
 import cell "../../core/terminal/cell"
+import grid "../../core/terminal/grid"
 import damage "../../core/terminal/damage"
 import egc "../../core/terminal/egc"
-import pty "../../platform/pty"
+import ipc "../../platform/ipc"
 import session "../../features/session"
+import client_feat "../../features/session_client"
 
 // Statistical percentile helper
 percentile :: proc(samples: []f64, p: f64) -> f64 {
@@ -268,7 +270,7 @@ bench_suite2_scroll_o1 :: proc(rows: int) -> Benchmark_Result {
 	for i in 0..<ITERS {
 		start := time.tick_now()
 		// Ring buffer origin rotation O(1)
-		_ = terminal.grid.grid_scroll_up(&term.grid, &term.damage, 0, rows - 1, 1)
+		_ = grid.grid_scroll_up(&term.grid, &term.damage, 0, rows - 1, 1)
 		dur := time.tick_since(start)
 		samples[i] = f64(time.duration_nanoseconds(dur))
 	}
@@ -370,12 +372,13 @@ bench_suite2_egc :: proc() -> Benchmark_Result {
 }
 
 // ==============================================================================
-// Suite 3: Platform PTY Driver
+// Suite 3: Session stream inbox ring (the viewer side of every session)
 // ==============================================================================
 
 bench_suite3_ring :: proc() -> Benchmark_Result {
-	ring: pty.Pty_Ring_Buffer
-	pty.ring_init(&ring)
+	ring: ipc.Byte_Ring
+	ring.buf = make([]u8, session.SESSION_INBOX_BYTES)
+	defer delete(ring.buf)
 
 	CHUNK_SIZE :: 4096
 	data := make([]u8, CHUNK_SIZE)
@@ -389,8 +392,8 @@ bench_suite3_ring :: proc() -> Benchmark_Result {
 
 	for i in 0..<ITERS {
 		start := time.tick_now()
-		_ = pty.ring_write(&ring, data)
-		_ = pty.ring_read(&ring, read_buf)
+		_ = ipc.ring_push(&ring, data)
+		_ = ipc.ring_pop(&ring, read_buf)
 		dur := time.tick_since(start)
 		samples[i] = f64(time.duration_nanoseconds(dur))
 	}
@@ -405,7 +408,7 @@ bench_suite3_ring :: proc() -> Benchmark_Result {
 	tp_str := fmt.tprintf("%.2f GB/s", gb_per_sec)
 
 	return Benchmark_Result{
-		name        = "3.1 64 KiB Ring Buffer",
+		name        = "3.1 Session inbox ring",
 		p50         = p50,
 		p95         = p95,
 		p99         = p99,
@@ -427,11 +430,12 @@ bench_suite4_keystroke_roundtrip :: proc() -> Benchmark_Result {
 		cols  = 80,
 	}
 
-	sess, err := session.session_create(cfg)
-	if err != .None {
+	// Through every tier: viewer → core → holder → shell → holder → core → viewer.
+	sess := client_feat.client_spawn(_client, cfg)
+	if sess == nil {
 		return Benchmark_Result{name = "4.1 Keystroke Roundtrip", passed = false}
 	}
-	defer session.session_destroy(sess)
+	defer client_feat.client_release(_client, sess, true)
 
 	ITERS :: 10
 	samples := make([]f64, ITERS)
@@ -439,11 +443,12 @@ bench_suite4_keystroke_roundtrip :: proc() -> Benchmark_Result {
 
 	for i in 0..<ITERS {
 		start := time.tick_now()
-		_ = session.session_write_string(sess, "printf 'K'\n")
+		session.session_write_string(sess, "printf 'K'\n")
 
 		// Poll until 'K' is drained into grid
 		found := false
-		for time.since(start) < 200 * time.Millisecond {
+		for time.tick_since(start) < 200 * time.Millisecond {
+			client_feat.client_pump(_client)
 			n := session.session_drain(sess)
 			if n > 0 {
 				for r in 0..<5 {
@@ -506,14 +511,14 @@ bench_suite5_zero_alloc :: proc() -> Benchmark_Result {
 	stream_chunk := "\x1b[1;31mSteady State Stream Data\x1b[0m\r\n"
 	data := transmute([]u8)stream_chunk
 
-	before_stream := track.total_allocated_mem
+	before_stream := track.total_memory_allocated
 
 	for i in 0..<1000 {
 		terminal.terminal_feed_bytes(&term, data)
 		_ = terminal.terminal_consume_damage(&term)
 	}
 
-	allocated_during_stream := track.total_allocated_mem - before_stream
+	allocated_during_stream := track.total_memory_allocated - before_stream
 
 	return Benchmark_Result{
 		name        = "5.1 Zero Alloc Gate",
@@ -531,7 +536,16 @@ bench_suite5_zero_alloc :: proc() -> Benchmark_Result {
 // Main Runner
 // ==============================================================================
 
+// _client: suite 4 runs its shell as a session of this bench's private session core.
+_client: ^client_feat.Client
+
 main :: proc() {
+	if handled, code := client_feat.client_tier_main(os.args); handled do os.exit(code)
+	if !client_feat.client_use_private_session() do os.exit(1)
+	_client = new(client_feat.Client)
+	defer free(_client)
+	if !client_feat.client_connect(_client, nil, nil) do os.exit(1)
+	defer client_feat.client_disconnect(_client)
 	fmt.println("=============================================================================================================")
 	fmt.println("                      TERM HEADLESS BENCHMARK SUITE — EMPIRICAL RESULTS")
 	fmt.println("=============================================================================================================")

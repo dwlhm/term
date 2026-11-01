@@ -54,7 +54,7 @@ app_spawn_terminal_pane :: proc(app: ^Term_App, rows: int = 24, cols: int = 80) 
 	ch := app.layout.metrics.cell_h if app != nil && app.layout.metrics.cell_h > 0 else 43.0
 	xp := int(f32(cols) * cw)
 	yp := int(f32(rows) * ch)
-	new_p, err := mux_feat.multiplexer_create_terminal_pane(&app.mux, {
+	new_p := mux_feat.multiplexer_create_terminal_pane(&app.mux, {
 		shell  = shell,
 		cwd    = cwd,
 		rows   = rows,
@@ -62,7 +62,7 @@ app_spawn_terminal_pane :: proc(app: ^Term_App, rows: int = 24, cols: int = 80) 
 		xpixel = xp,
 		ypixel = yp,
 	})
-	if err != .None do return 0, false
+	if new_p == 0 do return 0, false
 
 	app_bind_session_extensions(app, new_p)
 	return new_p, true
@@ -119,7 +119,7 @@ app_close_tab :: proc(app: ^Term_App, tab_idx: int) {
 
 	tabs_feat.tabs_manager_close_tab(&app.tabs_mgr, tab_idx)
 	if len(app.tabs_mgr.entries) == 0 {
-		app_request_hide(app)
+		app_request_quit_flow(app) // nothing is shown any more: nothing to ask about
 		return
 	}
 
@@ -511,6 +511,6 @@ app_execute_action :: proc(app: ^Term_App, act: Action_Id) {
 		command_center_toggle(&app.cmd_center, .Sessions, app_command_center_sources(app))
 
 	case .App_Quit:
-		app_request_hide(app)
+		app_request_quit_flow(app)
 	}
 }

@@ -14,7 +14,6 @@ import "vendor:sdl3"
 import plat_win "../../platform/window"
 import plat_clip "../../platform/clipboard"
 import plat_font "../../platform/font"
-import plat_pty "../../platform/pty"
 import plat_ipc "../../platform/ipc"
 import contract "../../core/render/contract"
 import damage "../../core/terminal/damage"
@@ -23,6 +22,7 @@ import wgpu_backend "../../platform/gpu/wgpu"
 import tabs_feat "../../features/tabs"
 import mux_feat "../../features/multiplexer"
 import sess_feat "../../features/session"
+import client_feat "../../features/session_client"
 import telemetry "../../features/telemetry"
 
 VERSION: string : "2.1.1"
@@ -37,7 +37,6 @@ Term_App :: struct {
 	format:        contract.Gpu_Format,
 	running:       bool,
 	role:          Instance_Role,
-	window_hidden: bool, // set by app_request_hide; rendering and blink ticks stop while true
 	quit_requested: bool, // atomic; set by the signal thread, consumed by app_run
 	signals:       Signal_Router,
 	control:       ^plat_ipc.Ipc_Server, // nil unless Primary with a bound control socket
@@ -61,9 +60,11 @@ Term_App :: struct {
 	diag:          Diagnostics,
 	sync_output:   Sync_Output_State,
 	session_reg:   sess_feat.Session_Registry,
+	client:        client_feat.Client,
+	quit:          App_Quit_State,
 	last_title_sync: time.Time,
 	window_focused:            bool,
-	pty_wakeup_pending:        bool,
+	wakeup_pending:        bool,
 	last_frame_acquire_failed: bool,
 	in_event_watch:  bool,
 	resize_pending:  bool,
@@ -234,8 +235,13 @@ app_init :: proc(app: ^Term_App, opts: Cli_Options = {}) -> bool {
 	app_apply_config(app, opts)
 
 	tabs_feat.tabs_manager_init(&app.tabs_mgr, layout_compute_tab_bar_rect(&app.layout))
-	mux_feat.multiplexer_init(&app.mux)
+	if !client_feat.client_connect(&app.client, app_wakeup_callback, app) {
+		fmt.eprintln("term: cannot reach or start the session core (see $TMPDIR/term-<uid>/core.log)")
+		return false
+	}
+	mux_feat.multiplexer_init(&app.mux, client_feat.client_provider(&app.client))
 	sess_feat.session_registry_init(&app.session_reg)
+	_ = client_feat.client_list(&app.client) // background sessions for the pill
 
 	// Create initial terminal pane & tab strictly inside content_area (below top bar!)
 	content_area := layout_compute_content_area(&app.layout)
@@ -263,7 +269,6 @@ app_init :: proc(app: ^Term_App, opts: Cli_Options = {}) -> bool {
 	app.running = true
 	app.window_focused = true
 	app.start_time = time.now()
-	plat_pty.pty_set_wakeup_callback(app_pty_wakeup_callback, app)
 	_ = signals_start(&app.signals, app)
 	_ = sdl3.AddEventWatch(app_event_watch, app)
 	return true
@@ -273,7 +278,6 @@ app_destroy :: proc(app: ^Term_App) {
 	if app == nil do return
 	app.running = false
 	app_control_stop(app)
-	plat_pty.pty_set_wakeup_callback(nil, nil)
 	signals_stop(&app.signals)
 	sdl3.RemoveEventWatch(app_event_watch, app)
 
@@ -286,7 +290,8 @@ app_destroy :: proc(app: ^Term_App) {
 
 	sess_feat.session_registry_destroy(&app.session_reg)
 	diagnostics_shutdown(app)
-	mux_feat.multiplexer_destroy(&app.mux)
+	mux_feat.multiplexer_destroy(&app.mux, false) // sessions still shown keep running in the core
+	client_feat.client_disconnect(&app.client)
 	tabs_feat.tabs_manager_destroy(&app.tabs_mgr)
 
 	// Drain any in-flight GPU work before releasing textures, views, and surface.
@@ -379,6 +384,7 @@ app_run :: proc(app: ^Term_App) {
 		layout_update(&app.layout, dt)
 		drop_effect_update(&app.drop_effect, dt)
 		_ = command_center_update(&app.cmd_center, dt)
+		_ = quit_dialog_update(&app.quit.dialog, dt)
 
 		drained := mux_feat.multiplexer_drain_all(&app.mux)
 		telemetry.telemetry_add_drain(&app.diag.tel, drained)
@@ -391,12 +397,9 @@ app_run :: proc(app: ^Term_App) {
 		if app_sync_layout_and_winsize(app, drained > 0) do term_dirty = true
 		diagnostics_poll(app)
 
-		bg_drained := sess_feat.session_registry_drain_all(&app.session_reg)
-		if sess_feat.session_registry_poll(&app.session_reg, bg_drained > 0) {
-			app.layout.tab_bar_reveal_timer = 2.0
-			chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
-			term_dirty = true
-		}
+		if app_sessions_poll(app) do term_dirty = true
+		app_quit_tick(app)
+		if !app.running do break
 
 		if app.control != nil && app_control_poll(app) do term_dirty = true
 
@@ -408,7 +411,7 @@ app_run :: proc(app: ^Term_App) {
 		needs_frame := term_dirty || cursor_damaged || app_needs_animation(app) || app.composer.sched.force_next || app.composer.sched.damage_pending
 
 		// Render only on real change, cursor toggle, or active animation; stay parked otherwise.
-		if needs_frame && !app.window_hidden && !app_sync_output_hold(app, now) {
+		if needs_frame && !app_sync_output_hold(app, now) {
 			frame_start := time.tick_now()
 			app_render_frame(app, term_dirty)
 			telemetry.telemetry_end_frame(&app.diag.tel, u64(time.tick_since(frame_start)))
@@ -419,7 +422,7 @@ app_run :: proc(app: ^Term_App) {
 }
 
 main :: proc() {
-	if handled, code := app_run_holder_cli(os.args); handled do os.exit(code)
+	if handled, code := client_feat.client_tier_main(os.args); handled do os.exit(code)
 	_ = signals_block_quit_set()
 	if handled, code := app_run_control_cli(os.args); handled {
 		os.exit(code)
@@ -446,6 +449,10 @@ main :: proc() {
 		}
 	}
 
+	if app.role == .Standalone && !client_feat.client_use_private_session() {
+		fmt.eprintln("term: cannot create a private session directory")
+		os.exit(1)
+	}
 	if !app_init(app, opts) {
 		fmt.eprintln("Failed to initialize Term application")
 		app_destroy(app) // Release whatever was initialized before the failure.

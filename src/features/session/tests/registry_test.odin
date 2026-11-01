@@ -1,135 +1,62 @@
 package feature_session_tests
 
-// Behavioral unit tests for the Detached Background Session Registry.
+// Behavioral unit tests for the background-session registry (the viewer's
+// mirror of core rows it does not show).
 
 import "core:testing"
-import "core:time"
 import session "../"
 
 @test
-test_registry_detach_pop_live :: proc(t: ^testing.T) {
+test_registry_mirrors_background_rows :: proc(t: ^testing.T) {
 	reg: session.Session_Registry
 	session.session_registry_init(&reg)
 	defer session.session_registry_destroy(&reg)
 
-	sess, err := session.session_create(session.Session_Config{shell = "/bin/sh", rows = 24, cols = 80})
-	testing.expect(t, err == .None, "session_create failed")
-	testing.expect(t, sess != nil, "session_create returned nil session")
-
-	ok := session.session_registry_detach(&reg, 1, sess)
-	testing.expect(t, ok, "detach must succeed")
+	testing.expect(t, session.session_registry_apply_row(&reg, {id = 1, state = .Busy, pid = 9, title = "make", cwd = "/src"}, false))
 	testing.expect_value(t, session.session_registry_count(&reg), 1)
+	e := session.session_registry_find(&reg, 1)
+	testing.expect(t, e != nil && e.state == .Busy && e.pid == 9)
+	if e != nil do testing.expect_value(t, session.registry_text(&e.title), "make")
 
-	entry := session.session_registry_find(&reg, 1)
-	testing.expect(t, entry != nil, "find must return the detached entry")
-	if entry != nil {
-		testing.expect(t, entry.state != .Exited, "fresh session must not be .Exited")
-	}
-
-	popped, found := session.session_registry_pop(&reg, 1)
-	testing.expect(t, found, "pop must find the live entry")
-	testing.expect_value(t, popped, sess)
+	// A session this viewer shows is not a background one.
+	testing.expect(t, session.session_registry_apply_row(&reg, {id = 1, state = .Busy}, true))
 	testing.expect_value(t, session.session_registry_count(&reg), 0)
-	session.session_destroy(popped)
 }
 
 @test
-test_registry_exited_entry :: proc(t: ^testing.T) {
+test_registry_attention_on_finish_and_exit :: proc(t: ^testing.T) {
 	reg: session.Session_Registry
 	session.session_registry_init(&reg)
 	defer session.session_registry_destroy(&reg)
 
-	sess, err := session.session_create(session.Session_Config{shell = "/bin/sh", rows = 24, cols = 80})
-	testing.expect(t, err == .None, "session_create failed")
-	testing.expect(t, sess != nil, "session_create returned nil session")
-
-	ok := session.session_registry_detach(&reg, 7, sess)
-	testing.expect(t, ok, "detach must succeed")
-
-	_, _ = session.session_write_string(sess, "exit\n")
-
-	start := time.now()
-	exited := false
-	for time.since(start) < 2 * time.Second {
-		session.session_drain(sess)
-		session.session_registry_poll(&reg, true)
-		entry := session.session_registry_find(&reg, 7)
-		if entry != nil && entry.state == .Exited {
-			exited = true
-			break
-		}
-		time.sleep(10 * time.Millisecond)
-	}
-	testing.expect(t, exited, "session must reach .Exited within 2s")
-	testing.expect_value(t, session.session_registry_attention_count(&reg), 1)
-
-	popped, found := session.session_registry_pop(&reg, 7)
-	testing.expect(t, !found, "pop must refuse an .Exited entry")
-	testing.expect(t, popped == nil, "pop must return nil for an .Exited entry")
-	testing.expect_value(t, session.session_registry_count(&reg), 1)
-
+	session.session_registry_apply_row(&reg, {id = 7, state = .Busy}, false)
+	session.session_registry_apply_row(&reg, {id = 8, state = .Idle}, false)
+	testing.expect_value(t, session.session_registry_attention_count(&reg), 0)
+	session.session_registry_apply_row(&reg, {id = 7, state = .Idle}, false)
+	session.session_registry_apply_row(&reg, {id = 8, state = .Exited}, false)
+	testing.expect_value(t, session.session_registry_attention_count(&reg), 2)
 	testing.expect(t, session.session_registry_clear_attention(&reg), "clear must report a cleared flag")
 	testing.expect_value(t, session.session_registry_attention_count(&reg), 0)
-
-	testing.expect(t, session.session_registry_remove(&reg, 7), "remove must dismiss the entry")
-	testing.expect_value(t, session.session_registry_count(&reg), 0)
+	testing.expect(t, session.session_registry_remove(&reg, 7))
+	testing.expect(t, !session.session_registry_remove(&reg, 7), "second remove finds nothing")
+	testing.expect_value(t, session.session_registry_count(&reg), 1)
 }
 
 @test
-test_registry_remove_unknown_and_nil :: proc(t: ^testing.T) {
+test_registry_long_text_is_truncated_not_overflowed :: proc(t: ^testing.T) {
 	reg: session.Session_Registry
 	session.session_registry_init(&reg)
 	defer session.session_registry_destroy(&reg)
+	long: [1024]u8
+	for &b in long do b = 'x'
+	session.session_registry_apply_row(&reg, {id = 2, state = .Idle, title = string(long[:])}, false)
+	e := session.session_registry_find(&reg, 2)
+	testing.expect(t, e != nil && len(session.registry_text(&e.title)) == len(e.title.buf))
+}
 
-	testing.expect(t, !session.session_registry_remove(&reg, 999), "unknown remove must fail")
-	testing.expect(t, session.session_registry_find(&reg, 999) == nil, "unknown find must be nil")
-
-	testing.expect(t, !session.session_registry_remove(nil, 1), "nil remove must fail")
-	testing.expect(t, session.session_registry_find(nil, 1) == nil, "nil find must be nil")
-	testing.expect(t, !session.session_registry_detach(nil, 1, nil), "nil detach must fail")
-
-	popped, found := session.session_registry_pop(nil, 1)
-	testing.expect(t, !found, "nil pop must report not found")
-	testing.expect(t, popped == nil, "nil pop must return nil")
-
-	testing.expect(t, !session.session_registry_poll(nil, true), "nil poll must report no change")
-	testing.expect_value(t, session.session_registry_attention_count(nil), 0)
-	testing.expect(t, !session.session_registry_clear_attention(nil), "nil clear must report false")
+@test
+test_registry_nil_safe :: proc(t: ^testing.T) {
+	testing.expect(t, !session.session_registry_remove(nil, 1))
+	testing.expect(t, session.session_registry_find(nil, 1) == nil)
 	testing.expect_value(t, session.session_registry_count(nil), 0)
-	session.session_registry_destroy(nil)
-}
-
-@test
-test_registry_busy_to_idle_attention :: proc(t: ^testing.T) {
-	reg: session.Session_Registry
-	session.session_registry_init(&reg)
-	defer session.session_registry_destroy(&reg)
-
-	sess, err := session.session_create(session.Session_Config{shell = "/bin/sh", rows = 24, cols = 80})
-	testing.expect(t, err == .None, "session_create failed")
-	testing.expect(t, sess != nil, "session_create returned nil session")
-
-	sess.command_running = true
-	sess.in_prompt = false
-	ok := session.session_registry_detach(&reg, 9, sess)
-	testing.expect(t, ok, "detach must succeed")
-
-	session.session_registry_poll(&reg, true)
-	entry := session.session_registry_find(&reg, 9)
-	testing.expect(t, entry != nil, "find must return the entry")
-	if entry != nil {
-		testing.expect_value(t, entry.state, session.Detached_Session_State.Busy)
-	}
-	testing.expect_value(t, session.session_registry_attention_count(&reg), 0)
-
-	sess.command_running = false
-	sess.in_prompt = true
-	testing.expect(t, session.session_registry_poll(&reg, true), "Busy→Idle must report a change")
-	entry = session.session_registry_find(&reg, 9)
-	if entry != nil {
-		testing.expect_value(t, entry.state, session.Detached_Session_State.Idle)
-	}
-	testing.expect_value(t, session.session_registry_attention_count(&reg), 1)
-
-	testing.expect(t, !session.session_registry_poll(&reg, false), "poll without output must not change state")
 }

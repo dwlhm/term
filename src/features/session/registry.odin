@@ -1,31 +1,45 @@
 package feature_session
 
-// Detached Background Session Registry
-// Feature Composition Layer (src/features/session/*).
-//
-// Invariant: Owns every session that is not bound to a visible pane. Entries
-// live until attached (pop) or removed (remove); an exited child keeps its
-// entry in state .Exited so the user can still notice and dismiss it.
+// Background Session Registry: the viewer's mirror of the core's sessions that
+// no pane of this viewer shows. The core owns them (they keep running with no
+// viewer at all); entries are refreshed from its rows (EVENT / SESSIONS) and
+// dropped when the core removes the session or this viewer attaches it.
 
 import "base:runtime"
+import ipc "../../platform/ipc"
 
 Detached_Session_State :: enum u8 {
 	Idle,   // shell at prompt, nothing running
-	Busy,   // foreground job running (session_is_running_job)
-	Exited, // child process has exited; PTY is dead
+	Busy,   // a CLI/TUI runs in the foreground
+	Exited, // the program has exited
 }
 
 Detached_Session_Entry :: struct {
 	id:        u32,
-	session:   ^Terminal_Session,
-	state:     Detached_Session_State, // last value computed by session_registry_poll
-	attention: bool,                   // set on Busy→Idle or any→Exited; cleared by clear_attention
+	state:     Detached_Session_State,
+	attention: bool, // set on Busy→Idle or any→Exited; cleared by clear_attention
+	pid:       u32,
+	elapsed_s: u32,
+	title:     Registry_Text,
+	process:   Registry_Text,
+	cwd:       Registry_Text,
+	status:    Registry_Text,
+}
+
+Registry_Text :: struct {
+	buf: [256]u8,
+	len: int,
 }
 
 Session_Registry :: struct {
 	entries:   [dynamic]Detached_Session_Entry,
 	allocator: runtime.Allocator,
 }
+
+registry_text :: proc(t: ^Registry_Text) -> string { return string(t.buf[:t.len]) }
+
+@(private = "file")
+_set_text :: proc(t: ^Registry_Text, s: string) { t.len = copy(t.buf[:], s) }
 
 session_registry_init :: proc(reg: ^Session_Registry, allocator := context.allocator) {
 	if reg == nil do return
@@ -35,56 +49,41 @@ session_registry_init :: proc(reg: ^Session_Registry, allocator := context.alloc
 
 session_registry_destroy :: proc(reg: ^Session_Registry) {
 	if reg == nil do return
-	for &entry in reg.entries {
-		if entry.session != nil {
-			session_destroy(entry.session)
-			entry.session = nil
-		}
-	}
 	delete(reg.entries)
 	reg.entries = nil
 }
 
-// _session_state classifies a session; may issue a foreground-process syscall.
-@(private = "file")
-_session_state :: proc(sess: ^Terminal_Session) -> Detached_Session_State {
-	if alive, _ := session_is_alive(sess); !alive do return .Exited
-	return .Busy if session_is_running_job(sess) else .Idle
-}
-
-// session_registry_detach takes ownership of sess. Initial state is computed
-// immediately (same rules as poll with had_output = true), attention = false.
-session_registry_detach :: proc(reg: ^Session_Registry, id: u32, sess: ^Terminal_Session) -> bool {
-	if reg == nil || sess == nil do return false
-	append(&reg.entries, Detached_Session_Entry{id = id, session = sess, state = _session_state(sess)})
+// session_registry_apply_row mirrors one core row. shown_here = a pane of this
+// viewer shows it (not a background session). Returns true if anything changed.
+session_registry_apply_row :: proc(reg: ^Session_Registry, row: ipc.Session_Row, shown_here: bool) -> bool {
+	if reg == nil do return false
+	if shown_here do return session_registry_remove(reg, row.id)
+	state: Detached_Session_State
+	switch row.state {
+	case .Idle:   state = .Idle
+	case .Busy:   state = .Busy
+	case .Exited: state = .Exited
+	}
+	e := session_registry_find(reg, row.id)
+	if e == nil {
+		append(&reg.entries, Detached_Session_Entry{id = row.id, state = state})
+		e = &reg.entries[len(reg.entries) - 1]
+	} else if e.state != state && (state == .Exited || (e.state == .Busy && state == .Idle)) {
+		e.attention = true
+	}
+	e.state, e.pid, e.elapsed_s = state, row.pid, row.elapsed_s
+	_set_text(&e.title, row.title)
+	_set_text(&e.process, row.process)
+	_set_text(&e.cwd, row.cwd)
+	_set_text(&e.status, row.status)
 	return true
 }
 
-// session_registry_pop releases ownership of a live entry to the caller.
-// Returns found = false for unknown ids AND for .Exited entries (a dead
-// session must be dismissed with remove, never attached).
-session_registry_pop :: proc(reg: ^Session_Registry, id: u32) -> (sess: ^Terminal_Session, found: bool) {
-	if reg == nil do return nil, false
-	for i in 0..<len(reg.entries) {
-		if reg.entries[i].id != id do continue
-		if reg.entries[i].state == .Exited do return nil, false
-		entry := reg.entries[i]
-		ordered_remove(&reg.entries, i)
-		return entry.session, true
-	}
-	return nil, false
-}
-
-// session_registry_remove destroys the entry's session (kills the child via
-// session_destroy) and removes it. Works for any state. false if id unknown.
+// session_registry_remove drops id's entry; true if it existed.
 session_registry_remove :: proc(reg: ^Session_Registry, id: u32) -> bool {
 	if reg == nil do return false
 	for i in 0..<len(reg.entries) {
 		if reg.entries[i].id == id {
-			if reg.entries[i].session != nil {
-				session_destroy(reg.entries[i].session)
-				reg.entries[i].session = nil
-			}
 			ordered_remove(&reg.entries, i)
 			return true
 		}
@@ -93,47 +92,17 @@ session_registry_remove :: proc(reg: ^Session_Registry, id: u32) -> bool {
 }
 
 // session_registry_find returns a pointer into entries (invalidated by any
-// detach/pop/remove) or nil.
+// apply/remove) or nil.
 session_registry_find :: proc(reg: ^Session_Registry, id: u32) -> ^Detached_Session_Entry {
 	if reg == nil do return nil
-	for i in 0..<len(reg.entries) {
-		if reg.entries[i].id == id {
-			return &reg.entries[i]
-		}
-	}
+	for &e in reg.entries do if e.id == id do return &e
 	return nil
-}
-
-// session_registry_poll recomputes every entry's state. Exited is detected
-// with session_is_alive (a field read, always checked). Busy/Idle uses
-// session_is_running_job, which may issue a syscall, so it is only
-// re-evaluated when had_output is true. Sets attention on Busy→Idle and on
-// any transition into .Exited. Returns true if any state or attention changed.
-session_registry_poll :: proc(reg: ^Session_Registry, had_output: bool) -> (changed: bool) {
-	if reg == nil do return false
-	for &entry in reg.entries {
-		if entry.state == .Exited do continue
-		if alive, _ := session_is_alive(entry.session); !alive {
-			entry.state, entry.attention, changed = .Exited, true, true
-			continue
-		}
-		if !had_output do continue
-		next := _session_state(entry.session)
-		if entry.state == .Busy && next == .Idle do entry.attention = true
-		if next != entry.state {
-			entry.state = next
-			changed = true
-		}
-	}
-	return
 }
 
 session_registry_attention_count :: proc(reg: ^Session_Registry) -> int {
 	if reg == nil do return 0
 	count := 0
-	for entry in reg.entries {
-		if entry.attention do count += 1
-	}
+	for entry in reg.entries do if entry.attention do count += 1
 	return count
 }
 
@@ -146,18 +115,6 @@ session_registry_clear_attention :: proc(reg: ^Session_Registry) -> bool {
 	return had_attention
 }
 
-// session_registry_drain_all drains PTY output for all background sessions without invoking GPU render passes.
-session_registry_drain_all :: proc(reg: ^Session_Registry) -> (total_drained: int) {
-	if reg == nil do return 0
-	for &entry in reg.entries {
-		if entry.session != nil {
-			total_drained += session_drain(entry.session)
-		}
-	}
-	return total_drained
-}
-
 session_registry_count :: proc(reg: ^Session_Registry) -> int {
-	if reg == nil do return 0
-	return len(reg.entries)
+	return len(reg.entries) if reg != nil else 0
 }

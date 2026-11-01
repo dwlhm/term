@@ -5,7 +5,7 @@ import "core:strconv"
 import "core:strings"
 import "core:time"
 import cursor "../../core/cursor"
-import pty "../../platform/pty"
+import ipc "../../platform/ipc"
 import terminal "../../core/terminal"
 import grid "../../core/terminal/grid"
 import extension "../../core/terminal/extension"
@@ -24,8 +24,19 @@ Session_Config :: struct {
 	ypixel: int,
 }
 
+// session_config_size clamps a config's geometry the way the Terminal uses it.
+session_config_size :: proc(config: Session_Config) -> ipc.Size_Msg {
+	rows := max(1, config.rows if config.rows > 0 else 24)
+	cols := max(1, config.cols if config.cols > 0 else 80)
+	xp := config.xpixel if config.xpixel > 0 else cols * 10
+	yp := config.ypixel if config.ypixel > 0 else rows * 20
+	return {cols = u16(cols), rows = u16(rows), xpixel = u16(xp), ypixel = u16(yp)}
+}
+
 Terminal_Session :: struct {
-	pty:             ^pty.Pty_Handle,
+	link:            Session_Link,
+	inbox:           Session_Inbox,
+	info:            Session_Info,
 	term:            terminal.Terminal,
 	in_prompt:       bool,
 	command_running: bool,
@@ -158,27 +169,16 @@ _osc_1337_handler :: proc(user_data: rawptr, osc_id: int, payload: string, term_
 	return false
 }
 
-session_create :: proc(config: Session_Config, allocator: runtime.Allocator = context.allocator) -> (sess: ^Terminal_Session, err: pty.Pty_Error) {
-	rows := max(1, config.rows if config.rows > 0 else 24)
-	cols := max(1, config.cols if config.cols > 0 else 80)
-	xp := config.xpixel if config.xpixel > 0 else cols * 10
-	yp := config.ypixel if config.ypixel > 0 else rows * 20
+// session_create builds the Terminal side of a session. The program runs
+// behind link (the caller already asked for it to be spawned).
+session_create :: proc(size: ipc.Size_Msg, link: Session_Link, allocator: runtime.Allocator = context.allocator) -> ^Terminal_Session {
+	rows, cols := max(1, int(size.rows)), max(1, int(size.cols))
+	xp, yp := int(size.xpixel) if size.xpixel > 0 else cols * 10, int(size.ypixel) if size.ypixel > 0 else rows * 20
 
-	pty_cfg := pty.Pty_Config{
-		shell  = config.shell,
-		argv   = config.argv,
-		cwd    = config.cwd,
-		rows   = rows,
-		cols   = cols,
-		xpixel = xp,
-		ypixel = yp,
-	}
-
-	handle, pty_err := pty.pty_spawn(pty_cfg)
-	if pty_err != .None do return nil, pty_err
-
-	sess = new(Terminal_Session, allocator)
-	sess.pty = handle
+	sess := new(Terminal_Session, allocator)
+	sess.link = link
+	sess.inbox.ring.buf = make([]u8, SESSION_INBOX_BYTES, allocator)
+	sess.info.alive = true
 	sess.allocator = allocator
 	sess.scroll_offset = 0
 
@@ -223,7 +223,7 @@ session_create :: proc(config: Session_Config, allocator: runtime.Allocator = co
 		}
 	}
 
-	return sess, .None
+	return sess
 }
 
 session_program_status :: proc(sess: ^Terminal_Session) -> ^extension.Program_Status {
@@ -244,59 +244,51 @@ session_is_running_job :: proc(sess: ^Terminal_Session) -> bool {
 	if sess.command_running do return true
 	if sess.in_prompt do return false
 
-	if sess.pty != nil {
-		name_buf: [128]u8
-		fg_name := pty.pty_get_foreground_process_name(sess.pty, name_buf[:])
-		if len(fg_name) > 0 {
-			switch fg_name {
-			case "zsh", "bash", "sh", "fish", "tcsh", "csh", "login":
-				return false
-			case:
-				return true
-			}
-		}
-	}
-	return false
+	fg_name := session_process_name(sess)
+	return len(fg_name) > 0 && fg_name != "login" && !session_is_shell_process(fg_name)
 }
 
 session_destroy :: proc(sess: ^Terminal_Session) {
 	if sess == nil do return
-	if sess.pty != nil do pty.pty_close(sess.pty)
 	terminal.terminal_destroy(&sess.term)
+	delete(sess.inbox.ring.buf, sess.allocator)
 	free(sess, sess.allocator)
 }
 
+// session_drain feeds what the link delivered into the Terminal and sends
+// the Terminal's replies (queries the core left for the viewer) back.
 session_drain :: proc(sess: ^Terminal_Session) -> int {
-	if sess == nil || sess.pty == nil do return 0
-
+	if sess == nil do return 0
 	buf: [65536]u8
 	total_drained := 0
-
 	for {
-		n := pty.pty_read_available(sess.pty, buf[:])
+		n := _inbox_pop(sess, buf[:])
 		if n <= 0 do break
 		terminal.terminal_feed_bytes(&sess.term, buf[:n])
 		total_drained += n
 	}
+	if total_drained > 0 && sess.link.consumed != nil do sess.link.consumed(sess.link.user, total_drained)
+	session_flush_responses(sess)
+	return total_drained
+}
 
-	// Flush any pending terminal responses (DSR, CPR, DA, OSC 10/11) back to PTY master
+// session_flush_responses sends pending Terminal replies (DSR, DA, OSC 10/11…) to the program.
+session_flush_responses :: proc(sess: ^Terminal_Session) {
 	resp_buf: [256]u8
 	for {
 		resp_n := terminal.terminal_drain_response(&sess.term, resp_buf[:])
 		if resp_n <= 0 do break
-		_, _ = pty.pty_write(sess.pty, resp_buf[:resp_n])
+		session_write(sess, resp_buf[:resp_n])
 	}
-
-	return total_drained
 }
 
-session_write :: proc(sess: ^Terminal_Session, data: []u8) -> (int, pty.Pty_Error) {
-	if sess == nil || sess.pty == nil do return 0, .Closed
-	return pty.pty_write(sess.pty, data)
+session_write :: proc(sess: ^Terminal_Session, data: []u8) {
+	if sess == nil || sess.link.write == nil || len(data) == 0 do return
+	sess.link.write(sess.link.user, data)
 }
 
-session_write_string :: proc(sess: ^Terminal_Session, s: string) -> (int, pty.Pty_Error) {
-	return session_write(sess, transmute([]u8)s)
+session_write_string :: proc(sess: ^Terminal_Session, s: string) {
+	session_write(sess, transmute([]u8)s)
 }
 
 session_resize :: proc(sess: ^Terminal_Session, cols, rows: u16, xpixel: u16 = 0, ypixel: u16 = 0) {
@@ -305,15 +297,15 @@ session_resize :: proc(sess: ^Terminal_Session, cols, rows: u16, xpixel: u16 = 0
 	if cols > 0 && xpixel > 0 && rows > 0 && ypixel > 0 {
 		terminal.terminal_set_cell_size(&sess.term, int(xpixel / cols), int(ypixel / rows))
 	}
-	if sess.pty != nil {
-		_ = pty.pty_resize(sess.pty, cols, rows, xpixel, ypixel)
+	if sess.link.resize != nil {
+		sess.link.resize(sess.link.user, {cols = cols, rows = rows, xpixel = xpixel, ypixel = ypixel})
 	}
 	sess.scroll_offset = clamp(sess.scroll_offset, 0, sess.term.grid.history_count)
 }
 
 session_is_alive :: proc(sess: ^Terminal_Session) -> (bool, int) {
-	if sess == nil || sess.pty == nil do return false, -1
-	return pty.pty_is_alive(sess.pty)
+	if sess == nil do return false, -1
+	return sess.info.alive, sess.info.exit_code
 }
 
 session_get_cell :: proc(sess: ^Terminal_Session, row, col: int) -> cell.Semantic_Cell {

@@ -137,14 +137,11 @@ _signals_drain :: proc(st: ^Signal_State) {
 }
 
 // _start_core launches `<own executable> --core` detached (new session,
-// reparented to init) with stdout/stderr appended to <session dir>/core.log.
+// reparented to init) with stdout/stderr appended to core.log (ipc_log_path).
 @(private = "file")
 _start_core :: proc() {
-	dir_buf, log_buf: [256]u8
-	log_path := "/dev/null"
-	if dir, err := ipc.ipc_session_dir(dir_buf[:]); err == .None {
-		if p, ok := ipc.ipc_session_path(log_buf[:], dir, "core.log"); ok do log_path = p
-	}
+	log_buf: [256]u8
+	log_path := ipc.ipc_log_path(log_buf[:], "core.log")
 	if !ipc.ipc_spawn_self_detached({"--core"}, log_path) {
 		fmt.eprintfln("holder: cannot start a core: %v", posix.errno())
 	}

@@ -1,7 +1,6 @@
 package feature_session
 
 import "core:strings"
-import pty "../../platform/pty"
 
 // session_is_shell_process returns true if the process name represents a standard interactive shell.
 session_is_shell_process :: proc(proc_name: string) -> bool {
@@ -14,10 +13,10 @@ session_is_shell_process :: proc(proc_name: string) -> bool {
 	return false
 }
 
-// session_get_foreground_process returns the active foreground process name from PTY.
+// session_get_foreground_process returns the foreground process name the link owner last reported.
 session_get_foreground_process :: proc(sess: ^Terminal_Session, out_buf: []u8) -> string {
-	if sess == nil || sess.pty == nil do return ""
-	return pty.pty_get_foreground_process_name(sess.pty, out_buf)
+	name := session_process_name(sess)
+	return string(out_buf[:copy(out_buf, name)])
 }
 
 // session_get_current_cwd returns the working directory (preferring OSC 7, falling back to PTY OS query).
@@ -32,12 +31,8 @@ session_get_current_cwd :: proc(sess: ^Terminal_Session, out_buf: []u8) -> strin
 		return string(out_buf[:copy_len])
 	}
 
-	// 2. Query OS via PTY
-	if sess.pty != nil {
-		return pty.pty_get_foreground_cwd(sess.pty, out_buf)
-	}
-
-	return ""
+	// 2. The foreground process cwd the link owner last reported
+	return string(out_buf[:copy(out_buf, session_process_cwd(sess))])
 }
 
 // session_resolve_title determines the effective tab title using:

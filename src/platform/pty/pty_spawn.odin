@@ -1,12 +1,26 @@
 package platform_pty
 
-// fd-level PTY primitives shared by Pty_Handle (GUI) and the holder process:
-// spawn a program on a fresh PTY and hang it up. No thread, no ring.
+// fd-level PTY primitives for the holder process (the only owner of PTYs):
+// spawn a program on a fresh PTY, resize it, describe its foreground process,
+// hang it up. No thread, no ring: the holder polls the master itself.
 
 import "core:c"
 import "core:os"
 import "core:strings"
 import posix "core:sys/posix"
+
+// fd flag helpers go through core:sys/posix on purpose: a second foreign
+// `fcntl` declaration with a different signature makes -o:speed builds panic
+// in the LLVM backend once another package also calls posix.fcntl.
+@(private = "file")
+_fd_set_cloexec :: proc(fd: posix.FD) {
+	if flags := posix.fcntl(fd, .GETFD); flags >= 0 do posix.fcntl(fd, .SETFD, flags | c.int(posix.FD_CLOEXEC))
+}
+
+@(private = "file")
+_fd_set_nonblocking :: proc(fd: posix.FD) {
+	if flags := posix.fcntl(fd, .GETFL); flags >= 0 do posix.fcntl(fd, .SETFL, flags | c.int(posix.O_NONBLOCK))
+}
 
 // Our identity, set after the scrubbed user environment (extra_env wins over both).
 @(private = "file")
