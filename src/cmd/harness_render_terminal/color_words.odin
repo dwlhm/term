@@ -19,6 +19,8 @@ import terminal_instance "../../core/render/terminal/instance"
 // Packed-cell bits shared with the shaders (terminal_renderer.odin).
 GPU_CELL_FLAG_DIRECT_COLOR :: u32(8) // cflags bit 3 (hi bit 4)
 GPU_CELL_DECOR_UNDERLINE_SHIFT :: 17 // hi bit 17 == u64 bit 49
+GPU_CELL_DECOR_STRIKE_SHIFT :: 18 // hi bit 18 == u64 bit 50
+GPU_CELL_DECOR_ITALIC_SHIFT :: 19 // hi bit 19 == u64 bit 51
 GPU_CELL_UL_STYLE_SHIFT :: 20 // hi bits 20..22 == u64 bits 52..54
 
 // color_words_at returns the three colour words that belong to one cell.
@@ -109,6 +111,8 @@ _cell_colors :: proc(
 
 // _push_decoration_rec paints one solid quad through the background instance
 // pass (uv_rect zero = solid fill, matching the production decoration record).
+// It stages in the overlay tail so the instance target draws it after glyphs,
+// exactly like _terminal_renderer_push_decoration.
 _push_decoration_rec :: #force_inline proc(inst: ^terminal_instance.Instance_Renderer, x, y, w, h: f32, color: [4]f32) {
 	rec := contract.Instance_Record{
 		pos_size = {x, y, w, h},
@@ -116,7 +120,7 @@ _push_decoration_rec :: #force_inline proc(inst: ^terminal_instance.Instance_Ren
 		fg_color = {0, 0, 0, 0},
 		bg_color = color,
 	}
-	terminal_instance.instance_renderer_push(inst, rec)
+	terminal_instance.instance_renderer_push_overlay(inst, rec)
 }
 
 // _underline_band mirrors ul_band() in tile_compute.wgsl / fullscreen.wgsl for
@@ -170,17 +174,16 @@ _push_underline :: proc(
 }
 
 // _push_cell_instance renders one packed cell through the instance strategy,
-// consuming the same colour words and underline decor as the shaders. With
-// skip_blank it leaves default blank cells to the pass clear colour (partial
-// redraws); a full redraw must pass false so erased cells repaint. decorations
-// go to decor_inst (drawn after the glyph pass, like the shaders) when given.
+// consuming the same colour words and underline/strike decor as the shaders.
+// With skip_blank it leaves default blank cells to the pass clear colour
+// (partial redraws); a full redraw must pass false so erased cells repaint.
+// Decorations go to the same batch's overlay tail, drawn after the glyph pass.
 _push_cell_instance :: proc(
 	inst: ^terminal_instance.Instance_Renderer,
 	t: ^Synthetic_Terminal,
 	r, c: u32,
 	cell_w, cell_h: f32,
 	skip_blank: bool = false,
-	decor_inst: ^terminal_instance.Instance_Renderer = nil,
 ) -> bool {
 	idx := int(r * t.cols + c)
 	packed := t.cells[idx]
@@ -188,7 +191,8 @@ _push_cell_instance :: proc(
 	decor, ul_style := unpack_decor(packed)
 	has_direct := (cflags & GPU_CELL_FLAG_DIRECT_COLOR) != 0
 	has_underline := (decor & 1) != 0
-	if skip_blank && content == ' ' && style == 0 && !has_direct && (cflags & 2) == 0 && !has_underline {
+	has_strike := (decor & 2) != 0
+	if skip_blank && content == ' ' && style == 0 && !has_direct && (cflags & 2) == 0 && !has_underline && !has_strike {
 		return false
 	}
 
@@ -209,8 +213,11 @@ _push_cell_instance :: proc(
 	if has_underline {
 		_, _, ul_argb := color_words_at(t, idx)
 		ul_color := argb_to_rgba(ul_argb) if ul_argb != 0 else fg
-		target := decor_inst if decor_inst != nil else inst
-		_push_underline(target, ul_style, x, y, cell_w, cell_h, ul_color)
+		_push_underline(inst, ul_style, x, y, cell_w, cell_h, ul_color)
+	}
+	if has_strike {
+		thickness := max(1.0, math.floor(cell_h * 0.06))
+		_push_decoration_rec(inst, x, y + cell_h * 0.55, cell_w, thickness, fg)
 	}
 	return true
 }

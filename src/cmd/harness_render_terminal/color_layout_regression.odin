@@ -59,52 +59,45 @@ _compare_pixels :: proc(a, b: [^]u8, bytes_per_row: u32) -> (diff, first_x, firs
 }
 
 _Color_Renderers :: struct {
-	inst:  terminal_instance.Instance_Renderer,
-	decor: terminal_instance.Instance_Renderer,
-	tile:  tile.Compute_Tile_Renderer,
-	fs:    fullscreen.Fullscreen_Renderer,
+	inst: terminal_instance.Instance_Renderer,
+	tile: tile.Compute_Tile_Renderer,
+	fs:   fullscreen.Fullscreen_Renderer,
 }
 
-// _color_renderers_init builds the three strategy renderers plus the separate
-// decoration batch (underlines must paint after glyphs, like the shaders).
+// _color_renderers_init builds the three strategy renderers. The instance
+// renderer keeps decorations in the same batch (overlay tail), so there is no
+// separate decoration renderer any more.
 _color_renderers_init :: proc(h: ^Harness_State, r: ^_Color_Renderers, sampler: contract.Gpu_Sampler) {
 	terminal_instance.instance_renderer_init(&r.inst, h.device, h.queue, COLOR_TEST_COLS * COLOR_TEST_ROWS, h.atlas.gpu_view, h.format)
-	terminal_instance.instance_renderer_init(&r.decor, h.device, h.queue, COLOR_TEST_COLS * COLOR_TEST_ROWS, h.atlas.gpu_view, h.format)
 	tile.compute_tile_init(&r.tile, h.device, h.queue, COLOR_TEST_ROWS, COLOR_TEST_COLS, COLOR_TEST_CELL_W, COLOR_TEST_CELL_H, h.atlas.gpu_view, h.format)
 	fullscreen.fullscreen_init(&r.fs, h.device, h.queue, COLOR_TEST_ROWS, COLOR_TEST_COLS, COLOR_TEST_CELL_W, COLOR_TEST_CELL_H, h.atlas.gpu_view, h.format)
-	for ptr in ([]^terminal_instance.Instance_Renderer{&r.inst, &r.decor}) {
-		if rawptr(ptr.sampler) != nil do contract.destroy_sampler(ptr.sampler)
-		ptr.sampler = sampler
-	}
+	if rawptr(r.inst.sampler) != nil do contract.destroy_sampler(r.inst.sampler)
+	r.inst.sampler = sampler
 	if rawptr(r.tile.sampler) != nil do contract.destroy_sampler(r.tile.sampler)
 	r.tile.sampler = sampler
 	if rawptr(r.fs.sampler) != nil do contract.destroy_sampler(r.fs.sampler)
 	r.fs.sampler = sampler
-	// Curly underlines emit one quad per band run, so reserve room per cell.
+	// Decorations emit one quad per band run, so reserve room per cell.
 	_rebuild_instance_resources(h, &r.inst, COLOR_TEST_COLS, COLOR_TEST_ROWS, f32(COLOR_TEST_W), f32(COLOR_TEST_H), 48)
-	_rebuild_instance_resources(h, &r.decor, COLOR_TEST_COLS, COLOR_TEST_ROWS, f32(COLOR_TEST_W), f32(COLOR_TEST_H), 48)
 }
 
 _color_renderers_destroy :: proc(r: ^_Color_Renderers) {
 	// Pipelines and the shared sampler are owned by Harness_State.
 	r.inst.sampler = contract.Gpu_Sampler(nil)
 	r.inst.pipeline = contract.Gpu_RenderPipeline(nil)
-	r.decor.sampler = contract.Gpu_Sampler(nil)
-	r.decor.pipeline = contract.Gpu_RenderPipeline(nil)
 	r.tile.sampler = contract.Gpu_Sampler(nil)
 	r.tile.compute_pipeline = contract.Gpu_ComputePipeline(nil)
 	r.tile.blit_pipeline = contract.Gpu_RenderPipeline(nil)
 	r.fs.sampler = contract.Gpu_Sampler(nil)
 	r.fs.pipeline = contract.Gpu_RenderPipeline(nil)
 	terminal_instance.instance_renderer_destroy(&r.inst)
-	terminal_instance.instance_renderer_destroy(&r.decor)
 	tile.compute_tile_destroy(&r.tile)
 	fullscreen.fullscreen_destroy(&r.fs)
 }
 
 _run_color_layout_regression :: proc(h: ^Harness_State) -> bool {
 	fmt.println("================================================================================")
-	fmt.println("     COLOUR LAYOUT REGRESSION: 3-WORD CELLs + UNDERLINE COLOUR (SGR 4:3)        ")
+	fmt.println("  COLOUR + DECORATION CONTRACT: STRIKE, SGR 4:n COLOUR, DECOR OVER GLYPHS        ")
 	fmt.println("================================================================================")
 
 	bytes_per_row: u32 = ((COLOR_TEST_W * 4) + 255) & ~u32(255)
@@ -153,25 +146,15 @@ _run_color_layout_regression :: proc(h: ^Harness_State) -> bool {
 
 	enc := contract.create_command_encoder(h.device)
 	if rawptr(enc) == nil do return false
-	_encode_instance_target(h, enc, &renderers.inst, &renderers.decor, &term, targets[0].view)
+	_encode_instance_target(h, enc, &renderers.inst, &term, targets[0].view)
 	_encode_tile_target(h, enc, &renderers.tile, &term, color_buf, targets[1].view)
 	_encode_fullscreen_target(h, enc, &renderers.fs, &term, color_buf, targets[2].view)
 	for &t in targets do _encode_readback(enc, t.tex, t.buf, bytes_per_row)
-	cmd := contract.finish_command_buffer(enc)
-	contract.release_command_encoder(enc)
-	if cmd != nil {
-		contract.submit(h.queue, cmd)
-		contract.release_command_buffer(cmd)
-	}
-	contract.wait_for_idle(h.device)
+	_submit_encoder(h, enc)
 
-	ptr_i := _map_readback(h, targets[0].buf, buf_size)
-	ptr_t := _map_readback(h, targets[1].buf, buf_size)
-	ptr_f := _map_readback(h, targets[2].buf, buf_size)
-	d_it, x_it, y_it := _compare_pixels(ptr_i, ptr_t, bytes_per_row)
-	d_if, x_if, y_if := _compare_pixels(ptr_i, ptr_f, bytes_per_row)
-	d_tf, x_tf, y_tf := _compare_pixels(ptr_t, ptr_f, bytes_per_row)
-	for &t in targets do wgpu.BufferUnmap(wgpu.Buffer(rawptr(t.buf)))
+	d_it, x_it, y_it := _readback_compare(h, &targets[0], &targets[1], buf_size, bytes_per_row)
+	d_if, x_if, y_if := _readback_compare(h, &targets[0], &targets[2], buf_size, bytes_per_row)
+	d_tf, x_tf, y_tf := _readback_compare(h, &targets[1], &targets[2], buf_size, bytes_per_row)
 
 	ok := true
 	if d_it > 0 || d_if > 0 || d_tf > 0 {
@@ -179,32 +162,10 @@ _run_color_layout_regression :: proc(h: ^Harness_State) -> bool {
 			d_it, x_it, y_it, d_if, x_if, y_if, d_tf, x_tf, y_tf)
 		ok = false
 	} else {
-		fmt.println("[PASS] instance == tile == fullscreen for 256 truecolor+underline cells (0 diff pixels)")
+		fmt.println("[PASS] instance == tile == fullscreen for 256 strike + SGR 4:n + bold/italic cells (0 diff pixels)")
 	}
 
-	// Mutation probe: a host that lays the words out at the old two-word stride
-	// must be caught even though the shaders still read COLOR_WORDS_PER_CELL.
-	enc_mut := contract.create_command_encoder(h.device)
-	if rawptr(enc_mut) == nil do return false
-	_encode_fullscreen_target(h, enc_mut, &renderers.fs, &term, color_buf, targets[2].view, 2)
-	_encode_readback(enc_mut, targets[2].tex, targets[2].buf, bytes_per_row)
-	cmd_mut := contract.finish_command_buffer(enc_mut)
-	contract.release_command_encoder(enc_mut)
-	if cmd_mut != nil {
-		contract.submit(h.queue, cmd_mut)
-		contract.release_command_buffer(cmd_mut)
-	}
-	contract.wait_for_idle(h.device)
-
-	ptr_i = _map_readback(h, targets[0].buf, buf_size)
-	ptr_f = _map_readback(h, targets[2].buf, buf_size)
-	d_mut, x_mut, y_mut := _compare_pixels(ptr_i, ptr_f, bytes_per_row)
-	wgpu.BufferUnmap(wgpu.Buffer(rawptr(targets[0].buf)))
-	wgpu.BufferUnmap(wgpu.Buffer(rawptr(targets[2].buf)))
-	if d_mut > 0 {
-		fmt.printfln("[PASS] Mutation: two-word colour stride caught (%d diff pixels, first at %d,%d)", d_mut, x_mut, y_mut)
-	} else {
-		fmt.println("[FAIL] Mutation: two-word colour stride was NOT caught!")
+	if !_run_color_layout_mutations(h, &renderers, &targets, color_buf, &term, buf_size, bytes_per_row) {
 		ok = false
 	}
 	return ok

@@ -16,6 +16,7 @@ import "core:math"
 import "core:mem"
 import "core:os"
 import "core:slice"
+import "core:strings"
 import "core:sys/posix"
 import "core:time"
 import "vendor:sdl3"
@@ -406,6 +407,9 @@ Harness_State :: struct {
 	blit_layout:      contract.Gpu_BindGroupLayout,
 	fs_pipeline:      contract.Gpu_RenderPipeline,
 	fs_layout:        contract.Gpu_BindGroupLayout,
+	// Deliberately broken fullscreen pipeline (strike_hit py + 0.5) that the
+	// colour/decoration regression must catch pixel-for-pixel.
+	fs_mutant_pipeline: contract.Gpu_RenderPipeline,
 
 	// Pane 1: Instance, Tile, Fullscreen
 	term1:            Synthetic_Terminal,
@@ -608,6 +612,34 @@ _create_shared_pipelines :: proc(h: ^Harness_State) -> bool {
 	)
 	if rawptr(h.fs_pipeline) == nil do return false
 	h.fs_layout = contract.pipeline_get_bind_group_layout(h.fs_pipeline, 0)
+
+	// 5. Mutation pipeline: the old fullscreen strike bug (py + 0.5).
+	mutant_wgsl, _ := strings.replace_all(
+		FULLSCREEN_WGSL,
+		"strike_hit(decor, py,",
+		"strike_hit(decor, py + 0.5,",
+		context.temp_allocator,
+	)
+	if mutant_wgsl == FULLSCREEN_WGSL {
+		fmt.eprintln("harness error: strike_hit call site not found for the mutation pipeline")
+		return false
+	}
+	mutant_mod := contract.create_shader_module(h.device, mutant_wgsl)
+	if rawptr(mutant_mod) == nil do return false
+	defer contract.destroy_shader_module(mutant_mod)
+
+	h.fs_mutant_pipeline = contract.create_render_pipeline(
+		h.device,
+		mutant_mod,
+		"fullscreen_vs_main",
+		mutant_mod,
+		"fullscreen_fs_main",
+		nil,
+		h.format,
+		.Alpha_Blend,
+		.Triangle_List,
+	)
+	if rawptr(h.fs_mutant_pipeline) == nil do return false
 
 	return true
 }
@@ -2726,4 +2758,5 @@ main :: proc() {
 	if rawptr(h.compute_pipeline) != nil do contract.destroy_compute_pipeline(h.compute_pipeline)
 	if rawptr(h.blit_pipeline) != nil do contract.destroy_render_pipeline(h.blit_pipeline)
 	if rawptr(h.fs_pipeline) != nil do contract.destroy_render_pipeline(h.fs_pipeline)
+	if rawptr(h.fs_mutant_pipeline) != nil do contract.destroy_render_pipeline(h.fs_mutant_pipeline)
 }

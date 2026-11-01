@@ -162,6 +162,7 @@ fn ul_band(ul_style: u32, px: f32, py: f32, cell_x0: f32, cell_y0: f32, cell_w: 
 }
 
 // strike_hit reports whether a pixel row belongs to the strikethrough rule.
+// y is the pixel centre, the same convention ul_band uses.
 fn strike_hit(decor: u32, y: f32, cell_y0: f32, cell_h: f32) -> bool {
     if ((decor & CELL_DECOR_STRIKE) == 0u) { return false; }
     let thickness = max(1.0, floor(cell_h * 0.06));
@@ -260,6 +261,9 @@ fn fullscreen_vs_main(@builtin(vertex_index) vertex_index: u32) -> Fullscreen_Ou
 
 @fragment
 fn fullscreen_fs_main(input: Fullscreen_Output) -> @location(0) vec4<f32> {
+    // Fragment position is already the pixel centre (x + 0.5, y + 0.5), so
+    // underline and strike sampling use it directly. tile_compute.wgsl adds the
+    // same 0.5 to its integer pixel index: one sampling convention everywhere.
     let px = input.clip_position.x;
     let py = input.clip_position.y;
 
@@ -402,7 +406,7 @@ fn fullscreen_fs_main(input: Fullscreen_Output) -> @location(0) vec4<f32> {
         if ((decor & CELL_DECOR_UNDERLINE) != 0u && ul_band(ul_style, px, py, x0, cell_y0, params.cell_w, params.cell_h)) {
             col = select(ul_col * params.cell_opacity, ul_col, cell_is_selected(cflags));
             glyph_coverage = max(glyph_coverage, 1.0);
-        } else if (strike_hit(decor, py + 0.5, cell_y0, params.cell_h)) {
+        } else if (strike_hit(decor, py, cell_y0, params.cell_h)) {
             col = select(fg_rgb * params.cell_opacity, fg_rgb, cell_is_selected(cflags));
             glyph_coverage = max(glyph_coverage, 1.0);
         }
@@ -443,7 +447,7 @@ fn fullscreen_fs_main(input: Fullscreen_Output) -> @location(0) vec4<f32> {
     if ((decor & CELL_DECOR_UNDERLINE) != 0u && ul_band(ul_style, px, py, x0, cell_y0, params.cell_w, params.cell_h)) {
         col = select(ul_col * params.cell_opacity, ul_col, cell_is_selected(cflags));
         glyph_coverage = max(glyph_coverage, 1.0);
-    } else if (strike_hit(decor, py + 0.5, cell_y0, params.cell_h)) {
+    } else if (strike_hit(decor, py, cell_y0, params.cell_h)) {
         col = select(fg_rgb * params.cell_opacity, fg_rgb, cell_is_selected(cflags));
         glyph_coverage = max(glyph_coverage, 1.0);
     }

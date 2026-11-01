@@ -764,6 +764,8 @@ _terminal_renderer_push_emoji :: #force_inline proc(
 
 // _terminal_renderer_push_decoration paints a 1-2px rule using the background
 // instance pass: uv_rect == {0,0,0,0} means "solid fill, ignore the atlas".
+// Rules go through the overlay tail so the instance strategy draws them after
+// the glyph pass, matching the cell shaders' decoration-over-ink order.
 _terminal_renderer_push_decoration :: #force_inline proc(
 	r: ^Terminal_Renderer,
 	x, y, w, h: f32,
@@ -775,7 +777,7 @@ _terminal_renderer_push_decoration :: #force_inline proc(
 		fg_color = {0, 0, 0, 0},
 		bg_color = color,
 	}
-	instance.instance_renderer_push(&r.inst_rend, rec)
+	instance.instance_renderer_push_overlay(&r.inst_rend, rec)
 }
 
 // _terminal_renderer_push_underline draws the stored SGR 4:n shape. Geometry
@@ -1491,15 +1493,22 @@ terminal_renderer_encode :: proc(
 				if contract.render_set_scissor_rect != nil {
 					contract.render_set_scissor_rect(pass, sc_x, sc_y, sc_w, sc_h)
 				}
-				if r.inst_rend.active_count > 0 {
+				front_count := instance.instance_renderer_front_count(&r.inst_rend)
+				if front_count > 0 {
 					contract.render_set_pipeline(pass, r.bg_pipeline)
 					contract.render_set_bind_group(pass, 0, r.inst_rend.bg_bind_group)
 					contract.render_set_vertex_buffer(pass, 0, r.inst_rend.instance_buffer, 0)
-					contract.render_draw(pass, 6, r.inst_rend.active_count)
+					contract.render_draw(pass, 6, front_count)
 				}
 				kitty.kitty_renderer_draw(&r.kitty_rend, pass, term)
-				if r.inst_rend.active_count > 0 {
+				if front_count > 0 {
 					instance.instance_renderer_draw(&r.inst_rend, pass)
+				}
+				// Decorations paint after glyph ink, matching the cell shaders.
+				if r.inst_rend.overlay_count > 0 {
+					contract.render_set_pipeline(pass, r.bg_pipeline)
+					contract.render_set_bind_group(pass, 0, r.inst_rend.bg_bind_group)
+					instance.instance_renderer_draw_overlays(&r.inst_rend, pass)
 				}
 				if r.emoji_rend.active_count > 0 {
 					instance.instance_renderer_draw(&r.emoji_rend, pass)
