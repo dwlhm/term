@@ -4,6 +4,7 @@ import cell "../cell"
 import damage "../damage"
 import egc "../egc"
 import grid "../grid"
+import uw "../../unicode_width"
 
 // _parser_apply_link attaches the OSC 8 hyperlink in effect to a finished cell.
 _parser_apply_link :: #force_inline proc(
@@ -124,7 +125,7 @@ _parser_extend_anchor :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Track
 	new_cell.flags += {.Has_Egc}
 
 	base_dc := grid.grid_get_direct_color(g, p.cursor.row, target_col)
-	if cell.grapheme_cluster_width(new_runes) == 2 && .Wide_Lead not_in base.flags {
+	if uw.cluster_width(new_runes) == 2 && .Wide_Lead not_in base.flags {
 		new_cell.flags += {.Wide_Lead}
 		grid.grid_set_cell(g, d, p.cursor.row, target_col, new_cell, base_dc)
 		if target_col + 1 < g.col_count {
@@ -161,14 +162,15 @@ _parser_put_combining :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Track
 	if base.char == 0 || base.char == ' ' do return
 
 	cluster, count := _parser_cluster_from_cell(p, base)
-	if !cell.grapheme_should_extend(cluster[:count], ch) do return
+	if !uw.should_extend(cluster[:count], ch) do return
 	_parser_extend_anchor(p, g, d, target_col, base, cluster[:count], ch)
 }
 
 _parser_put_char :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, ch: rune) {
 	if g == nil do return
 
-	w := cell.wcwidth(ch)
+	props := uw.props(ch)
+	w := int(props.width)
 	if w == 0 {
 		_parser_put_combining(p, g, d, ch)
 		return
@@ -177,8 +179,9 @@ _parser_put_char :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, c
 	p.last_print = ch
 
 	// UAX #29 stateful anchor: a non-ASCII base rune may extend the cluster in
-	// the previous cell (ZWJ emoji, regional-indicator pairs, keycaps).
-	if ch >= 0x80 {
+	// the previous cell (ZWJ emoji, regional-indicator pairs, keycaps). Plain
+	// text (CJK, Latin, box drawing) can never join, so it skips the lookup.
+	if ch >= 0x80 && uw.can_extend(props) {
 		target_col := p.cursor.col if p.cursor.pending_wrap else p.cursor.col - 1
 		if target_col >= 0 {
 			prev := grid.grid_get_cell(g, p.cursor.row, target_col)
@@ -191,7 +194,7 @@ _parser_put_char :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, c
 			anchor := grid.grid_get_cell(g, p.cursor.row, target_col)
 			if anchor.char != 0 && anchor.char != ' ' {
 				cluster, count := _parser_cluster_from_cell(p, anchor)
-				if cell.grapheme_should_extend(cluster[:count], ch) {
+				if uw.should_extend(cluster[:count], ch) {
 					_parser_extend_anchor(p, g, d, target_col, anchor, cluster[:count], ch)
 					return
 				}

@@ -25,6 +25,7 @@ import cell "../../terminal/cell"
 import grid "../../terminal/grid"
 import damage "../../terminal/damage"
 import plat_font "../../../platform/font"
+import uw "../../unicode_width"
 
 GLYPH_WGSL        :: #load("../shaders/glyph.wgsl", string)
 BG_WGSL           :: #load("../shaders/bg.wgsl", string)
@@ -1149,7 +1150,7 @@ _terminal_renderer_pack_grid :: proc(
 				continue
 			}
 
-			if emoji_atlas != nil && plat_font.is_emoji_codepoint(ch) {
+			if emoji_atlas != nil && uw.is_emoji_presentation(ch) {
 				if eg, eok := plat_font.emoji_atlas_get(emoji_atlas, ch); eok {
 					_terminal_renderer_push_emoji_quad_only(r, eg, x_pos, y_pos, gw, cell_h, is_focused)
 				}
@@ -1460,7 +1461,7 @@ terminal_renderer_encode :: proc(
 
 				if ch == 0x10EEEE do continue
 
-				if emoji_atlas != nil && plat_font.is_emoji_codepoint(ch) {
+				if emoji_atlas != nil && uw.is_emoji_presentation(ch) {
 					if eg, eok := plat_font.emoji_atlas_get(emoji_atlas, ch); eok {
 						_terminal_renderer_push_emoji(r, eg, x_pos, y_pos, gw, cell_h, bg, is_focused)
 					}

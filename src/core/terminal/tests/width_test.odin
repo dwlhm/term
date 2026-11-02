@@ -2,25 +2,6 @@ package terminal_tests
 
 import "core:testing"
 import term "../"
-import cell "../cell"
-
-// Emoji=Yes symbols without Emoji_Presentation (⏺ ✔ ➡ ▶ ⏵) are narrow text by
-// default; only Emoji_Presentation=Yes codepoints are wide color emoji.
-@test
-test_wcwidth_emoji_presentation :: proc(t: ^testing.T) {
-	narrow := []rune{0x23FA, 0x23F5, 0x2714, 0x27A1, 0x25B6, 0x2764, 0x1F321, 0x1F000, 0x1FBB2}
-	for r in narrow {
-		testing.expectf(t, cell.wcwidth(r) == 1, "U+%04X must be narrow", r)
-		testing.expectf(t, !cell.is_emoji_codepoint(r), "U+%04X must default to text presentation", r)
-	}
-	wide := []rune{0x23E9, 0x23F0, 0x2705, 0x2728, 0x2B50, 0x1F004, 0x1F600, 0x1F44D, 0x1FAF8, 0x1F3FB, 0x1F1E6}
-	for r in wide {
-		testing.expectf(t, cell.wcwidth(r) == 2, "U+%04X must be wide", r)
-		testing.expectf(t, cell.is_emoji_codepoint(r), "U+%04X must default to emoji presentation", r)
-	}
-	testing.expect_value(t, cell.wcwidth(0x1F210), 2) // EAW=Wide ideograph, not emoji
-	testing.expect(t, !cell.is_emoji_codepoint(0x1F210), "U+1F210 is not emoji presentation")
-}
 
 @test
 test_parser_text_default_symbol_cursor :: proc(t: ^testing.T) {

@@ -8,7 +8,7 @@ import "core:os"
 import "core:path/filepath"
 import "core:strings"
 import "core:sync"
-import cell "../../core/terminal/cell"
+import uw "../../core/unicode_width"
 
 FONT_DISCOVERY_PATHS := []string{
 	"assets/fonts/MapleMono-NF-Regular.ttf",
@@ -193,10 +193,6 @@ _is_box_or_block :: proc(cp: u32) -> bool {
 	       (cp >= 0xE0A0 && cp <= 0xE0A3) ||
 	       (cp >= 0xE0B0 && cp <= 0xE0D7) ||
 	       (cp >= 0xEE00 && cp <= 0xEE0B)
-}
-
-is_emoji_codepoint :: proc(r: rune) -> bool {
-	return cell.is_emoji_codepoint(r)
 }
 
 _calibrate_reference :: proc(r: ^Font_Rasterizer) -> (cap_px, baseline_px: int) {
@@ -432,7 +428,7 @@ font_rasterize_cluster_into :: proc(
 is_emoji_cluster :: proc(runes: []rune) -> bool {
 	for r in runes do if r == 0xFE0E do return false
 	for r in runes {
-		if is_emoji_codepoint(r) do return true
+		if uw.is_emoji_presentation(r) do return true
 		if r == 0x200D || r == 0x20E3 || r == 0xFE0F do return true
 	}
 	return false

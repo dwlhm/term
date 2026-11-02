@@ -21,7 +21,7 @@ TEST_FLAGS ?= -define:ODIN_TEST_THREADS=1
 DEBUG_FLAGS ?= -debug
 RELEASE_FLAGS ?= -o:speed -no-bounds-check
 
-.PHONY: all term release run term-debug harness-features run-harness-features harness-render-chrome run-harness-render-chrome harness-render-terminal run-harness-render-terminal harness-render-composer run-harness-composer test test-app test-holder test-session-core test-font test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-selector test-gpu check esctest clean help bench bench-quick bundle dmg portable dist install uninstall
+.PHONY: all term release run term-debug harness-features run-harness-features harness-render-chrome run-harness-render-chrome harness-render-terminal run-harness-render-terminal harness-render-composer run-harness-composer test test-app test-holder test-session-core test-font test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-selector test-gpu check esctest clean help bench bench-quick bundle dmg portable dist install uninstall test-unicode-width gen-unicode
 
 all: term harness-features harness-render-chrome harness-render-terminal harness-composer
 
@@ -123,7 +123,7 @@ bench-session:
 	$(ODIN) build src/cmd/bench_session -out:$(OUT_DIR)/bench_session $(RELEASE_FLAGS) $(COMMON_FLAGS)
 	./$(OUT_DIR)/bench_session
 
-test: test-app test-terminal test-pty test-holder test-session-core test-font test-window test-session test-control test-ipc test-tabs test-multiplexer test-interaction test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-selector test-gpu test-features test-e2e
+test: test-app test-unicode-width test-terminal test-pty test-holder test-session-core test-font test-window test-session test-control test-ipc test-tabs test-multiplexer test-interaction test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-selector test-gpu test-features test-e2e
 
 # VT conformance suite (esctest2) driven inside a real Term pane; requires a GUI
 # session. Extra esctest flags: make esctest ESCTEST_ARGS="--include=CUP"
@@ -148,6 +148,13 @@ test-session-core:
 
 test-font:
 	$(ODIN) test src/platform/font/tests $(TEST_FLAGS)
+
+test-unicode-width:
+	$(ODIN) test src/core/unicode_width/tests $(TEST_FLAGS)
+
+# Regenerates the unicode_width lookup tables from unicode_width/reference.
+gen-unicode:
+	$(ODIN) run src/core/unicode_width/gen -- src/core/unicode_width/tables.odin
 
 test-window:
 	$(ODIN) test src/platform/window $(TEST_FLAGS)
@@ -240,6 +247,9 @@ check:
 	$(ODIN) check src/cmd/harness_composer $(CHECK_FLAGS)
 	$(ODIN) check src/cmd/term_driver $(CHECK_FLAGS)
 	$(ODIN) check src/core/cursor $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/core/unicode_width $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/core/unicode_width/reference $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/core/unicode_width/gen $(CHECK_FLAGS)
 	$(ODIN) check src/core/composer $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/core/composer/layer $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/core/composer/blit $(CHECK_FLAGS) -no-entry-point
