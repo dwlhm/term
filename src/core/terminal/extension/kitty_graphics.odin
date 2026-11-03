@@ -378,6 +378,7 @@ kitty_graphics_handle_clear :: proc(ext: ^Terminal_Extension, mode: int, term: r
 kitty_graphics_handle_scroll :: proc(ext: ^Terminal_Extension, n: int, top, bottom: int, term: rawptr) {
 	if ext == nil || ext.user_data == nil do return
 	state := (^Kitty_Extension)(ext.user_data)
+	if len(state.placements) == 0 do return // every LF scrolls: skip the screen lookup when nothing is placed
 	screen: Kitty_Screen = .Primary
 	if state.screen_provider != nil && term != nil {
 		screen = state.screen_provider(term)

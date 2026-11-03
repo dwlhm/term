@@ -348,15 +348,19 @@ _row_reset :: #force_inline proc(r: ^Row, fill: cell.Semantic_Cell, dc: cell.Dir
 	r.is_prompt = false
 }
 
-// _fill_cells writes each array in its own pass (vectorizable); the common
-// all-default colour is a memset.
+// _fill_cells writes each array in its own pass; the common all-default
+// colour is a memset. Cells are stored as u64 words: that loop vectorizes
+// (the 4-aligned struct loop does not), and slice.fill's doubling memmoves
+// cost more than the stores on the short rows most resets clear.
 @(private = "file")
 _fill_cells :: #force_inline proc(cells: []cell.Semantic_Cell, colors: []cell.Direct_Color, fill: cell.Semantic_Cell, dc: cell.Direct_Color) {
-	slice.fill(cells, fill)
+	#assert(size_of(cell.Semantic_Cell) == size_of(u64))
+	word := transmute(u64)fill
+	for &w in slice.reinterpret([]u64, cells) do w = word
 	if dc == {} {
 		slice.zero(colors)
 	} else {
-		slice.fill(colors, dc)
+		for &c in colors do c = dc
 	}
 }
 
