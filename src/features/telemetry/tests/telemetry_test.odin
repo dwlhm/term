@@ -7,13 +7,15 @@ import "core:testing"
 import core_terminal "../../../core/terminal"
 import telemetry "../"
 
-TMP_PATH :: "/tmp/term-telemetry-test.ndjson"
+// One file per test: the runner executes tests in parallel threads.
+SUMMARY_PATH :: "/tmp/term-telemetry-summary-test.ndjson"
+ZERO_ALLOC_PATH :: "/tmp/term-telemetry-zero-alloc-test.ndjson"
 
 @(test)
 test_percentiles_and_summary :: proc(t: ^testing.T) {
 	tel := new(telemetry.Telemetry)
 	defer free(tel)
-	testing.expect(t, telemetry.telemetry_open(tel, TMP_PATH))
+	testing.expect(t, telemetry.telemetry_open(tel, SUMMARY_PATH))
 
 	// 1000 frames: 1..1000 µs.
 	for i in 1 ..= 1000 {
@@ -29,7 +31,7 @@ test_percentiles_and_summary :: proc(t: ^testing.T) {
 	testing.expect_value(t, telemetry.telemetry_percentile_ns(tel, 0.999), 1_000_000)
 	telemetry.telemetry_close(tel)
 
-	data, err := os.read_entire_file(TMP_PATH, context.allocator)
+	data, err := os.read_entire_file(SUMMARY_PATH, context.allocator)
 	testing.expect(t, err == nil)
 	defer delete(data)
 	text := string(data)
@@ -37,13 +39,15 @@ test_percentiles_and_summary :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(text, `"strategy":"Instance"`))
 	testing.expect(t, strings.contains(text, `"summary":true`))
 	testing.expect(t, strings.contains(text, `"p50_us":510`))
+	testing.expect(t, strings.contains(text, `"cpu_ms":`))
+	testing.expect(t, tel.cpu_us > 0)
 }
 
 @(test)
 test_record_frame_zero_alloc :: proc(t: ^testing.T) {
 	tel := new(telemetry.Telemetry)
 	defer free(tel)
-	testing.expect(t, telemetry.telemetry_open(tel, TMP_PATH))
+	testing.expect(t, telemetry.telemetry_open(tel, ZERO_ALLOC_PATH))
 	defer telemetry.telemetry_close(tel)
 
 	track: mem.Tracking_Allocator

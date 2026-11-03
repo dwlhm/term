@@ -30,6 +30,7 @@ Telemetry :: struct {
 	total_bytes:  u64,
 	max_frame_ns: u64,
 	peak_rss_kb:  i64,
+	cpu_us:       i64, // cumulative process user+sys CPU time
 	hist:         [HIST_BUCKETS]u32,
 	buf_len:      int,
 	buf:          [WRITE_BUF_SIZE]u8,
@@ -52,7 +53,7 @@ telemetry_close :: proc(t: ^Telemetry) {
 	line: [LINE_MAX]u8
 	s := fmt.bprintf(
 		line[:],
-		`{{"summary":true,"duration_s":%.3f,"frames":%d,"total_bytes":%d,"p50_us":%d,"p95_us":%d,"p99_us":%d,"p999_us":%d,"max_us":%d,"peak_rss_kb":%d}}` + "\n",
+		`{{"summary":true,"duration_s":%.3f,"frames":%d,"total_bytes":%d,"p50_us":%d,"p95_us":%d,"p99_us":%d,"p999_us":%d,"max_us":%d,"cpu_ms":%d,"peak_rss_kb":%d}}` + "\n",
 		time.duration_seconds(time.tick_since(t.start)),
 		t.frames,
 		t.total_bytes,
@@ -61,6 +62,7 @@ telemetry_close :: proc(t: ^Telemetry) {
 		telemetry_percentile_ns(t, 0.99) / 1000,
 		telemetry_percentile_ns(t, 0.999) / 1000,
 		t.max_frame_ns / 1000,
+		t.cpu_us / 1000,
 		t.peak_rss_kb,
 	)
 	_append(t, transmute([]u8)s)
@@ -89,18 +91,19 @@ telemetry_end_frame :: proc(t: ^Telemetry, frame_ns: u64) {
 	t.total_bytes += u64(t.pending.drain_bytes)
 	t.max_frame_ns = max(t.max_frame_ns, frame_ns)
 	t.hist[min(frame_ns / HIST_RES_NS, HIST_BUCKETS - 1)] += 1
-	t.peak_rss_kb = _peak_rss_kb()
+	_sample_rusage(t)
 
 	line: [LINE_MAX]u8
 	s := fmt.bprintf(
 		line[:],
-		`{{"t_us":%d,"frame_us":%d,"drain_bytes":%d,"dirty_cells":%d,"panes":%d,"strategy":"%s","peak_rss_kb":%d}}` + "\n",
+		`{{"t_us":%d,"frame_us":%d,"drain_bytes":%d,"dirty_cells":%d,"panes":%d,"strategy":"%s","cpu_us":%d,"peak_rss_kb":%d}}` + "\n",
 		i64(time.duration_microseconds(time.tick_since(t.start))),
 		frame_ns / 1000,
 		t.pending.drain_bytes,
 		t.pending.dirty_cells,
 		t.pending.panes,
 		t.pending.strategy,
+		t.cpu_us,
 		t.peak_rss_kb,
 	)
 	_append(t, transmute([]u8)s)
@@ -136,12 +139,18 @@ _flush :: proc(t: ^Telemetry) {
 }
 
 @(private = "file")
-_peak_rss_kb :: proc() -> i64 {
+_sample_rusage :: proc(t: ^Telemetry) {
 	usage: posix.rusage
-	if posix.getrusage(.SELF, &usage) != .OK do return 0
+	if posix.getrusage(.SELF, &usage) != .OK do return
 	when ODIN_OS == .Darwin {
-		return i64(usage.ru_maxrss) / 1024 // bytes on Darwin
+		t.peak_rss_kb = i64(usage.ru_maxrss) / 1024 // bytes on Darwin
 	} else {
-		return i64(usage.ru_maxrss) // KiB on Linux
+		t.peak_rss_kb = i64(usage.ru_maxrss) // KiB on Linux
 	}
+	t.cpu_us = _timeval_us(usage.ru_utime) + _timeval_us(usage.ru_stime)
+}
+
+@(private = "file")
+_timeval_us :: #force_inline proc "contextless" (tv: posix.timeval) -> i64 {
+	return i64(tv.tv_sec) * 1_000_000 + i64(tv.tv_usec)
 }
