@@ -88,3 +88,15 @@ test_grid_dump_format :: proc(t: ^testing.T) {
 	testing.expect_value(t, lines[2], "  wo世界")
 	testing.expect_value(t, lines[3], "")
 }
+
+@(test)
+test_grid_dump_history_format :: proc(t: ^testing.T) {
+	term: core_terminal.Terminal
+	core_terminal.terminal_init(&term, 2, 10)
+	defer core_terminal.terminal_destroy(&term)
+	core_terminal.terminal_feed_string(&term, "one\r\ntwo\r\nthree\r\nfour")
+
+	text := telemetry.grid_dump_history_format(&term)
+	defer delete(text)
+	testing.expect_value(t, text, "one\ntwo\n")
+}
