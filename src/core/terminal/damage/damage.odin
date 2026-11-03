@@ -23,7 +23,8 @@ Damage_Journal :: struct {
 	max_row:    int,
 	min_col:    int,
 	max_col:    int,
-	dirty_rows: []Dirty_Row,
+	full_rows:  int, // rows damaged end to end
+	span_count: int, // dirty spans, counting a full row as one
 }
 
 Damage_Tracker :: struct {
@@ -31,7 +32,11 @@ Damage_Tracker :: struct {
 	row_count:  int,
 	col_count:  int,
 	has_damage: bool,
-	allocator:  runtime.Allocator,
+	// O(1) whole-screen damage (scrolls, clears): every row counts as full and
+	// per-row marks are skipped until damage_consume.
+	all_dirty:      bool,
+	all_generation: u32,
+	allocator:      runtime.Allocator,
 }
 
 damage_init :: proc(d: ^Damage_Tracker, rows, cols: int, allocator: runtime.Allocator = context.allocator) {
@@ -61,6 +66,7 @@ damage_reset :: proc(d: ^Damage_Tracker) {
 		d.dirty_rows[i] = Dirty_Row{}
 	}
 	d.has_damage = false
+	d.all_dirty = false
 }
 
 damage_mark_cell :: proc(d: ^Damage_Tracker, row, col: int, generation: u32 = 0) {
@@ -74,6 +80,7 @@ damage_mark_span :: proc(d: ^Damage_Tracker, row, col_start, col_end: int, gener
 	if c_start >= c_end do return
 
 	d.has_damage = true
+	if d.all_dirty do return
 	dr := &d.dirty_rows[row]
 	dr.generation = generation
 
@@ -117,6 +124,7 @@ damage_mark_span :: proc(d: ^Damage_Tracker, row, col_start, col_end: int, gener
 damage_mark_row :: proc(d: ^Damage_Tracker, row: int, generation: u32 = 0) {
 	if d == nil || row < 0 || row >= d.row_count do return
 	d.has_damage = true
+	if d.all_dirty do return
 	dr := &d.dirty_rows[row]
 	dr.generation = generation
 	dr.full = true
@@ -126,18 +134,27 @@ damage_mark_row :: proc(d: ^Damage_Tracker, row: int, generation: u32 = 0) {
 damage_mark_all :: proc(d: ^Damage_Tracker, generation: u32 = 0) {
 	if d == nil do return
 	d.has_damage = true
-	for i in 0..<len(d.dirty_rows) {
-		d.dirty_rows[i] = Dirty_Row{
-			generation = generation,
-			full       = true,
-			span_count = 0,
-		}
-	}
+	d.all_dirty = true
+	d.all_generation = generation
 }
 
 damage_consume :: proc(d: ^Damage_Tracker) -> Damage_Journal {
 	if d == nil || !d.has_damage {
 		return Damage_Journal{has_damage = false}
+	}
+	if d.all_dirty {
+		journal := Damage_Journal{
+			has_damage  = true,
+			full_damage = true,
+			min_row     = 0,
+			max_row     = d.row_count - 1,
+			min_col     = 0,
+			max_col     = d.col_count,
+			full_rows   = d.row_count,
+			span_count  = d.row_count,
+		}
+		damage_reset(d)
+		return journal
 	}
 
 	journal := Damage_Journal{
@@ -146,9 +163,7 @@ damage_consume :: proc(d: ^Damage_Tracker) -> Damage_Journal {
 		max_row    = -1,
 		min_col    = d.col_count,
 		max_col    = -1,
-		dirty_rows = d.dirty_rows,
 	}
-
 	for r in 0..<d.row_count {
 		dr := d.dirty_rows[r]
 		if dr.full {
@@ -156,18 +171,18 @@ damage_consume :: proc(d: ^Damage_Tracker) -> Damage_Journal {
 			journal.max_row = max(journal.max_row, r)
 			journal.min_col = 0
 			journal.max_col = d.col_count
+			journal.full_rows += 1
+			journal.span_count += 1
 		} else if dr.span_count > 0 {
 			journal.min_row = min(journal.min_row, r)
 			journal.max_row = max(journal.max_row, r)
+			journal.span_count += int(dr.span_count)
 			for i in 0..<int(dr.span_count) {
 				journal.min_col = min(journal.min_col, int(dr.spans[i].col_start))
 				journal.max_col = max(journal.max_col, int(dr.spans[i].col_end))
 			}
 		}
 	}
-
-	// Reset dirty tracker for next frame
 	damage_reset(d)
-
 	return journal
 }

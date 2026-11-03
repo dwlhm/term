@@ -1,5 +1,6 @@
 package terminal_grid
 
+import "core:slice"
 import "base:runtime"
 import cell "../cell"
 import damage "../damage"
@@ -182,10 +183,7 @@ grid_clear_line :: proc(
 		r.direct_colors[c_end] = dc
 	}
 
-	for c in c_start..<c_end {
-		r.cells[c] = fill
-		r.direct_colors[c] = dc
-	}
+	_fill_cells(r.cells[c_start:c_end], r.direct_colors[c_start:c_end], fill, dc)
 	if c_start == 0 && c_end >= g.col_count {
 		r.wrap = false
 		r.is_prompt = false
@@ -240,15 +238,7 @@ grid_scroll_up :: proc(
 		// Clear bottom exposed rows
 		for i in 0..<actual {
 			lr := g.row_count - actual + i
-			phys := grid_physical_row(g, lr)
-			r := &g.rows[phys]
-			for c in 0..<g.col_count {
-				r.cells[c] = fill
-				r.direct_colors[c] = dc
-			}
-			r.generation += 1
-			r.wrap = false
-			r.is_prompt = false
+			_row_reset(&g.rows[grid_physical_row(g, lr)], fill, dc)
 		}
 		if d != nil {
 			damage.damage_mark_all(d, 1)
@@ -256,33 +246,16 @@ grid_scroll_up :: proc(
 		return actual
 	}
 
-	// Sub-region scroll (DECSTBM margins): copy row pointers in subregion
+	// Sub-region scroll (DECSTBM margins): rotate the Row headers (slices into
+	// the pools) inside [t, b]; no cell data moves. The vacated rows end up at
+	// the bottom of the region and are reset.
 	for i in t..<(b - actual + 1) {
-		src_phys := grid_physical_row(g, i + actual)
-		dst_phys := grid_physical_row(g, i)
-		copy(g.rows[dst_phys].cells, g.rows[src_phys].cells)
-		copy(g.rows[dst_phys].direct_colors, g.rows[src_phys].direct_colors)
-		g.rows[dst_phys].generation += 1
-		g.rows[dst_phys].wrap = g.rows[src_phys].wrap
-		g.rows[dst_phys].is_prompt = g.rows[src_phys].is_prompt
-		if d != nil {
-			damage.damage_mark_row(d, i, g.rows[dst_phys].generation)
-		}
+		_swap_rows(g, i, i + actual)
 	}
 	for i in (b - actual + 1)..=b {
-		phys := grid_physical_row(g, i)
-		r := &g.rows[phys]
-		for c in 0..<g.col_count {
-			r.cells[c] = fill
-			r.direct_colors[c] = dc
-		}
-		r.generation += 1
-		r.wrap = false
-		r.is_prompt = false
-		if d != nil {
-			damage.damage_mark_row(d, i, r.generation)
-		}
+		_row_reset(&g.rows[grid_physical_row(g, i)], fill, dc)
 	}
+	_mark_region(g, d, t, b)
 
 	return actual
 }
@@ -308,15 +281,7 @@ grid_scroll_down :: proc(
 		g.origin = (g.origin - actual + g.capacity) & g.mask
 		// Clear top exposed rows
 		for i in 0..<actual {
-			phys := grid_physical_row(g, i)
-			r := &g.rows[phys]
-			for c in 0..<g.col_count {
-				r.cells[c] = fill
-				r.direct_colors[c] = dc
-			}
-			r.generation += 1
-			r.wrap = false
-			r.is_prompt = false
+			_row_reset(&g.rows[grid_physical_row(g, i)], fill, dc)
 		}
 		if d != nil {
 			damage.damage_mark_all(d, 1)
@@ -324,33 +289,14 @@ grid_scroll_down :: proc(
 		return actual
 	}
 
-	// Sub-region scroll: copy downward from bottom to top
+	// Sub-region scroll: rotate Row headers downward; vacated rows end up on top.
 	for i := b; i >= t + actual; i -= 1 {
-		src_phys := grid_physical_row(g, i - actual)
-		dst_phys := grid_physical_row(g, i)
-		copy(g.rows[dst_phys].cells, g.rows[src_phys].cells)
-		copy(g.rows[dst_phys].direct_colors, g.rows[src_phys].direct_colors)
-		g.rows[dst_phys].generation += 1
-		g.rows[dst_phys].wrap = g.rows[src_phys].wrap
-		g.rows[dst_phys].is_prompt = g.rows[src_phys].is_prompt
-		if d != nil {
-			damage.damage_mark_row(d, i, g.rows[dst_phys].generation)
-		}
+		_swap_rows(g, i, i - actual)
 	}
 	for i in t..<(t + actual) {
-		phys := grid_physical_row(g, i)
-		r := &g.rows[phys]
-		for c in 0..<g.col_count {
-			r.cells[c] = fill
-			r.direct_colors[c] = dc
-		}
-		r.generation += 1
-		r.wrap = false
-		r.is_prompt = false
-		if d != nil {
-			damage.damage_mark_row(d, i, r.generation)
-		}
+		_row_reset(&g.rows[grid_physical_row(g, i)], fill, dc)
 	}
+	_mark_region(g, d, t, b)
 
 	return actual
 }
@@ -365,4 +311,41 @@ grid_resize :: proc(
 	displacement: ^int = nil,
 ) {
 	grid_resize_reflow(g, d, new_rows, new_cols, cursor_row, cursor_col, cursor_pending_wrap, displacement)
+}
+
+@(private = "file")
+_swap_rows :: #force_inline proc(g: ^Grid, a, b: int) {
+	pa, pb := grid_physical_row(g, a), grid_physical_row(g, b)
+	g.rows[pa], g.rows[pb] = g.rows[pb], g.rows[pa]
+}
+
+// _row_reset clears a whole row to `fill`, including its line flags.
+@(private = "file")
+_row_reset :: #force_inline proc(r: ^Row, fill: cell.Semantic_Cell, dc: cell.Direct_Color) {
+	_fill_cells(r.cells, r.direct_colors, fill, dc)
+	r.generation += 1
+	r.wrap = false
+	r.is_prompt = false
+}
+
+// _fill_cells writes each array in its own pass (vectorizable); the common
+// all-default colour is a memset.
+@(private = "file")
+_fill_cells :: #force_inline proc(cells: []cell.Semantic_Cell, colors: []cell.Direct_Color, fill: cell.Semantic_Cell, dc: cell.Direct_Color) {
+	slice.fill(cells, fill)
+	if dc == {} {
+		slice.zero(colors)
+	} else {
+		slice.fill(colors, dc)
+	}
+}
+
+// _mark_region bumps the generation of every row in [t, b] and marks it dirty.
+@(private = "file")
+_mark_region :: proc(g: ^Grid, d: ^damage.Damage_Tracker, t, b: int) {
+	for i in t..=b {
+		r := &g.rows[grid_physical_row(g, i)]
+		r.generation += 1
+		if d != nil do damage.damage_mark_row(d, i, r.generation)
+	}
 }

@@ -72,6 +72,50 @@ test_damage_journal :: proc(t: ^testing.T) {
 }
 
 @test
+test_damage_journal_counts_survive_consume :: proc(t: ^testing.T) {
+	d: damage.Damage_Tracker
+	damage.damage_init(&d, 24, 80)
+	defer damage.damage_destroy(&d)
+	_ = damage.damage_consume(&d)
+
+	damage.damage_mark_row(&d, 2, 1)
+	damage.damage_mark_span(&d, 7, 0, 4, 1)
+	damage.damage_mark_span(&d, 7, 10, 12, 1)
+	journal := damage.damage_consume(&d)
+	testing.expect(t, !journal.full_damage, "partial damage is not full")
+	testing.expect_value(t, journal.full_rows, 1)
+	testing.expect_value(t, journal.span_count, 3)
+	testing.expect_value(t, journal.min_row, 2)
+	testing.expect_value(t, journal.max_row, 7)
+}
+
+@test
+test_damage_mark_all_is_full_until_consume :: proc(t: ^testing.T) {
+	d: damage.Damage_Tracker
+	damage.damage_init(&d, 24, 80)
+	defer damage.damage_destroy(&d)
+	_ = damage.damage_consume(&d)
+
+	damage.damage_mark_all(&d, 3)
+	damage.damage_mark_span(&d, 5, 1, 2, 4) // absorbed by the whole-screen mark
+	damage.damage_mark_row(&d, 6, 4)
+	journal := damage.damage_consume(&d)
+	testing.expect(t, journal.full_damage, "mark_all reports full damage")
+	testing.expect_value(t, journal.full_rows, 24)
+	testing.expect_value(t, journal.span_count, 24)
+	testing.expect_value(t, journal.min_row, 0)
+	testing.expect_value(t, journal.max_row, 23)
+	testing.expect_value(t, journal.min_col, 0)
+	testing.expect_value(t, journal.max_col, 80)
+
+	damage.damage_mark_cell(&d, 1, 1, 5)
+	journal = damage.damage_consume(&d)
+	testing.expect(t, !journal.full_damage, "consume clears the whole-screen mark")
+	testing.expect_value(t, journal.full_rows, 0)
+	testing.expect_value(t, journal.span_count, 1)
+}
+
+@test
 test_grid_scroll_o1 :: proc(t: ^testing.T) {
 	g: grid.Grid
 	d: damage.Damage_Tracker

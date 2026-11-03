@@ -1229,18 +1229,9 @@ terminal_renderer_encode :: proc(
 	_terminal_renderer_ensure_resources(r, u32(cols), u32(rows), cell_w, cell_h, text_atlas.glyph_view, text_atlas.emoji_view)
 
 	dirty_cells := 0
-	span_count := 0
-	full_rows := 0
+	span_count := journal.span_count
+	full_rows := min(journal.full_rows, rows)
 	if journal.has_damage {
-		for r_idx in 0..<min(rows, len(journal.dirty_rows)) {
-			dr := journal.dirty_rows[r_idx]
-			if dr.full {
-				full_rows += 1
-				span_count += 1
-			} else if dr.span_count > 0 {
-				span_count += int(dr.span_count)
-			}
-		}
 		dirty_w := max(1, min(journal.max_col, cols) - max(journal.min_col, 0))
 		dirty_h := max(1, min(journal.max_row, rows - 1) - max(journal.min_row, 0) + 1)
 		dirty_cells = min(total_cells, dirty_w * dirty_h)

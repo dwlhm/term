@@ -6,6 +6,34 @@ import egc "../egc"
 import grid "../grid"
 import uw "../../unicode_width"
 
+// _parser_print_ascii prints a run of printable ASCII. Each segment that fits
+// before the right margin is one grid write; a pending wrap, or autowrap off,
+// takes the per-character path for that byte (wrap, scroll, prompt rows).
+_parser_print_ascii :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, text: []u8) {
+	i := 0
+	for i < len(text) {
+		n := 0
+		if !p.cursor.pending_wrap && p.autowrap {
+			c := cell.cell_make(0, p.cursor.active_fg, p.cursor.active_bg, p.cursor.active_style, p.cursor.active_flags)
+			linked, dc := _parser_apply_link(p, c, p.cursor.direct_color)
+			n = grid.grid_write_ascii(g, d, p.cursor.row, p.cursor.col, text[i:], linked, dc)
+		}
+		if n == 0 {
+			_parser_put_char(p, g, d, rune(text[i]))
+			i += 1
+			continue
+		}
+		i += n
+		if p.cursor.col + n < g.col_count {
+			p.cursor.col += n
+		} else {
+			p.cursor.col = g.col_count - 1
+			p.cursor.pending_wrap = true
+		}
+	}
+	p.last_print = rune(text[len(text) - 1])
+}
+
 // _parser_apply_link attaches the OSC 8 hyperlink in effect to a finished cell.
 _parser_apply_link :: #force_inline proc(
 	p: ^Parser,

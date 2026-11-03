@@ -21,7 +21,7 @@ TEST_FLAGS ?= -define:ODIN_TEST_THREADS=1
 DEBUG_FLAGS ?= -debug
 RELEASE_FLAGS ?= -o:speed -no-bounds-check
 
-.PHONY: all term release run term-debug harness-features run-harness-features harness-render-chrome run-harness-render-chrome harness-render-terminal run-harness-render-terminal harness-render-composer run-harness-composer test test-app test-holder test-session-core test-font test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-selector test-gpu check esctest clean help bench bench-quick bundle dmg portable dist install uninstall test-unicode-width gen-unicode
+.PHONY: all term release run term-debug harness-features run-harness-features harness-render-chrome run-harness-render-chrome harness-render-terminal run-harness-render-terminal harness-render-composer run-harness-composer test test-app test-holder test-session-core test-font test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-selector test-gpu check esctest clean help bench bench-quick bundle dmg portable dist install uninstall test-unicode-width gen-unicode bench-parser
 
 all: term harness-features harness-render-chrome harness-render-terminal harness-composer
 
@@ -117,6 +117,12 @@ bench: harness-composer
 
 bench-quick: harness-composer
 	./$(OUT_DIR)/harness_composer --bench --quick
+
+# Parser + grid throughput per workload (no PTY/IPC/GPU); ARGS="--rows 50 --cols 200".
+bench-parser:
+	@mkdir -p $(OUT_DIR)
+	$(ODIN) build src/cmd/bench_parser -out:$(OUT_DIR)/bench_parser $(RELEASE_FLAGS) $(COMMON_FLAGS)
+	./$(OUT_DIR)/bench_parser $(ARGS)
 
 bench-session:
 	@mkdir -p $(OUT_DIR)
@@ -245,6 +251,7 @@ check:
 	$(ODIN) check src/cmd/harness_render_chrome $(CHECK_FLAGS)
 	$(ODIN) check src/cmd/harness_render_terminal $(CHECK_FLAGS)
 	$(ODIN) check src/cmd/harness_composer $(CHECK_FLAGS)
+	$(ODIN) check src/cmd/bench_parser $(CHECK_FLAGS)
 	$(ODIN) check src/cmd/term_driver $(CHECK_FLAGS)
 	$(ODIN) check src/core/cursor $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/core/unicode_width $(CHECK_FLAGS) -no-entry-point

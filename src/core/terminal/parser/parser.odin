@@ -503,20 +503,14 @@ parser_parse_bytes :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 
 	i := 0
 	for i < len(data) {
-		// Fast ASCII run scanner in Ground state (only when not in middle of UTF-8 sequence)
+		// Printable ASCII runs in Ground state go to the grid as whole runs.
 		if p.state == .Ground && p.utf8_state == 0 && !_parser_graphics_active(p) {
 			start := i
-			for i < len(data) && data[i] >= 0x20 && data[i] <= 0x7E && (!p.cursor.pending_wrap && (p.autowrap || p.cursor.col < g.col_count - 1)) {
-				_parser_put_char(p, g, d, rune(data[i]))
-				i += 1
-			}
-			if i > start && i < len(data) && (data[i] < 0x20 || data[i] > 0x7E) {
-				// Process next byte
-				parser_parse_byte(p, g, d, data[i])
-				i += 1
+			for i < len(data) && data[i] >= 0x20 && data[i] <= 0x7E do i += 1
+			if i > start {
+				_parser_print_ascii(p, g, d, data[start:i])
 				continue
 			}
-			if i >= len(data) do break
 		}
 
 		parser_parse_byte(p, g, d, data[i])
