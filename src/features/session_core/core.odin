@@ -4,7 +4,7 @@ package feature_session_core
 // holders that own the programs, served to viewers and the `term session` CLI.
 //
 // Invariants:
-// 1. Single-threaded poll loop; poll timeout = nearest deadline, -1 when idle.
+// 1. Single-threaded wait loop (platform/poller); timeout = nearest deadline, -1 when idle.
 // 2. Buffers are allocated at start, per session at create/adopt and per
 //    connection at accept; the steady-state loop does not allocate.
 // 3. Every byte a program prints reaches its Terminal; viewers get the same
@@ -21,6 +21,7 @@ import "core:sys/posix"
 import "core:time"
 import terminal "../../core/terminal"
 import ipc "../../platform/ipc"
+import poller "../../platform/poller"
 import session "../session"
 
 CORE_MAX_SESSIONS :: 256
@@ -106,7 +107,8 @@ Core :: struct {
 	empty_since: i64,
 	grace_ns:    i64,
 	owned:       bool, // SESSION_OWNED_ENV: sessions end with the owner's last viewer
-	stop_pipe:   [2]posix.FD, // core_request_stop / SIGTERM wake the poll
+	stop_pipe:   [2]posix.FD, // core_request_stop / SIGTERM wake the wait
+	poller:      poller.Poller,
 	holders:     [CORE_MAX_HOLDERS]Core_Holder,
 	sessions:    [CORE_MAX_SESSIONS]Core_Session,
 	viewers:     [CORE_MAX_VIEWERS]Core_Viewer,
@@ -146,6 +148,7 @@ core_run :: proc() -> int {
 	defer core_destroy(c)
 	if !_core_listen(c) do return 0 if c.listen_fd == -2 else 1
 	if !_stop_pipe_open(c) do return 1
+	if !poller.poller_init(&c.poller, CORE_MAX_POLL) do return 1
 	_install_stop_signals()
 	core_adopt_holders(c)
 	if core_current_holder(c) < 0 && !core_start_holder(c) do return 1
@@ -210,6 +213,7 @@ core_destroy :: proc(c: ^Core) {
 	delete(c.paint)
 	delete(c.text)
 	delete(c.msg)
+	poller.poller_destroy(&c.poller)
 	free(c)
 }
 

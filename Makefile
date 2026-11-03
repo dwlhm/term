@@ -21,7 +21,7 @@ TEST_FLAGS ?= -define:ODIN_TEST_THREADS=1
 DEBUG_FLAGS ?= -debug
 RELEASE_FLAGS ?= -o:speed -no-bounds-check
 
-.PHONY: all term release run term-debug harness-features run-harness-features harness-render-chrome run-harness-render-chrome harness-render-terminal run-harness-render-terminal harness-render-composer run-harness-composer test test-app test-holder test-session-core test-font test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-selector test-gpu check esctest clean help bench bench-quick bundle dmg portable dist install uninstall test-unicode-width gen-unicode bench-parser bench-session bench-throughput
+.PHONY: all term release run term-debug harness-features run-harness-features harness-render-chrome run-harness-render-chrome harness-render-terminal run-harness-render-terminal harness-render-composer run-harness-composer test test-app test-holder test-session-core test-font test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-selector test-gpu check esctest clean help bench bench-quick bundle dmg portable dist install uninstall test-unicode-width gen-unicode bench-parser bench-session bench-throughput test-poller
 
 all: term harness-features harness-render-chrome harness-render-terminal harness-composer
 
@@ -133,7 +133,7 @@ bench-session:
 bench-throughput: term
 	python3 -I scripts/stress/throughput.py -t $(OUT_DIR)/term $(ARGS)
 
-test: test-app test-unicode-width test-terminal test-pty test-holder test-session-core test-font test-window test-session test-control test-ipc test-tabs test-multiplexer test-interaction test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-selector test-gpu test-features test-e2e
+test: test-app test-unicode-width test-terminal test-pty test-holder test-session-core test-font test-window test-session test-control test-ipc test-poller test-tabs test-multiplexer test-interaction test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-selector test-gpu test-features test-e2e
 
 # VT conformance suite (esctest2) driven inside a real Term pane; requires a GUI
 # session. Extra esctest flags: make esctest ESCTEST_ARGS="--include=CUP"
@@ -177,6 +177,9 @@ test-control:
 
 test-ipc:
 	$(ODIN) test src/platform/ipc/tests $(CHECK_FLAGS) $(TEST_FLAGS)
+
+test-poller:
+	$(ODIN) test src/platform/poller/tests $(CHECK_FLAGS) $(TEST_FLAGS)
 
 test-tabs:
 	$(ODIN) test src/features/tabs/tests $(TEST_FLAGS)

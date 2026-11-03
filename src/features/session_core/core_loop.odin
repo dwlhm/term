@@ -1,18 +1,21 @@
 package feature_session_core
 
-// One poll iteration: wait for sockets or the nearest deadline, then serve.
+// One loop round: wait for sockets or the nearest deadline, then serve.
 
 import "core:sys/posix"
 import ipc "../../platform/ipc"
+import poller "../../platform/poller"
 
 @(private = "file")
 Poll_Who :: enum u8 { Stop, Listener, Holder, Viewer }
 
+CORE_MAX_POLL :: 2 + CORE_MAX_HOLDERS + CORE_MAX_VIEWERS
+
 @(private = "file")
 Poll_Set :: struct {
-	fds:   [2 + CORE_MAX_HOLDERS + CORE_MAX_VIEWERS]posix.pollfd,
-	who:   [2 + CORE_MAX_HOLDERS + CORE_MAX_VIEWERS]Poll_Who,
-	index: [2 + CORE_MAX_HOLDERS + CORE_MAX_VIEWERS]int,
+	fds:   [CORE_MAX_POLL]posix.pollfd,
+	who:   [CORE_MAX_POLL]Poll_Who,
+	index: [CORE_MAX_POLL]int,
 	n:     int,
 }
 
@@ -32,7 +35,7 @@ _core_step :: proc(c: ^Core) {
 	_add(&ps, c.listen_fd, nil, .Listener, 0)
 	for &h, i in c.holders do if h.used do _add(&ps, h.conn.fd, &h.conn, .Holder, i)
 	for &v, i in c.viewers do if v.used do _add(&ps, v.conn.fd, &v.conn, .Viewer, i)
-	ready := posix.poll(raw_data(ps.fds[:]), posix.nfds_t(ps.n), i32(_timeout_ms(c)))
+	ready := poller.poller_poll(&c.poller, ps.fds[:ps.n], _timeout_ms(c))
 	if ready < 0 && posix.errno() != .EINTR do return
 	for i in 0..<ps.n {
 		rev := ps.fds[i].revents

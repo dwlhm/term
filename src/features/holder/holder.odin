@@ -5,8 +5,9 @@ package feature_holder
 // drives it over a framed ipc.Stream_Conn (channel = session id).
 //
 // Invariants:
-// 1. One thread, one posix.poll over the listener, pending connections, the
-//    core link, every session master and a SIGCHLD self-pipe. The timeout is
+// 1. One thread, one wait (platform/poller: a kqueue kept across rounds on
+//    macOS) over the listener, pending connections, the core link, every
+//    session master and a SIGCHLD self-pipe. The timeout is
 //    the nearest deadline, -1 when idle (zero wakeups). A round reads the
 //    clock once, visits only live sessions and drains each ready master into
 //    one OUTPUT frame (macOS hands out ~1 KiB per read).
@@ -24,6 +25,7 @@ package feature_holder
 import "core:fmt"
 import "core:sys/posix"
 import ipc "../../platform/ipc"
+import poller "../../platform/poller"
 
 HOLDER_MAX_SESSIONS :: 256
 HOLDER_TAIL_BYTES   :: 1 << 20
@@ -109,6 +111,7 @@ Holder :: struct {
 	sup:           Supervisor,
 	signals:       Signal_State,
 	orphans:       [HOLDER_MAX_SESSIONS]i32, // released, not yet reaped children
+	poller:        poller.Poller,
 	pfds:          [HOLDER_MAX_POLL]posix.pollfd,
 	tags:          [HOLDER_MAX_POLL]Poll_Tag,
 	msg_buf:       [16 * 1024]u8, // WELCOME / PROC_INFO encoding scratch
@@ -129,7 +132,7 @@ holder_run :: proc(socket_path: string) -> int {
 		_holder_tick(h, now)
 		if h.done do break
 		n := _poll_build(h)
-		ready := posix.poll(&h.pfds[0], posix.nfds_t(n), _poll_timeout(h, now))
+		ready := poller.poller_poll(&h.poller, h.pfds[:n], int(_poll_timeout(h, now)))
 		now = _now()
 		if ready < 0 && posix.errno() != .EINTR {
 			fmt.eprintfln("holder: poll failed: %v", posix.errno())
@@ -149,6 +152,10 @@ _holder_open :: proc(h: ^Holder, socket_path: string) -> bool {
 	h.listen_fd = -1
 	for &p in h.pending do p.fd = -1
 	h.core.fd = -1
+	if !poller.poller_init(&h.poller, HOLDER_MAX_POLL) {
+		fmt.eprintfln("holder: cannot create its poller: %v", posix.errno())
+		return false
+	}
 	if len(socket_path) >= len(h.path_buf) {
 		fmt.eprintln("holder: socket path too long")
 		return false
@@ -184,6 +191,7 @@ _holder_close :: proc(h: ^Holder) {
 	}
 	_orphans_reap_wait(h)
 	_signals_restore(&h.signals)
+	poller.poller_destroy(&h.poller)
 }
 
 // _holder_finish ends the holder: BYE to a linked core (flushed within the
