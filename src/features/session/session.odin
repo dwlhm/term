@@ -267,7 +267,11 @@ session_drain :: proc(sess: ^Terminal_Session) -> int {
 		terminal.terminal_feed_bytes(&sess.term, buf[:n])
 		total_drained += n
 	}
-	if total_drained > 0 && sess.link.consumed != nil do sess.link.consumed(sess.link.user, total_drained)
+	if total_drained > 0 {
+		// ED 3 (a program's `clear`, a history resync) can shrink the history under the view.
+		sess.scroll_offset = min(sess.scroll_offset, sess.term.grid.history_count)
+		if sess.link.consumed != nil do sess.link.consumed(sess.link.user, total_drained)
+	}
 	session_flush_responses(sess)
 	return total_drained
 }

@@ -7,23 +7,30 @@ import grid "grid"
 // PAINT_PREAMBLE resets whatever state the receiving terminal is in: CAN aborts
 // a half-received sequence, DECSTR resets the pen/margins/modes, and the rest
 // switches off what DECSTR leaves alone (mouse, focus, paste, sync, keyboard
-// flags, alternate screen, charsets, hyperlink, kitty images, keypad).
+// flags, alternate screen, charsets, hyperlink, kitty images, keypad). The
+// screen erase follows it (PAINT_ERASE_*).
 PAINT_PREAMBLE ::
 	"\x18\x1b[!p" +
 	"\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1016l\x1b[?1007l" +
 	"\x1b[?1004l\x1b[?2004l\x1b[?2026l\x1b[<16u\x1b[?1049l\x1b>" +
-	"\x1b(B\x1b)B\x1b*B\x1b+B\x0f\x1b]8;;\x1b\\\x1b_Ga=d,d=A,q=2\x1b\\" +
-	"\x1b[H\x1b[2J"
+	"\x1b(B\x1b)B\x1b*B\x1b+B\x0f\x1b]8;;\x1b\\\x1b_Ga=d,d=A,q=2\x1b\\"
+
+// A paint that asks for history replaces the receiver's scrollback (ED 3);
+// one without keeps it (ED 2), so a viewer that skipped output keeps what it saw.
+PAINT_ERASE_SCREEN  :: "\x1b[H\x1b[2J"
+PAINT_ERASE_HISTORY :: "\x1b[H\x1b[3J"
 
 // terminal_paint serializes `t` as VT bytes that rebuild it in a fresh
 // Terminal of the same size: up to `history` scrollback lines (main screen
-// only), the main screen, the alternate screen when active, kitty images
-// visible on the active screen, then modes, cursor and title. `out` is cleared
+// only; history > 0 also replaces the receiver's scrollback), the main screen,
+// the alternate screen when active, kitty images visible on the active screen,
+// then modes, cursor and title. `out` is cleared
 // and only grows; the caller reuses it across paints.
 terminal_paint :: proc(t: ^Terminal, out: ^[dynamic]u8, history: int) {
 	if t == nil || out == nil do return
 	clear(out)
 	_paint_str(out, PAINT_PREAMBLE)
+	_paint_str(out, PAINT_ERASE_HISTORY if history > 0 else PAINT_ERASE_SCREEN)
 
 	pen := PAINT_PEN_DEFAULT
 	alt := t.parser.in_alt_screen

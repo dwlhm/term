@@ -1,7 +1,8 @@
 package feature_session_core
 
-// Viewer attachments: first paint, live bytes, repaint after overflow, and
-// the size owner (the most recently active attachment that is not observing).
+// Viewer attachments: first paint, live bytes, repaint after overflow (and
+// the history resync once output settles), and the size owner (the most
+// recently active attachment that is not observing).
 
 import terminal "../../core/terminal"
 import extension "../../core/terminal/extension"
@@ -19,9 +20,11 @@ core_attach :: proc(c: ^Core, s: ^Core_Session, vi: int, req: ipc.Attach_Msg) ->
 	channel = v.next_channel
 	if !ipc.stream_channel_open(&v.conn, channel, true) do return 0, false
 	a := &s.attaches[slot]
-	a^ = {used = true, observe = req.observe, viewer = vi, channel = channel, size = req.size, active_ns = _now()}
+	history := int(min(req.history, CORE_PAINT_HISTORY_MAX))
+	a^ = {used = true, observe = req.observe, viewer = vi, channel = channel, size = req.size, active_ns = _now(), history = history}
 	core_apply_leader(c, s)
-	_attach_paint(c, s, a, int(min(req.history, CORE_PAINT_HISTORY_MAX)))
+	_attach_paint(c, s, a, history)
+	if a.recovering do _attach_stale(s, a) // the paint waits for ground and goes out without history
 	return channel, true
 }
 
@@ -47,6 +50,7 @@ core_attach_push :: proc(c: ^Core, s: ^Core_Session, a: ^Core_Attach, bytes: []u
 	if !a.recovering {
 		if ipc.stream_data(&v.conn, a.channel, bytes) do return
 		a.recovering = true
+		_attach_stale(s, a)
 	}
 	if terminal.terminal_parser_at_ground(&s.sess.term) do _attach_paint(c, s, a, 0)
 }
@@ -92,10 +96,37 @@ core_apply_leader :: proc(c: ^Core, s: ^Core_Session) {
 	_ = terminal.terminal_consume_damage(t)
 }
 
-// core_attach_repaint gives every viewer of a session one fresh paint (used
-// after a stitch, which held the live frames back).
+// core_attach_repaint gives every viewer of a session one fresh paint after
+// its screen changed without live frames (a stitch held them back, a tail was
+// adopted); their history follows once output settles.
 core_attach_repaint :: proc(c: ^Core, s: ^Core_Session) {
-	for &a in s.attaches do if a.used do _attach_paint(c, s, &a, 0)
+	for &a in s.attaches {
+		if !a.used do continue
+		_attach_paint(c, s, &a, 0)
+		_attach_stale(s, &a)
+	}
+}
+
+// core_attach_resync repaints every stale viewer with the history it asked
+// for, replacing its scrollback. true = one is still stale (its paint waits
+// for the parser to reach ground): try again at the next settle.
+core_attach_resync :: proc(c: ^Core, s: ^Core_Session) -> (retry: bool) {
+	for &a in s.attaches {
+		if !a.used || !a.stale do continue
+		_attach_paint(c, s, &a, a.history)
+		a.stale = a.recovering
+		retry ||= a.stale
+	}
+	return
+}
+
+// _attach_stale: the viewer missed output its scrollback should have; output
+// settling resyncs it (a viewer that asked for no history has nothing to fix).
+@(private = "file")
+_attach_stale :: proc(s: ^Core_Session, a: ^Core_Attach) {
+	if a.history == 0 do return
+	a.stale = true
+	if s.settle_due_ns == 0 do s.settle_due_ns = _now() + CORE_SETTLE_MS * 1_000_000
 }
 
 // core_attach_frame handles a viewer frame on an attach channel.

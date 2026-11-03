@@ -1,5 +1,6 @@
 package feature_session_tests
 
+import "core:fmt"
 import "core:strings"
 import "core:testing"
 import ipc "../../../platform/ipc"
@@ -166,4 +167,18 @@ test_session_takes_a_core_paint :: proc(t: ^testing.T) {
 	feed(dst, string(paint[:]))
 	testing.expect_value(t, row_text(dst, 0), "red prompt$")
 	session.session_destroy(dst)
+}
+
+@test
+test_session_view_stays_inside_shrunken_history :: proc(t: ^testing.T) {
+	l: Loopback_Link
+	defer delete(l.written)
+	sess := loopback_session(&l)
+	defer session.session_destroy(sess)
+	for i in 0..<60 do feed(sess, fmt.tprintf("line %d\r\n", i))
+	sess.scroll_offset = sess.term.grid.history_count
+	testing.expect(t, sess.scroll_offset > 0, "scrolled into history")
+	feed(sess, "\x1b[3J") // `clear` (or a history resync) drops the history
+	testing.expect_value(t, sess.term.grid.history_count, 0)
+	testing.expect_value(t, sess.scroll_offset, 0)
 }

@@ -45,7 +45,7 @@ _core_step :: proc(c: ^Core) {
 		}
 	}
 	core_lists_due(c)
-	core_proc_refresh_due(c)
+	core_settle_due(c, _now())
 	core_stitch_tick(c)
 	for &h in c.holders do if h.used do ipc.stream_flush(&h.conn)
 	for &v in c.viewers do if v.used do ipc.stream_flush(&v.conn)
@@ -59,7 +59,7 @@ _timeout_ms :: proc(c: ^Core) -> int {
 	for &v in c.viewers do if v.used && v.list_waiting do due = _earliest(due, v.list_due_ns)
 	for &s in c.sessions {
 		if !s.used do continue
-		if s.proc_due_ns != 0 do due = _earliest(due, s.proc_due_ns)
+		if s.settle_due_ns != 0 do due = _earliest(due, s.settle_due_ns)
 		if s.stitch != nil && s.stitch.active do due = _earliest(due, core_stitch_due_ns(&s))
 	}
 	if c.empty_since > 0 do due = _earliest(due, c.empty_since + c.grace_ns)

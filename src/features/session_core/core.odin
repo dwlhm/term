@@ -29,7 +29,7 @@ CORE_MAX_VIEWERS  :: 16
 CORE_MAX_ATTACH   :: 8
 CORE_GRACE_MS     :: 3000
 CORE_PROC_WAIT_MS :: 300 // LIST waits this long for fresh foreground info
-CORE_PROC_QUIET_MS :: 250 // output quiet this long → refresh the foreground process (titles, active)
+CORE_SETTLE_MS :: 250 // output quiet this long → refresh the foreground process (titles, active), resync stale viewers
 CORE_HOLDER_CTL   :: 2 << 20
 CORE_VIEWER_CTL   :: 2 << 20
 CORE_SOCKET_NAME  :: "core.sock"
@@ -51,6 +51,8 @@ Core_Attach :: struct {
 	used:       bool,
 	observe:    bool,
 	recovering: bool, // missed output: gets a paint at the next parser ground
+	stale:      bool, // painted without history after missing output: gets its history once output settles
+	history:    int,  // scrollback lines this viewer asked for (first paint and resync)
 	viewer:     int,
 	channel:    u32,
 	size:       ipc.Size_Msg,
@@ -63,20 +65,20 @@ Core_Link :: struct {
 }
 
 Core_Session :: struct {
-	used:         bool,
-	exited:       bool,
-	proc_pending: bool,
-	proc_due_ns:  i64, // output settled: ask the holder for the foreground process then (0 = nothing due)
-	id:           u32,
-	holder:       int,
-	started_unix: i64,
-	row_hash:     u64,
-	exit:         ipc.Exit_Msg,
-	sess:         ^session.Terminal_Session,
-	relay:        terminal.Relay,
-	link:         Core_Link,
-	stitch:       ^Stitch_State, // nil until a read asks for alt-screen history
-	attaches:     [CORE_MAX_ATTACH]Core_Attach,
+	used:          bool,
+	exited:        bool,
+	proc_pending:  bool,
+	settle_due_ns: i64, // output settles then: foreground process query + stale viewer resync (0 = nothing due)
+	id:            u32,
+	holder:        int,
+	started_unix:  i64,
+	row_hash:      u64,
+	exit:          ipc.Exit_Msg,
+	sess:          ^session.Terminal_Session,
+	relay:         terminal.Relay,
+	link:          Core_Link,
+	stitch:        ^Stitch_State, // nil until a read asks for alt-screen history
+	attaches:      [CORE_MAX_ATTACH]Core_Attach,
 }
 
 Core_Viewer :: struct {
