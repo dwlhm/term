@@ -639,6 +639,7 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 
 	ui_dirty := false
 	for {
+		app.window_visible = app_window_visible_after(app.window_visible, ev.type)
 		#partial switch ev.type {
 		case .QUIT, .WINDOW_CLOSE_REQUESTED:
 			ui_dirty = true

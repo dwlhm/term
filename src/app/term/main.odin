@@ -64,6 +64,7 @@ Term_App :: struct {
 	quit:          App_Quit_State,
 	last_title_sync: time.Time,
 	window_focused:            bool,
+	window_visible:            bool, // false: minimized, covered or screen locked (window_visibility.odin)
 	wakeup_pending:        bool,
 	last_frame_acquire_failed: bool,
 	in_event_watch:  bool,
@@ -268,6 +269,7 @@ app_init :: proc(app: ^Term_App, opts: Cli_Options = {}) -> bool {
 
 	app.running = true
 	app.window_focused = true
+	app.window_visible = true
 	app.start_time = time.now()
 	_ = signals_start(&app.signals, app)
 	_ = sdl3.AddEventWatch(app_event_watch, app)
@@ -411,10 +413,16 @@ app_run :: proc(app: ^Term_App) {
 		needs_frame := term_dirty || cursor_damaged || app_needs_animation(app) || app.composer.sched.force_next || app.composer.sched.damage_pending
 
 		// Render only on real change, cursor toggle, or active animation; stay parked otherwise.
-		if needs_frame && !app_sync_output_hold(app, now) {
+		// A window nobody sees waits one frame instead (its damage stays pending for the expose).
+		if needs_frame && !app.window_visible {
+			time.sleep(HIDDEN_FRAME_MS * time.Millisecond)
+		} else if needs_frame && !app_sync_output_hold(app, now) {
 			frame_start := time.tick_now()
 			app_render_frame(app, term_dirty)
 			telemetry.telemetry_end_frame(&app.diag.tel, u64(time.tick_since(frame_start)))
+			// No target came (surface occluded before or without a window event): pace like a
+			// presented frame, and keep trying so the window is drawn as soon as it shows.
+			if app.last_frame_acquire_failed do time.sleep(HIDDEN_FRAME_MS * time.Millisecond)
 		}
 
 		free_all(context.temp_allocator)
