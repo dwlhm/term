@@ -200,6 +200,13 @@ _detect_active_prompt_start :: proc(g: ^Grid, cur_r: int) -> int {
 	return prompt_start
 }
 
+// _in_prompt_block: the active prompt block is rows [prompt_start_r, cur_r];
+// rows below the cursor are ordinary output.
+@(private = "file")
+_in_prompt_block :: #force_inline proc(r, prompt_start_r, cur_r: int) -> bool {
+	return prompt_start_r >= 0 && r >= prompt_start_r && r <= cur_r
+}
+
 _extract_logical_lines :: proc(
 	old: ^Grid,
 	start_r, end_r: int,
@@ -243,7 +250,7 @@ _extract_logical_lines :: proc(
 
 		// Prompt boundary protection: all rows within active prompt block are isolated individually
 		// with truncate so that vertical distance to cursor never expands, regardless of prior wrap flags.
-		if prompt_start_r >= 0 && r >= prompt_start_r && r <= cur_r {
+		if _in_prompt_block(r, prompt_start_r, cur_r) {
 			ll.phys_rows = 1
 			ll.is_prompt = true
 			ll.truncate = true
@@ -279,7 +286,7 @@ _extract_logical_lines :: proc(
 
 		for r <= end_r {
 			// Do not wrap into active prompt block
-			if prompt_start_r >= 0 && r >= prompt_start_r {
+			if _in_prompt_block(r, prompt_start_r, cur_r) {
 				break
 			}
 
@@ -313,7 +320,7 @@ _extract_logical_lines :: proc(
 					ll.wrapped = true
 					break
 				}
-				if prompt_start_r >= 0 && r >= prompt_start_r {
+				if _in_prompt_block(r, prompt_start_r, cur_r) {
 					ll.wrapped = false
 					is_continuation = false
 					break

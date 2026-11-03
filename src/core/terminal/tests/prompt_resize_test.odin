@@ -106,3 +106,26 @@ test_terminal_resize_inflight_overflow_prompt_header_does_not_wrap :: proc(t: ^t
 	testing.expect(t, r0_cleared != nil, "Row 0 should exist")
 	testing.expect_value(t, r0_cleared.cells[0].char, ' ')
 }
+
+// Rows below the cursor while a prompt is active (prompt at the top after
+// `clear`, output further down) are outside the prompt block [prompt start,
+// cursor row]: reflow must consume them like any other row instead of
+// stalling on them (the old guard looped forever, allocating).
+@test
+test_terminal_resize_rows_below_active_prompt :: proc(t: ^testing.T) {
+	terminal: term.Terminal
+	term.terminal_init(&terminal, 7, 15)
+	defer term.terminal_destroy(&terminal)
+
+	term.terminal_feed_string(&terminal, "\r\n\r\nbelow\x1b[H$ ls")
+	testing.expect_value(t, terminal.parser.cursor.row, 0)
+
+	term.terminal_resize(&terminal, 9, 14)
+	testing.expect_value(t, terminal.parser.cursor.row, 0)
+	testing.expect_value(t, terminal.parser.cursor.col, 4)
+	testing.expect_value(t, term.terminal_get_cell(&terminal, 0, 0).char, '$')
+	testing.expect_value(t, term.terminal_get_cell(&terminal, 2, 0).char, 'b')
+
+	term.terminal_resize(&terminal, 6, 30)
+	testing.expect_value(t, term.terminal_get_cell(&terminal, 2, 0).char, 'b')
+}
