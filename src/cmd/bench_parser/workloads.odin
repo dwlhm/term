@@ -4,6 +4,9 @@ import "core:fmt"
 import "core:strings"
 
 // Deterministic synthetic output streams, one per parser/grid cost class.
+// Text lines end in "\r\n" as a PTY with onlcr delivers them; a bare "\n"
+// keeps the column, so lines would staircase across the screen and measure
+// wrapping and wide row clears instead of the workload.
 
 Workload :: struct {
 	name:  string,
@@ -54,7 +57,7 @@ _lines :: proc(name: string, per_line: int, alphabet: string, allocator := conte
 	lines := 0
 	for strings.builder_len(b) < WORKLOAD_BYTES {
 		for _ in 0 ..< per_line do strings.write_string(&b, glyphs[_next(&rng) % u64(len(glyphs))])
-		strings.write_byte(&b, '\n')
+		strings.write_string(&b, "\r\n")
 		lines += 1
 	}
 	return {name, "line", lines, b.buf[:]}
@@ -68,7 +71,7 @@ _numbers :: proc(allocator := context.allocator) -> Workload {
 	for strings.builder_len(b) < WORKLOAD_BYTES {
 		n += 1
 		strings.write_int(&b, n)
-		strings.write_byte(&b, '\n')
+		strings.write_string(&b, "\r\n")
 	}
 	return {"ascii_short", "line", n, b.buf[:]}
 }
@@ -97,7 +100,7 @@ _sgr :: proc(allocator := context.allocator) -> Workload {
 			v := _next(&rng)
 			fmt.sbprintf(&b, "\x1b[38;2;%d;%d;%dm%s\x1b[0m ", v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF, words[v % len(words)])
 		}
-		strings.write_byte(&b, '\n')
+		strings.write_string(&b, "\r\n")
 		lines += 1
 	}
 	return {"sgr", "line", lines, b.buf[:]}
