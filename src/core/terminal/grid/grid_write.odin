@@ -45,6 +45,7 @@ grid_write_ascii :: proc(
 	}
 	if first >= 0 {
 		r.generation += 1
+		r.occ = max(r.occ, u16(last + 1))
 		if d != nil do damage.damage_mark_span(d, row, first, last + 1, r.generation)
 	}
 	return n

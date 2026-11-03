@@ -9,11 +9,13 @@ Row :: struct {
 	cells:         []cell.Semantic_Cell,
 	direct_colors: []cell.Direct_Color,
 	generation:    u32,
+	occ:           u16, // cells at [occ:] are CELL_DEFAULT with no colour (an upper bound)
 	is_prompt:     bool,
 	wrap:          bool,
 }
 
 DEFAULT_SCROLLBACK :: 2048
+GRID_MAX_COLS      :: int(max(u16)) // Row.occ is a u16: keeps Row at 40 bytes for region scrolls
 
 Grid :: struct {
 	rows:          []Row,
@@ -53,7 +55,7 @@ grid_init :: proc(
 ) {
 	if g == nil do return
 	g.row_count = max(1, rows)
-	g.col_count = max(1, cols)
+	g.col_count = clamp(cols, 1, GRID_MAX_COLS)
 	g.capacity = _next_pow2(max(g.row_count, 1) + max(0, history))
 	g.mask = g.capacity - 1
 	g.origin = 0
@@ -149,6 +151,7 @@ grid_set_cell :: proc(g: ^Grid, d: ^damage.Damage_Tracker, row, col: int, c: cel
 			r.direct_colors[col] = {}
 		}
 		r.generation += 1
+		r.occ = max(r.occ, u16(col + 1))
 		if d != nil {
 			damage.damage_mark_cell(d, row, col, r.generation)
 		}
@@ -174,6 +177,7 @@ grid_clear_line :: proc(
 	if c_start >= c_end do return
 
 	// Boundary wide-char sanitization
+	blank := fill == cell.CELL_DEFAULT && dc == {}
 	if c_start > 0 && .Wide_Continuation in r.cells[c_start].flags {
 		r.cells[c_start - 1] = fill
 		r.direct_colors[c_start - 1] = dc
@@ -181,9 +185,18 @@ grid_clear_line :: proc(
 	if c_end < g.col_count && .Wide_Continuation in r.cells[c_end].flags {
 		r.cells[c_end] = fill
 		r.direct_colors[c_end] = dc
+		if !blank do r.occ = max(r.occ, u16(c_end + 1))
 	}
 
-	_fill_cells(r.cells[c_start:c_end], r.direct_colors[c_start:c_end], fill, dc)
+	if blank {
+		// Cells at [occ:] are already blank: only the written part is cleared.
+		e := max(c_start, min(c_end, int(r.occ)))
+		_fill_cells(r.cells[c_start:e], r.direct_colors[c_start:e], fill, dc)
+		if c_end >= int(r.occ) do r.occ = min(r.occ, u16(c_start))
+	} else {
+		_fill_cells(r.cells[c_start:c_end], r.direct_colors[c_start:c_end], fill, dc)
+		r.occ = max(r.occ, u16(c_end))
+	}
 	if c_start == 0 && c_end >= g.col_count {
 		r.wrap = false
 		r.is_prompt = false
@@ -319,10 +332,17 @@ _swap_rows :: #force_inline proc(g: ^Grid, a, b: int) {
 	g.rows[pa], g.rows[pb] = g.rows[pb], g.rows[pa]
 }
 
-// _row_reset clears a whole row to `fill`, including its line flags.
+// _row_reset clears a whole row to `fill`, including its line flags. A blank
+// fill only touches the cells written since the last reset (`occ`).
 @(private = "file")
 _row_reset :: #force_inline proc(r: ^Row, fill: cell.Semantic_Cell, dc: cell.Direct_Color) {
-	_fill_cells(r.cells, r.direct_colors, fill, dc)
+	if fill == cell.CELL_DEFAULT && dc == {} {
+		_fill_cells(r.cells[:r.occ], r.direct_colors[:r.occ], fill, dc)
+		r.occ = 0
+	} else {
+		_fill_cells(r.cells, r.direct_colors, fill, dc)
+		r.occ = u16(len(r.cells))
+	}
 	r.generation += 1
 	r.wrap = false
 	r.is_prompt = false

@@ -66,8 +66,18 @@ _copy_row_into :: proc(
 		g.rows[phys].direct_colors[target_cols - 1] = {}
 	}
 	g.rows[phys].generation = 1
+	g.rows[phys].occ = _occupied(&g.rows[phys])
 	g.rows[phys].wrap = wrap
 	g.rows[phys].is_prompt = is_prompt
+}
+
+// _occupied is the exact `occ` of a rebuilt row: one past its last cell that
+// is not blank.
+@(private = "file")
+_occupied :: proc(r: ^Row) -> u16 {
+	n := len(r.cells)
+	for n > 0 && r.cells[n - 1] == cell.CELL_DEFAULT && r.direct_colors[n - 1] == {} do n -= 1
+	return u16(n)
 }
 
 _destroy_logical_lines :: proc(lines: [dynamic]_Logical_Line) {
@@ -511,7 +521,7 @@ grid_resize_reflow :: proc(
 ) {
 	if g == nil do return
 	target_rows := max(1, new_rows)
-	target_cols := max(1, new_cols)
+	target_cols := clamp(new_cols, 1, GRID_MAX_COLS)
 	if target_rows == g.row_count && target_cols == g.col_count do return
 
 	old := g^
