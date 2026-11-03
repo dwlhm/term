@@ -3,6 +3,7 @@
 Frame: [kind u8][channel u32 LE][len u32 LE][payload]. Only what the stress
 check needs: HELLO, CREATE, ATTACH, DATA with CREDIT.
 """
+import collections
 import socket
 import struct
 import time
@@ -38,6 +39,7 @@ class Link:
                     raise
                 time.sleep(0.05)
         self.buf = bytearray()
+        self.held = collections.deque()  # frames that arrived while waiting for an answer
         self.token = 0
         self.send(HELLO, 0, struct.pack("<IBQ", 1, ROLE_VIEWER, 0) + _str(b"stress"))
         f = self.next(5)
@@ -52,6 +54,10 @@ class Link:
 
     def next(self, timeout=None):
         """The next frame, None on timeout; EOFError when the core is gone."""
+        return self.held.popleft() if self.held else self._recv_frame(timeout)
+
+    def _recv_frame(self, timeout):
+        """The next frame off the socket (not the held ones)."""
         self.s.settimeout(timeout)
         while True:
             if len(self.buf) >= HDR.size:
@@ -71,17 +77,22 @@ class Link:
             self.buf += chunk
 
     def _attached(self, token):
-        while True:
-            f = self.next(5)
-            if f is None:
-                raise RuntimeError("no answer to CREATE/ATTACH")
-            kind, _, p = f
-            if kind == FAIL and struct.unpack_from("<I", p)[0] == token:
-                raise RuntimeError("core refused: %r" % p[5:])
-            if kind == ATTACHED:
-                tok, sid, channel = struct.unpack("<III", p)
-                if tok == token:
+        """Waits for the answer to `token`; other frames stay queued for next()."""
+        early = []
+        try:
+            while True:
+                f = self._recv_frame(5)
+                if f is None:
+                    raise RuntimeError("no answer to CREATE/ATTACH")
+                kind, _, p = f
+                if kind == FAIL and struct.unpack_from("<I", p)[0] == token:
+                    raise RuntimeError("core refused: %r" % p[5:])
+                if kind == ATTACHED and struct.unpack_from("<I", p)[0] == token:
+                    _, sid, channel = struct.unpack("<III", p)
                     return sid, channel
+                early.append(f)
+        finally:
+            self.held.extend(early)
 
     def create(self, argv, cols=80, rows=24):
         self.token += 1

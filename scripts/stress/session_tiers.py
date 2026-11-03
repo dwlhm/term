@@ -64,7 +64,7 @@ def flood_kill_core():
     with open(big, "wb") as f:
         f.write((b"0123456789abcdefghijklmnopqrstuvwxyz-cat-flood-line\n") * (100 * 1024 * 1024 // 52))
     v = Link(SOCK)
-    ida, cha = v.create(["/bin/sh", "-c", "yes | head -c 200000000 | cat; echo; echo FLOOD-A-DONE; sleep 300"])
+    ida, cha = v.create(["/bin/sh", "-c", "yes | head -c 2000000000 | cat; echo; echo FLOOD-A-DONE; sleep 300"])
     idb, chb = v.create(["/bin/sh", "-c", "cat %s; echo; echo FLOOD-B-DONE; sleep 300" % big])
     a, b = Stream(cha, b"FLOOD-A-DONE"), Stream(chb, b"FLOOD-B-DONE")
     pump(v, [a, b], 1.0)
