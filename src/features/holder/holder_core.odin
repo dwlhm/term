@@ -103,29 +103,27 @@ _send_welcome :: proc(h: ^Holder) {
 		crashes  = _recent_crashes(h, _now()),
 		count    = u32(h.count),
 	})
-	for &s in h.sessions {
-		if !s.used do continue
+	for slot in h.live[:h.count] {
+		s := &h.sessions[slot]
 		ipc.enc_held(&w, {id = s.id, pid = u32(s.pid), started_unix = s.started_unix, size = s.size, exited = s.exit_final, exit = s.exit})
 		s.tailed, s.exit_sent = false, s.exit_final
 	}
-	h.tail_cursor = 0
 	_core_send(h, ipc.MSG_WELCOME, 0, ipc.wire_bytes_written(&w))
 }
 
-// _send_tails offers each session's TAIL in order while the backlog has room;
-// until then that session's output only goes to its tail.
+// _send_tails offers each untailed session its TAIL while the backlog has
+// room; until then that session's output only goes to its tail.
 _send_tails :: proc(h: ^Holder) {
-	for h.core_state == .Linked && h.tail_cursor < HOLDER_MAX_SESSIONS {
-		s := &h.sessions[h.tail_cursor]
-		if s.used && !s.tailed {
-			if ipc.stream_queued(&h.core) + ipc.STREAM_HEADER + s.tail.len > HOLDER_BACKLOG do return
-			front := ipc.ring_front(&s.tail)
-			wrapped := s.tail.buf[:s.tail.len - len(front)]
-			if !_core_send(h, ipc.MSG_TAIL, s.id, front, wrapped) do return
-			s.tailed = true
-			_session_report_exit(h, s)
-		}
-		h.tail_cursor += 1
+	for slot in h.live[:h.count] {
+		s := &h.sessions[slot]
+		if s.tailed do continue
+		if h.core_state != .Linked do return
+		if ipc.stream_queued(&h.core) + ipc.STREAM_HEADER + s.tail.len > HOLDER_BACKLOG do return
+		front := ipc.ring_front(&s.tail)
+		wrapped := s.tail.buf[:s.tail.len - len(front)]
+		if !_core_send(h, ipc.MSG_TAIL, s.id, front, wrapped) do return
+		s.tailed = true
+		_session_report_exit(h, s)
 	}
 }
 
@@ -195,6 +193,6 @@ _core_destroy :: proc(h: ^Holder) {
 	if h.core_state == .None do return
 	ipc.stream_conn_destroy(&h.core)
 	h.core_state = .None
-	for &s in h.sessions do s.tailed = false
+	for slot in h.live[:h.count] do h.sessions[slot].tailed = false
 	_update_pause(h, _now())
 }

@@ -44,12 +44,12 @@ _supervisor_empty :: proc(sup: ^Supervisor, now: i64) { sup.empty_since = now }
 
 // _supervise_deadline: when to start a core (sessions, no core) or to exit
 // (no core, no sessions); NO_DEADLINE while a core is linked.
-_supervise_deadline :: proc(h: ^Holder) -> i64 {
+_supervise_deadline :: proc(h: ^Holder, now: i64) -> i64 {
 	sup := &h.sup
 	if sup.linked || h.stopping do return NO_DEADLINE
 	if h.count == 0 do return max(sup.absent_since, sup.empty_since) + sup.grace
 	if sup.no_core do return NO_DEADLINE
-	return sup.absent_since + _backoff(sup, _now())
+	return sup.absent_since + _backoff(sup, now)
 }
 
 // _backoff = grace·2^n, n = restarts in the last 5 min (≤ 6), capped at 60 s.
@@ -61,7 +61,7 @@ _backoff :: proc(sup: ^Supervisor, now: i64) -> i64 {
 }
 
 _supervise :: proc(h: ^Holder, now: i64) {
-	if now < _supervise_deadline(h) do return
+	if now < _supervise_deadline(h, now) do return
 	if h.count == 0 {
 		h.done = true
 		return

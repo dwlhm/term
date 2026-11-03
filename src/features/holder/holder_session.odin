@@ -9,20 +9,21 @@ import ipc "../../platform/ipc"
 import pty "../../platform/pty"
 
 _session_find :: proc(h: ^Holder, id: u32) -> ^Session {
-	for &s in h.sessions do if s.used && s.id == id do return &s
+	for slot in h.live[:h.count] do if h.sessions[slot].id == id do return &h.sessions[slot]
 	return nil
 }
 
 // _session_spawn starts m on a new PTY as session id. The two rings are the
 // only allocations a session makes.
 _session_spawn :: proc(h: ^Holder, id: u32, m: ^ipc.Spawn_Msg) -> (s: ^Session, reason: string) {
-	for &slot in h.sessions {
+	index := -1
+	for slot, i in h.sessions {
 		if !slot.used {
-			s = &slot
+			index = i
 			break
 		}
 	}
-	if s == nil do return nil, "too many sessions"
+	if index < 0 do return nil, "too many sessions"
 	cfg := pty.Pty_Config{
 		shell  = m.argv[0],
 		argv   = m.argv[1:m.argc],
@@ -35,6 +36,7 @@ _session_spawn :: proc(h: ^Holder, id: u32, m: ^ipc.Spawn_Msg) -> (s: ^Session, 
 	master, pid, err := pty.pty_spawn_raw(cfg, m.env[:m.envc])
 	free_all(context.temp_allocator)
 	if err != .None do return nil, fmt.bprintf(h.msg_buf[:], "spawn failed: %v", err)
+	s = &h.sessions[index]
 	s^ = {
 		used         = true,
 		id           = id,
@@ -46,6 +48,7 @@ _session_spawn :: proc(h: ^Holder, id: u32, m: ^ipc.Spawn_Msg) -> (s: ^Session, 
 	}
 	s.tail.buf = make([]u8, HOLDER_TAIL_BYTES)
 	s.input.buf = make([]u8, HOLDER_INPUT_BYTES)
+	h.live[h.count] = u16(index)
 	h.count += 1
 	return s, ""
 }
@@ -62,8 +65,18 @@ _session_forget :: proc(h: ^Holder, s: ^Session) {
 	delete(s.tail.buf)
 	delete(s.input.buf)
 	s^ = {}
-	h.count -= 1
+	for slot, i in h.live[:h.count] {
+		if &h.sessions[slot] != s do continue
+		h.count -= 1
+		h.live[i] = h.live[h.count] // swap-remove: live order is not a contract
+		break
+	}
 	if h.count == 0 do _supervisor_empty(&h.sup, _now())
+}
+
+// _forget_all releases every session; backwards, since forget swap-removes.
+_forget_all :: proc(h: ^Holder) {
+	for i := h.count - 1; i >= 0; i -= 1 do _session_forget(h, &h.sessions[h.live[i]])
 }
 
 // _tail_push keeps the newest HOLDER_TAIL_BYTES: the oldest bytes make room.
@@ -77,24 +90,42 @@ _tail_push :: proc(r: ^ipc.Byte_Ring, data: []u8) {
 	ipc.ring_push(r, d)
 }
 
-_session_read :: proc(h: ^Holder, s: ^Session, now: i64) {
+// _session_drain reads the master until it would block, ends, or one frame
+// budget is full, then hands the bytes on as a single OUTPUT frame. The budget
+// also fits the core's control queue, so a round in which every session floods
+// never overflows it (_backlogged leaves HOLDER_CTL_CAP - HOLDER_BACKLOG room).
+_session_drain :: proc(h: ^Holder, s: ^Session, now: i64) {
 	if _backlogged(h) do return
-	buf := h.read_buf[:]
-	n := posix.read(posix.FD(s.master), &buf[0], len(buf))
-	if n > 0 {
-		_tail_push(&s.tail, buf[:n])
-		if h.core_state == .Linked && s.tailed do _core_send(h, ipc.MSG_OUTPUT, s.id, buf[:n])
-		return
+	send := h.core_state == .Linked && s.tailed
+	budget := len(h.read_buf)
+	if send do budget = min(budget, len(h.core.ctl.buf) - h.core.ctl.len - ipc.STREAM_HEADER)
+	got, ended := 0, false
+	for got < budget {
+		n := posix.read(posix.FD(s.master), &h.read_buf[got], uint(budget - got))
+		if n > 0 {
+			got += n
+			continue
+		}
+		if n < 0 && posix.errno() == .EINTR do continue
+		ended = n == 0 || posix.errno() != .EAGAIN || (got == 0 && _master_hung_up(s))
+		break
 	}
-	if n < 0 && posix.errno() == .EINTR do return
-	if n < 0 && posix.errno() == .EAGAIN {
-		// Spurious wakeup; a hangup with nothing left to read is the end.
-		pfd := posix.pollfd{fd = posix.FD(s.master), events = {.IN}}
-		if posix.poll(&pfd, 1, 0) <= 0 || pfd.revents & {.HUP, .ERR} == {} || .IN in pfd.revents do return
+	if got > 0 {
+		_tail_push(&s.tail, h.read_buf[:got])
+		if send do _core_send(h, ipc.MSG_OUTPUT, s.id, h.read_buf[:got])
 	}
+	if !ended do return
 	s.eof = true // EOF / EIO: the reader is done
 	ipc.ring_clear(&s.input)
 	_session_check_exit(h, s, now)
+}
+
+// _master_hung_up: an EAGAIN with nothing read is a spurious wakeup unless the
+// master reports a hangup with nothing left to read.
+@(private = "file")
+_master_hung_up :: proc(s: ^Session) -> bool {
+	pfd := posix.pollfd{fd = posix.FD(s.master), events = {.IN}}
+	return posix.poll(&pfd, 1, 0) > 0 && pfd.revents & {.HUP, .ERR} != {} && .IN not_in pfd.revents
 }
 
 _session_write :: proc(s: ^Session) {
@@ -140,14 +171,15 @@ _session_report_exit :: proc(h: ^Holder, s: ^Session) {
 
 // _reap_all collects every exited child (sessions and orphans).
 _reap_all :: proc(h: ^Holder, now: i64) {
-	for &s in h.sessions {
-		if !s.used || s.reaped do continue
+	for slot in h.live[:h.count] {
+		s := &h.sessions[slot]
+		if s.reaped do continue
 		status: c.int
 		if posix.waitpid(posix.pid_t(s.pid), &status, {.NOHANG}) != posix.pid_t(s.pid) do continue
 		s.reaped = true
 		s.exit = _exit_from_status(status)
 		s.exit_deadline = now + _ms(HOLDER_EXIT_FLOW_MS)
-		_session_check_exit(h, &s, now)
+		_session_check_exit(h, s, now)
 	}
 	for &pid in h.orphans {
 		if pid <= 0 do continue

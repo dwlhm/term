@@ -7,7 +7,9 @@ package feature_holder
 // Invariants:
 // 1. One thread, one posix.poll over the listener, pending connections, the
 //    core link, every session master and a SIGCHLD self-pipe. The timeout is
-//    the nearest deadline, -1 when idle (zero wakeups).
+//    the nearest deadline, -1 when idle (zero wakeups). A round reads the
+//    clock once, visits only live sessions and drains each ready master into
+//    one OUTPUT frame (macOS hands out ~1 KiB per read).
 // 2. Allocation only at spawn (tail + input rings) and at connect (the
 //    core's Stream_Conn); the steady-state loop never allocates.
 // 3. PTYs are always read: into the 1 MiB overwrite-oldest tail and, with a
@@ -33,7 +35,7 @@ HOLDER_GRACE_MS     :: 3000
 HOLDER_LINGER_MS    :: 5000 // flush budget for BYE before a link is dropped
 HOLDER_HELLO_MS     :: 5000
 HOLDER_MAX_PENDING  :: 4
-HOLDER_READ_CHUNK   :: 64 * 1024
+HOLDER_READ_CHUNK   :: ipc.STREAM_DATA_CHUNK // drain budget per master per round
 
 PREVIOUS_NONE     :: u8(0)
 PREVIOUS_HANDOVER :: u8(1)
@@ -89,11 +91,11 @@ Holder :: struct {
 	build:         string, // ipc_build_id: holders of another build get drained
 	sessions:      [HOLDER_MAX_SESSIONS]Session,
 	count:         int,
+	live:          [HOLDER_MAX_SESSIONS]u16, // slots in use: live[:count], unordered
 	pending:       [HOLDER_MAX_PENDING]Pending,
 	core:          ipc.Stream_Conn,
 	core_state:    Core_State,
 	core_deadline: i64, // Closing: linger end
-	tail_cursor:   int, // sessions below this index have been offered their TAIL
 	previous:      u8, // how the last core link ended, for the next WELCOME
 	crash_times:   [HOLDER_CRASH_MEMORY]i64, // when core links ended in a crash (ring)
 	crash_next:    int,
@@ -110,7 +112,7 @@ Holder :: struct {
 	pfds:          [HOLDER_MAX_POLL]posix.pollfd,
 	tags:          [HOLDER_MAX_POLL]Poll_Tag,
 	msg_buf:       [16 * 1024]u8, // WELCOME / PROC_INFO encoding scratch
-	read_buf:      [HOLDER_READ_CHUNK]u8, // one PTY read (a stack array would be zeroed per read)
+	read_buf:      [HOLDER_READ_CHUNK]u8, // one drained frame (a stack array would be zeroed per read)
 }
 
 // holder_run serves socket_path until shut down, drained empty, or idle
@@ -122,18 +124,20 @@ holder_run :: proc(socket_path: string) -> int {
 		_holder_close(h)
 		return 1
 	}
+	now := _now() // one clock read per round: taken when poll returns
 	for !h.done {
-		_holder_tick(h, _now())
+		_holder_tick(h, now)
 		if h.done do break
 		n := _poll_build(h)
-		ready := posix.poll(&h.pfds[0], posix.nfds_t(n), _poll_timeout(h, _now()))
+		ready := posix.poll(&h.pfds[0], posix.nfds_t(n), _poll_timeout(h, now))
+		now = _now()
 		if ready < 0 && posix.errno() != .EINTR {
 			fmt.eprintfln("holder: poll failed: %v", posix.errno())
 			h.exit_code = 1
 			break
 		}
-		if ready > 0 do _poll_dispatch(h, n)
-		_core_pump(h, _now())
+		if ready > 0 do _poll_dispatch(h, n, now)
+		_core_pump(h, now)
 	}
 	code := h.exit_code
 	_holder_close(h)
@@ -171,7 +175,7 @@ _holder_open :: proc(h: ^Holder, socket_path: string) -> bool {
 // _holder_close releases everything; sessions still held are hung up.
 @(private = "file")
 _holder_close :: proc(h: ^Holder) {
-	for &s in h.sessions do if s.used do _session_forget(h, &s)
+	_forget_all(h)
 	_core_destroy(h)
 	for &p in h.pending do _pending_close(&p)
 	if h.listen_fd >= 0 {

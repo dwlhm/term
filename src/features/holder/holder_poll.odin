@@ -29,7 +29,10 @@ _update_pause :: proc(h: ^Holder, now: i64) {
 		h.pause_start = now
 		return
 	}
-	for &s in h.sessions do if s.used && s.reaped && !s.exit_final do s.exit_deadline += now - h.pause_start
+	for slot in h.live[:h.count] {
+		s := &h.sessions[slot]
+		if s.reaped && !s.exit_final do s.exit_deadline += now - h.pause_start
+	}
 }
 
 // _holder_tick fires every deadline that is due.
@@ -37,17 +40,20 @@ _holder_tick :: proc(h: ^Holder, now: i64) {
 	_update_pause(h, now)
 	for &p in h.pending do if p.fd >= 0 && now >= p.deadline do _pending_close(&p)
 	if h.core_state == .Closing && now >= h.core_deadline do _core_closed(h, now)
-	for &s in h.sessions do if s.used && s.reaped && !s.exit_final do _session_check_exit(h, &s, now)
+	for slot in h.live[:h.count] do _session_check_exit(h, &h.sessions[slot], now)
 	if h.draining && h.count == 0 && !h.stopping do _holder_finish(h, now)
 	_supervise(h, now)
 }
 
 _poll_timeout :: proc(h: ^Holder, now: i64) -> c.int {
-	next := _supervise_deadline(h)
+	next := _supervise_deadline(h, now)
 	for p in h.pending do if p.fd >= 0 do next = min(next, p.deadline)
 	if h.core_state == .Closing do next = min(next, h.core_deadline)
 	if !h.paused {
-		for s in h.sessions do if s.used && s.reaped && !s.exit_final do next = min(next, s.exit_deadline)
+		for slot in h.live[:h.count] {
+			s := &h.sessions[slot]
+			if s.reaped && !s.exit_final do next = min(next, s.exit_deadline)
+		}
 	}
 	if next == NO_DEADLINE do return -1
 	wait := max(next - now, 0)
@@ -69,21 +75,21 @@ _poll_build :: proc(h: ^Holder) -> int {
 		if ipc.stream_wants_write(&h.core) do events += {.OUT}
 		add(h, &n, h.core.fd, events, .Core, 0)
 	}
-	for &s, i in h.sessions {
-		if !s.used || s.eof do continue
+	for slot in h.live[:h.count] {
+		s := &h.sessions[slot]
+		if s.eof do continue
 		events: posix.Poll_Event
 		if !h.paused do events += {.IN}
 		if s.input.len > 0 do events += {.OUT}
-		if events != {} do add(h, &n, posix.FD(s.master), events, .Session, i)
+		if events != {} do add(h, &n, posix.FD(s.master), events, .Session, int(slot))
 	}
 	return n
 }
 
-_poll_dispatch :: proc(h: ^Holder, n: int) {
+_poll_dispatch :: proc(h: ^Holder, n: int, now: i64) {
 	for i in 0..<n {
 		ev := h.pfds[i].revents
 		if ev == {} do continue
-		now := _now()
 		tag := h.tags[i]
 		switch tag.kind {
 		case .Listener: _accept_all(h, now)
@@ -100,6 +106,6 @@ _session_event :: proc(h: ^Holder, index: int, fd: posix.FD, ev: posix.Poll_Even
 	s := &h.sessions[index]
 	// The slot may have been released (or reused) by a core message this round.
 	if !s.used || posix.FD(s.master) != fd || s.eof do return
-	if ev & {.IN, .HUP, .ERR, .NVAL} != {} do _session_read(h, s, now)
+	if ev & {.IN, .HUP, .ERR, .NVAL} != {} do _session_drain(h, s, now)
 	if .OUT in ev && s.used do _session_write(s)
 }

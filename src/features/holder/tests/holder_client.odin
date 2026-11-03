@@ -31,6 +31,8 @@ Client :: struct {
 	log:    [dynamic]Rec,
 	closed: bool,
 	bytes:  int, // OUTPUT bytes received
+	by_ch:  [8]int, // OUTPUT bytes per channel (< 8)
+	max_f:  int, // largest OUTPUT payload
 	keep:   bool, // false: OUTPUT is counted, not logged
 }
 
@@ -114,7 +116,11 @@ client_pump :: proc(c: ^Client, timeout_ms: int) {
 	for {
 		f, ok := ipc.stream_next(&c.conn)
 		if !ok do break
-		if f.kind == ipc.MSG_OUTPUT do c.bytes += len(f.payload)
+		if f.kind == ipc.MSG_OUTPUT {
+			c.bytes += len(f.payload)
+			if f.channel < len(c.by_ch) do c.by_ch[f.channel] += len(f.payload)
+			c.max_f = max(c.max_f, len(f.payload))
+		}
 		if f.kind == ipc.MSG_OUTPUT && !c.keep do continue
 		append(&c.log, Rec{f.kind, f.channel, clone(f.payload)})
 	}

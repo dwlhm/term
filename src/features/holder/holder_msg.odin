@@ -114,11 +114,11 @@ _on_goodbye :: proc(h: ^Holder, payload: []u8, now: i64) -> bool {
 	if len(payload) != 1 do return false
 	switch ipc.Goodbye(payload[0]) {
 	case .Handover:
-		for &s in h.sessions do if s.used do ipc.ring_clear(&s.tail)
+		for slot in h.live[:h.count] do ipc.ring_clear(&h.sessions[slot].tail)
 		h.previous = PREVIOUS_HANDOVER
 		_core_begin_close(h, now)
 	case .Shutdown:
-		for &s in h.sessions do if s.used do _session_forget(h, &s)
+		_forget_all(h)
 		_holder_finish(h, now)
 	case:
 		return false
