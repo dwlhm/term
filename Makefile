@@ -21,7 +21,7 @@ TEST_FLAGS ?= -define:ODIN_TEST_THREADS=1
 DEBUG_FLAGS ?= -debug
 RELEASE_FLAGS ?= -o:speed -no-bounds-check
 
-.PHONY: all term release run term-debug harness-features run-harness-features harness-render-chrome run-harness-render-chrome harness-render-terminal run-harness-render-terminal harness-render-composer run-harness-composer test test-app test-holder test-session-core test-font test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-selector test-gpu check esctest clean help bench bench-quick bundle dmg portable dist install uninstall test-unicode-width gen-unicode bench-parser
+.PHONY: all term release run term-debug harness-features run-harness-features harness-render-chrome run-harness-render-chrome harness-render-terminal run-harness-render-terminal harness-render-composer run-harness-composer test test-app test-holder test-session-core test-font test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-selector test-gpu check esctest clean help bench bench-quick bundle dmg portable dist install uninstall test-unicode-width gen-unicode bench-parser bench-session bench-throughput
 
 all: term harness-features harness-render-chrome harness-render-terminal harness-composer
 
@@ -128,6 +128,10 @@ bench-session:
 	@mkdir -p $(OUT_DIR)
 	$(ODIN) build src/cmd/bench_session -out:$(OUT_DIR)/bench_session $(RELEASE_FLAGS) $(COMMON_FLAGS)
 	./$(OUT_DIR)/bench_session
+
+# Output MB/s + CPU per tier: PTY → holder → core (no viewer / Python viewer / GUI); ARGS="-m noview -r 1 file".
+bench-throughput: term
+	python3 -I scripts/stress/throughput.py -t $(OUT_DIR)/term $(ARGS)
 
 test: test-app test-unicode-width test-terminal test-pty test-holder test-session-core test-font test-window test-session test-control test-ipc test-tabs test-multiplexer test-interaction test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-selector test-gpu test-features test-e2e
 
@@ -326,4 +330,5 @@ help:
 	@echo "  clean                       Remove build artifacts and binaries"
 	@echo "  bench                       Run harness_composer full benchmark suite"
 	@echo "  bench-quick                 Run harness_composer quick benchmark suite"
+	@echo "  bench-throughput            Output MB/s and CPU per tier (cat in a session; ARGS=...)"
 	@echo "  help                        Show this help message"
