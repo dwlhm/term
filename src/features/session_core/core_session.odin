@@ -92,6 +92,8 @@ core_session_adopt_tail :: proc(c: ^Core, s: ^Core_Session, tail: []u8) {
 	terminal.relay_flush(&s.relay, &s.sess.term)
 	for terminal.terminal_drain_response(&s.sess.term, c.msg[:4096]) > 0 {}
 	_ = terminal.terminal_consume_damage(&s.sess.term)
+	// A viewer can attach between WELCOME (empty screen) and this tail.
+	core_attach_repaint(c, s)
 	if exact && h != nil && h.handover && len(c.replies) > 0 && !s.exited {
 		core_holder_send(c, s.holder, ipc.MSG_INPUT, s.id, c.replies[:])
 	}

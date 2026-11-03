@@ -100,6 +100,28 @@ test_only_the_stale_viewer_is_resynced :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_viewer_attached_before_the_tail_is_repainted :: proc(t: ^testing.T) {
+	r: Rig
+	testing.expect(t, rig_make(&r) && rig_attach(&r, 200) == 0, "rig")
+	defer rig_destroy(&r)
+	view := _view_make()
+	defer _view_free(view)
+	rig_deliver(&r, 0, view) // the first paint of a session still empty (WELCOME only)
+
+	b := strings.builder_make(context.temp_allocator)
+	for i in 0 ..< 300 do fmt.sbprintf(&b, "T%d\r\n", i)
+	strings.write_string(&b, "TAIL-DONE")
+	core.core_session_adopt_tail(r.c, r.s, b.buf[:])
+	rig_deliver(&r, 0, view)
+	testing.expect(t, strings.contains(_row_text(view, 23), "TAIL-DONE"), "the adopted screen reaches the viewer")
+	testing.expect(t, r.s.attaches[0].stale, "its history follows")
+
+	core.core_settle_due(r.c, SETTLED)
+	rig_deliver(&r, 0, view)
+	_expect_same_history(t, &r.s.sess.term, view, 200)
+}
+
+@(test)
 test_resync_waits_for_parser_ground :: proc(t: ^testing.T) {
 	r: Rig
 	testing.expect(t, rig_make(&r) && rig_attach(&r, 100) == 0, "rig")
