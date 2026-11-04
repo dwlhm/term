@@ -906,20 +906,6 @@ _float_to_argb :: #force_inline proc "contextless" (col: [4]f32) -> u32 {
 }
 
 @(private = "file")
-_probe_ligature_run :: proc(
-	cache: ^plat_font.Ligature_Cache,
-	r: ^plat_font.Font_Rasterizer,
-	buf: []u8,
-) -> ([]u32, int) {
-	for try_len := min(len(buf), plat_font.LIGATURE_MAX_LEN); try_len >= 2; try_len -= 1 {
-		if glyphs, is_lig := plat_font.ligature_cache_lookup(cache, r, buf[:try_len]); is_lig && len(glyphs) > 0 {
-			return glyphs, try_len
-		}
-	}
-	return nil, 0
-}
-
-@(private = "file")
 _apply_row_ligatures :: proc(
 	cache: ^plat_font.Ligature_Cache,
 	r: ^plat_font.Font_Rasterizer,
@@ -927,43 +913,34 @@ _apply_row_ligatures :: proc(
 	cols: int,
 	out_chars: []u32,
 ) {
-	limit := min(cols, len(row.cells))
+	limit := min(cols, len(row.cells), len(out_chars))
 	for c in 0..<limit {
 		out_chars[c] = u32(row.cells[c].char)
 	}
 	if cache == nil || r == nil || r.hb_font == nil do return
 
+	// Each maximal symbol run is shaped whole: the font decides ligatures from
+	// the full context, so a run is never split into smaller probes.
+	run_buf: [plat_font.LIGATURE_RUN_MAX]u8
 	col := 0
 	for col < limit {
-		ch := row.cells[col].char
-		if ch >= 128 || !plat_font.is_ligature_candidate(u8(ch)) {
+		run_len := 0
+		for col + run_len < limit && run_len < len(run_buf) {
+			ch := row.cells[col + run_len].char
+			if ch >= 128 || !plat_font.is_ligature_candidate(u8(ch)) do break
+			run_buf[run_len] = u8(ch)
+			run_len += 1
+		}
+		if run_len == 0 {
 			col += 1
 			continue
 		}
-
-		run_len := 0
-		run_buf: [plat_font.LIGATURE_MAX_LEN]u8
-		for col + run_len < limit && run_len < plat_font.LIGATURE_MAX_LEN {
-			next_ch := row.cells[col + run_len].char
-			if next_ch < 128 && plat_font.is_ligature_candidate(u8(next_ch)) {
-				run_buf[run_len] = u8(next_ch)
-				run_len += 1
-			} else {
-				break
+		if glyphs, is_lig := plat_font.ligature_cache_lookup(cache, r, run_buf[:run_len]); is_lig {
+			for g_id, i in glyphs {
+				if g_id != 0 do out_chars[col + i] = plat_font.CONTENT_LIGATURE_BASE + g_id
 			}
 		}
-
-		if run_len >= 2 {
-			if glyphs, matched_len := _probe_ligature_run(cache, r, run_buf[:run_len]); matched_len > 0 {
-				for i in 0..<matched_len {
-					g_id := glyphs[i] if i < len(glyphs) else glyphs[len(glyphs) - 1]
-					out_chars[col + i] = plat_font.CONTENT_LIGATURE_BASE + g_id
-				}
-				col += matched_len
-				continue
-			}
-		}
-		col += 1
+		col += run_len
 	}
 }
 
