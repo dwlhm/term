@@ -37,9 +37,10 @@ app_spawn_terminal_pane :: proc(app: ^Term_App, rows: int = 24, cols: int = 80) 
 	shell := os.get_env("SHELL", context.temp_allocator)
 	if len(shell) == 0 do shell = "/bin/sh"
 
+	// cwd may point into scratch_cwd, so the buffer lives as long as the proc.
+	scratch_cwd: [1024]u8
 	cwd := ""
 	if focused := mux_feat.multiplexer_get_focused_pane(&app.mux); focused != nil && focused.session != nil {
-		scratch_cwd: [1024]u8
 		cwd = sess_feat.session_get_current_cwd(focused.session, scratch_cwd[:])
 	}
 	if len(cwd) == 0 && app != nil {
@@ -262,9 +263,10 @@ app_cycle_tab_pane :: proc(app: ^Term_App, forward: bool) {
 app_open_in_finder :: proc(app: ^Term_App) {
 	if app == nil do return
 	p := mux_feat.multiplexer_get_focused_pane(&app.mux)
+	// cwd may point into scratch_cwd, so the buffer lives as long as the proc.
+	scratch_cwd: [1024]u8
 	cwd := ""
 	if p != nil && p.session != nil {
-		scratch_cwd: [1024]u8
 		cwd = sess_feat.session_get_current_cwd(p.session, scratch_cwd[:])
 	}
 	if len(cwd) == 0 && app != nil {

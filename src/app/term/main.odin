@@ -181,7 +181,8 @@ app_apply_custom_font :: proc(app: ^Term_App, font_path: string, size: f32) -> b
 app_init :: proc(app: ^Term_App, opts: Cli_Options = {}) -> bool {
 	diagnostics_init(&app.diag, opts)
 	app.config = config_load()
-	app.default_cwd = app_resolve_initial_cwd(&app.config, opts)
+	// The resolver answers in temp memory, which every frame frees.
+	app.default_cwd = strings.clone(app_resolve_initial_cwd(&app.config, opts))
 	win_w, win_h := config_resolve_window_dimensions(&app.config)
 
 	// First initialize window with user-configured bounds (or default 1280x800)
@@ -295,6 +296,7 @@ app_destroy :: proc(app: ^Term_App) {
 	mux_feat.multiplexer_destroy(&app.mux, false) // sessions still shown keep running in the core
 	client_feat.client_disconnect(&app.client)
 	tabs_feat.tabs_manager_destroy(&app.tabs_mgr)
+	delete(app.default_cwd)
 
 	// Drain any in-flight GPU work before releasing textures, views, and surface.
 	if contract.wait_for_idle != nil && rawptr(app.device) != nil {
