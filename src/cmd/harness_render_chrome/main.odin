@@ -2936,6 +2936,7 @@ main :: proc() {
 		os.exit(1)
 	}
 	defer plat_win.window_destroy(&h.window)
+	_ = sdl3.ShowWindow(h.window.handle) // window_init creates it hidden
 
 	// Unified WGPU Hardware Setup across Darwin and Linux
 	wgpu_backend.init_wgpu_driver()

@@ -367,6 +367,8 @@ app_reset_font_size :: proc(app: ^Term_App) {
 }
 
 app_run :: proc(app: ^Term_App) {
+	app_reveal_window(app)
+
 	last_time := time.now()
 	for app.running {
 		if intrinsics.atomic_load(&app.quit_requested) {

@@ -25,7 +25,8 @@ Platform_Menu_Item :: struct {
 	action_tag:   int,
 }
 
-// window_init initializes SDL3 and creates a window with high pixel density and transparency.
+// window_init initializes SDL3 and creates a hidden window with high pixel density and
+// transparency. The caller shows it once it is styled and its first frame is presented.
 window_init :: proc(w: ^Window, title: string, width, height: i32) -> bool {
 	_ = sdl3.SetHint(sdl3.HINT_NO_SIGNAL_HANDLERS, "1")
 	if !sdl3.Init(sdl3.INIT_VIDEO) {
@@ -49,7 +50,7 @@ window_init :: proc(w: ^Window, title: string, width, height: i32) -> bool {
 		cstring(&w._title_buf[0]),
 		c.int(width),
 		c.int(height),
-		sdl3.WINDOW_HIGH_PIXEL_DENSITY | sdl3.WINDOW_RESIZABLE | sdl3.WINDOW_TRANSPARENT,
+		sdl3.WINDOW_HIGH_PIXEL_DENSITY | sdl3.WINDOW_RESIZABLE | sdl3.WINDOW_TRANSPARENT | sdl3.WINDOW_HIDDEN,
 	)
 
 	if w.handle == nil {

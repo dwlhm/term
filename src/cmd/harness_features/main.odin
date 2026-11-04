@@ -201,6 +201,7 @@ main :: proc() {
 		return
 	}
 	defer plat_win.window_destroy(&state.window)
+	_ = sdl3.ShowWindow(state.window.handle) // window_init creates it hidden
 
 	// 2. Initialize WGPU Hardware
 	wgpu_backend.init_wgpu_driver()

@@ -2582,6 +2582,7 @@ main :: proc() {
 		os.exit(1)
 	}
 	defer plat_win.window_destroy(&h.window)
+	_ = sdl3.ShowWindow(h.window.handle) // window_init creates it hidden
 
 	wgpu_backend.init_wgpu_driver()
 	h.instance = contract.create_instance()
