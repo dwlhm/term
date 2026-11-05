@@ -228,6 +228,7 @@ app_init :: proc(app: ^Term_App, opts: Cli_Options = {}) -> bool {
 	app.layout.metrics.ui_cell_w = app.text_atlas.ui_cell_w
 	app.layout.metrics.ui_cell_h = app.text_atlas.ui_cell_h
 	app.layout.metrics.ui_atlas = &app.text_atlas.ui_glyph_atlas.atlas
+	plat_font.text_atlas_set_wakeup(&app.text_atlas, app, app_wakeup_callback)
 
 	if !terminal_view_init(&app.term_view, app.device, app.queue, app.format, app.text_atlas.glyph_view, app.text_atlas.emoji_view) do return false
 	if !chrome_view_init(&app.chrome_view, app.device, app.queue, app.format, u32(app.layout.screen_w), u32(app.layout.screen_h)) do return false
@@ -394,7 +395,8 @@ app_run :: proc(app: ^Term_App) {
 		dt := f32(time.duration_seconds(time.diff(last_time, now)))
 		last_time = now
 		app.time_elapsed = f32(time.duration_seconds(time.diff(app.start_time, now)))
-		term_dirty := events_dirty
+		term_dirty := events_dirty.term
+		chrome_dirty := events_dirty.chrome
 
 		layout_update(&app.layout, dt)
 		drop_effect_update(&app.drop_effect, dt)
@@ -403,7 +405,11 @@ app_run :: proc(app: ^Term_App) {
 
 		drained := mux_feat.multiplexer_drain_all(&app.mux)
 		telemetry.telemetry_add_drain(&app.diag.tel, drained)
-		if drained > 0 do term_dirty = true
+		if drained > 0 {
+			term_dirty = true
+			cursor_reset_blink(&app.cursor, u64(time.duration_nanoseconds(time.diff(app.start_time, now))))
+		}
+		if plat_font.text_atlas_has_completions(&app.text_atlas) do term_dirty = true
 
 		reaped := app_reap_dead_sessions(app)
 		if reaped do term_dirty = true
@@ -419,11 +425,8 @@ app_run :: proc(app: ^Term_App) {
 		if app.control != nil && app_control_poll(app) do term_dirty = true
 
 		now_ns := u64(time.duration_nanoseconds(time.diff(app.start_time, now)))
-		if term_dirty {
-			cursor_reset_blink(&app.cursor, now_ns)
-		}
 		cursor_damaged := app_sync_cursor_layer(app, now_ns)
-		needs_frame := term_dirty || cursor_damaged || app_needs_animation(app) || app.composer.sched.force_next || app.composer.sched.damage_pending
+		needs_frame := term_dirty || chrome_dirty || cursor_damaged || app_needs_animation(app) || app.composer.sched.force_next || app.composer.sched.damage_pending
 
 		// Render only on real change, cursor toggle, or active animation; stay parked otherwise.
 		// A window nobody sees waits one frame instead (its damage stays pending for the expose).
@@ -431,7 +434,7 @@ app_run :: proc(app: ^Term_App) {
 			time.sleep(HIDDEN_FRAME_MS * time.Millisecond)
 		} else if needs_frame && !app_sync_output_hold(app, now) {
 			frame_start := time.tick_now()
-			app_render_frame(app, term_dirty)
+			app_render_frame(app, term_dirty, chrome_dirty)
 			telemetry.telemetry_end_frame(&app.diag.tel, u64(time.tick_since(frame_start)))
 			// No target came (surface occluded before or without a window event): pace like a
 			// presented frame, and keep trying so the window is drawn as soon as it shows.

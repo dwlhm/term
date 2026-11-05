@@ -17,6 +17,7 @@ import tabs_feat "../../features/tabs"
 import mux_feat "../../features/multiplexer"
 import sess_feat "../../features/session"
 import telemetry "../../features/telemetry"
+import core_terminal "../../core/terminal"
 
 // tab_title_mask_path replaces $HOME or /Users/<user> / /home/<user> with ~
 tab_title_mask_path :: proc(title: string, allocator := context.temp_allocator) -> string {
@@ -154,66 +155,106 @@ app_sync_cursor_layer :: proc(app: ^Term_App, now_ns: u64) -> (damaged: bool) {
 	            !app.cmd_center.visible && !app.quit.dialog.visible
 
 	can_blink := can_show && app.window_focused && p.session.term.parser.cursor.blinking
-	_ = cursor_update_blink(&app.cursor, now_ns, can_blink)
+	toggled := cursor_update_blink(&app.cursor, now_ns, can_blink)
 	scheduler.scheduler_set_deadline(&app.composer.sched, app.cursor.next_blink_ns)
 
-	target_rect := l.dest_rect
-	target_scissor := l.scissor_rect
-	target_opacity: f32 = 0.0
-	target_radius: f32 = 0.0
+	target_rect, target_scissor, target_opacity, target_radius, content_dirty := _cursor_eval_state(app, p, can_show, can_blink)
 
-	if can_show {
-		cur_c := p.session.term.parser.cursor.col
-		cur_r := p.session.term.parser.cursor.row + p.session.scroll_offset
-		cur_pad_x, cur_pad_y := pane_grid_pad(
-			p.rect,
-			p.session.term.rows,
-			p.session.term.cols,
-			app.layout.metrics.cell_w,
-			app.layout.metrics.cell_h,
-			app.layout.metrics.pane_pad_x,
-			app.layout.metrics.pane_pad_y,
-		)
-		rows_visible := int((p.rect[3] - 2.0 * cur_pad_y) / max(1.0, app.layout.metrics.cell_h))
-		if cur_r >= 0 && cur_r < rows_visible {
-			cur_shape: Cursor_Shape = .Block
-			switch p.session.term.parser.cursor.shape {
-			case .Block:     cur_shape = .Block
-			case .Beam:      cur_shape = .Beam
-			case .Underline: cur_shape = .Underline
-			}
-			r := cursor_compute_rect(
-				cur_c,
-				cur_r,
-				p.rect,
-				app.layout.metrics.cell_w,
-				app.layout.metrics.cell_h,
-				cur_pad_x,
-				cur_pad_y,
-				cur_shape,
-			)
-			if r[0] + r[2] <= p.rect[0] + p.rect[2] && r[1] + r[3] <= p.rect[1] + p.rect[3] {
-				target_rect = composer.rect_make(r[0], r[1], r[2], r[3])
-				target_scissor = composer.rect_make(p.rect[0], p.rect[1], p.rect[2], p.rect[3])
-				target_radius = (2.0 * app.layout.metrics.scale) if cur_shape == .Block else 0.0
-				if !app.window_focused {
-					target_opacity = 0.35
-				} else if !p.session.term.parser.cursor.blinking || app.cursor.is_visible {
-					target_opacity = COLOR_CURSOR_BLOCK[3]
-				}
-			}
-		}
+	cur_w := u32(max(1.0, target_rect.w))
+	cur_h := u32(max(1.0, target_rect.h))
+	if l.width != cur_w || l.height != cur_h {
+		l, _ = pipeline.composer_pipeline_acquire_layer(&app.composer.pipe, CURSOR_LAYER_ID, .Overlay, cur_w, cur_h)
+		content_dirty = true
+	}
+	if content_dirty {
+		pipeline.composer_pipeline_mark_dirty(&app.composer.pipe, CURSOR_LAYER_ID)
 	}
 
-	if l.dest_rect != target_rect || l.scissor_rect != target_scissor || l.opacity != target_opacity || l.corner_radius != target_radius {
+	uniforms_changed := l.dest_rect != target_rect || l.scissor_rect != target_scissor || l.opacity != target_opacity || l.corner_radius != target_radius
+	if uniforms_changed {
 		l.dest_rect = target_rect
 		l.scissor_rect = target_scissor
 		l.opacity = target_opacity
 		l.corner_radius = target_radius
 		scheduler.scheduler_mark_damage(&app.composer.sched, CURSOR_LAYER_ID)
-		return true
 	}
-	return false
+
+	return toggled || uniforms_changed || content_dirty
+}
+
+@(private = "file")
+_cursor_eval_state :: proc(
+	app: ^Term_App,
+	p: ^mux_feat.Pane_Entry,
+	can_show, can_blink: bool,
+) -> (target_rect, target_scissor: composer.Composer_Rect, target_opacity, target_radius: f32, content_dirty: bool) {
+	if !can_show || p == nil || p.session == nil do return {}, {}, 0.0, 0.0, false
+
+	cur_c := p.session.term.parser.cursor.col
+	cur_r := p.session.term.parser.cursor.row + p.session.scroll_offset
+	cur_pad_x, cur_pad_y := pane_grid_pad(
+		p.rect,
+		p.session.term.rows,
+		p.session.term.cols,
+		app.layout.metrics.cell_w,
+		app.layout.metrics.cell_h,
+		app.layout.metrics.pane_pad_x,
+		app.layout.metrics.pane_pad_y,
+	)
+	rows_visible := int((p.rect[3] - 2.0 * cur_pad_y) / max(1.0, app.layout.metrics.cell_h))
+	if cur_r < 0 || cur_r >= rows_visible do return {}, {}, 0.0, 0.0, false
+
+	cur_shape: Cursor_Shape = .Block
+	switch p.session.term.parser.cursor.shape {
+	case .Block:     cur_shape = .Block
+	case .Beam:      cur_shape = .Beam
+	case .Underline: cur_shape = .Underline
+	}
+
+	cur_ch: rune = ' '
+	is_wide, is_italic, is_bold := false, false, false
+	logical_r := cur_r - p.session.scroll_offset
+	row := core_terminal.terminal_get_row(&p.session.term, logical_r)
+	if row != nil && cur_c >= 0 && cur_c < len(row.cells) {
+		cell_val := row.cells[cur_c]
+		cur_ch = cell_val.char
+		is_wide = core_terminal.Cell_Flag.Wide_Lead in cell_val.flags
+		is_italic = core_terminal.Style_Flag.Italic in cell_val.style
+		is_bold = core_terminal.Style_Flag.Bold in cell_val.style
+	}
+
+	cw := app.layout.metrics.cell_w * 2.0 if is_wide else app.layout.metrics.cell_w
+	ch := app.layout.metrics.cell_h
+	cur_x := p.rect[0] + cur_pad_x + f32(cur_c) * app.layout.metrics.cell_w
+	cur_y := p.rect[1] + cur_pad_y + f32(cur_r) * ch
+
+	if cur_x + cw > p.rect[0] + p.rect[2] || cur_y + ch > p.rect[1] + p.rect[3] do return {}, {}, 0.0, 0.0, false
+
+	target_rect = composer.rect_make(cur_x, cur_y, cw, ch)
+	target_scissor = composer.rect_make(p.rect[0], p.rect[1], p.rect[2], p.rect[3])
+	target_radius = (2.0 * app.layout.metrics.scale) if cur_shape == .Block else 0.0
+
+	if !app.window_focused {
+		target_opacity = 0.35
+	} else if !p.session.term.parser.cursor.blinking || app.cursor.is_visible {
+		target_opacity = COLOR_CURSOR_BLOCK[3]
+	}
+
+	content_dirty = cur_c != app.cursor.last_col || cur_r != app.cursor.last_row ||
+	                cur_ch != app.cursor.last_char || cur_shape != app.cursor.last_shape ||
+	                app.window_focused != app.cursor.last_focused || p.id != app.cursor.last_pane_id
+	if content_dirty {
+		app.cursor.last_col = cur_c
+		app.cursor.last_row = cur_r
+		app.cursor.last_char = cur_ch
+		app.cursor.last_shape = cur_shape
+		app.cursor.last_focused = app.window_focused
+		app.cursor.last_pane_id = p.id
+		app.cursor.last_is_wide = is_wide
+		app.cursor.last_is_italic = is_italic
+		app.cursor.last_is_bold = is_bold
+	}
+	return target_rect, target_scissor, target_opacity, target_radius, content_dirty
 }
 
 App_Frame_Context :: struct {
@@ -227,6 +268,33 @@ _app_frame_acquire :: proc(user: rawptr) -> (contract.Gpu_Texture, contract.Gpu_
 	tex, view, _ := contract.get_surface_texture(ctx.app.surface)
 	if rawptr(view) == nil do return nil, nil, false
 	return tex, view, true
+}
+
+@(private = "file")
+_app_raster_cursor :: proc(app: ^Term_App, enc: contract.Gpu_CommandEncoder, l: ^composer.Composer_Layer) -> bool {
+	p := mux_feat.multiplexer_get_focused_pane(&app.mux)
+	if p == nil || p.session == nil || l.width == 0 || l.height == 0 {
+		pass := contract.begin_render_pass(enc, l.view, {0, 0, 0, 0}, .Clear)
+		if rawptr(pass) != nil do contract.end_render_pass(pass)
+		return true
+	}
+	terminal_view_encode_cursor(
+		&app.term_view,
+		enc,
+		l.view,
+		&app.text_atlas,
+		app.layout.metrics.cell_w,
+		app.layout.metrics.cell_h,
+		app.cursor.last_char,
+		app.cursor.last_is_wide,
+		app.cursor.last_is_italic,
+		app.cursor.last_is_bold,
+		p.session.term.parser.cursor.shape,
+		COLOR_CURSOR_BLOCK,
+		{0.08, 0.09, 0.12, 1.0},
+		l.corner_radius,
+	)
+	return true
 }
 
 @(private = "file")
@@ -272,15 +340,7 @@ _app_frame_raster :: proc(user: rawptr, enc: contract.Gpu_CommandEncoder, l: ^co
 		return true
 
 	case CURSOR_LAYER_ID:
-		col := [4]f64{
-			f64(COLOR_CURSOR_BLOCK[0]),
-			f64(COLOR_CURSOR_BLOCK[1]),
-			f64(COLOR_CURSOR_BLOCK[2]),
-			1.0,
-		}
-		pass := contract.begin_render_pass(enc, l.view, col, .Clear)
-		if rawptr(pass) != nil do contract.end_render_pass(pass)
-		return true
+		return _app_raster_cursor(app, enc, l)
 
 	case CHROME_LAYER_ID:
 		chrome_render.chrome_renderer_set_viewport(&app.chrome_view.rend, max(u32(1), l.width), max(u32(1), l.height))
@@ -301,9 +361,9 @@ _app_frame_present :: proc(user: rawptr, tex: contract.Gpu_Texture, view: contra
 
 // app_render_frame executes production frame_tick: rasters only dirty layers onto
 // a single CommandEncoder, composites via Composer_Pipeline, submits, and presents once.
-app_render_frame :: proc(app: ^Term_App, term_dirty: bool = true) {
-	chrome_dirty := false
-	if term_dirty || app_needs_animation(app) || !app.chrome_view.has_dl_hash || chrome_render.chrome_renderer_is_dirty(&app.chrome_view.rend) {
+app_render_frame :: proc(app: ^Term_App, term_dirty: bool = true, chrome_event_dirty: bool = false) {
+	chrome_dirty := chrome_event_dirty
+	if term_dirty || chrome_event_dirty || app_needs_animation(app) || !app.chrome_view.has_dl_hash || chrome_render.chrome_renderer_is_dirty(&app.chrome_view.rend) {
 		chrome_dirty = chrome_view_build_draw_list(
 			&app.chrome_view,
 			&app.layout,
@@ -320,14 +380,10 @@ app_render_frame :: proc(app: ^Term_App, term_dirty: bool = true) {
 			&app.drop_effect,
 			&app.session_reg,
 			&app.quit,
-		)
+		) || chrome_dirty
 	}
 
 	now_ns := u64(time.duration_nanoseconds(time.since(app.start_time)))
-	if term_dirty {
-		cursor_reset_blink(&app.cursor, now_ns)
-	}
-	_ = app_sync_cursor_layer(app, now_ns)
 
 	if term_dirty {
 		pipeline.composer_pipeline_mark_dirty(&app.composer.pipe, TERMINAL_LAYER_ID)
