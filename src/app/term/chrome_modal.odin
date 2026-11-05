@@ -18,7 +18,7 @@ chrome_draw_modal_frame :: proc(dl: ^chrome_dl.Ui_Draw_List, layout: ^Layout_Sta
 }
 
 chrome_keycap_w :: proc(m: Visual_Metrics, label: string) -> f32 {
-	return max(20.0 * m.scale, chrome_text_width(m, label, 11.5 * m.scale) + 10.0 * m.scale)
+	return max(22.0 * m.scale, chrome_text_width(m, label, FONT_CHROME_META * m.scale) + 12.0 * m.scale)
 }
 
 chrome_draw_keycap :: proc(dl: ^chrome_dl.Ui_Draw_List, m: Visual_Metrics, e: f32, rect: [4]f32, label: string, lh: f32) {
@@ -31,11 +31,12 @@ chrome_draw_keycap :: proc(dl: ^chrome_dl.Ui_Draw_List, m: Visual_Metrics, e: f3
 // chrome_draw_key_hints draws "keycap label" pairs left to right from x; returns the end x.
 chrome_draw_key_hints :: proc(dl: ^chrome_dl.Ui_Draw_List, m: Visual_Metrics, e, x, y: f32, hints: [][2]string) -> f32 {
 	s, fx := m.scale, x
+	th := FONT_CHROME_META * s
 	for h in hints {
-		kw, lw := chrome_keycap_w(m, h[0]), chrome_text_width(m, h[1], 11.0 * s)
-		chrome_draw_keycap(dl, m, e, {fx, y, kw, 18.0 * s}, h[0], 10.0 * s)
-		chrome_dl.ui_draw_text(dl, {fx + kw + 4.0 * s, y + 3.5 * s, lw, 11.0 * s}, h[1], chrome_with_alpha(COLOR_CHROME_TEXT_FAINT, e))
-		fx += kw + 4.0 * s + lw + 14.0 * s
+		kw, lw := chrome_keycap_w(m, h[0]), chrome_text_width(m, h[1], th)
+		chrome_draw_keycap(dl, m, e, {fx, y, kw, 20.0 * s}, h[0], th)
+		chrome_dl.ui_draw_text(dl, {fx + kw + 5.0 * s, y + (20.0 * s - th) * 0.5, lw, th}, h[1], chrome_with_alpha(COLOR_CHROME_TEXT_FAINT, e))
+		fx += kw + 5.0 * s + lw + 14.0 * s
 	}
 	return fx
 }

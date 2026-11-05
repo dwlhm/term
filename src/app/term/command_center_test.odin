@@ -243,7 +243,7 @@ test_command_center_caret_uses_text_measure :: proc(t: ^testing.T) {
 	command_center_emit_draw_list(&cc, src, &dl, &layout)
 
 	s := layout.metrics.scale
-	expected_x := cc.modal_rect[0] + 18.0 * s + chrome_text_width(layout.metrics, "abc", 15.0 * s)
+	expected_x := cc.modal_rect[0] + 18.0 * s + chrome_text_width(layout.metrics, "abc", FONT_CHROME_TITLE * s)
 	target_w := 2.0 * s
 	found := false
 	for cmd in dl.commands {

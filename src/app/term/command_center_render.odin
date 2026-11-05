@@ -30,38 +30,42 @@ _cc_split_keycaps :: proc(seg: string, allocator := context.temp_allocator) -> [
 
 @(private = "file")
 _cc_calc_list_h :: proc(cc: ^Command_Center_State, s, cap_h: f32) -> f32 {
-	if cc.row_count == 0 do return 36.0 * s
+	if cc.row_count == 0 do return 40.0 * s
 	h: f32 = 0
 	for r in 0..<COMMAND_CENTER_VISIBLE_CAP {
 		idx := cc.scroll_offset + r
 		if idx >= cc.row_count do break
-		rh: f32 = 28.0 * s if cc.rows[idx].kind == .Header else (36.0 * s if cc.rows[idx].kind == .Tab else 44.0 * s)
+		rh: f32 = 30.0 * s if cc.rows[idx].kind == .Header else (38.0 * s if cc.rows[idx].kind == .Tab else 48.0 * s)
 		if h + rh > cap_h && h > 0 do break
 		h += rh
 	}
-	return max(36.0 * s, h)
+	return max(40.0 * s, h)
 }
 
 @(private = "file")
 _cc_draw_chips :: proc(ctx: Cc_Ctx) {
 	cy, cx := ctx.modal_y + 10.0 * ctx.s, ctx.modal_x + 12.0 * ctx.s
 	n_sess := len(ctx.src.sessions.entries) if ctx.src.sessions != nil else 0
+	th := FONT_CHROME_BODY * ctx.s
 	for mode in Command_Center_Mode {
 		lbl := fmt.tprintf("%s · %d", CC_LABELS[mode], n_sess) if mode == .Sessions && n_sess > 0 else CC_LABELS[mode]
-		tw, cw := chrome_text_width(ctx.m, lbl, 12.0 * ctx.s), chrome_text_width(ctx.m, lbl, 12.0 * ctx.s) + 20.0 * ctx.s
-		r := [4]f32{cx, cy, cw, 24.0 * ctx.s}
+		tw := chrome_text_width(ctx.m, lbl, th)
+		cw := tw + 20.0 * ctx.s
+		r := [4]f32{cx, cy, cw, 26.0 * ctx.s}
 		if ctx.cc.visible do ctx.cc.chip_rects[mode] = r
 		is_act := ctx.cc.mode == mode
-		if is_act do chrome_dl.ui_draw_rounded_rect(ctx.dl, r, chrome_with_alpha(COLOR_CHROME_ACCENT_SOFT, ctx.e), 12.0 * ctx.s)
+		if is_act do chrome_dl.ui_draw_rounded_rect(ctx.dl, r, chrome_with_alpha(COLOR_CHROME_ACCENT_SOFT, ctx.e), 13.0 * ctx.s)
 		tc := COLOR_CHROME_ACCENT if is_act else COLOR_CHROME_TEXT_MUTED
-		chrome_dl.ui_draw_text(ctx.dl, {cx + 10.0 * ctx.s, cy + 6.0 * ctx.s, tw, 12.0 * ctx.s}, lbl, chrome_with_alpha(tc, ctx.e))
+		trect := [4]f32{cx + 10.0 * ctx.s, cy + (26.0 * ctx.s - th) * 0.5, tw, th}
+		if is_act do chrome_dl.ui_draw_text_bold(ctx.dl, trect, lbl, chrome_with_alpha(tc, ctx.e))
+		else do chrome_dl.ui_draw_text(ctx.dl, trect, lbl, chrome_with_alpha(tc, ctx.e))
 		cx += cw + 4.0 * ctx.s
 	}
 }
 
 @(private = "file")
 _cc_draw_search :: proc(ctx: Cc_Ctx, P: f32) {
-	sy, sh, th := ctx.modal_y + 34.0 * ctx.s, 44.0 * ctx.s, 15.0 * ctx.s
+	sy, sh, th := ctx.modal_y + 38.0 * ctx.s, 46.0 * ctx.s, FONT_CHROME_TITLE * ctx.s
 	if ctx.cc.visible do ctx.cc.search_rect = {ctx.modal_x + P, sy, ctx.modal_w - 2.0 * P, sh}
 	tx, ty := ctx.modal_x + 18.0 * ctx.s, sy + (sh - th) * 0.5
 	q := text_input_as_string(&ctx.cc.input)
@@ -70,7 +74,7 @@ _cc_draw_search :: proc(ctx: Cc_Ctx, P: f32) {
 		chrome_dl.ui_draw_rounded_rect(ctx.dl, {sx, ty, sw, th}, chrome_with_alpha(COLOR_CHROME_ACCENT_SOFT, ctx.e), 3.0 * ctx.s)
 	} else {
 		cx := tx + chrome_text_width(ctx.m, q[:clamp(ctx.cc.input.cursor, 0, len(q))], th)
-		chrome_dl.ui_draw_rect(ctx.dl, {cx, ty - 2.0 * ctx.s, 2.0 * ctx.s, th + 4.0 * ctx.s}, chrome_with_alpha(COLOR_CHROME_ACCENT, ctx.e))
+		chrome_dl.ui_draw_rect(ctx.dl, {cx, ty + 1.0 * ctx.s, 2.0 * ctx.s, th - 2.0 * ctx.s}, chrome_with_alpha(COLOR_CHROME_ACCENT, ctx.e))
 	}
 	txt, col := q, COLOR_CHROME_TEXT
 	if len(q) == 0 do txt, col = CC_PLACEHOLDERS[ctx.cc.mode], COLOR_CHROME_TEXT_FAINT
@@ -91,12 +95,12 @@ _cc_draw_action_row :: proc(ctx: Cc_Ctx, action: Action_Id, r: [4]f32) {
 	kx := r[0] + r[2] - 14.0 * s - total
 	for lb in labels {
 		kw := chrome_keycap_w(ctx.m, lb)
-		chrome_draw_keycap(ctx.dl, ctx.m, ctx.e, {kx, r[1] + 5.0 * s, kw, 20.0 * s}, lb, 11.5 * s)
+		chrome_draw_keycap(ctx.dl, ctx.m, ctx.e, {kx, r[1] + 5.0 * s, kw, 22.0 * s}, lb, FONT_CHROME_META * s)
 		kx += kw + 3.0 * s
 	}
 	max_w := r[2] - 28.0 * s - (total + 10.0 * s if total > 0 else 0)
-	chrome_dl.ui_draw_text(ctx.dl, {r[0] + 14.0 * s, r[1] + 7.0 * s, max_w, 13.5 * s}, meta.title, chrome_with_alpha(COLOR_CHROME_TEXT, ctx.e))
-	if len(meta.description) > 0 do chrome_dl.ui_draw_text(ctx.dl, {r[0] + 14.0 * s, r[1] + 25.0 * s, max_w, 11.0 * s}, meta.description, chrome_with_alpha(COLOR_CHROME_TEXT_MUTED, ctx.e))
+	chrome_dl.ui_draw_text(ctx.dl, {r[0] + 14.0 * s, r[1] + 6.0 * s, max_w, FONT_CHROME_BODY * s}, meta.title, chrome_with_alpha(COLOR_CHROME_TEXT, ctx.e))
+	if len(meta.description) > 0 do chrome_dl.ui_draw_text(ctx.dl, {r[0] + 14.0 * s, r[1] + 25.0 * s, max_w, FONT_CHROME_META * s}, meta.description, chrome_with_alpha(COLOR_CHROME_TEXT_MUTED, ctx.e))
 }
 
 @(private = "file")
@@ -105,15 +109,15 @@ _cc_draw_tab_row :: proc(ctx: Cc_Ctx, tab_idx: int, r: [4]f32) {
 	is_active := ctx.src.tabs != nil && tab_idx == ctx.src.tabs.model.active_idx
 	badge := fmt.tprintf("%d", tab_idx + 1)
 	bw := chrome_keycap_w(ctx.m, badge)
-	chrome_draw_keycap(ctx.dl, ctx.m, ctx.e, {r[0] + 12.0 * s, r[1] + 8.0 * s, bw, 20.0 * s}, badge, 11.5 * s)
+	chrome_draw_keycap(ctx.dl, ctx.m, ctx.e, {r[0] + 12.0 * s, r[1] + 8.0 * s, bw, 22.0 * s}, badge, FONT_CHROME_META * s)
 	title := "Shell"
 	if ctx.src.tabs != nil && tab_idx >= 0 && tab_idx < len(ctx.src.tabs.entries) {
 		if e := &ctx.src.tabs.entries[tab_idx]; e.title_len > 0 do title = string(e.title_buf[:e.title_len])
 	}
-	tx, cw := r[0] + 12.0 * s + bw + 10.0 * s, chrome_text_width(ctx.m, "current", 11.5 * s)
+	tx, cw := r[0] + 12.0 * s + bw + 10.0 * s, chrome_text_width(ctx.m, "current", FONT_CHROME_META * s)
 	max_w := r[0] + r[2] - 14.0 * s - tx - (cw + 10.0 * s if is_active else 0.0)
-	chrome_dl.ui_draw_text(ctx.dl, {tx, r[1] + 11.25 * s, max_w, 13.5 * s}, title, chrome_with_alpha(COLOR_CHROME_TEXT, ctx.e))
-	if is_active do chrome_dl.ui_draw_text(ctx.dl, {r[0] + r[2] - 14.0 * s - cw, r[1] + 12.25 * s, cw, 11.5 * s}, "current", chrome_with_alpha(COLOR_CHROME_SUCCESS, ctx.e))
+	chrome_dl.ui_draw_text(ctx.dl, {tx, r[1] + (r[3] - FONT_CHROME_BODY * s) * 0.5, max_w, FONT_CHROME_BODY * s}, title, chrome_with_alpha(COLOR_CHROME_TEXT, ctx.e))
+	if is_active do chrome_dl.ui_draw_text(ctx.dl, {r[0] + r[2] - 14.0 * s - cw, r[1] + (r[3] - FONT_CHROME_META * s) * 0.5, cw, FONT_CHROME_META * s}, "current", chrome_with_alpha(COLOR_CHROME_SUCCESS, ctx.e))
 }
 
 @(private = "file")
@@ -130,8 +134,8 @@ _cc_draw_session_row :: proc(ctx: Cc_Ctx, sess_id: u32, r: [4]f32) {
 		}
 		if entry.attention do dot_col = COLOR_CHROME_WARNING
 	}
-	chrome_dl.ui_draw_rounded_rect(ctx.dl, {r[0] + 14.0 * s, r[1] + 10.25 * s, 7.0 * s, 7.0 * s}, chrome_with_alpha(dot_col, ctx.e), 3.5 * s)
-	chrome_dl.ui_draw_text(ctx.dl, {r[0] + 30.0 * s, r[1] + 7.0 * s, r[2] - 120.0 * s, 13.5 * s}, title, chrome_with_alpha(COLOR_CHROME_TEXT, ctx.e))
+	chrome_dl.ui_draw_rounded_rect(ctx.dl, {r[0] + 14.0 * s, r[1] + 11.0 * s, 7.0 * s, 7.0 * s}, chrome_with_alpha(dot_col, ctx.e), 3.5 * s)
+	chrome_dl.ui_draw_text(ctx.dl, {r[0] + 30.0 * s, r[1] + 6.0 * s, r[2] - 120.0 * s, FONT_CHROME_BODY * s}, title, chrome_with_alpha(COLOR_CHROME_TEXT, ctx.e))
 	if entry != nil {
 		parts := make([dynamic]string, context.temp_allocator)
 		append(&parts, fmt.tprintf("#%d", sess_id))
@@ -141,10 +145,10 @@ _cc_draw_session_row :: proc(ctx: Cc_Ctx, sess_id: u32, r: [4]f32) {
 			append(&parts, b)
 		}
 		if st := sess_feat.registry_text(&entry.status); len(st) > 0 do append(&parts, st)
-		chrome_dl.ui_draw_text(ctx.dl, {r[0] + 30.0 * s, r[1] + 25.0 * s, r[2] - 120.0 * s, 11.0 * s}, strings.join(parts[:], " · ", context.temp_allocator), chrome_with_alpha(COLOR_CHROME_TEXT_MUTED, ctx.e))
+		chrome_dl.ui_draw_text(ctx.dl, {r[0] + 30.0 * s, r[1] + 25.0 * s, r[2] - 120.0 * s, FONT_CHROME_META * s}, strings.join(parts[:], " · ", context.temp_allocator), chrome_with_alpha(COLOR_CHROME_TEXT_MUTED, ctx.e))
 	}
-	sw := chrome_text_width(ctx.m, state_str, 11.5 * s)
-	chrome_dl.ui_draw_text(ctx.dl, {r[0] + r[2] - 14.0 * s - sw, r[1] + 7.0 * s, sw, 11.5 * s}, state_str, chrome_with_alpha(COLOR_CHROME_TEXT_MUTED, ctx.e))
+	sw := chrome_text_width(ctx.m, state_str, FONT_CHROME_META * s)
+	chrome_dl.ui_draw_text(ctx.dl, {r[0] + r[2] - 14.0 * s - sw, r[1] + 7.0 * s, sw, FONT_CHROME_META * s}, state_str, chrome_with_alpha(COLOR_CHROME_TEXT_MUTED, ctx.e))
 }
 
 @(private = "file")
@@ -152,8 +156,9 @@ _cc_draw_list_rows :: proc(ctx: Cc_Ctx, P, row_start_y, cap_h, list_h: f32) {
 	s := ctx.s
 	if ctx.cc.row_count == 0 {
 		msg := CC_EMPTY[ctx.cc.mode]
-		tw := chrome_text_width(ctx.m, msg, 13.0 * s)
-		chrome_dl.ui_draw_text(ctx.dl, {ctx.modal_x + (ctx.modal_w - tw) * 0.5, row_start_y + (list_h - 13.0 * s) * 0.5, tw, 13.0 * s}, msg, chrome_with_alpha(COLOR_CHROME_TEXT_MUTED, ctx.e))
+		th := FONT_CHROME_BODY * s
+		tw := chrome_text_width(ctx.m, msg, th)
+		chrome_dl.ui_draw_text(ctx.dl, {ctx.modal_x + (ctx.modal_w - tw) * 0.5, row_start_y + (list_h - th) * 0.5, tw, th}, msg, chrome_with_alpha(COLOR_CHROME_TEXT_MUTED, ctx.e))
 		return
 	}
 	ctx.cc.row_rect_count = 0
@@ -162,7 +167,7 @@ _cc_draw_list_rows :: proc(ctx: Cc_Ctx, P, row_start_y, cap_h, list_h: f32) {
 		idx := ctx.cc.scroll_offset + r
 		if idx >= ctx.cc.row_count do break
 		row := ctx.cc.rows[idx]
-		rh: f32 = 28.0 * s if row.kind == .Header else (36.0 * s if row.kind == .Tab else 44.0 * s)
+		rh: f32 = 30.0 * s if row.kind == .Header else (38.0 * s if row.kind == .Tab else 48.0 * s)
 		if y + rh - row_start_y > cap_h && ctx.cc.row_rect_count > 0 do break
 		rrect := [4]f32{ctx.modal_x + P, y, ctx.modal_w - 2.0 * P, rh}
 		if ctx.cc.visible && ctx.cc.row_rect_count < COMMAND_CENTER_VISIBLE_CAP {
@@ -177,7 +182,7 @@ _cc_draw_list_rows :: proc(ctx: Cc_Ctx, P, row_start_y, cap_h, list_h: f32) {
 		switch row.kind {
 		case .Header:
 			t := ACTION_CATEGORY_TITLES[row.category]
-			chrome_dl.ui_draw_text(ctx.dl, {rrect[0] + 14.0 * s, rrect[1] + 12.0 * s, rrect[2] - 28.0 * s, 10.5 * s}, t, chrome_with_alpha(COLOR_CHROME_TEXT_FAINT, ctx.e))
+			chrome_dl.ui_draw_text_bold(ctx.dl, {rrect[0] + 14.0 * s, rrect[1] + 10.0 * s, rrect[2] - 28.0 * s, FONT_CHROME_META * s}, t, chrome_with_alpha(COLOR_CHROME_TEXT_FAINT, ctx.e))
 		case .Action:  _cc_draw_action_row(ctx, row.action, rrect)
 		case .Tab:     _cc_draw_tab_row(ctx, row.tab_index, rrect)
 		case .Session: _cc_draw_session_row(ctx, row.session_id, rrect)
@@ -206,7 +211,7 @@ command_center_emit_draw_list :: proc(cc: ^Command_Center_State, src: Command_Ce
 	mx, my := (layout.screen_w - mw) * 0.5, max(72.0 * s, layout.screen_h * 0.16) + (1.0 - e) * 8.0 * s
 	cap_h := layout.screen_h * 0.55
 	list_h := _cc_calc_list_h(cc, s, cap_h)
-	mh := 124.0 * s + list_h
+	mh := 130.0 * s + list_h
 
 	if cc.visible do cc.modal_rect = {mx, my, mw, mh}
 	else do cc.modal_rect, cc.search_rect, cc.chip_rects, cc.row_rect_count = {}, {}, {}, 0
@@ -217,7 +222,7 @@ command_center_emit_draw_list :: proc(cc: ^Command_Center_State, src: Command_Ce
 	P := 6.0 * s
 	_cc_draw_chips(ctx)
 	_cc_draw_search(ctx, P)
-	row_start_y := my + 83.0 * s
+	row_start_y := my + 88.0 * s
 	_cc_draw_list_rows(ctx, P, row_start_y, cap_h, list_h)
 	if cc.row_count > COMMAND_CENTER_VISIBLE_CAP {
 		th, max_s := max(24.0 * s, list_h * (f32(COMMAND_CENTER_VISIBLE_CAP) / f32(cc.row_count))), f32(cc.row_count - COMMAND_CENTER_VISIBLE_CAP)

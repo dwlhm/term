@@ -3,19 +3,30 @@ package term
 // Term Visual Constants & Color Palette
 // Part of Tier 3 Application Shell (src/app/term/*).
 
+import atlas "../../core/render/atlas"
+
 WINDOW_MARGIN:        f32 : 8.0
 PANE_GAP:             f32 : 8.0
 BORDER_RADIUS:        f32 : 8.0
-TAB_BAR_HEIGHT:       f32 : 30.0
+TAB_BAR_HEIGHT:       f32 : 34.0
 AUTO_HIDE_TRIGGER_Y:  f32 : 42.0
 
 DEFAULT_CELL_WIDTH:   f32 : 9.5
 DEFAULT_CELL_HEIGHT:  f32 : 21.5
 
+// 3-Tier Chrome UI Typography Scale (logical line-box height before DPI scale;
+// Geist Sans cell_h ≈ 1.321 × em, so 20.0 / 17.0 / 15.0 render at ~15.1 / 12.9 / 11.4 pt em)
+FONT_CHROME_TITLE:    f32 : 20.0
+FONT_CHROME_BODY:     f32 : 17.0
+FONT_CHROME_META:     f32 : 15.0
+
 Visual_Metrics :: struct {
 	scale:               f32,
 	cell_w:              f32,
 	cell_h:              f32,
+	ui_cell_w:           f32,
+	ui_cell_h:           f32,
+	ui_atlas:            ^atlas.Atlas,
 	window_margin:       f32,
 	pane_gap:            f32,
 	border_radius:       f32,
@@ -98,12 +109,16 @@ COLOR_PANE_BG         := [4]f32{0.08, 0.09, 0.12, 1.0}
 COLOR_PANE_BORDER     := [4]f32{0.16, 0.19, 0.25, 0.80}
 COLOR_PANE_FOCUS      := [4]f32{0.24, 0.30, 0.40, 0.70}
 
-// Tab Colors (Modern borderless capsule palette with pane-like hierarchy)
-COLOR_TAB_INACTIVE_BG := [4]f32{0.10, 0.12, 0.16, 0.45}
-COLOR_TAB_ACTIVE_BG   := [4]f32{0.18, 0.22, 0.30, 0.95}
-COLOR_TAB_ACTIVE_LINE := [4]f32{0.45, 0.60, 0.80, 0.90}
-COLOR_TAB_TEXT_ACTIVE := [4]f32{0.95, 0.97, 1.00, 1.00}
-COLOR_TAB_TEXT_INACT  := [4]f32{0.50, 0.54, 0.62, 0.70}
+// Tab Colors (Modern capsule palette with 1px inset border & hover hierarchy)
+COLOR_TAB_INACTIVE_BG     := [4]f32{0.10, 0.12, 0.16, 0.50}
+COLOR_TAB_HOVER_BG        := [4]f32{0.14, 0.17, 0.23, 0.76}
+COLOR_TAB_ACTIVE_BG       := [4]f32{0.17, 0.21, 0.29, 0.96}
+COLOR_TAB_ACTIVE_LINE     := [4]f32{0.43, 0.66, 1.00, 0.95}
+COLOR_TAB_ACTIVE_BORDER   := [4]f32{1.00, 1.00, 1.00, 0.14}
+COLOR_TAB_INACTIVE_BORDER := [4]f32{1.00, 1.00, 1.00, 0.06}
+COLOR_TAB_TEXT_ACTIVE     := [4]f32{0.95, 0.97, 1.00, 1.00}
+COLOR_TAB_TEXT_HOVER      := [4]f32{0.84, 0.87, 0.94, 0.94}
+COLOR_TAB_TEXT_INACT      := [4]f32{0.58, 0.62, 0.70, 0.80}
 
 // Cursor & Selection Colors
 COLOR_CURSOR_BLOCK    := [4]f32{0.28, 0.68, 1.00, 0.85}
@@ -138,15 +153,29 @@ chrome_with_alpha :: #force_inline proc "contextless" (c: [4]f32, a: f32) -> [4]
 	return {c[0], c[1], c[2], c[3] * a}
 }
 
-// chrome_text_advance is the per-rune advance of chrome text drawn at height
-// text_h; it mirrors the chrome renderer (glyph width = h * cell_w / cell_h).
+// chrome_text_advance is the fallback per-rune advance of chrome text drawn at height
+// text_h when no proportional UI atlas is bound.
 chrome_text_advance :: proc(m: Visual_Metrics, text_h: f32) -> f32 {
 	if m.cell_h <= 0 do return text_h * 0.5
 	return text_h * m.cell_w / m.cell_h
 }
 
-// chrome_text_width is the drawn width of text at height text_h.
+// chrome_text_width is the drawn width of text at height text_h (using proportional
+// Geist Sans glyph advances when ui_atlas is bound).
 chrome_text_width :: proc(m: Visual_Metrics, text: string, text_h: f32) -> f32 {
+	if m.ui_atlas != nil && m.ui_cell_h > 0 {
+		scale := text_h / m.ui_cell_h
+		fallback_adv := max(m.ui_cell_w * scale, 1.0)
+		total: f32 = 0.0
+		for ch in text {
+			if slot, ok := atlas.atlas_lookup_pinned_slot(ch); ok && m.ui_atlas.slots[slot].valid {
+				total += max(m.ui_atlas.slots[slot].advance * scale, 1.0)
+			} else {
+				total += fallback_adv
+			}
+		}
+		return total
+	}
 	n := 0
 	for _ in text do n += 1
 	return f32(n) * chrome_text_advance(m, text_h)

@@ -6,6 +6,7 @@ package term
 import "base:runtime"
 import "core:math"
 import cursor "../../core/cursor"
+import atlas "../../core/render/atlas"
 import contract "../../core/render/contract"
 import chrome_dl "../../core/chrome/draw_list"
 import chrome_splits "../../core/chrome/splits"
@@ -74,9 +75,14 @@ chrome_view_init :: proc(
 	return true
 }
 
-chrome_view_set_atlas :: proc(cv: ^Chrome_View, atlas_view: contract.Gpu_TextureView, cell_w, cell_h: f32) {
+chrome_view_set_atlas :: proc(
+	cv: ^Chrome_View,
+	atlas_view: contract.Gpu_TextureView,
+	cell_w, cell_h: f32,
+	slots: ^[atlas.ATLAS_SLOT_COUNT]atlas.Atlas_Slot = nil,
+) {
 	if cv == nil do return
-	chrome_render.chrome_renderer_set_atlas(&cv.rend, atlas_view, cell_w, cell_h)
+	chrome_render.chrome_renderer_set_atlas(&cv.rend, atlas_view, cell_w, cell_h, slots)
 	cv.has_dl_hash = false
 	chrome_render.chrome_renderer_mark_dirty(&cv.rend, true)
 }
@@ -215,161 +221,49 @@ chrome_view_build_draw_list :: proc(
 	}
 
 	// 3. Render Modern Integrated Top Bar & Tabs
-	if layout != nil && tabs != nil && layout.tab_bar_anim_t > 0.001 {
-		g := tab_bar_geometry(layout, session_pill_width(layout, sessions))
-		scale := layout.metrics.scale
-
-		anim_offset_y := g.offset_y
-		alpha_factor := g.alpha
-		bar_h := g.bar_h
-
-		// Subtle backdrop banner when sliding down over terminal panes in fullscreen
-		if layout.is_fullscreen {
-			banner_rect: [4]f32 = {0, anim_offset_y, layout.screen_w, bar_h + 2.0 * scale}
-			banner_bg: [4]f32 = {0.08, 0.09, 0.11, 0.92 * alpha_factor}
-			chrome_dl.ui_draw_rounded_rect(&cv.draw_list, banner_rect, banner_bg, 0)
-		}
-
-		tab_h := g.tab_h
-		tab_y := g.tab_y
-		tabs_x := g.tabs_x
-		tab_w := g.tab_w
-		tab_gap := g.tab_gap
-		capsule_radius := tab_h * 0.5
-
-		// Fixed right-side buttons: [⊞] Overview and [+] New Tab
-		btn_w := g.btn_w
-		btn_ov_x := g.overview_x
-		btn_plus_x := g.new_tab_x
-		tabs_end_x := g.tabs_end_x
-
-		avail_tabs_w := max(40.0 * scale, tabs_end_x - tabs_x)
-
-		// Clamp tab scroll offset
-		total_tabs_w := f32(len(tabs.entries)) * (tab_w + tab_gap)
-		max_scroll := max(0.0, total_tabs_w - avail_tabs_w)
-		layout.tab_scroll_offset = clamp(layout.tab_scroll_offset, 0.0, max_scroll)
-
-		// Render visible tabs
-		for i in 0..<len(tabs.entries) {
-			tab_item_x := tabs_x + f32(i) * (tab_w + tab_gap) - layout.tab_scroll_offset
-			draw_x := max(tabs_x, tab_item_x)
-			draw_r := min(tabs_end_x, tab_item_x + tab_w)
-			draw_w := draw_r - draw_x
-
-			// Skip tabs completely outside the visible tab viewport
-			if draw_w <= 2.0 * scale do continue
-
-			is_active := (i == tabs.model.active_idx)
-			pill_rect: [4]f32 = {draw_x, tab_y, draw_w, tab_h}
-
-			pill_bg := COLOR_TAB_ACTIVE_BG if is_active else COLOR_TAB_INACTIVE_BG
-			pill_bg[3] *= alpha_factor
-			chrome_dl.ui_draw_rounded_rect(&cv.draw_list, pill_rect, pill_bg, capsule_radius)
-
-			// Close button [x]
-			close_w: f32 = 24.0 * scale
-			has_close := (tab_item_x + tab_w - 18.0 * scale <= draw_r) && (draw_w >= 36.0 * scale)
-
-			// Tab Title
-			text_x := draw_x + 10.0 * scale
-			text_max_w := (draw_r - (close_w if has_close else 8.0 * scale)) - text_x
-
-			if text_max_w > 8.0 * scale {
-				tab_title := string(tabs.entries[i].title_buf[:tabs.entries[i].title_len]) if tabs.entries[i].title_len > 0 else "Shell"
-				txt_col := COLOR_TAB_TEXT_ACTIVE if is_active else COLOR_TAB_TEXT_INACT
-				txt_col[3] *= alpha_factor
-				text_y := tab_y + (tab_h - 14.0 * scale) * 0.5
-				chrome_dl.ui_draw_text(&cv.draw_list, {text_x, text_y, text_max_w, 14.0 * scale}, tab_title, txt_col)
-			}
-
-			if has_close {
-				close_col: [4]f32 = {0.75, 0.80, 0.90, 0.85 * alpha_factor} if is_active else {0.40, 0.45, 0.55, 0.45 * alpha_factor}
-				close_x := tab_item_x + tab_w - 18.0 * scale
-				close_y := tab_y + (tab_h - 13.0 * scale) * 0.5
-				chrome_dl.ui_draw_text(&cv.draw_list, {close_x, close_y, 10.0 * scale, 13.0 * scale}, "x", close_col)
-			}
-		}
-
-		// New Tab Button [+]
-		if btn_plus_x > tabs_x {
-			plus_rect: [4]f32 = {btn_plus_x, tab_y, btn_w, tab_h}
-			plus_bg: [4]f32 = {0.11, 0.13, 0.17, 0.50 * alpha_factor}
-			chrome_dl.ui_draw_rounded_rect(&cv.draw_list, plus_rect, plus_bg, capsule_radius)
-
-			// Plus icon
-			icon_col: [4]f32 = {0.70, 0.75, 0.85, 0.75 * alpha_factor}
-			cx := btn_plus_x + (btn_w - 8.0 * scale) * 0.5
-			cy := tab_y + (tab_h - 1.5 * scale) * 0.5
-			chrome_dl.ui_draw_rounded_rect(&cv.draw_list, {cx, cy, 8.0 * scale, 1.5 * scale}, icon_col, 0.75 * scale)
-			cx2 := btn_plus_x + (btn_w - 1.5 * scale) * 0.5
-			cy2 := tab_y + (tab_h - 8.0 * scale) * 0.5
-			chrome_dl.ui_draw_rounded_rect(&cv.draw_list, {cx2, cy2, 1.5 * scale, 8.0 * scale}, icon_col, 0.75 * scale)
-		}
-
-		// Tab Overview Button [⊞]
-		if btn_ov_x > tabs_x {
-			ov_rect: [4]f32 = {btn_ov_x, tab_y, btn_w, tab_h}
-			is_ov_open := (cmd_center != nil && cmd_center.visible && cmd_center.mode == .Tabs)
-			ov_bg: [4]f32 = {0.18, 0.22, 0.30, 0.90 * alpha_factor} if is_ov_open else {0.11, 0.13, 0.17, 0.50 * alpha_factor}
-			chrome_dl.ui_draw_rounded_rect(&cv.draw_list, ov_rect, ov_bg, capsule_radius)
-
-			// Grid icon [⊞] (four small squares)
-			sq_s: f32 = 3.5 * scale
-			sq_gap: f32 = 1.5 * scale
-			top_left_x := btn_ov_x + (btn_w - (sq_s * 2.0 + sq_gap)) * 0.5
-			top_left_y := tab_y + (tab_h - (sq_s * 2.0 + sq_gap)) * 0.5
-			icon_col: [4]f32 = {0.80, 0.88, 1.0, 0.90 * alpha_factor} if is_ov_open else {0.70, 0.75, 0.85, 0.75 * alpha_factor}
-
-			chrome_dl.ui_draw_rounded_rect(&cv.draw_list, {top_left_x, top_left_y, sq_s, sq_s}, icon_col, 0.8 * scale)
-			chrome_dl.ui_draw_rounded_rect(&cv.draw_list, {top_left_x + sq_s + sq_gap, top_left_y, sq_s, sq_s}, icon_col, 0.8 * scale)
-			chrome_dl.ui_draw_rounded_rect(&cv.draw_list, {top_left_x, top_left_y + sq_s + sq_gap, sq_s, sq_s}, icon_col, 0.8 * scale)
-			chrome_dl.ui_draw_rounded_rect(&cv.draw_list, {top_left_x + sq_s + sq_gap, top_left_y + sq_s + sq_gap, sq_s, sq_s}, icon_col, 0.8 * scale)
-		}
-
-		session_pill_emit(&cv.draw_list, layout, g, sessions, cmd_center != nil && cmd_center.visible && cmd_center.mode == .Sessions)
-	}
+	tab_bar_view_emit(&cv.draw_list, layout, tabs, cmd_center, sessions)
 
 	// 3b. Search bar (Cmd+F)
 	if search != nil && search.active && layout != nil {
 		scale := layout.metrics.scale
-		bar_w := 340.0 * scale
-		bar_h := 28.0 * scale
+		bar_w := 360.0 * scale
+		bar_h := 34.0 * scale
 		x := layout.screen_w - bar_w - 20.0 * scale
 		y := layout.metrics.tab_bar_height + 10.0 * scale
-		chrome_dl.ui_draw_rounded_rect(&cv.draw_list, {x, y, bar_w, bar_h}, {0.10, 0.12, 0.17, 0.97}, bar_h * 0.5)
-		chrome_dl.ui_draw_border(&cv.draw_list, {x, y, bar_w, bar_h}, {0.30, 0.55, 0.90, 0.65}, bar_h * 0.5)
+		chrome_dl.ui_draw_shadow(&cv.draw_list, {x, y + 4.0 * scale, bar_w, bar_h}, COLOR_CHROME_SHADOW, bar_h * 0.5)
+		chrome_dl.ui_draw_rounded_rect(&cv.draw_list, {x, y, bar_w, bar_h}, COLOR_CHROME_SURFACE, bar_h * 0.5)
+		chrome_dl.ui_draw_border(&cv.draw_list, {x, y, bar_w, bar_h}, COLOR_CHROME_BORDER, bar_h * 0.5)
 
 		query := text_input_as_string(&search.input)
 		has_query := len(query) > 0
 		label := query if has_query else "Find in scrollback…"
-		label_color: [4]f32 = {0.92, 0.94, 0.98, 1.0} if has_query else {0.55, 0.58, 0.66, 1.0}
-		text_h := 14.0 * scale
-		text_x := x + 12.0 * scale
+		label_color := COLOR_CHROME_TEXT if has_query else COLOR_CHROME_TEXT_FAINT
+		text_h := FONT_CHROME_BODY * scale
+		text_x := x + 14.0 * scale
 		text_y := y + (bar_h - text_h) * 0.5
-		if has_query {
-			char_w := 7.5 * scale
-			if s_idx, e_idx, sel_active := text_input_selection_range(&search.input); sel_active {
-				sel_x := text_x + f32(s_idx) * char_w
-				sel_w := f32(e_idx - s_idx) * char_w
-				chrome_dl.ui_draw_rounded_rect(&cv.draw_list, {sel_x, text_y, sel_w, text_h}, {0.25, 0.45, 0.85, 0.45}, 2.0 * scale)
-			} else {
-				cur_x := text_x + f32(search.input.cursor) * char_w
-				chrome_dl.ui_draw_rect(&cv.draw_list, {cur_x, text_y + 1 * scale, 1.5 * scale, text_h - 2 * scale}, {0.35, 0.65, 1.0, 0.90})
-			}
+		if s_idx, e_idx, sel_active := text_input_selection_range(&search.input); has_query && sel_active {
+			sel_x := text_x + chrome_text_width(layout.metrics, query[:s_idx], text_h)
+			sel_w := chrome_text_width(layout.metrics, query[s_idx:e_idx], text_h)
+			chrome_dl.ui_draw_rounded_rect(&cv.draw_list, {sel_x, text_y, sel_w, text_h}, COLOR_CHROME_ACCENT_SOFT, 3.0 * scale)
+		} else {
+			cur_prefix := query[:clamp(search.input.cursor, 0, len(query))] if has_query else ""
+			cur_x := text_x + chrome_text_width(layout.metrics, cur_prefix, text_h)
+			chrome_dl.ui_draw_rect(&cv.draw_list, {cur_x, text_y + 1.0 * scale, 2.0 * scale, text_h - 2.0 * scale}, COLOR_CHROME_ACCENT)
 		}
 		chrome_dl.ui_draw_text(
 			&cv.draw_list,
-			{text_x, text_y, bar_w - 70.0 * scale, text_h},
+			{text_x, text_y, bar_w - 72.0 * scale, text_h},
 			label,
 			label_color,
 		)
 
 		status := "0/0" if len(query) == 0 else ("1/1" if search.has_match else "0/0")
-		status_color: [4]f32 = {0.55, 0.58, 0.66, 1.0} if !search.has_match else {0.45, 0.75, 0.55, 1.0}
+		status_h := FONT_CHROME_META * scale
+		status_w := chrome_text_width(layout.metrics, status, status_h)
+		status_color := COLOR_CHROME_SUCCESS if search.has_match && has_query else COLOR_CHROME_TEXT_MUTED
 		chrome_dl.ui_draw_text(
 			&cv.draw_list,
-			{x + bar_w - 52.0 * scale, y + (bar_h - text_h) * 0.5, 40.0 * scale, text_h},
+			{x + bar_w - 14.0 * scale - status_w, y + (bar_h - status_h) * 0.5, status_w + 2.0 * scale, status_h},
 			status,
 			status_color,
 		)
@@ -431,35 +325,10 @@ _cursor_for_command_center :: proc(cc: ^Command_Center_State, pt: [2]f32) -> (cu
 
 _cursor_for_tab_bar :: proc(layout: ^Layout_State, tabs: ^tabs_feat.Tabs_Manager, pt: [2]f32, sessions: ^sess_feat.Session_Registry = nil) -> (cursor.Mouse_Cursor, bool) {
 	if layout == nil do return .Default, false
-	g := tab_bar_geometry(layout, session_pill_width(layout, sessions))
-	if !g.interactive || pt.y < 0 || pt.y > (g.bar_h + g.offset_y) {
-		return .Default, false
-	}
-
-	tab_h := g.tab_h
-	tab_y := g.tab_y
-	tab_w := g.tab_w
-	tab_gap := g.tab_gap
-	tabs_x := g.tabs_x
-	btn_w := g.btn_w
-	btn_ov_x := g.overview_x
-	btn_plus_x := g.new_tab_x
-	tabs_end_x := g.tabs_end_x
-
-	if tab_bar_point_in(g.pill_rect, pt.x, pt.y) do return .Pointer, true
-	if pt.x >= btn_ov_x && pt.x <= btn_ov_x + btn_w && pt.y >= tab_y && pt.y <= tab_y + tab_h do return .Pointer, true
-	if pt.x >= btn_plus_x && pt.x <= btn_plus_x + btn_w && pt.y >= tab_y && pt.y <= tab_y + tab_h do return .Pointer, true
-	if tabs != nil {
-		for i in 0..<len(tabs.entries) {
-			tab_item_x := tabs_x + f32(i) * (tab_w + tab_gap) - layout.tab_scroll_offset
-			draw_x := max(tabs_x, tab_item_x)
-			draw_r := min(tabs_end_x, tab_item_x + tab_w)
-			if draw_x < draw_r && pt.x >= draw_x && pt.x <= draw_r && pt.y >= tab_y && pt.y <= tab_y + tab_h {
-				return .Pointer, true
-			}
-		}
-	}
-	return .Default, true
+	tab_count := len(tabs.entries) if tabs != nil else 0
+	hover, in_bar := tab_bar_hit_test(layout, tab_count, session_pill_width(layout, sessions), pt.x, pt.y)
+	if !in_bar do return .Default, false
+	return (.Pointer if hover.kind != .None else .Default), true
 }
 
 // chrome_view_cursor determines the mouse cursor shape for all chrome elements.

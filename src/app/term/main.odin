@@ -168,7 +168,10 @@ app_apply_custom_font :: proc(app: ^Term_App, font_path: string, size: f32) -> b
 
 	plat_font.glyph_atlas_clear_and_prewarm(&app.text_atlas.glyph_atlas)
 	_ = plat_font.text_atlas_upload(&app.text_atlas, app.device, app.queue)
-	chrome_view_set_atlas(&app.chrome_view, app.text_atlas.glyph_view, app.text_atlas.cell_w, app.text_atlas.cell_h)
+	app.layout.metrics.ui_cell_w = app.text_atlas.ui_cell_w
+	app.layout.metrics.ui_cell_h = app.text_atlas.ui_cell_h
+	app.layout.metrics.ui_atlas = &app.text_atlas.ui_glyph_atlas.atlas
+	chrome_view_set_atlas(&app.chrome_view, app.text_atlas.ui_glyph_view, app.text_atlas.ui_cell_w, app.text_atlas.ui_cell_h, &app.text_atlas.ui_glyph_atlas.atlas.slots)
 
 	for &pane in app.mux.panes {
 		if pane.kind == .Terminal && pane.session != nil {
@@ -222,10 +225,13 @@ app_init :: proc(app: ^Term_App, opts: Cli_Options = {}) -> bool {
 	if !plat_font.text_atlas_upload(&app.text_atlas, app.device, app.queue) do return false
 	app.layout.metrics.cell_w = app.text_atlas.cell_w
 	app.layout.metrics.cell_h = app.text_atlas.cell_h
+	app.layout.metrics.ui_cell_w = app.text_atlas.ui_cell_w
+	app.layout.metrics.ui_cell_h = app.text_atlas.ui_cell_h
+	app.layout.metrics.ui_atlas = &app.text_atlas.ui_glyph_atlas.atlas
 
 	if !terminal_view_init(&app.term_view, app.device, app.queue, app.format, app.text_atlas.glyph_view, app.text_atlas.emoji_view) do return false
 	if !chrome_view_init(&app.chrome_view, app.device, app.queue, app.format, u32(app.layout.screen_w), u32(app.layout.screen_h)) do return false
-	chrome_view_set_atlas(&app.chrome_view, app.text_atlas.glyph_view, app.text_atlas.cell_w, app.text_atlas.cell_h)
+	chrome_view_set_atlas(&app.chrome_view, app.text_atlas.ui_glyph_view, app.text_atlas.ui_cell_w, app.text_atlas.ui_cell_h, &app.text_atlas.ui_glyph_atlas.atlas.slots)
 	if !composer_view_init(&app.composer, app.device, app.queue, app.format, app.layout.screen_w, app.layout.screen_h) do return false
 
 	mouse_init(&app.mouse, app.layout.metrics.cell_w, app.layout.metrics.cell_h, app.layout.metrics.pane_pad_x, app.layout.metrics.pane_pad_y)
@@ -342,9 +348,12 @@ app_apply_font_size :: proc(app: ^Term_App, new_size: f32) {
 	if !plat_font.text_atlas_set_pixel_size(&app.text_atlas, font_size, app.device, app.queue) do return
 	app.layout.metrics.cell_w = app.text_atlas.cell_w
 	app.layout.metrics.cell_h = app.text_atlas.cell_h
+	app.layout.metrics.ui_cell_w = app.text_atlas.ui_cell_w
+	app.layout.metrics.ui_cell_h = app.text_atlas.ui_cell_h
+	app.layout.metrics.ui_atlas = &app.text_atlas.ui_glyph_atlas.atlas
 	app.mouse.cell_w = app.text_atlas.cell_w
 	app.mouse.cell_h = app.text_atlas.cell_h
-	chrome_view_set_atlas(&app.chrome_view, app.text_atlas.glyph_view, app.text_atlas.cell_w, app.text_atlas.cell_h)
+	chrome_view_set_atlas(&app.chrome_view, app.text_atlas.ui_glyph_view, app.text_atlas.ui_cell_w, app.text_atlas.ui_cell_h, &app.text_atlas.ui_glyph_atlas.atlas.slots)
 
 	for &pane in app.mux.panes {
 		if pane.kind == .Terminal && pane.session != nil {

@@ -19,18 +19,27 @@ session_pill_width :: proc(layout: ^Layout_State, reg: ^sess_feat.Session_Regist
 	if layout == nil || sess_feat.session_registry_count(reg) == 0 do return 0
 	s := layout.metrics.scale
 	buf: [64]u8
-	return (9 + 6 + 6 + 10) * s + chrome_text_width(layout.metrics, session_pill_label(reg, buf[:]), 11.5 * s)
+	return (10 + 6 + 6 + 11) * s + chrome_text_width(layout.metrics, session_pill_label(reg, buf[:]), FONT_CHROME_META * s)
 }
 
 // _pill_colors picks bg/dot/text tokens: attention → warning, any busy → accent.
 @(private = "file")
-_pill_colors :: proc(reg: ^sess_feat.Session_Registry, active: bool) -> (bg, dot, text: [4]f32) {
+_pill_colors :: proc(reg: ^sess_feat.Session_Registry, active, hovered: bool) -> (bg, border, dot, text: [4]f32) {
 	attention := sess_feat.session_registry_attention_count(reg)
 	busy := false
 	if reg != nil do for entry in reg.entries do busy ||= entry.state == .Busy
-	bg = COLOR_TAB_ACTIVE_BG if active else (COLOR_CHROME_ACCENT_SOFT if attention > 0 else COLOR_TAB_INACTIVE_BG)
+	if active {
+		bg = COLOR_TAB_ACTIVE_BG
+		border = COLOR_TAB_ACTIVE_BORDER
+	} else if attention > 0 {
+		bg = COLOR_CHROME_ACCENT_SOFT
+		border = COLOR_TAB_ACTIVE_BORDER if hovered else COLOR_CHROME_BORDER
+	} else {
+		bg = COLOR_TAB_HOVER_BG if hovered else COLOR_TAB_INACTIVE_BG
+		border = COLOR_TAB_ACTIVE_BORDER if hovered else COLOR_CHROME_BORDER
+	}
 	dot = COLOR_CHROME_WARNING if attention > 0 else (COLOR_CHROME_ACCENT if busy else COLOR_CHROME_TEXT_FAINT)
-	text = COLOR_CHROME_TEXT if attention > 0 else COLOR_CHROME_TEXT_MUTED
+	text = COLOR_CHROME_TEXT if (attention > 0 || active || hovered) else COLOR_CHROME_TEXT_MUTED
 	return
 }
 
@@ -39,13 +48,14 @@ session_pill_emit :: proc(dl: ^chrome_dl.Ui_Draw_List, layout: ^Layout_State, g:
 	label := session_pill_label(reg, make([]u8, 64, context.temp_allocator)) // temp: lives until the frame renders
 	if len(label) == 0 do return
 	s, r := layout.metrics.scale, g.pill_rect
-	bg, dot, text := _pill_colors(reg, active)
+	hovered := layout.tab_bar_hover.kind == .Session_Pill
+	bg, border, dot, text := _pill_colors(reg, active, hovered)
 	radius := g.tab_h * 0.5
 	chrome_dl.ui_draw_rounded_rect(dl, r, chrome_with_alpha(bg, g.alpha), radius)
-	chrome_dl.ui_draw_border(dl, r, chrome_with_alpha(COLOR_CHROME_BORDER, g.alpha), radius, {}, 1.0 * s)
+	chrome_dl.ui_draw_border(dl, r, chrome_with_alpha(border, g.alpha), radius, {}, 1.0 * s)
 	dot_size := 6.0 * s
-	chrome_dl.ui_draw_rounded_rect(dl, {r[0] + 9.0 * s, r[1] + (r[3] - dot_size) * 0.5, dot_size, dot_size}, chrome_with_alpha(dot, g.alpha), 3.0 * s)
-	text_h := 11.5 * s
-	text_rect := [4]f32{r[0] + 21.0 * s, r[1] + (r[3] - text_h) * 0.5, chrome_text_width(layout.metrics, label, text_h), text_h}
+	chrome_dl.ui_draw_rounded_rect(dl, {r[0] + 10.0 * s, r[1] + (r[3] - dot_size) * 0.5, dot_size, dot_size}, chrome_with_alpha(dot, g.alpha), 3.0 * s)
+	text_h := FONT_CHROME_META * s
+	text_rect := [4]f32{r[0] + 22.0 * s, r[1] + (r[3] - text_h) * 0.5, chrome_text_width(layout.metrics, label, text_h) + 2.0 * s, text_h}
 	chrome_dl.ui_draw_text(dl, text_rect, label, chrome_with_alpha(text, g.alpha))
 }

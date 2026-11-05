@@ -50,6 +50,11 @@ app_handle_window_resize :: proc(app: ^Term_App) -> bool {
 		app.layout.metrics.cell_w = app.text_atlas.cell_w
 		app.layout.metrics.cell_h = app.text_atlas.cell_h
 	}
+	if app.text_atlas.ui_cell_w > 0 {
+		app.layout.metrics.ui_cell_w = app.text_atlas.ui_cell_w
+		app.layout.metrics.ui_cell_h = app.text_atlas.ui_cell_h
+		app.layout.metrics.ui_atlas = &app.text_atlas.ui_glyph_atlas.atlas
+	}
 
 	target_w := f32(app.window.pixel_w)
 	target_h := f32(app.window.pixel_h)
@@ -135,63 +140,26 @@ app_handle_mouse_button_down :: proc(app: ^Term_App, ev: sdl3.MouseButtonEvent) 
 	}
 
 	// Click on tab pills, buttons, or free space in tab bar
-	sessions := &app.session_reg
-	g := tab_bar_geometry(&app.layout, session_pill_width(&app.layout, sessions))
-	scale := app.layout.metrics.scale
-	tab_bar_interactive := g.interactive
-	if tab_bar_interactive && my >= 0 && my <= (g.bar_h + g.offset_y) {
-		tab_y := g.tab_y
-		tab_h := g.tab_h
-		tabs_x := g.tabs_x
-		tab_w := g.tab_w
-		tab_gap := g.tab_gap
-		tabs_end_x := g.tabs_end_x
-		btn_ov_x := g.overview_x
-		btn_plus_x := g.new_tab_x
-		btn_w := g.btn_w
-
-		// 1. Click on [⊞] Show All Tabs button
-		if mx >= btn_ov_x && mx <= btn_ov_x + btn_w && my >= tab_y && my <= tab_y + tab_h {
+	pill_w := session_pill_width(&app.layout, &app.session_reg)
+	if hover, in_bar := tab_bar_hit_test(&app.layout, len(app.tabs_mgr.entries), pill_w, mx, my); in_bar {
+		switch hover.kind {
+		case .Overview:
 			app_execute_action(app, .Tab_Overview_Toggle)
-			return
-		}
-
-		// 2. Click on [+] new tab button
-		if mx >= btn_plus_x && mx <= btn_plus_x + btn_w && my >= tab_y && my <= tab_y + tab_h {
+		case .New_Tab:
 			app_execute_action(app, .Tab_New)
-			return
-		}
-
-		// Session pill
-		if tab_bar_point_in(g.pill_rect, mx, my) {
+		case .Session_Pill:
 			app_execute_action(app, .Sessions_Toggle)
-			return
-		}
-
-		// 3. Click on tab pills & close buttons within visible bounds
-		for i in 0..<len(app.tabs_mgr.entries) {
-			tab_item_x := tabs_x + f32(i) * (tab_w + tab_gap) - app.layout.tab_scroll_offset
-			draw_x := max(tabs_x, tab_item_x)
-			draw_r := min(tabs_end_x, tab_item_x + tab_w)
-			if draw_x >= draw_r do continue
-
-			if mx >= draw_x && mx <= draw_r && my >= tab_y && my <= tab_y + tab_h {
-				if mx >= tab_item_x + tab_w - 24.0 * scale {
-					app_close_tab(app, i)
-				} else {
-					app_select_tab(app, i)
-				}
-				return
+		case .Tab_Close:
+			app_close_tab(app, hover.tab_idx)
+			new_hover, _ := tab_bar_hit_test(&app.layout, len(app.tabs_mgr.entries), session_pill_width(&app.layout, &app.session_reg), mx, my)
+			app.layout.tab_bar_hover = new_hover
+		case .Tab:
+			app_select_tab(app, hover.tab_idx)
+		case .None:
+			if ev.clicks == 2 {
+				plat_win.platform_toggle_maximize(app.window.handle)
 			}
 		}
-
-		// 4. Double click on free space in title bar -> Toggle Maximize / Zoom
-		if ev.clicks == 2 {
-			plat_win.platform_toggle_maximize(app.window.handle)
-			return
-		}
-
-		// Tab bar click absorbed, prevent fallthrough into panes
 		return
 	}
 
@@ -308,7 +276,11 @@ app_handle_mouse_wheel :: proc(app: ^Term_App, ev: sdl3.MouseWheelEvent) {
 		scale := app.layout.metrics.scale
 		wheel_delta := (ev.x != 0.0 ? ev.x : -ev.y) * 16.0 * scale
 		app.layout.tab_scroll_offset += wheel_delta
-		layout_tab_bar_clamp_scroll(&app.layout, len(app.tabs_mgr.entries), 80.0 * scale)
+		pill_w := session_pill_width(&app.layout, &app.session_reg)
+		layout_tab_bar_clamp_scroll(&app.layout, len(app.tabs_mgr.entries), pill_w)
+		new_hover, _ := tab_bar_hit_test(&app.layout, len(app.tabs_mgr.entries), pill_w, mx, my)
+		app.layout.tab_bar_hover = new_hover
+		chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
 		app.layout.tab_bar_reveal_timer = 2.0
 		return
 	}
@@ -665,6 +637,11 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 			if app.mouse.hover_link.active {
 				ui_dirty = true
 			}
+			if app.layout.tab_bar_hover.kind != .None {
+				app.layout.tab_bar_hover = {kind = .None, tab_idx = -1}
+				chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
+				ui_dirty = true
+			}
 			app.mouse.hover_link = {}
 			app_set_mouse_cursor(.Default)
 		case .WINDOW_PIXEL_SIZE_CHANGED, .WINDOW_RESIZED, .WINDOW_EXPOSED, .WINDOW_LEAVE_FULLSCREEN, .WINDOW_ENTER_FULLSCREEN, .WINDOW_RESTORED:
@@ -684,6 +661,11 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 			}
 
 			if app.quit.dialog.visible {
+				if app.layout.tab_bar_hover.kind != .None {
+					app.layout.tab_bar_hover = {kind = .None, tab_idx = -1}
+					chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
+					ui_dirty = true
+				}
 				if quit_dialog_handle_motion(app, mx, my) {
 					chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
 					ui_dirty = true
@@ -692,12 +674,25 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 				continue
 			}
 			if app.cmd_center.visible {
+				if app.layout.tab_bar_hover.kind != .None {
+					app.layout.tab_bar_hover = {kind = .None, tab_idx = -1}
+					chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
+					ui_dirty = true
+				}
 				if command_center_handle_motion(&app.cmd_center, mx, my) {
 					chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
 					ui_dirty = true
 				}
 				if !sdl3.PollEvent(&ev) do break
 				continue
+			}
+
+			new_tb_hover, in_tb := tab_bar_hit_test(&app.layout, len(app.tabs_mgr.entries), session_pill_width(&app.layout, &app.session_reg), mx, my)
+			app.layout.tab_bar_hovered = in_tb
+			if new_tb_hover != app.layout.tab_bar_hover {
+				app.layout.tab_bar_hover = new_tb_hover
+				chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
+				ui_dirty = true
 			}
 
 			// A0. Dragging the scrollback thumb

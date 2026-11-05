@@ -99,7 +99,7 @@ app_select_tab :: proc(app: ^Term_App, idx: int) {
 		}
 	}
 
-	layout_tab_bar_ensure_visible(&app.layout, idx, len(app.tabs_mgr.entries), 80.0 * app.layout.metrics.scale)
+	layout_tab_bar_ensure_visible(&app.layout, idx, len(app.tabs_mgr.entries), session_pill_width(&app.layout, &app.session_reg))
 	chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
 	app.layout.tab_bar_reveal_timer = 2.0
 }
@@ -139,7 +139,7 @@ app_close_tab :: proc(app: ^Term_App, tab_idx: int) {
 		}
 	}
 
-	layout_tab_bar_clamp_scroll(&app.layout, len(app.tabs_mgr.entries), 80.0 * app.layout.metrics.scale)
+	layout_tab_bar_clamp_scroll(&app.layout, len(app.tabs_mgr.entries), session_pill_width(&app.layout, &app.session_reg))
 	chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
 	app.layout.tab_bar_reveal_timer = 2.0
 }

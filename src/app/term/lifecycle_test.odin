@@ -3,6 +3,7 @@ package term
 import "core:testing"
 import "core:time"
 import "vendor:sdl3"
+import chrome_dl "../../core/chrome/draw_list"
 
 @(test)
 test_resolve_role :: proc(t: ^testing.T) {
@@ -63,4 +64,36 @@ test_wait_timeout_follows_quit_wait :: proc(t: ^testing.T) {
 	app.quit.due_ns = time.tick_now()._nsec + 200 * 1_000_000
 	ms := app_compute_wait_timeout_ms(app, false)
 	testing.expect(t, ms > 0 && ms <= 201, "parks only until the quit wait ends")
+}
+
+@(test)
+test_quit_dialog_emit_bounds_and_buttons :: proc(t: ^testing.T) {
+	layout: Layout_State
+	layout_init(&layout, 2.0, 8, 8, 1.0)
+	layout.screen_w = 2560
+	layout.screen_h = 1600
+
+	d: Quit_Dialog_State
+	quit_dialog_open(&d)
+	_ = quit_dialog_update(&d, 1.0)
+
+	cands := [2]Quit_Candidate{{id = 1, keep = true}, {id = 2, keep = false}}
+	dl: chrome_dl.Ui_Draw_List
+	chrome_dl.ui_draw_list_init(&dl)
+	defer chrome_dl.ui_draw_list_destroy(&dl)
+
+	quit_dialog_emit_draw_list(&d, cands[:], &dl, &layout)
+	testing.expect_value(t, d.row_count, 2)
+	for i in 0..<d.row_count {
+		r := d.row_rects[i]
+		testing.expect(t, r[0] >= d.modal_rect[0] && r[1] >= d.modal_rect[1] &&
+			r[0]+r[2] <= d.modal_rect[0]+d.modal_rect[2] &&
+			r[1]+r[3] <= d.modal_rect[1]+d.modal_rect[3], "quit row inside modal")
+	}
+	for b in Quit_Button {
+		br := d.button_rects[b]
+		testing.expect(t, br[2] > 0 && br[0] >= d.modal_rect[0] && br[0]+br[2] <= d.modal_rect[0]+d.modal_rect[2], "button inside modal")
+	}
+	testing.expect(t, d.button_rects[.Kill_All][0]+d.button_rects[.Kill_All][2] <= d.button_rects[.Keep_All][0], "Kill_All left of Keep_All")
+	testing.expect(t, d.button_rects[.Keep_All][0]+d.button_rects[.Keep_All][2] <= d.button_rects[.Quit][0], "Keep_All left of Quit")
 }

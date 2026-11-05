@@ -14,6 +14,7 @@ Layout_State :: struct {
 	mouse_y:              f32,
 	is_fullscreen:        bool,
 	tab_bar_hovered:      bool,
+	tab_bar_hover:        Tab_Bar_Hover,
 	tab_bar_force:        bool,
 	tab_bar_reveal_timer: f32, // Seconds to keep tab bar visible after an action in fullscreen
 	tab_bar_anim_t:       f32, // 0.0 (hidden) .. 1.0 (fully visible)
@@ -29,54 +30,53 @@ layout_init :: proc(l: ^Layout_State, scale: f32 = 1.0, pad_x: f32 = DEFAULT_PAN
 	l.mouse_y = 100.0 * l.metrics.scale
 	l.is_fullscreen = false
 	l.tab_bar_hovered = false
+	l.tab_bar_hover = {kind = .None, tab_idx = -1}
 	l.tab_bar_force = false
 	l.tab_bar_reveal_timer = 0.0
 	l.tab_bar_anim_t = 1.0
 	l.tab_scroll_offset = 0.0
 }
 
-layout_tab_bar_clamp_scroll :: proc(l: ^Layout_State, tab_count: int, right_margin: f32) {
+layout_tab_bar_clamp_scroll :: proc(l: ^Layout_State, tab_count: int, pill_w: f32 = 0) {
 	if l == nil do return
-	scale := l.metrics.scale
-	tab_w: f32 = 140.0 * scale
-	tab_gap: f32 = 6.0 * scale
-	tabs_x := (12.0 * scale) if l.is_fullscreen else (l.metrics.traffic_clearance + 6.0 * scale)
-
-	total_tabs_w := f32(tab_count) * (tab_w + tab_gap)
-	avail_w := max(50.0 * scale, l.screen_w - tabs_x - right_margin)
+	g := tab_bar_geometry(l, pill_w)
+	total_tabs_w := f32(tab_count) * g.tab_w + f32(max(0, tab_count - 1)) * g.tab_gap
+	avail_w := max(40.0 * l.metrics.scale, g.tabs_end_x - g.tabs_x)
 	max_scroll := max(0.0, total_tabs_w - avail_w)
 	l.tab_scroll_offset = clamp(l.tab_scroll_offset, 0.0, max_scroll)
 }
 
-layout_tab_bar_ensure_visible :: proc(l: ^Layout_State, tab_idx: int, tab_count: int, right_margin: f32) {
+layout_tab_bar_ensure_visible :: proc(l: ^Layout_State, tab_idx: int, tab_count: int, pill_w: f32 = 0) {
 	if l == nil || tab_idx < 0 do return
-	scale := l.metrics.scale
-	tab_w: f32 = 140.0 * scale
-	tab_gap: f32 = 6.0 * scale
-	tabs_x := (12.0 * scale) if l.is_fullscreen else (l.metrics.traffic_clearance + 6.0 * scale)
-
-	tab_left := f32(tab_idx) * (tab_w + tab_gap)
-	tab_right := tab_left + tab_w
-	avail_w := max(50.0 * scale, l.screen_w - tabs_x - right_margin)
+	g := tab_bar_geometry(l, pill_w)
+	tab_left := f32(tab_idx) * (g.tab_w + g.tab_gap)
+	tab_right := tab_left + g.tab_w
+	avail_w := max(40.0 * l.metrics.scale, g.tabs_end_x - g.tabs_x)
 
 	if tab_left < l.tab_scroll_offset {
 		l.tab_scroll_offset = tab_left
 	} else if tab_right > l.tab_scroll_offset + avail_w {
 		l.tab_scroll_offset = tab_right - avail_w
 	}
-	layout_tab_bar_clamp_scroll(l, tab_count, right_margin)
+	layout_tab_bar_clamp_scroll(l, tab_count, pill_w)
 }
 
 layout_set_scale :: proc(l: ^Layout_State, scale: f32) {
 	if l == nil do return
 	prev_cell_w := l.metrics.cell_w
 	prev_cell_h := l.metrics.cell_h
+	prev_ui_cell_w := l.metrics.ui_cell_w
+	prev_ui_cell_h := l.metrics.ui_cell_h
+	prev_ui_atlas := l.metrics.ui_atlas
 	prev_pad_x := l.metrics.pane_pad_x / l.metrics.scale if l.metrics.scale > 0 else DEFAULT_PANE_PAD_X
 	prev_pad_y := l.metrics.pane_pad_y / l.metrics.scale if l.metrics.scale > 0 else DEFAULT_PANE_PAD_Y
 	prev_pane_opacity := l.metrics.pane_opacity
 	l.metrics = visual_metrics_make(scale, prev_pad_x, prev_pad_y, prev_pane_opacity)
 	if prev_cell_w > 0 do l.metrics.cell_w = prev_cell_w
 	if prev_cell_h > 0 do l.metrics.cell_h = prev_cell_h
+	if prev_ui_cell_w > 0 do l.metrics.ui_cell_w = prev_ui_cell_w
+	if prev_ui_cell_h > 0 do l.metrics.ui_cell_h = prev_ui_cell_h
+	if prev_ui_atlas != nil do l.metrics.ui_atlas = prev_ui_atlas
 }
 
 layout_update :: proc(l: ^Layout_State, dt: f32) {
