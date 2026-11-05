@@ -107,11 +107,23 @@ darwin_query_font_by_name :: proc(name: string, allocator := context.temp_alloca
 	return _darwin_desc_to_path(desc, allocator)
 }
 
-darwin_query_os_fixed_pitch_font :: proc(allocator := context.temp_allocator) -> (path: string, ok: bool) {
-	// kCTFontUIFontUserFixedPitch = 1
-	font := CTFontCreateUIFontForLanguage(1, 14.0, nil)
+@(private = "file")
+_darwin_ui_font_type :: proc(style: Font_Style_Class) -> u32 {
+	// kCTFontUIFontSystem = 0, kCTFontUIFontUserFixedPitch = 1
+	return 0 if style == .Sans else 1
+}
+
+darwin_query_os_default_font :: proc(style: Font_Style_Class = .Mono, allocator := context.temp_allocator) -> (path: string, ok: bool) {
+	font := CTFontCreateUIFontForLanguage(_darwin_ui_font_type(style), 14.0, nil)
 	if font == nil do return "", false
 	defer CFRelease(CFTypeRef(font))
+
+	if url := CTFontCopyAttribute(font, kCTFontURLAttribute); url != nil {
+		defer CFRelease(url)
+		if p, url_ok := _darwin_url_to_path(CFURLRef(url), allocator); url_ok {
+			return p, true
+		}
+	}
 
 	ps := CTFontCopyPostScriptName(font)
 	if ps == nil do return "", false
@@ -124,10 +136,14 @@ darwin_query_os_fixed_pitch_font :: proc(allocator := context.temp_allocator) ->
 	return _darwin_desc_to_path(desc, allocator)
 }
 
-darwin_query_os_cascade_fonts :: proc(max_count: int, allocator := context.temp_allocator) -> []string {
+darwin_query_os_fixed_pitch_font :: proc(allocator := context.temp_allocator) -> (path: string, ok: bool) {
+	return darwin_query_os_default_font(.Mono, allocator)
+}
+
+darwin_query_os_cascade_fonts :: proc(max_count: int, allocator := context.temp_allocator, style: Font_Style_Class = .Mono) -> []string {
 	if max_count <= 0 do return nil
 
-	font := CTFontCreateUIFontForLanguage(1, 14.0, nil)
+	font := CTFontCreateUIFontForLanguage(_darwin_ui_font_type(style), 14.0, nil)
 	if font == nil do return nil
 	defer CFRelease(CFTypeRef(font))
 
@@ -155,7 +171,7 @@ darwin_query_os_cascade_fonts :: proc(max_count: int, allocator := context.temp_
 
 // darwin_query_font_for_codepoint asks CoreText's per-character fallback which
 // installed font covers `cp`, rejecting the LastResort placeholder font.
-darwin_query_font_for_codepoint :: proc(cp: u32, allocator := context.temp_allocator) -> (path: string, ok: bool) {
+darwin_query_font_for_codepoint :: proc(cp: u32, allocator := context.temp_allocator, style: Font_Style_Class = .Mono) -> (path: string, ok: bool) {
 	units: [2]u16
 	n := 1
 	if cp >= 0x10000 {
@@ -169,7 +185,7 @@ darwin_query_font_for_codepoint :: proc(cp: u32, allocator := context.temp_alloc
 	if str == nil do return "", false
 	defer CFRelease(CFTypeRef(str))
 
-	base := CTFontCreateUIFontForLanguage(1, 14.0, nil)
+	base := CTFontCreateUIFontForLanguage(_darwin_ui_font_type(style), 14.0, nil)
 	if base == nil do return "", false
 	defer CFRelease(CFTypeRef(base))
 

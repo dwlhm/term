@@ -42,6 +42,7 @@ _glyph_atlas_prewarm_pinned :: proc(gam: ^Glyph_Atlas_Manager) {
 
 		draw_w: f32 = cell_w
 		offset_x: f32 = 0.0
+		advance: f32 = cell_w
 
 		if fc != nil && font_has_codepoint(fc, cp) {
 			draw_w, offset_x = font_rasterize_codepoint(
@@ -49,6 +50,9 @@ _glyph_atlas_prewarm_pinned :: proc(gam: ^Glyph_Atlas_Manager) {
 				core_atlas.ATLAS_WIDTH, int(px), int(py),
 				core_atlas.ATLAS_GLYPH_SIZE, core_atlas.ATLAS_GLYPH_SIZE,
 			)
+			if fc.style_class == .Sans {
+				advance = draw_w
+			}
 		} else if cp > 0x20 {
 			_draw_fallback_box(gam.atlas.pixels, core_atlas.ATLAS_WIDTH, int(px), int(py), cp)
 		}
@@ -60,7 +64,7 @@ _glyph_atlas_prewarm_pinned :: proc(gam: ^Glyph_Atlas_Manager) {
 			v1       = v1,
 			draw_w   = draw_w,
 			offset_x = offset_x,
-			advance  = cell_w,
+			advance  = advance,
 			valid    = true,
 		}
 	}
@@ -160,6 +164,7 @@ _glyph_atlas_prewarm_pinned :: proc(gam: ^Glyph_Atlas_Manager) {
 
 		draw_w: f32 = cell_w
 		offset_x: f32 = 0.0
+		advance: f32 = cell_w
 
 		if fc != nil && font_has_codepoint(fc, u32(cp)) {
 			draw_w, offset_x = font_rasterize_codepoint(
@@ -167,6 +172,9 @@ _glyph_atlas_prewarm_pinned :: proc(gam: ^Glyph_Atlas_Manager) {
 				core_atlas.ATLAS_WIDTH, int(px), int(py),
 				core_atlas.ATLAS_GLYPH_SIZE, core_atlas.ATLAS_GLYPH_SIZE,
 			)
+			if fc.style_class == .Sans {
+				advance = draw_w
+			}
 		}
 		u0, v0, u1, v1 := core_atlas.atlas_slot_uv(slot, draw_w, cell_h)
 		gam.atlas.slots[slot] = core_atlas.Atlas_Slot{
@@ -176,7 +184,7 @@ _glyph_atlas_prewarm_pinned :: proc(gam: ^Glyph_Atlas_Manager) {
 			v1       = v1,
 			draw_w   = draw_w,
 			offset_x = offset_x,
-			advance  = cell_w,
+			advance  = advance,
 			valid    = true,
 		}
 	}
@@ -274,25 +282,7 @@ glyph_atlas_drain_async :: proc(gam: ^Glyph_Atlas_Manager) -> (drained: bool) {
 
 // glyph_atlas_lookup_slot performs O(1) static range check for pinned glyphs.
 glyph_atlas_lookup_slot :: proc(cp: rune) -> (slot: u32, ok: bool) {
-	u := u32(cp)
-	if u >= 0x20 && u <= 0x7E {
-		return u32(core_atlas.PINNED_ASCII_BASE + (u - 0x20)), true
-	}
-	if u >= 0x2500 && u <= 0x257F {
-		return u32(core_atlas.PINNED_BOX_BASE + (u - 0x2500)), true
-	}
-	if u >= 0x2580 && u <= 0x259F {
-		return u32(core_atlas.PINNED_BLOCK_BASE + (u - 0x2580)), true
-	}
-	if u >= 0xE0B0 && u <= 0xE0B3 {
-		return u32(core_atlas.PINNED_POWERLINE_BASE + (u - 0xE0B0)), true
-	}
-	for p_cp, idx in core_atlas.PINNED_UI_CODEPOINTS {
-		if cp == p_cp {
-			return u32(core_atlas.PINNED_UI_BASE + idx), true
-		}
-	}
-	return 0, false
+	return core_atlas.atlas_lookup_pinned_slot(cp)
 }
 
 // glyph_atlas_get_or_rasterize looks up any codepoint (ASCII, box, block, nerd font, braille, emoji, unicode)

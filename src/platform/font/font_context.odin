@@ -11,6 +11,7 @@ import "core:sync"
 import uw "../../core/unicode_width"
 
 FONT_DISCOVERY_PATHS := []string{
+	"assets/fonts/GeistMonoNerdFont-Regular.otf",
 	"assets/fonts/MapleMono-NF-Regular.ttf",
 	"assets/fonts/MapleMono-Regular.ttf",
 	"assets/fonts/SymbolsNerdFontMono-Regular.ttf",
@@ -20,6 +21,12 @@ FONT_DISCOVERY_PATHS := []string{
 	"/System/Library/Fonts/Menlo.ttc",
 	"/System/Library/Fonts/Monaco.ttf",
 	"/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+}
+
+UI_FONT_DISCOVERY_PATHS := []string{
+	"assets/fonts/Geist-Regular.ttf",
+	"/System/Library/Fonts/SFNS.ttf",
+	"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
 }
 
 MAX_FALLBACKS :: 32
@@ -33,9 +40,17 @@ FALLBACK_DISCOVERY_PATHS := []string{
 	"/Library/Fonts/Arial Unicode.ttf",
 }
 
+UI_FALLBACK_DISCOVERY_PATHS := []string{
+	"assets/fonts/SymbolsNerdFontMono-Regular.ttf",
+	"/System/Library/Fonts/SFNS.ttf",
+	"/System/Library/Fonts/Apple Symbols.ttf",
+	"/Library/Fonts/Arial Unicode.ttf",
+}
+
 Font_Context :: struct {
 	rasterizer:          Font_Rasterizer,
 	has_font:            bool,
+	style_class:         Font_Style_Class,
 	fallbacks:           [MAX_FALLBACKS]Font_Rasterizer,
 	fallback_paths:      [MAX_FALLBACKS]string,
 	fallback_count:      int,
@@ -89,16 +104,18 @@ resolve_font_path :: proc(path: string, allocator := context.temp_allocator) -> 
 	return "", false
 }
 
-font_context_init :: proc(fc: ^Font_Context, pixel_size: f32 = 32.0) -> bool {
+font_context_init :: proc(fc: ^Font_Context, pixel_size: f32 = 32.0, style_class: Font_Style_Class = .Mono) -> bool {
 	if fc == nil do return false
 	fc.pixel_size = pixel_size
+	fc.style_class = style_class
 	fc.has_font = false
 	fc.active_path = ""
 	fc.fallback_count = 0
 	fc.miss_cache = {}
 
 	// 1. Discover Primary Font (Priority A: Bundled / User configured font)
-	for p in FONT_DISCOVERY_PATHS {
+	primary_paths := UI_FONT_DISCOVERY_PATHS if style_class == .Sans else FONT_DISCOVERY_PATHS
+	for p in primary_paths {
 		if path, ok := resolve_font_path(p, context.temp_allocator); ok {
 			err: Font_Error
 			if font_rasterizer_init(&fc.rasterizer, path, pixel_size, &err) {
@@ -109,9 +126,9 @@ font_context_init :: proc(fc: ^Font_Context, pixel_size: f32 = 32.0) -> bool {
 		}
 	}
 
-	// Priority B: OS default fixed-pitch font (Menlo, SF Mono, etc.)
+	// Priority B: OS default font (.Mono fixed-pitch or .Sans system UI)
 	if !fc.has_font {
-		if os_font, ok := platform_query_os_fixed_pitch_font(context.temp_allocator); ok {
+		if os_font, ok := platform_query_os_default_font(style_class, context.temp_allocator); ok {
 			err: Font_Error
 			if font_rasterizer_init(&fc.rasterizer, os_font, pixel_size, &err) {
 				fc.has_font = true
@@ -125,17 +142,21 @@ font_context_init :: proc(fc: ^Font_Context, pixel_size: f32 = 32.0) -> bool {
 	// Calibrate reference cap-height and baseline
 	fc.primary_cap_px, fc.primary_baseline_px = _calibrate_reference(&fc.rasterizer)
 
-	// 2. Discover Fallback Fonts (Priority A: Bundled symbol / nerd font)
-	for p in FALLBACK_DISCOVERY_PATHS {
+	// 2. Discover Fallback Fonts (Priority A: Bundled symbol / nerd font & OS defaults)
+	fallback_paths := UI_FALLBACK_DISCOVERY_PATHS if style_class == .Sans else FALLBACK_DISCOVERY_PATHS
+	for p in fallback_paths {
 		if path, ok := resolve_font_path(p, context.temp_allocator); ok {
 			_try_append_fallback(fc, path, pixel_size)
 		}
+	}
+	if os_fallback, ok := platform_query_os_default_font(style_class, context.temp_allocator); ok {
+		_try_append_fallback(fc, os_fallback, pixel_size)
 	}
 
 	// Priority B: Dynamic Operating System cascade list (Arabic, CJK, etc.)
 	needed := FALLBACK_INIT_LIMIT - fc.fallback_count
 	if needed > 0 {
-		cascades := platform_query_os_cascade_fonts(needed, context.temp_allocator)
+		cascades := platform_query_os_cascade_fonts(needed, context.temp_allocator, style_class)
 		for path in cascades {
 			_try_append_fallback(fc, path, pixel_size)
 		}
@@ -275,8 +296,8 @@ _rasterize_fallback_fitted :: proc(
 		return gw, 0.0
 	}
 
-	// Scale so ink height matches normal text (~90% cell height)
-	target_h := max(f32(fc.primary_cap_px) * 1.25, f32(cell_h) * 0.90)
+	// Scale so ink height matches cap-height in .Sans UI, or ~90% cell height in .Mono terminal
+	target_h := f32(fc.primary_cap_px) if fc.style_class == .Sans else max(f32(fc.primary_cap_px) * 1.25, f32(cell_h) * 0.90)
 	size := r.metrics.pixel_size * target_h / f32(base_h)
 	size = min(size, r.metrics.pixel_size * ATLAS_FALLBACK_MAX_SCALE)
 
@@ -343,8 +364,15 @@ _rasterize_codepoint_locked :: proc(
 		if FT_Load_Glyph(fc.rasterizer.face, gid, FT_LOAD_RENDER | FT_LOAD_TARGET_NORMAL) == 0 {
 			w := int(slot.bitmap.width)
 			h := int(slot.bitmap.rows)
-			if w > target_w || h > cell_h {
+			max_fit_w := slot_w - 2 if fc.style_class == .Sans else target_w
+			if w > max_fit_w || h > cell_h {
 				return _rasterize_symbol_fitted(&fc.rasterizer, cp, dst_pixels, pitch, px, py, slot_w, slot_h, cell_w, cell_h, is_wide)
+			}
+			if fc.style_class == .Sans && !is_symbol_or_pua(cp) {
+				adv := max(math.ceil(f32(slot.advance.x) / 64.0), f32(max(0, int(slot.bitmap_left)) + w))
+				if adv <= 0 do adv = gw
+				font_rasterize_glyph_into(&fc.rasterizer, cp, dst_pixels, pitch, px, py, slot_w, slot_h)
+				return adv, 0.0
 			}
 		}
 		font_rasterize_glyph_into(&fc.rasterizer, cp, dst_pixels, pitch, px, py, slot_w, slot_h)

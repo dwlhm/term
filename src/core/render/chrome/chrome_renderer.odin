@@ -17,28 +17,6 @@ import "surface"
 import "batch"
 import "sdf"
 
-_chrome_lookup_pinned_slot :: #force_inline proc "contextless" (cp: rune) -> (slot: u32, ok: bool) {
-	u := u32(cp)
-	if u >= 0x20 && u <= 0x7E {
-		return u32(atlas.PINNED_ASCII_BASE + (u - 0x20)), true
-	}
-	if u >= 0x2500 && u <= 0x257F {
-		return u32(atlas.PINNED_BOX_BASE + (u - 0x2500)), true
-	}
-	if u >= 0x2580 && u <= 0x259F {
-		return u32(atlas.PINNED_BLOCK_BASE + (u - 0x2580)), true
-	}
-	if u >= 0xE0B0 && u <= 0xE0B3 {
-		return u32(atlas.PINNED_POWERLINE_BASE + (u - 0xE0B0)), true
-	}
-	for p_cp, idx in atlas.PINNED_UI_CODEPOINTS {
-		if cp == p_cp {
-			return u32(atlas.PINNED_UI_BASE + idx), true
-		}
-	}
-	return 0, false
-}
-
 Chrome_Renderer :: struct {
 	device:        contract.Gpu_Device,
 	queue:         contract.Gpu_Queue,
@@ -50,6 +28,7 @@ Chrome_Renderer :: struct {
 	sdf:           sdf.Chrome_Sdf_Pipeline,      // Strategy 3: SDF Vector Shader
 	atlas_cell_w:  f32,
 	atlas_cell_h:  f32,
+	atlas_slots:   ^[atlas.ATLAS_SLOT_COUNT]atlas.Atlas_Slot,
 	active_strat:  int,                          // 1: Cached, 2: Batch, 3: SDF
 	redraw_count:  u64,
 	cached_frames: u64,
@@ -102,10 +81,12 @@ chrome_renderer_set_atlas :: proc(
 	atlas_view: contract.Gpu_TextureView,
 	cell_w: f32 = 19.0,
 	cell_h: f32 = 43.0,
+	slots: ^[atlas.ATLAS_SLOT_COUNT]atlas.Atlas_Slot = nil,
 ) -> bool {
 	if r == nil || !r.available do return false
 	if cell_w > 0.0 do r.atlas_cell_w = cell_w
 	if cell_h > 0.0 do r.atlas_cell_h = cell_h
+	r.atlas_slots = slots
 	return batch.chrome_batch_set_atlas(&r.batch, atlas_view)
 }
 
@@ -248,25 +229,42 @@ chrome_renderer_encode :: proc(
 		case .Text_Run, .Icon:
 			if len(cmd.text) > 0 && cmd.rect[2] > 0.0 && cmd.rect[3] > 0.0 {
 				gh := cmd.rect[3]
-				gw := max(gh * glyph_aspect, 4.0)
+				scale := gh / cell_h
+				fallback_gw := max(gh * glyph_aspect, 4.0)
 				pen_x := cmd.rect[0]
 				max_x := cmd.rect[0] + cmd.rect[2]
+				is_bold := cmd.border_width > 0.0
 				for ch in cmd.text {
-					// 0.5 px slack: pen_x accumulates per glyph, so a run measured as
-					// n * advance must not lose its last glyph to float rounding.
-					if pen_x + gw > max_x + 0.5 do break
-					if ch > ' ' {
-						if slot, ok := _chrome_lookup_pinned_slot(ch); ok {
-							u0, v0, u1, v1 := atlas.atlas_slot_uv(slot, cell_w, cell_h)
-							batch.chrome_batch_push_uv_quad(
-								&r.batch,
-								{pen_x, cmd.rect[1], gw, gh},
-								{u0, v0, u1, v1},
-								cmd.color,
-							)
+					slot, ok := atlas.atlas_lookup_pinned_slot(ch)
+					adv := fallback_gw
+					quad_w := fallback_gw
+					u0, v0, u1, v1: f32
+					if ok {
+						if r.atlas_slots != nil && r.atlas_slots[slot].valid {
+							info := r.atlas_slots[slot]
+							adv = max(info.advance * scale, 1.0)
+							quad_w = max(info.draw_w * scale, 1.0)
+							u0, v0, u1, v1 = info.u0, info.v0, info.u1, info.v1
+						} else {
+							u0, v0, u1, v1 = atlas.atlas_slot_uv(slot, cell_w, cell_h)
 						}
 					}
-					pen_x += gw
+					// 0.5 px slack: pen_x accumulates per glyph, so a run measured as
+					// sum(advance) must not lose its last glyph to float rounding.
+					if pen_x + adv > max_x + 0.5 do break
+					if ch > ' ' && ok {
+						if is_bold {
+							v0 = -(v0 + 2.0)
+							v1 = -(v1 + 2.0)
+						}
+						batch.chrome_batch_push_uv_quad(
+							&r.batch,
+							{pen_x, cmd.rect[1], quad_w, gh},
+							{u0, v0, u1, v1},
+							cmd.color,
+						)
+					}
+					pen_x += adv
 				}
 			}
 		}

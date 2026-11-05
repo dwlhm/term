@@ -30,7 +30,7 @@ _discover_face_for_codepoint :: proc(fc: ^Font_Context, cp: u32) -> ^Font_Raster
 	slot := &fc.miss_cache[cp % FONT_MISS_CACHE_SIZE]
 	if slot^ == cp + 1 do return nil
 
-	path, ok := platform_query_font_for_codepoint(cp, context.allocator)
+	path, ok := platform_query_font_for_codepoint(cp, context.allocator, fc.style_class)
 	defer delete(path)
 	if ok && _try_append_fallback(fc, path, fc.pixel_size) {
 		face := &fc.fallbacks[fc.fallback_count - 1]

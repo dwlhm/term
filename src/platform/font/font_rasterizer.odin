@@ -153,7 +153,7 @@ font_rasterizer_init :: proc(
 
 	// Monospace cell width probe
 	advance_px: f32 = 0
-	sample_runes := []rune{'M', 'W', 'm', '0', 'A', ' ', 0x2500, 0xE0B0, 0xF179, 0xF07B}
+	sample_runes := []rune{'M', 'W', 'm', '0', 'A', ' ', 0x2500}
 	for sr in sample_runes {
 		g_idx := FT_Get_Char_Index(r.face, FT_ULong(sr))
 		if g_idx != 0 {
@@ -210,7 +210,7 @@ font_rasterizer_set_pixel_size :: proc(r: ^Font_Rasterizer, pixel_size: f32) -> 
 	r.metrics.cell_height = math.ceil(r.metrics.ascent - r.metrics.descent + r.metrics.line_gap)
 
 	advance_px: f32 = 0
-	sample_runes := []rune{'M', 'W', 'm', '0', 'A', ' ', 0x2500, 0xE0B0, 0xF179, 0xF07B}
+	sample_runes := []rune{'M', 'W', 'm', '0', 'A', ' ', 0x2500}
 	for sr in sample_runes {
 		g_idx := FT_Get_Char_Index(r.face, FT_ULong(sr))
 		if g_idx != 0 {
@@ -730,7 +730,7 @@ font_rasterize_glyph_into :: proc(
 	if int(slot.bitmap.width) <= 0 || int(slot.bitmap.rows) <= 0 do return
 
 	ascent_px := int(math.round(r.metrics.ascent))
-	offset_x := dst_x + int(slot.bitmap_left)
+	offset_x := dst_x + max(0, int(slot.bitmap_left))
 	offset_y := dst_y + ascent_px - int(slot.bitmap_top)
 
 	_font_blit_glyph_pixels(slot, dst, dst_stride, offset_x, offset_y, dst_x, dst_y, slot_w, slot_h)

@@ -104,6 +104,29 @@ INV_ATLAS_HEIGHT : f32 : 1.0 / f32(ATLAS_HEIGHT)  // 1.0 / 2048.0
 SLOT_NORM_U      : f32 : f32(ATLAS_GLYPH_SIZE) * INV_ATLAS_WIDTH  // 64.0 / 1024.0 = 0.0625
 SLOT_NORM_V      : f32 : f32(ATLAS_GLYPH_SIZE) * INV_ATLAS_HEIGHT // 64.0 / 2048.0 = 0.03125
 
+// atlas_lookup_pinned_slot performs O(1) range/table lookup for pinned glyphs.
+atlas_lookup_pinned_slot :: #force_inline proc "contextless" (cp: rune) -> (slot: u32, ok: bool) {
+	u := u32(cp)
+	if u >= 0x20 && u <= 0x7E {
+		return u32(PINNED_ASCII_BASE + (u - 0x20)), true
+	}
+	if u >= 0x2500 && u <= 0x257F {
+		return u32(PINNED_BOX_BASE + (u - 0x2500)), true
+	}
+	if u >= 0x2580 && u <= 0x259F {
+		return u32(PINNED_BLOCK_BASE + (u - 0x2580)), true
+	}
+	if u >= 0xE0B0 && u <= 0xE0B3 {
+		return u32(PINNED_POWERLINE_BASE + (u - 0xE0B0)), true
+	}
+	for p_cp, idx in PINNED_UI_CODEPOINTS {
+		if cp == p_cp {
+			return u32(PINNED_UI_BASE + idx), true
+		}
+	}
+	return 0, false
+}
+
 // atlas_slot_origin calculates the top-left pixel coordinates of a slot using fast bitwise math.
 atlas_slot_origin :: #force_inline proc "contextless" (slot: u32) -> (px, py: u32) {
 	s := slot & (ATLAS_SLOT_COUNT - 1)

@@ -56,13 +56,23 @@ fn vs_main(
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-	let mask = textureSampleLevel(atlas_texture, atlas_sampler, clamp(input.uv, vec2<f32>(0.0), vec2<f32>(1.0)), 0.0).r;
 	if (input.uv.x < 0.0) {
 		return input.color;
 	}
-	if (mask < 0.01) {
+	let is_bold = input.uv.y < 0.0;
+	let uv_y = select(input.uv.y, -input.uv.y - 2.0, is_bold);
+	let uv = clamp(vec2<f32>(input.uv.x, uv_y), vec2<f32>(0.0), vec2<f32>(1.0));
+	let m0 = textureSampleLevel(atlas_texture, atlas_sampler, uv, 0.0).r;
+	let m1 = select(
+		0.0,
+		textureSampleLevel(atlas_texture, atlas_sampler, clamp(uv - vec2<f32>(0.65 / 1024.0, 0.0), vec2<f32>(0.0), vec2<f32>(1.0)), 0.0).r * 0.85,
+		is_bold,
+	);
+	let raw_mask = max(m0, m1);
+	if (raw_mask < 0.01) {
 		discard;
 	}
+	let mask = pow(clamp(raw_mask, 0.0, 1.0), 0.82);
 	return vec4<f32>(input.color.rgb, input.color.a * mask);
 }
 `

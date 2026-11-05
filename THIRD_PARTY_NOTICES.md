@@ -6,20 +6,29 @@ Term incorporates, bundles, or dynamically links to open-source third-party soft
 
 ## Table of Contents
 
-1. [Maple Mono Font (SIL Open Font License 1.1)](#1-maple-mono-font)
-2. [Symbols Nerd Font Mono (SIL Open Font License 1.1 / MIT)](#2-symbols-nerd-font-mono)
-3. [The FreeType Project (The FreeType License)](#3-the-freetype-project)
-4. [HarfBuzz (MIT License)](#4-harfbuzz)
-5. [Simple DirectMedia Layer - SDL3 (zlib License)](#5-simple-directmedia-layer---sdl3)
-6. [libpng (PNG Reference Library License version 2)](#6-libpng)
-7. [Graphite2 (Mozilla Public License 2.0 / GNU LGPL 2.1)](#7-graphite2)
-8. [GLib (GNU Lesser General Public License 2.1)](#8-glib)
-9. [GNU gettext / libintl (GNU Lesser General Public License 2.1)](#9-gnu-gettext--libintl)
-10. [PCRE2 (3-Clause BSD License)](#10-pcre2)
+1. [Geist & Geist Mono Nerd Font (SIL Open Font License 1.1)](#1-geist--geist-mono-nerd-font)
+2. [Maple Mono Font (SIL Open Font License 1.1)](#2-maple-mono-font)
+3. [Symbols Nerd Font Mono (SIL Open Font License 1.1 / MIT)](#3-symbols-nerd-font-mono)
+4. [The FreeType Project (The FreeType License)](#4-the-freetype-project)
+5. [HarfBuzz (MIT License)](#5-harfbuzz)
+6. [Simple DirectMedia Layer - SDL3 (zlib License)](#6-simple-directmedia-layer---sdl3)
+7. [libpng (PNG Reference Library License version 2)](#7-libpng)
+8. [Graphite2 (Mozilla Public License 2.0 / GNU LGPL 2.1)](#8-graphite2)
+9. [GLib (GNU Lesser General Public License 2.1)](#9-glib)
+10. [GNU gettext / libintl (GNU Lesser General Public License 2.1)](#10-gnu-gettext--libintl)
+11. [PCRE2 (3-Clause BSD License)](#11-pcre2)
 
 ---
 
-## 1. Maple Mono Font
+## 1. Geist & Geist Mono Nerd Font
+
+**Source**: https://github.com/vercel/geist-font / https://github.com/ryanoasis/nerd-fonts  
+**Copyright**: Copyright (c) 2024 Vercel, Inc. / Copyright (c) 2016 Ryan McIntyre  
+**License**: SIL Open Font License, Version 1.1 (see `assets/fonts/OFL-Geist.txt` and full OFL 1.1 text below)
+
+---
+
+## 2. Maple Mono Font
 
 **Source**: https://github.com/subframe7536/maple-font  
 **Copyright**: Copyright 2022 The Maple Mono Project Authors (https://github.com/subframe7536/maple-font)  

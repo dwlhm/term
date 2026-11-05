@@ -178,6 +178,20 @@ ui_draw_text :: proc(dl: ^Ui_Draw_List, rect: [4]f32, text: string, color: [4]f3
 	append(&dl.commands, cmd)
 }
 
+// ui_draw_text_bold appends a bold text run command (synthetic weight boost in fragment shader).
+ui_draw_text_bold :: proc(dl: ^Ui_Draw_List, rect: [4]f32, text: string, color: [4]f32, clip_rect: [4]f32 = {}) {
+	if dl == nil do return
+	cmd := Ui_Draw_Cmd{
+		kind         = .Text_Run,
+		rect         = rect,
+		color        = color,
+		border_width = 1.0,
+		text         = text,
+		clip_rect    = clip_rect,
+	}
+	append(&dl.commands, cmd)
+}
+
 // ui_draw_shadow appends a drop-shadow command.
 ui_draw_shadow :: proc(dl: ^Ui_Draw_List, rect: [4]f32, color: [4]f32, radius: f32, clip_rect: [4]f32 = {}) {
 	if dl == nil do return

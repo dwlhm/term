@@ -1990,9 +1990,10 @@ _run_artifact_suite :: proc(h: ^Harness_State) {
 		if plat_font.text_atlas_upload(&text_atlas, h.device, h.queue) {
 			chrome.chrome_renderer_set_atlas(
 				&h.chrome_renderer,
-				text_atlas.glyph_view,
-				text_atlas.cell_w,
-				text_atlas.cell_h,
+				text_atlas.ui_glyph_view,
+				text_atlas.ui_cell_w,
+				text_atlas.ui_cell_h,
+				&text_atlas.ui_glyph_atlas.atlas.slots,
 			)
 		}
 	}

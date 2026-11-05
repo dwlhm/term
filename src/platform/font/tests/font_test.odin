@@ -1,11 +1,20 @@
 package platform_font_tests
 
 import "core:os"
+import "core:strings"
 import "core:testing"
 import font "../"
 
 @test
 test_resolve_font_path :: proc(t: ^testing.T) {
+	geist_mono, gm_ok := font.resolve_font_path("assets/fonts/GeistMonoNerdFont-Regular.otf", context.temp_allocator)
+	testing.expect(t, gm_ok, "assets/fonts/GeistMonoNerdFont-Regular.otf should resolve")
+	testing.expect(t, os.is_file(geist_mono), "resolved GeistMonoNerdFont path must exist on disk")
+
+	geist_sans, gs_ok := font.resolve_font_path("assets/fonts/Geist-Regular.ttf", context.temp_allocator)
+	testing.expect(t, gs_ok, "assets/fonts/Geist-Regular.ttf should resolve")
+	testing.expect(t, os.is_file(geist_sans), "resolved Geist-Regular path must exist on disk")
+
 	resolved, ok := font.resolve_font_path("assets/fonts/MapleMono-NF-Regular.ttf", context.temp_allocator)
 	testing.expect(t, ok, "assets/fonts/MapleMono-NF-Regular.ttf should resolve")
 	testing.expect(t, os.is_file(resolved), "resolved font path must exist on disk")
@@ -21,15 +30,32 @@ test_resolve_font_path :: proc(t: ^testing.T) {
 @test
 test_font_context_lifecycle :: proc(t: ^testing.T) {
 	fc: font.Font_Context
-	ok := font.font_context_init(&fc, 24.0)
+	ok := font.font_context_init(&fc, 24.0, .Mono)
 	testing.expect(t, ok, "font_context_init should succeed with bundled/system fonts")
 	testing.expect(t, fc.has_font, "font_context must have primary font")
-	testing.expect(t, len(fc.active_path) > 0, "active_path must be populated")
+	testing.expect(t, strings.has_suffix(fc.active_path, "GeistMonoNerdFont-Regular.otf"), "primary terminal font must be GeistMonoNerdFont-Regular.otf")
 	defer font.font_context_destroy(&fc)
 
-	// Verify primary font has standard ASCII codepoints
+	// Verify primary font has standard ASCII codepoints and Nerd Font PUA
 	testing.expect(t, font.font_has_codepoint(&fc, 'A'), "font must have ASCII 'A'")
 	testing.expect(t, font.font_has_codepoint(&fc, 'z'), "font must have ASCII 'z'")
+	testing.expect(t, font.font_has_codepoint(&fc, 0xE0B0), "font must have Powerline PUA U+E0B0")
+
+	ui_fc: font.Font_Context
+	ui_ok := font.font_context_init(&ui_fc, 24.0, .Sans)
+	testing.expect(t, ui_ok, "UI font_context_init (.Sans) should succeed")
+	testing.expect(t, strings.has_suffix(ui_fc.active_path, "Geist-Regular.ttf"), "primary UI font must be Geist-Regular.ttf")
+	defer font.font_context_destroy(&ui_fc)
+	testing.expect(t, font.font_has_codepoint(&ui_fc, 'M'), "UI font must have ASCII 'M'")
+	testing.expect(t, font.font_has_codepoint(&ui_fc, 0x2715), "UI font chain must cover U+2715 close glyph")
+
+	ui_gam: font.Glyph_Atlas_Manager
+	testing.expect(t, font.glyph_atlas_init(&ui_gam, &ui_fc), "UI glyph_atlas_init must succeed")
+	defer font.glyph_atlas_destroy(&ui_gam)
+	slot_i, _ := font.glyph_atlas_lookup_slot('i')
+	slot_w, _ := font.glyph_atlas_lookup_slot('W')
+	testing.expect(t, ui_gam.atlas.slots[slot_i].advance < ui_gam.atlas.slots[slot_w].advance,
+		"Geist Sans UI atlas must record proportional advance ('i' < 'W')")
 }
 
 @test
