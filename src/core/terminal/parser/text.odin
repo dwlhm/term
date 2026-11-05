@@ -10,6 +10,7 @@ import uw "../../unicode_width"
 // before the right margin is one grid write; a pending wrap, or autowrap off,
 // takes the per-character path for that byte (wrap, scroll, prompt rows).
 _parser_print_ascii :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, text: []u8) {
+	_parser_mark_prompt_row(p, g)
 	i := 0
 	for i < len(text) {
 		n := 0
@@ -62,21 +63,6 @@ _parser_erase_cell :: proc(p: ^Parser) -> (c: cell.Semantic_Cell, dc: cell.Direc
 	return c, dc
 }
 
-@(private = "file")
-_row_is_prompt_header :: proc(g: ^grid.Grid, row_idx: int) -> bool {
-	phys := grid.grid_physical_row(g, row_idx)
-	if phys < 0 || phys >= len(g.rows) do return false
-	row := &g.rows[phys]
-	if row.is_prompt do return true
-	for c in 0..<min(8, len(row.cells)) {
-		ch := row.cells[c].char
-		if ch == 0 || ch == ' ' do continue
-		if ch == 0x256D || ch == 0x250C do return true // '╭', '┌'
-		break
-	}
-	return false
-}
-
 _parser_apply_pending_wrap :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker) {
 	if !p.autowrap {
 		p.cursor.pending_wrap = false
@@ -85,12 +71,6 @@ _parser_apply_pending_wrap :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_
 	if !p.cursor.pending_wrap do return
 	phys := grid.grid_physical_row(g, p.cursor.row)
 	if phys >= 0 && phys < len(g.rows) {
-		if _row_is_prompt_header(g, p.cursor.row) {
-			// Prompt header rows must not wrap onto new lines during in-flight resizes
-			p.cursor.pending_wrap = false
-			p.cursor.col = g.col_count - 1
-			return
-		}
 		g.rows[phys].wrap = true
 	}
 	p.cursor.col = 0
@@ -101,6 +81,7 @@ _parser_apply_pending_wrap :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_
 		p.cursor.row += 1
 	}
 	p.cursor.pending_wrap = false
+	_parser_mark_prompt_row(p, g)
 }
 
 // _parser_sanitize_wide_boundary cleans up orphan Wide_Lead or Wide_Continuation cells
@@ -234,12 +215,6 @@ _parser_put_char :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, c
 		if p.cursor.pending_wrap || (w == 2 && p.cursor.col >= g.col_count - 1) {
 			phys := grid.grid_physical_row(g, p.cursor.row)
 			if phys >= 0 && phys < len(g.rows) {
-				if _row_is_prompt_header(g, p.cursor.row) {
-					// Prompt header rows must not wrap onto new lines during in-flight resizes
-					p.cursor.pending_wrap = false
-					p.cursor.col = g.col_count - 1
-					return
-				}
 				g.rows[phys].wrap = true
 			}
 			p.cursor.col = 0
@@ -259,6 +234,7 @@ _parser_put_char :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, c
 			p.cursor.col = max(0, g.col_count - 1)
 		}
 	}
+	_parser_mark_prompt_row(p, g)
 
 	// Wide character boundary sanitization prior to overwrite
 	_parser_sanitize_wide_boundary(g, d, p.cursor.row, p.cursor.col)

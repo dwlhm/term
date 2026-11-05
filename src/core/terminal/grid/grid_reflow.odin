@@ -130,81 +130,22 @@ _row_logical_len :: proc(g: ^Grid, r: int) -> int {
 	return n
 }
 
-_is_prompt_start_row :: proc(row: ^Row, is_continuation: bool, is_cursor_row: bool) -> bool {
-	if row == nil || is_continuation do return false
-	if row.is_prompt do return true
-
-	n := len(row.cells)
-	for c in 0..<n {
-		ch := row.cells[c].char
-		if ch == 0 || ch == ' ' do continue
-
-		// Multi-line prompt frame corners and bars: '╭', '╰', '┌', '└', '─', '│'
-		switch ch {
-		case 0x256D, 0x2570, 0x250C, 0x2514, 0x2500, 0x2502:
-			return true
-		// Powerline symbols and git branch icons
-		case 0xE0A0, 0xE0B0, 0xE0B1, 0xE0B2, 0xE0B3:
-			return true
-		// Prompt markers: '❯', '›', '➜', '▶', '»', '→'
-		case 0x276F, 0x203A, 0x279C, 0x25B6, 0x00BB, 0x2192:
-			return true
-		case '$', '#', '%':
-			if c + 1 < n && (row.cells[c + 1].char == ' ' || row.cells[c + 1].char == 0) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 _detect_active_prompt_start :: proc(g: ^Grid, cur_r: int) -> int {
 	if g == nil || cur_r < 0 || cur_r >= g.row_count do return -1
 
 	cur_phys := grid_physical_row(g, cur_r)
 	cur_row := &g.rows[cur_phys]
-	if cur_row == nil do return -1
+	if cur_row == nil || !cur_row.is_prompt do return -1
 
-	has_cur_prompt := cur_row.is_prompt || _is_prompt_start_row(cur_row, false, true)
-	prompt_start := cur_r if has_cur_prompt else -1
-
-	// Scan up to 4 rows above cursor to find prompt start frame ('╭' or '┌') or row.is_prompt
-	for r := cur_r - 1; r >= max(0, cur_r - 4); r -= 1 {
+	prompt_start := cur_r
+	for r := cur_r - 1; r >= 0; r -= 1 {
 		phys := grid_physical_row(g, r)
 		row := &g.rows[phys]
-		if row == nil do break
-
-		// Empty row cannot be part of contiguous prompt frame
-		if _row_content_len(row) == 0 do break
-
-		// Check first non-space character
-		first_ch: rune = 0
-		first_col := -1
-		for c in 0..<len(row.cells) {
-			ch := row.cells[c].char
-			if ch == 0 || ch == ' ' do continue
-			first_ch = ch
-			first_col = c
+		if row != nil && row.is_prompt {
+			prompt_start = r
+		} else {
 			break
 		}
-
-		if first_ch == 0x256D || first_ch == 0x250C { // '╭', '┌'
-			prompt_start = r
-			break
-		}
-
-		if row.is_prompt {
-			prompt_start = r
-			continue
-		}
-
-		// Continuation line of multi-line frame: must start with '│' (0x2502) or be indented (first_col > 0)
-		if first_ch == 0x2502 || first_col > 0 {
-			continue
-		}
-
-		// Hit a line starting at col 0 with non-frame character: cannot be part of prompt frame!
-		break
 	}
 
 	return prompt_start
@@ -285,13 +226,6 @@ _extract_logical_lines :: proc(
 			r += 1
 			is_continuation = false
 			continue
-		}
-
-		phys := grid_physical_row(old, r)
-		first_row := &old.rows[phys]
-		is_p := _is_prompt_start_row(first_row, is_continuation, r == cur_r)
-		if is_p {
-			ll.is_prompt = true
 		}
 
 		for r <= end_r {
@@ -601,6 +535,7 @@ grid_resize_reflow :: proc(
 				_copy_row_into(g, i, dst_row.cells, dst_row.direct_colors, dst_row.wrap, dst_row.is_prompt)
 			}
 			new_cur_r = target_rows - 1
+			if displacement != nil do displacement^ = -shift
 		} else {
 			delta_rows := max(0, target_rows - old.row_count)
 			free_rows := max(0, target_rows - num_vis_old)
@@ -627,6 +562,7 @@ grid_resize_reflow :: proc(
 				_copy_row_into(g, pull + i, dst_row.cells, dst_row.direct_colors, dst_row.wrap, dst_row.is_prompt)
 			}
 			new_cur_r = clamp(cur_r + pull, 0, target_rows - 1)
+			if displacement != nil do displacement^ = pull
 		}
 
 		if cursor_row != nil do cursor_row^ = new_cur_r
@@ -709,9 +645,9 @@ grid_resize_reflow :: proc(
 
 	disp := 0
 	if num_vis <= target_rows {
-		delta_rows := max(0, target_rows - old.row_count)
+		old_blank_below := max(0, old.row_count - num_vis_old)
 		free_rows := target_rows - num_vis
-		max_pull := min(delta_rows, free_rows)
+		max_pull := min(free_rows, max(0, (target_rows - old_blank_below) - num_vis))
 		actual_pull := min(n_hist, max_pull)
 		disp = actual_pull
 

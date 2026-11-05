@@ -20,6 +20,9 @@ _paint_state :: proc(t: ^Terminal, out: ^[dynamic]u8, pen: ^Paint_Pen) {
 	_paint_dec_mode(out, 6, p.origin_mode)
 	_paint_dec_mode(out, 7, p.autowrap)
 	_paint_cursor(t, out, pen)
+	if !p.in_alt_screen && p.prompt_state == .Prompt {
+		_paint_str(out, "\x1b]133;P\x07")
+	}
 	_paint_set_pen(t, out, pen, _paint_active_pen(p))
 	_paint_input_modes(p, out)
 	_paint_cursor_style(p, out)

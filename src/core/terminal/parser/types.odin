@@ -37,6 +37,12 @@ Mouse_Format :: enum u8 {
 	Sgr_Pixel, // ?1016
 }
 
+Prompt_State :: enum u8 {
+	None,
+	Prompt, // OSC 133;A / 133;P: shell is drawing prompt
+	Input,  // OSC 133;B: shell is at prompt waiting for / editing command input
+}
+
 Cursor :: struct {
 	row:          int,
 	col:          int,
@@ -95,6 +101,7 @@ Parser :: struct {
 	esc_charset_slot: u8,
 
 	in_alt_screen:    bool,
+	prompt_state:     Prompt_State,
 	sync_output:      bool, // (?2026) synchronized update: hold presentation
 	// OSC 8 hyperlink currently in effect for newly written cells.
 	active_link:      u16,

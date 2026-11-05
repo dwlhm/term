@@ -343,8 +343,8 @@ test_terminal_resize_prompt_flag_not_duplicated_on_continuation :: proc(t: ^test
 	term.terminal_init(&terminal, 5, 30)
 	defer term.terminal_destroy(&terminal)
 
-	// Long prompt line with explicit is_prompt
-	term.terminal_feed_string(&terminal, "prompt start text")
+	// Long non-active prompt line in output (cursor has moved to row 1)
+	term.terminal_feed_string(&terminal, "prompt start text\r\n")
 	row0 := term.terminal_get_row(&terminal, 0)
 	testing.expect(t, row0 != nil, "Row 0 should not be nil")
 	row0.is_prompt = true
@@ -364,10 +364,10 @@ test_terminal_resize_active_prompt_top_line_truncated_not_wrapped :: proc(t: ^te
 	term.terminal_init(&terminal, 5, 60)
 	defer term.terminal_destroy(&terminal)
 
-	// Simulate Powerlevel10k 2-line prompt:
+	// Simulate Powerlevel10k 2-line prompt with OSC 133:
 	// Row 0: "╭─  ~/project/term on git:main              at 16:05:24" (56 chars)
 	// Row 1: "╰─❯ " (cursor here)
-	term.terminal_feed_string(&terminal, "\u256D\u2500 \uF179 ~/project/term on git:main              at 16:05:24\r\n\u2570\u2500\u276F ")
+	term.terminal_feed_string(&terminal, "\x1b]133;A\x07\u256D\u2500 \uF179 ~/project/term on git:main              at 16:05:24\r\n\u2570\u2500\u276F \x1b]133;B\x07")
 
 	testing.expect_value(t, terminal.parser.cursor.row, 1)
 
@@ -460,8 +460,8 @@ test_terminal_resize_starship_multiline_prompt_protection :: proc(t: ^testing.T)
 	term.terminal_init(&terminal, 5, 60)
 	defer term.terminal_destroy(&terminal)
 
-	// Output line followed by 2-line prompt
-	term.terminal_feed_string(&terminal, "output row 0\r\n\u256D\u2500 \uF179 ~/project/term on git:main at 12:00:00\r\n\u2570\u2500\u276F ")
+	// Output line followed by 2-line prompt with OSC 133
+	term.terminal_feed_string(&terminal, "output row 0\r\n\x1b]133;A\x07\u256D\u2500 \uF179 ~/project/term on git:main at 12:00:00\r\n\u2570\u2500\u276F \x1b]133;B\x07")
 
 	testing.expect_value(t, terminal.parser.cursor.row, 2)
 
@@ -486,7 +486,7 @@ test_terminal_resize_standard_bash_prompt_protection :: proc(t: ^testing.T) {
 	term.terminal_init(&terminal, 5, 60)
 	defer term.terminal_destroy(&terminal)
 
-	term.terminal_feed_string(&terminal, "first output\r\nuser@hostname:~/project$ ")
+	term.terminal_feed_string(&terminal, "first output\r\n\x1b]133;A\x07user@hostname:~/project$ \x1b]133;B\x07")
 	testing.expect_value(t, terminal.parser.cursor.row, 1)
 
 	// Resize down to 15 cols: cursor row with prompt must be protected
@@ -551,7 +551,7 @@ test_terminal_resize_starship_pure_prompt_with_input :: proc(t: ^testing.T) {
 	defer term.terminal_destroy(&terminal)
 
 	// Top banner starting with '╭', bottom line starting with '❯ ' and user input
-	term.terminal_feed_string(&terminal, "\u256D\u2500 \uF179 ~/project/term on git:main at 12:00:00\r\n\u276F git status")
+	term.terminal_feed_string(&terminal, "\x1b]133;A\x07\u256D\u2500 \uF179 ~/project/term on git:main at 12:00:00\r\n\u276F \x1b]133;B\x07git status")
 	testing.expect_value(t, terminal.parser.cursor.row, 1)
 
 	// Shrink from 60 to 20 columns:
@@ -573,7 +573,7 @@ test_terminal_resize_rapid_narrow_widen_prompt_no_duplication :: proc(t: ^testin
 	term.terminal_init(&terminal, 5, 60)
 	defer term.terminal_destroy(&terminal)
 
-	term.terminal_feed_string(&terminal, "\u256D\u2500 \uF179 ~/project/term on git:main\r\n\u2570\u2500\u276F ")
+	term.terminal_feed_string(&terminal, "\x1b]133;A\x07\u256D\u2500 \uF179 ~/project/term on git:main\r\n\u2570\u2500\u276F \x1b]133;B\x07")
 	testing.expect_value(t, terminal.parser.cursor.row, 1)
 	testing.expect_value(t, terminal.grid.history_count, 0)
 

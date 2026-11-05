@@ -13,7 +13,7 @@ PAINT_PREAMBLE ::
 	"\x18\x1b[!p" +
 	"\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1016l\x1b[?1007l" +
 	"\x1b[?1004l\x1b[?2004l\x1b[?2026l\x1b[<16u\x1b[?1049l\x1b>" +
-	"\x1b(B\x1b)B\x1b*B\x1b+B\x0f\x1b]8;;\x1b\\\x1b_Ga=d,d=A,q=2\x1b\\"
+	"\x1b(B\x1b)B\x1b*B\x1b+B\x0f\x1b]8;;\x1b\\\x1b]133;C\x1b\\\x1b_Ga=d,d=A,q=2\x1b\\"
 
 // A paint that asks for history replaces the receiver's scrollback (ED 3);
 // one without keeps it (ED 2), so a viewer that skipped output keeps what it saw.
@@ -51,9 +51,14 @@ terminal_paint :: proc(t: ^Terminal, out: ^[dynamic]u8, history: int) {
 // rows are rebuilt by autowrap (keeping their wrap flag for reflow).
 _paint_lines :: proc(t: ^Terminal, g: ^grid.Grid, from, to: int, out: ^[dynamic]u8, pen: ^Paint_Pen) {
 	prev_wrapped := false
+	in_prompt_run := false
 	for r in from ..< to {
 		row := grid.grid_get_row(g, r)
 		if row == nil do continue
+		if row.is_prompt && !in_prompt_run {
+			_paint_str(out, "\x1b]133;P\x07")
+			in_prompt_run = true
+		}
 		last := r == to - 1
 		wrapped := row.wrap && !last
 		end := len(row.cells) if wrapped else _paint_row_end(row)
@@ -61,6 +66,11 @@ _paint_lines :: proc(t: ^Terminal, g: ^grid.Grid, from, to: int, out: ^[dynamic]
 		if prev_wrapped do end = max(end, 1)
 		for c in 0 ..< end do _paint_cell(t, row, c, out, pen)
 		prev_wrapped = wrapped
+		next_row := grid.grid_get_row(g, r + 1) if !last else nil
+		if in_prompt_run && (last || (!wrapped && (next_row == nil || !next_row.is_prompt))) {
+			_paint_str(out, "\x1b]133;B\x07")
+			in_prompt_run = false
+		}
 		if last || wrapped do continue
 		// LF erases with the current background (BCE): reset the pen first.
 		if pen.bg != 0 || pen.dc.has_bg do _paint_set_pen(t, out, pen, Paint_Pen{fg = 7, link = pen.link})

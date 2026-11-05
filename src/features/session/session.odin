@@ -122,12 +122,10 @@ _osc_133_handler :: proc(user_data: rawptr, osc_id: int, payload: string, term_p
 	if sess == nil || len(payload) == 0 do return false
 
 	switch payload[0] {
-	case 'A':
+	case 'A', 'B', 'P':
 		sess.in_prompt, sess.command_running = true, false
-		if t := (^terminal.Terminal)(term_ptr); t != nil {
-			if phys := grid.grid_physical_row(&t.grid, t.parser.cursor.row); phys >= 0 && phys < len(t.grid.rows) do t.grid.rows[phys].is_prompt = true
-		}
-	case 'B', 'D': sess.in_prompt, sess.command_running = false, false
+	case 'D':
+		sess.in_prompt, sess.command_running = false, false
 	case 'C':
 		sess.in_prompt, sess.command_running = false, true
 		sess.command_start_time = time.now()

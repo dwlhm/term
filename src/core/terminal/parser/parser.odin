@@ -96,6 +96,7 @@ parser_init :: proc(p: ^Parser, rows, cols: int) {
 	p.response_len = 0
 	p.utf8_state = 0
 	p.utf8_len = 0
+	p.prompt_state = .None
 	p.egc_pool = nil
 	p.on_osc = nil
 	p.on_csi = nil
@@ -146,7 +147,54 @@ _parser_dispatch_dcs :: proc(p: ^Parser) {
 	}
 }
 
-_parser_dispatch_osc :: proc(p: ^Parser) {
+_parser_mark_prompt_row :: #force_inline proc(p: ^Parser, g: ^grid.Grid) {
+	if p == nil || g == nil || p.in_alt_screen || p.prompt_state != .Prompt do return
+	if phys := grid.grid_physical_row(g, p.cursor.row); phys >= 0 && phys < len(g.rows) {
+		g.rows[phys].is_prompt = true
+	}
+}
+
+_parser_clear_prompt_rows :: proc(g: ^grid.Grid, from_row, to_row: int) {
+	if g == nil do return
+	for r in max(0, from_row) ..< min(g.row_count, to_row) {
+		if phys := grid.grid_physical_row(g, r); phys >= 0 && phys < len(g.rows) {
+			g.rows[phys].is_prompt = false
+		}
+	}
+}
+
+_parser_handle_osc_133 :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, payload: string) {
+	if p == nil || g == nil || p.in_alt_screen || len(payload) == 0 do return
+	switch payload[0] {
+	case 'A':
+		if p.prompt_state != .None {
+			erase_c, erase_dc := _parser_erase_cell(p)
+			for p.cursor.row > 0 {
+				above := grid.grid_physical_row(g, p.cursor.row - 1)
+				if above < 0 || above >= len(g.rows) || !g.rows[above].is_prompt do break
+				p.cursor.row -= 1
+				grid.grid_clear_line(g, d, p.cursor.row, 0, g.col_count, erase_c, erase_dc)
+			}
+		}
+		_parser_clear_prompt_rows(g, 0, g.row_count)
+		p.prompt_state = .Prompt
+		_parser_mark_prompt_row(p, g)
+	case 'P':
+		p.prompt_state = .Prompt
+		_parser_mark_prompt_row(p, g)
+	case 'B':
+		p.prompt_state = .Input
+		if phys := grid.grid_physical_row(g, p.cursor.row); phys >= 0 && phys < len(g.rows) {
+			g.rows[phys].is_prompt = true
+		}
+		_parser_clear_prompt_rows(g, p.cursor.row + 1, g.row_count)
+	case 'C', 'D':
+		p.prompt_state = .None
+		_parser_clear_prompt_rows(g, 0, g.row_count)
+	}
+}
+
+_parser_dispatch_osc :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker) {
 	if p == nil do return
 	defer {
 		clear(&p.osc_buf)
@@ -178,6 +226,9 @@ _parser_dispatch_osc :: proc(p: ^Parser) {
 		}
 	}
 
+	if osc_id == 133 {
+		_parser_handle_osc_133(p, g, d, payload)
+	}
 	if p.on_osc != nil {
 		p.on_osc(p.user_data, osc_id, payload)
 	}
@@ -222,6 +273,7 @@ parser_parse_byte :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, 
 				p.cursor.row += 1
 			}
 			p.cursor.pending_wrap = false
+			_parser_mark_prompt_row(p, g)
 		case '\t': // Tab - advance to the next programmed stop
 			p.cursor.col = _parser_next_tab_stop(p, g.col_count, p.cursor.col)
 			p.cursor.pending_wrap = false
@@ -306,6 +358,7 @@ parser_parse_byte :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, 
 				p.cursor.row += 1
 			}
 			p.cursor.pending_wrap = false
+			_parser_mark_prompt_row(p, g)
 			p.state = .Ground
 		case 'E': // NEL - next line (CR + IND)
 			p.cursor.col = 0
@@ -316,6 +369,7 @@ parser_parse_byte :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, 
 				p.cursor.row += 1
 			}
 			p.cursor.pending_wrap = false
+			_parser_mark_prompt_row(p, g)
 			p.state = .Ground
 		case 'P': // DCS - Device Control String
 			p.state = .Dcs_String
@@ -466,7 +520,7 @@ parser_parse_byte :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, 
 
 	case .Osc_String:
 		if b == 0x07 { // BEL terminates OSC
-			_parser_dispatch_osc(p)
+			_parser_dispatch_osc(p, g, d)
 			p.state = .Ground
 		} else if b == 0x1B { // ESC inside OSC might be ST (ESC \)
 			p.state = .Esc_In_Osc
@@ -478,7 +532,7 @@ parser_parse_byte :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, 
 
 	case .Esc_In_Osc:
 		if b == '\\' { // String Terminator (ST)
-			_parser_dispatch_osc(p)
+			_parser_dispatch_osc(p, g, d)
 			p.state = .Ground
 		} else {
 			// Aborted OSC sequence
