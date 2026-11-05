@@ -5,6 +5,7 @@ package feature_session_core_tests
 
 import "core:log"
 import "core:strings"
+import "core:sync"
 import "core:testing"
 import "core:time"
 import client "../../session_client"
@@ -115,5 +116,38 @@ test_slow_viewer_gets_repaint :: proc(t: ^testing.T) {
 	testing.expect(t, wait_same_screen(a, sa, b, sb), "the repaint matches the live screen")
 	view_close(b)
 	view_close(a)
+	testing.expect(t, tiers_stop(tiers), "tiers end")
+}
+
+@(private = "file")
+_Wake_Probe :: struct {
+	c:        ^client.Client,
+	unlocked: bool,
+	called:   bool,
+}
+
+@(private = "file")
+_wake_probe_cb :: proc "contextless" (data: rawptr) {
+	p := (^_Wake_Probe)(data)
+	if sync.mutex_try_lock(&p.c.mutex) {
+		p.unlocked = true
+		sync.mutex_unlock(&p.c.mutex)
+	}
+	sync.atomic_store(&p.called, true)
+}
+
+@(test)
+test_wake_callback_runs_unlocked :: proc(t: ^testing.T) {
+	tiers := tiers_start()
+	v := new(View)
+	v.drain = true
+	probe := _Wake_Probe{c = &v.c}
+	testing.expect(t, client.client_connect(&v.c, _wake_probe_cb, &probe), "connected with wake probe")
+	s := view_sh(v, "printf 'HELLO'; sleep 30")
+	testing.expect(t, view_attached(v, s) != 0, "attached")
+	testing.expect(t, view_wait_screen(v, s, "HELLO", 5000), "output received")
+	testing.expect(t, sync.atomic_load(&probe.called), "wake callback invoked")
+	testing.expect(t, probe.unlocked, "client.mutex must be unlocked during wake callback to prevent SDL event watch AB-BA deadlock")
+	view_close(v)
 	testing.expect(t, tiers_stop(tiers), "tiers end")
 }

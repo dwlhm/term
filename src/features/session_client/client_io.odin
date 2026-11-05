@@ -32,7 +32,6 @@ _io_main :: proc(data: rawptr) {
 @(private = "file")
 _io_turn :: proc(c: ^Client) -> bool {
 	sync.mutex_lock(&c.mutex)
-	defer sync.mutex_unlock(&c.mutex)
 	ipc.stream_flush(&c.conn)
 	ipc.stream_fill(&c.conn)
 	woke := false
@@ -51,8 +50,10 @@ _io_turn :: proc(c: ^Client) -> bool {
 		if !ipc.ring_push(&c.ctl_inbox, hdr[:], f.payload) do c.conn.err = .Overflow
 	}
 	ipc.stream_flush(&c.conn)
+	ok := c.conn.err == .None
+	sync.mutex_unlock(&c.mutex)
 	if woke && c.wake != nil do c.wake(c.wake_data)
-	return c.conn.err == .None
+	return ok
 }
 
 // _io_settle runs on the closing thread once the IO thread stopped: it sends
