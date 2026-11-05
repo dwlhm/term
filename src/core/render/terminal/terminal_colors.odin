@@ -43,6 +43,9 @@ Hyperlink_Highlight :: struct {
 HOVER_OPENABLE_BG: [4]f32 : {0.141, 0.322, 0.220, 1.0} // dark green
 HOVER_BLOCKED_BG:  [4]f32 : {0.380, 0.161, 0.149, 1.0} // dark red
 
+COLOR_CURSOR_BLOCK_DEFAULT: [4]f32 : {0.28, 0.68, 1.00, 0.90}
+COLOR_CURSOR_TEXT_DEFAULT:  [4]f32 : {0.08, 0.09, 0.12, 1.00}
+
 rgb_to_r5g6b5 :: #force_inline proc "contextless" (r, g, b: u8) -> u16 {
 	r5 := (u16(r) * 31 + 127) / 255
 	g6 := (u16(g) * 63 + 127) / 255

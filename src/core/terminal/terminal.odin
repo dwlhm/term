@@ -9,6 +9,10 @@ import extension "extension"
 import grid "grid"
 import parser "parser"
 
+Cursor_Shape :: parser.Cursor_Shape
+Cell_Flag    :: cell.Cell_Flag
+Style_Flag   :: cell.Style_Flag
+
 Terminal :: struct {
 	// `alt_grid` holds the inactive buffer (primary while the alternate screen is
 	// active); `grid` is always the buffer the parser writes into.

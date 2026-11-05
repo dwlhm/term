@@ -12,10 +12,19 @@ Cursor_Shape :: enum {
 }
 
 Cursor_State :: struct {
-	shape:         Cursor_Shape,
-	blink_rate:    f32, // Hz
-	is_visible:    bool,
-	next_blink_ns: u64,
+	shape:          Cursor_Shape,
+	blink_rate:     f32, // Hz
+	is_visible:     bool,
+	next_blink_ns:  u64,
+	last_col:       int,
+	last_row:       int,
+	last_char:      rune,
+	last_shape:     Cursor_Shape,
+	last_focused:   bool,
+	last_pane_id:   u32,
+	last_is_wide:   bool,
+	last_is_italic: bool,
+	last_is_bold:   bool,
 }
 
 cursor_init :: proc(c: ^Cursor_State) {
@@ -24,6 +33,15 @@ cursor_init :: proc(c: ^Cursor_State) {
 	c.blink_rate = 1.0
 	c.is_visible = true
 	c.next_blink_ns = 0
+	c.last_col = -1
+	c.last_row = -1
+	c.last_char = 0
+	c.last_shape = .Block
+	c.last_focused = false
+	c.last_pane_id = 0
+	c.last_is_wide = false
+	c.last_is_italic = false
+	c.last_is_bold = false
 }
 
 // cursor_reset_blink forces the cursor visible and pushes the next blink deadline

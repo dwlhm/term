@@ -21,13 +21,14 @@ Terminal_Pane_Slot :: struct {
 }
 
 Terminal_View :: struct {
-	pipelines:  terminal_render.Terminal_Pipelines,
-	slots:      [MAX_TERMINAL_PANE_SLOTS]Terminal_Pane_Slot,
-	device:     contract.Gpu_Device,
-	queue:      contract.Gpu_Queue,
-	format:     contract.Gpu_Format,
-	atlas_view: contract.Gpu_TextureView,
-	emoji_view: contract.Gpu_TextureView,
+	pipelines:   terminal_render.Terminal_Pipelines,
+	cursor_rend: terminal_render.Terminal_Renderer,
+	slots:       [MAX_TERMINAL_PANE_SLOTS]Terminal_Pane_Slot,
+	device:      contract.Gpu_Device,
+	queue:       contract.Gpu_Queue,
+	format:      contract.Gpu_Format,
+	atlas_view:  contract.Gpu_TextureView,
+	emoji_view:  contract.Gpu_TextureView,
 }
 
 terminal_view_init :: proc(
@@ -46,6 +47,9 @@ terminal_view_init :: proc(
 	tv.emoji_view = emoji_view
 
 	if !terminal_render.terminal_pipelines_init(&tv.pipelines, device, format) {
+		return false
+	}
+	if !terminal_render.terminal_renderer_init_with_pipelines(&tv.cursor_rend, device, queue, format, atlas_view, emoji_view, &tv.pipelines) {
 		return false
 	}
 	return true
@@ -101,7 +105,40 @@ terminal_view_destroy :: proc(tv: ^Terminal_View) {
 			tv.slots[i].pane_id = 0
 		}
 	}
+	terminal_render.terminal_renderer_destroy(&tv.cursor_rend)
 	terminal_render.terminal_pipelines_destroy(&tv.pipelines)
+}
+
+terminal_view_encode_cursor :: proc(
+	tv: ^Terminal_View,
+	enc: contract.Gpu_CommandEncoder,
+	target_view: contract.Gpu_TextureView,
+	text_atlas: ^plat_font.Text_Atlas,
+	cell_w, cell_h: f32,
+	ch: rune,
+	is_wide, is_italic, is_bold: bool,
+	shape: core_terminal.Cursor_Shape,
+	cursor_color: [4]f32,
+	cursor_text_color: [4]f32,
+	border_radius: f32,
+) {
+	if tv == nil do return
+	terminal_render.terminal_renderer_encode_cursor(
+		&tv.cursor_rend,
+		enc,
+		target_view,
+		text_atlas,
+		cell_w,
+		cell_h,
+		ch,
+		is_wide,
+		is_italic,
+		is_bold,
+		shape,
+		cursor_color,
+		cursor_text_color,
+		border_radius,
+	)
 }
 
 terminal_view_resolve_active_bg :: proc(sess: ^sess_feat.Terminal_Session) -> [4]f32 {
