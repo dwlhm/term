@@ -108,6 +108,14 @@ _kitty_should_encode :: proc(key: sdl3.Keycode, mod: sdl3.Keymod, flags: u8) -> 
 	case sdl3.K_RETURN, sdl3.K_KP_ENTER, sdl3.K_TAB, sdl3.K_BACKSPACE, sdl3.K_SPACE:
 		return true
 	}
+
+	// Under disambiguate mode (flag 1), printable keys with Shift alone produce
+	// plain text (e.g. Shift+; -> ':' or Shift+a -> 'A') and are not ambiguous.
+	is_other_mod := (mod & (sdl3.KMOD_CTRL | sdl3.KMOD_ALT | sdl3.KMOD_GUI)) != sdl3.KMOD_NONE
+	if !is_other_mod && _key_is_printable(key) && key != sdl3.K_SPACE {
+		return false
+	}
+
 	return _kitty_code_ok(key)
 }
 

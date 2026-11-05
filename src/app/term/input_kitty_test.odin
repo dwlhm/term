@@ -41,6 +41,12 @@ test_input_disambiguate_ctrl_and_alt :: proc(t: ^testing.T) {
 	// Unmodified, non-ambiguous keys keep their legacy behaviour.
 	testing.expect_value(t, _encode(sdl3.K_RETURN, sdl3.KMOD_NONE, flags), "\r")
 	testing.expect_value(t, _encode(sdl3.K_A, sdl3.KMOD_NONE, flags), "<none>")
+	// Shift alone on printable keys produces plain text, never CSI u.
+	testing.expect_value(t, _encode(sdl3.K_SEMICOLON, sdl3.KMOD_SHIFT, flags), "<none>")
+	testing.expect_value(t, _encode(sdl3.K_A, sdl3.KMOD_SHIFT, flags), "<none>")
+	testing.expect_value(t, _encode(sdl3.K_SLASH, sdl3.KMOD_SHIFT, flags), "<none>")
+	testing.expect_value(t, _encode(sdl3.K_SPACE, sdl3.KMOD_SHIFT, flags), "\x1b[32;2u")
+	testing.expect_value(t, _encode(sdl3.K_SEMICOLON, sdl3.KMOD_CTRL, flags), "\x1b[59;5u")
 }
 
 @test
