@@ -210,8 +210,7 @@ ATLAS_FALLBACK_FIT_STEP  : f32 : 0.95
 ATLAS_FALLBACK_FIT_STEPS : int : 24
 
 _is_box_or_block :: proc(cp: u32) -> bool {
-	return (cp >= 0x2500 && cp <= 0x259F) ||
-	       (cp >= 0xE0A0 && cp <= 0xE0A3) ||
+	return (cp >= 0xE0A0 && cp <= 0xE0A3) ||
 	       (cp >= 0xE0B0 && cp <= 0xE0D7) ||
 	       (cp >= 0xEE00 && cp <= 0xEE0B)
 }
@@ -351,7 +350,15 @@ _rasterize_codepoint_locked :: proc(
 	face := _font_face_for_codepoint(fc, cp)
 	if face == nil do return gw, 0.0
 
-	// 1. Box drawing and block elements
+	// 1. Procedural box drawing and block elements
+	if cp >= 0x2500 && cp <= 0x257F {
+		draw_procedural_box(dst_pixels, pitch, px, py, cell_w, cell_h, cp)
+		return gw, 0.0
+	}
+	if cp >= 0x2580 && cp <= 0x259F {
+		draw_procedural_block(dst_pixels, pitch, px, py, cell_w, cell_h, cp)
+		return gw, 0.0
+	}
 	if _is_box_or_block(cp) {
 		font_rasterize_glyph_into(face, cp, dst_pixels, pitch, px, py, slot_w, slot_h)
 		return gw, 0.0

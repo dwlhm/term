@@ -77,15 +77,7 @@ _glyph_atlas_prewarm_pinned :: proc(gam: ^Glyph_Atlas_Manager) {
 		draw_w: f32 = cell_w
 		offset_x: f32 = 0.0
 
-		if fc != nil && font_has_codepoint(fc, cp) {
-			draw_w, offset_x = font_rasterize_codepoint(
-				fc, cp, gam.atlas.pixels,
-				core_atlas.ATLAS_WIDTH, int(px), int(py),
-				core_atlas.ATLAS_GLYPH_SIZE, core_atlas.ATLAS_GLYPH_SIZE,
-			)
-		} else {
-			_draw_procedural_box_drawing(gam.atlas.pixels, core_atlas.ATLAS_WIDTH, int(px), int(py), cp)
-		}
+		draw_procedural_box(gam.atlas.pixels, core_atlas.ATLAS_WIDTH, int(px), int(py), int(cell_w), int(cell_h), cp)
 		u0, v0, u1, v1 := core_atlas.atlas_slot_uv(slot, draw_w, cell_h)
 		gam.atlas.slots[slot] = core_atlas.Atlas_Slot{
 			u0       = u0,
@@ -107,15 +99,7 @@ _glyph_atlas_prewarm_pinned :: proc(gam: ^Glyph_Atlas_Manager) {
 		draw_w: f32 = cell_w
 		offset_x: f32 = 0.0
 
-		if fc != nil && font_has_codepoint(fc, cp) {
-			draw_w, offset_x = font_rasterize_codepoint(
-				fc, cp, gam.atlas.pixels,
-				core_atlas.ATLAS_WIDTH, int(px), int(py),
-				core_atlas.ATLAS_GLYPH_SIZE, core_atlas.ATLAS_GLYPH_SIZE,
-			)
-		} else {
-			_draw_procedural_block_element(gam.atlas.pixels, core_atlas.ATLAS_WIDTH, int(px), int(py), cp)
-		}
+		draw_procedural_block(gam.atlas.pixels, core_atlas.ATLAS_WIDTH, int(px), int(py), int(cell_w), int(cell_h), cp)
 		u0, v0, u1, v1 := core_atlas.atlas_slot_uv(slot, draw_w, cell_h)
 		gam.atlas.slots[slot] = core_atlas.Atlas_Slot{
 			u0       = u0,
@@ -539,34 +523,4 @@ _draw_procedural_braille :: proc(pixels: []u8, pitch, px, py: int, cp: u32) {
 	}
 }
 
-_draw_procedural_box_drawing :: proc(pixels: []u8, pitch, px, py: int, cp: u32) {
-	mid_x := px + core_atlas.ATLAS_GLYPH_SIZE / 2
-	mid_y := py + core_atlas.ATLAS_GLYPH_SIZE / 2
 
-	for y in 0..<core_atlas.ATLAS_GLYPH_SIZE {
-		pixels[(py + y) * pitch + mid_x] = 220
-		pixels[(py + y) * pitch + (mid_x + 1)] = 220
-	}
-	for x in 0..<core_atlas.ATLAS_GLYPH_SIZE {
-		pixels[mid_y * pitch + (px + x)] = 220
-		pixels[(mid_y + 1) * pitch + (px + x)] = 220
-	}
-}
-
-_draw_procedural_block_element :: proc(pixels: []u8, pitch, px, py: int, cp: u32) {
-	half_h := core_atlas.ATLAS_GLYPH_SIZE / 2
-	y_start := 0
-	y_end := core_atlas.ATLAS_GLYPH_SIZE
-
-	if cp == 0x2580 { // Upper half
-		y_end = half_h
-	} else if cp == 0x2584 { // Lower half
-		y_start = half_h
-	}
-
-	for y in y_start..<y_end {
-		for x in 4..<(core_atlas.ATLAS_GLYPH_SIZE - 4) {
-			pixels[(py + y) * pitch + (px + x)] = 255
-		}
-	}
-}
