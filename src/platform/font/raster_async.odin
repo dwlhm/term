@@ -49,6 +49,9 @@ Async_Raster_Worker :: struct {
 	comp_head:  int,
 	comp_tail:  int,
 	comp_count: int,
+
+	wakeup_user: rawptr,
+	wakeup_proc: proc "contextless" (user: rawptr),
 }
 
 @(private = "file")
@@ -131,14 +134,28 @@ _async_raster_worker_loop :: proc(data: rawptr) {
 
 		comp := _async_raster_execute_job(w, &req)
 
+		cb: proc "contextless" (user: rawptr)
+		user: rawptr
 		sync.mutex_lock(&w.mutex)
 		if w.comp_count < ASYNC_RASTER_QUEUE_CAP {
 			w.comps[w.comp_tail] = comp
 			w.comp_tail = (w.comp_tail + 1) % ASYNC_RASTER_QUEUE_CAP
 			w.comp_count += 1
+			cb = w.wakeup_proc
+			user = w.wakeup_user
 		}
 		sync.mutex_unlock(&w.mutex)
+
+		if cb != nil do cb(user)
 	}
+}
+
+async_raster_worker_set_wakeup :: proc(w: ^Async_Raster_Worker, user: rawptr, cb: proc "contextless" (user: rawptr)) {
+	if w == nil do return
+	sync.mutex_lock(&w.mutex)
+	w.wakeup_user = user
+	w.wakeup_proc = cb
+	sync.mutex_unlock(&w.mutex)
 }
 
 async_raster_worker_init :: proc(w: ^Async_Raster_Worker, fc: ^Font_Context) -> bool {

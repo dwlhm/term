@@ -3,6 +3,7 @@ package platform_font
 // Unified Text & Texture Atlas Facade
 // Platform Font Subsystem (src/platform/font/*).
 
+import "core:sync"
 import core_atlas "../../core/render/atlas"
 import contract "../../core/render/contract"
 
@@ -147,4 +148,35 @@ text_atlas_set_pixel_size :: proc(ta: ^Text_Atlas, pixel_size: f32, device: cont
 	emoji_atlas_reset(&ta.emoji_atlas, pixel_size)
 
 	return text_atlas_upload(ta, device, queue)
+}
+
+text_atlas_set_wakeup :: proc(ta: ^Text_Atlas, user: rawptr, cb: proc "contextless" (user: rawptr)) {
+	if ta == nil do return
+	if ta.glyph_atlas.async_worker != nil {
+		async_raster_worker_set_wakeup(ta.glyph_atlas.async_worker, user, cb)
+	}
+	if ta.ui_glyph_atlas.async_worker != nil {
+		async_raster_worker_set_wakeup(ta.ui_glyph_atlas.async_worker, user, cb)
+	}
+}
+
+text_atlas_has_completions :: proc(ta: ^Text_Atlas) -> bool {
+	if ta == nil do return false
+	if ta.glyph_atlas.async_worker != nil {
+		w := ta.glyph_atlas.async_worker
+		if sync.mutex_try_lock(&w.mutex) {
+			has := w.comp_count > 0
+			sync.mutex_unlock(&w.mutex)
+			if has do return true
+		}
+	}
+	if ta.ui_glyph_atlas.async_worker != nil {
+		w := ta.ui_glyph_atlas.async_worker
+		if sync.mutex_try_lock(&w.mutex) {
+			has := w.comp_count > 0
+			sync.mutex_unlock(&w.mutex)
+			if has do return true
+		}
+	}
+	return false
 }
