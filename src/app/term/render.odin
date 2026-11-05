@@ -238,6 +238,8 @@ _app_frame_raster :: proc(user: rawptr, enc: contract.Gpu_CommandEncoder, l: ^co
 	switch l.id {
 	case TERMINAL_LAYER_ID:
 		first := true
+		target_w := f32(max(u32(1), l.width))
+		target_h := f32(max(u32(1), l.height))
 		for &pane in app.mux.panes {
 			if pane.kind == .Terminal && pane.session != nil && pane.rect[2] > 10 {
 				load_op: contract.Gpu_Load_Op = .Clear if first else .Load
@@ -254,8 +256,8 @@ _app_frame_raster :: proc(user: rawptr, enc: contract.Gpu_CommandEncoder, l: ^co
 					l.view,
 					&app.text_atlas,
 					app.layout.metrics,
-					app.layout.screen_w,
-					app.layout.screen_h,
+					target_w,
+					target_h,
 					load_op,
 					app.hyperlink_openable_bg,
 					app.hyperlink_blocked_bg,
@@ -281,6 +283,7 @@ _app_frame_raster :: proc(user: rawptr, enc: contract.Gpu_CommandEncoder, l: ^co
 		return true
 
 	case CHROME_LAYER_ID:
+		chrome_render.chrome_renderer_set_viewport(&app.chrome_view.rend, max(u32(1), l.width), max(u32(1), l.height))
 		return chrome_view_encode(&app.chrome_view, enc, l.view, .Clear)
 	}
 

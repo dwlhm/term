@@ -90,7 +90,8 @@ chrome_view_destroy :: proc(cv: ^Chrome_View) {
 chrome_view_resize :: proc(cv: ^Chrome_View, screen_w, screen_h: u32) {
 	if cv == nil do return
 	cv.has_dl_hash = false
-	chrome_render.chrome_renderer_resize(&cv.rend, screen_w, screen_h)
+	chrome_render.chrome_renderer_set_viewport(&cv.rend, screen_w, screen_h)
+	chrome_render.chrome_renderer_mark_dirty(&cv.rend, true)
 }
 
 chrome_view_build_draw_list :: proc(

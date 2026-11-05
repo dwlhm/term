@@ -100,8 +100,11 @@ window_update_pixel_size :: proc(w: ^Window) {
 	w.width  = i32(lw)
 	w.height = i32(lh)
 
-	// Compute DPI scale factor; default to 1.0 if logical width is zero.
-	if lw > 0 {
+	// Query true backing display scale factor; fall back to pixel/logical ratio if unavailable.
+	display_scale := sdl3.GetWindowDisplayScale(w.handle)
+	if display_scale > 0 {
+		w.pixel_ratio = display_scale
+	} else if lw > 0 {
 		w.pixel_ratio = f32(pw) / f32(lw)
 	} else {
 		w.pixel_ratio = 1.0

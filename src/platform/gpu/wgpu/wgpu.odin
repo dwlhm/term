@@ -365,7 +365,28 @@ _wgpu_configure_surface :: proc(surface: rawptr, device: contract.Gpu_Device, fo
 	dev := wgpu.Device(rawptr(device))
 	if dev == nil do return
 
+	w := max(u32(1), width)
+	h := max(u32(1), height)
 	wgpu_fmt := _contract_to_wgpu_format(format)
+
+	if surf.configured && surf.device == dev && (wgpu_fmt == .Undefined || wgpu_fmt == surf.format) {
+		if surf.width == w && surf.height == h do return
+		wgpu.DevicePoll(surf.device, true, nil)
+		config := wgpu.SurfaceConfiguration{
+			device      = dev,
+			format      = surf.format,
+			usage       = { .RenderAttachment },
+			width       = w,
+			height      = h,
+			alphaMode   = surf.alpha_mode,
+			presentMode = surf.present_mode,
+		}
+		wgpu.SurfaceConfigure(surf.handle, &config)
+		surf.width = w
+		surf.height = h
+		return
+	}
+
 	target_alpha := wgpu.CompositeAlphaMode.Opaque
 	if surf.adapter != nil {
 		caps, status := wgpu.SurfaceGetCapabilities(surf.handle, surf.adapter)
@@ -434,9 +455,6 @@ _wgpu_configure_surface :: proc(surface: rawptr, device: contract.Gpu_Device, fo
 			wgpu_fmt = .RGBA8Unorm
 		}
 	}
-
-	w := max(u32(1), width)
-	h := max(u32(1), height)
 
 	if surf.configured && surf.device == dev && surf.format == wgpu_fmt && surf.width == w && surf.height == h && surf.alpha_mode == target_alpha {
 		return

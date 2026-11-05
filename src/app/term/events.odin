@@ -24,7 +24,7 @@ import sess_feat "../../features/session"
 // tab-bar animation, and bounds PTY output latency when no SDL event arrives.
 FRAME_TICK_MS :: 8
 
-app_handle_window_resize :: proc(app: ^Term_App) {
+app_handle_window_resize :: proc(app: ^Term_App) -> bool {
 	curr_fs := plat_win.platform_is_fullscreen(app.window.handle)
 	fs_changed := app.layout.is_fullscreen != curr_fs
 	app.layout.is_fullscreen = curr_fs
@@ -40,9 +40,10 @@ app_handle_window_resize :: proc(app: ^Term_App) {
 	}
 
 	plat_win.window_update_pixel_size(&app.window)
-	if app.window.pixel_w <= 0 || app.window.pixel_h <= 0 do return
+	if app.window.pixel_w <= 0 || app.window.pixel_h <= 0 do return false
 
 	scale := app.window.pixel_ratio
+	scale_changed := app.layout.metrics.scale != scale
 	layout_set_scale(&app.layout, scale)
 
 	if app.text_atlas.cell_w > 0 {
@@ -56,10 +57,9 @@ app_handle_window_resize :: proc(app: ^Term_App) {
 		app.layout.screen_h != target_h ||
 		app.composer.screen_w != target_w ||
 		app.composer.screen_h != target_h ||
-		app.chrome_view.rend.width != u32(app.window.pixel_w) ||
-		app.chrome_view.rend.height != u32(app.window.pixel_h)
+		scale_changed
 
-	if !size_changed && !fs_changed do return
+	if !size_changed && !fs_changed do return false
 
 	// Rendering pipeline is fully in pixel space.
 	app.layout.screen_w = target_w
@@ -83,6 +83,7 @@ app_handle_window_resize :: proc(app: ^Term_App) {
 		}
 	}
 	chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
+	return true
 }
 
 app_event_watch :: proc "c" (userdata: rawptr, event: ^sdl3.Event) -> bool {
@@ -102,9 +103,13 @@ app_event_watch :: proc "c" (userdata: rawptr, event: ^sdl3.Event) -> bool {
 		defer app.in_event_watch = false
 		for {
 			app.resize_pending = false
-			app_handle_window_resize(app)
-			_ = mux_feat.multiplexer_drain_all(&app.mux)
-			app_render_frame(app, true)
+			drained_pre := mux_feat.multiplexer_drain_all(&app.mux)
+			resized := app_handle_window_resize(app)
+			drained_post := mux_feat.multiplexer_drain_all(&app.mux)
+			expose := event.type == .WINDOW_EXPOSED || event.type == .WINDOW_RESTORED
+			if resized || drained_pre > 0 || drained_post > 0 || expose {
+				app_render_frame(app, true)
+			}
 			if !app.resize_pending do break
 		}
 	}
@@ -663,9 +668,10 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 			app.mouse.hover_link = {}
 			app_set_mouse_cursor(.Default)
 		case .WINDOW_PIXEL_SIZE_CHANGED, .WINDOW_RESIZED, .WINDOW_EXPOSED, .WINDOW_LEAVE_FULLSCREEN, .WINDOW_ENTER_FULLSCREEN, .WINDOW_RESTORED:
-			ui_dirty = true
 			sdl3.FlushEvents(sdl3.EventType.WINDOW_RESIZED, sdl3.EventType.WINDOW_PIXEL_SIZE_CHANGED)
-			app_handle_window_resize(app)
+			if app_handle_window_resize(app) || ev.type == .WINDOW_EXPOSED || ev.type == .WINDOW_RESTORED {
+				ui_dirty = true
+			}
 		case .MOUSE_MOTION:
 			ratio := app.window.pixel_ratio
 			mx := f32(ev.motion.x) * ratio

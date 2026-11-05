@@ -125,25 +125,17 @@ terminal_view_resolve_active_bg :: proc(sess: ^sess_feat.Terminal_Session) -> [4
 	return COLOR_PANE_BG
 }
 
-// pane_grid_pad returns the effective horizontal/vertical padding that centers
-// the terminal cell grid within a pane's content box (rect inset by the base
-// padding). Leftover pixels (pane size not being an exact multiple of the cell
-// size) are split evenly so full-screen TUIs leave no lopsided gap at the
-// bottom/right — mirroring Kitty/Alacritty content centering.
+// pane_grid_pad returns the effective top-left padding for the terminal cell
+// grid within a pane's content box. Anchoring to (base_pad_x, base_pad_y) keeps
+// the top-left origin stationary during live window resize so sub-cell pixel
+// deltas are absorbed smoothly at the right/bottom edges without sawtooth jitter.
 pane_grid_pad :: proc(
 	pane_rect: [4]f32,
 	term_rows, term_cols: int,
 	cell_w, cell_h: f32,
 	base_pad_x, base_pad_y: f32,
 ) -> (pad_x, pad_y: f32) {
-	if cell_w <= 0.0 || cell_h <= 0.0 do return base_pad_x, base_pad_y
-	content_w := max(0.0, pane_rect[2] - 2.0 * base_pad_x)
-	content_h := max(0.0, pane_rect[3] - 2.0 * base_pad_y)
-	rows := max(1, min(term_rows, int(content_h / cell_h)))
-	cols := max(1, min(term_cols, int(content_w / cell_w)))
-	pad_x = base_pad_x + (content_w - f32(cols) * cell_w) * 0.5
-	pad_y = base_pad_y + (content_h - f32(rows) * cell_h) * 0.5
-	return
+	return base_pad_x, base_pad_y
 }
 
 terminal_view_encode_pane :: proc(

@@ -327,7 +327,7 @@ app_destroy :: proc(app: ^Term_App) {
 
 // app_sync_resize_increments keeps continuous 1-point window sizing enabled so
 // macOS zoom/maximize, fullscreen, and third-party window managers never hit
-// AppKit _zoomToScreen constraint loops; pane_grid_pad centers sub-cell space.
+// AppKit _zoomToScreen constraint loops.
 app_sync_resize_increments :: proc(app: ^Term_App) {
 	if app == nil || app.window.handle == nil do return
 	plat_win.platform_set_resize_increments(app.window.handle, 1.0, 1.0)

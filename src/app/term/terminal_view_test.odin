@@ -1,6 +1,6 @@
 package term
 
-// Behavioral tests for pane_grid_pad, the cell-grid centering geometry helper.
+// Behavioral tests for pane_grid_pad, the top-left anchored cell-grid padding helper.
 
 import "core:testing"
 import "core:time"
@@ -15,21 +15,21 @@ test_pane_grid_pad_exact_fit :: proc(t: ^testing.T) {
 }
 
 @test
-test_pane_grid_pad_centers_leftover :: proc(t: ^testing.T) {
-	// content_h = 100, 4 rows x 20px = 80 -> leftover 20 split into 10 top/bottom.
-	rect := [4]f32{0, 0, 408, 108}
-	px, py := pane_grid_pad(rect, 4, 10, 40, 20, 4, 4)
+test_pane_grid_pad_anchors_top_left_with_leftover :: proc(t: ^testing.T) {
+	// Sub-cell leftover pixels are absorbed at the right/bottom edges so top-left
+	// padding stays stationary during live resize (no sawtooth jitter).
+	rect := [4]f32{0, 0, 425, 123}
+	px, py := pane_grid_pad(rect, 4, 10, 40, 20, 4, 6)
 	testing.expect_value(t, px, f32(4))
-	testing.expect_value(t, py, f32(14))
+	testing.expect_value(t, py, f32(6))
 }
 
 @test
-test_pane_grid_pad_clamps_to_term_size :: proc(t: ^testing.T) {
-	// Term is 3 rows while the pane fits 5; grid = 3 rows -> leftover centered.
+test_pane_grid_pad_anchors_top_left_across_term_sizes :: proc(t: ^testing.T) {
 	rect := [4]f32{0, 0, 408, 108}
-	px, py := pane_grid_pad(rect, 3, 10, 40, 20, 4, 4)
-	testing.expect_value(t, px, f32(4))
-	testing.expect_value(t, py, f32(24))
+	px, py := pane_grid_pad(rect, 3, 10, 40, 20, 8, 10)
+	testing.expect_value(t, px, f32(8))
+	testing.expect_value(t, py, f32(10))
 }
 
 @test
@@ -92,4 +92,16 @@ test_wait_timeout_parked_when_idle_and_wakes_on_pty :: proc(t: ^testing.T) {
 	app.layout.tab_bar_anim_t = 0.5
 	testing.expect_value(t, app_compute_wait_timeout_ms(app, false), i32(FRAME_TICK_MS))
 	app.layout.tab_bar_anim_t = 1.0
+}
+
+@test
+test_quantize_layer_cap_grows_in_buckets :: proc(t: ^testing.T) {
+	// Initial allocation rounds up to 256px multiples
+	testing.expect_value(t, _quantize_layer_cap(0, 1280), u32(1280))
+	testing.expect_value(t, _quantize_layer_cap(0, 1281), u32(1536))
+	// Shrinking or sub-bucket growth keeps existing capacity (zero texture churn)
+	testing.expect_value(t, _quantize_layer_cap(1536, 1285), u32(1536))
+	testing.expect_value(t, _quantize_layer_cap(1536, 900), u32(1536))
+	// Crossing bucket boundary grows to next 256px multiple
+	testing.expect_value(t, _quantize_layer_cap(1536, 1537), u32(1792))
 }

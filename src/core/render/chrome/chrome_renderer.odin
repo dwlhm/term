@@ -119,11 +119,16 @@ chrome_renderer_destroy :: proc(r: ^Chrome_Renderer) {
 	r.available = false
 }
 
-chrome_renderer_resize :: proc(r: ^Chrome_Renderer, width, height: u32) -> bool {
-	if r == nil || !r.available do return false
+chrome_renderer_set_viewport :: proc(r: ^Chrome_Renderer, width, height: u32) {
+	if r == nil || !r.available do return
 	r.width = max(width, 1)
 	r.height = max(height, 1)
 	batch.chrome_batch_set_screen_size(&r.batch, f32(r.width), f32(r.height))
+}
+
+chrome_renderer_resize :: proc(r: ^Chrome_Renderer, width, height: u32) -> bool {
+	if r == nil || !r.available do return false
+	chrome_renderer_set_viewport(r, width, height)
 	return surface.chrome_surface_resize(&r.surface, r.device, r.width, r.height, r.format)
 }
 
