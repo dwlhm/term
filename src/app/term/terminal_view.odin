@@ -3,8 +3,7 @@ package term
 // Terminal Grid View Orchestrator.
 // Part of Tier 3 Application Shell (src/app/term/*).
 //
-// Delegates rendering entirely to the engine Terminal_Renderer in core_render:
-// Evaluates adaptive rendering strategies (Instance, Compute Tiles, Fullscreen)
+// Delegates rendering entirely to the engine Terminal_Renderer in core_render
 // without compiling shaders or encoding low-level GPU passes in the application layer.
 
 import contract "../../core/render/contract"
@@ -162,11 +161,11 @@ terminal_view_encode_pane :: proc(
 	screen_w, screen_h: f32,
 	load_op: contract.Gpu_Load_Op = .Load,
 	hover_openable_bg, hover_blocked_bg: [4]f32,
-) -> (strat: terminal_render.Render_Strategy, dirty_cells: int) {
-	if tv == nil || rawptr(enc) == nil || sess == nil || rawptr(target_view) == nil || text_atlas == nil do return .Instance, 0
+) -> (dirty_cells: int) {
+	if tv == nil || rawptr(enc) == nil || sess == nil || rawptr(target_view) == nil || text_atlas == nil do return 0
 
 	rend := terminal_view_get_or_create_renderer(tv, pane_id)
-	if rend == nil do return .Instance, 0
+	if rend == nil do return 0
 
 	sel_active := mouse != nil && mouse.selection.active && mouse.selection.pane_id == pane_id
 	sel_r_start := mouse.selection.start_cell.row if sel_active else -1
@@ -225,7 +224,7 @@ terminal_view_encode_pane :: proc(
 		metrics.pane_opacity,
 	)
 
-	return rend.last_strategy, rend.last_dirty_cells
+	return rend.last_dirty_cells
 }
 
 terminal_view_render_pane :: proc(

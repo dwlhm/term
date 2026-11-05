@@ -149,7 +149,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // Fast path: ordinary background cell or standard UI quad
-    if (input.params.w == 0.0) {
+    if (input.params.w > -0.999 && input.params.w != 1.0) {
         return input.color;
     }
 

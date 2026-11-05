@@ -242,7 +242,7 @@ _app_frame_raster :: proc(user: rawptr, enc: contract.Gpu_CommandEncoder, l: ^co
 			if pane.kind == .Terminal && pane.session != nil && pane.rect[2] > 10 {
 				load_op: contract.Gpu_Load_Op = .Clear if first else .Load
 				first = false
-				strat, dirty_cells := terminal_view_encode_pane(
+				dirty_cells := terminal_view_encode_pane(
 					&app.term_view,
 					enc,
 					pane.session,
@@ -260,13 +260,7 @@ _app_frame_raster :: proc(user: rawptr, enc: contract.Gpu_CommandEncoder, l: ^co
 					app.hyperlink_openable_bg,
 					app.hyperlink_blocked_bg,
 				)
-				strat_name: string
-				switch strat {
-				case .Instance: strat_name = "Instance"
-				case .Compute_Tiles: strat_name = "Compute_Tiles"
-				case .Fullscreen: strat_name = "Fullscreen"
-				}
-				telemetry.telemetry_add_pane(&app.diag.tel, dirty_cells, strat_name)
+				telemetry.telemetry_add_pane(&app.diag.tel, dirty_cells)
 			}
 		}
 		if first {

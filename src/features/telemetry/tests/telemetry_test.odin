@@ -20,7 +20,7 @@ test_percentiles_and_summary :: proc(t: ^testing.T) {
 	// 1000 frames: 1..1000 µs.
 	for i in 1 ..= 1000 {
 		telemetry.telemetry_add_drain(tel, 10)
-		telemetry.telemetry_add_pane(tel, 5, "Instance")
+		telemetry.telemetry_add_pane(tel, 5)
 		telemetry.telemetry_end_frame(tel, u64(i) * 1000)
 	}
 	testing.expect_value(t, tel.frames, 1000)
@@ -36,7 +36,7 @@ test_percentiles_and_summary :: proc(t: ^testing.T) {
 	defer delete(data)
 	text := string(data)
 	testing.expect_value(t, strings.count(text, "\n"), 1001)
-	testing.expect(t, strings.contains(text, `"strategy":"Instance"`))
+	testing.expect(t, strings.contains(text, `"dirty_cells":5`))
 	testing.expect(t, strings.contains(text, `"summary":true`))
 	testing.expect(t, strings.contains(text, `"p50_us":510`))
 	testing.expect(t, strings.contains(text, `"cpu_ms":`))
@@ -57,7 +57,7 @@ test_record_frame_zero_alloc :: proc(t: ^testing.T) {
 
 	for i in 0 ..< 20_000 { 	// forces several buffer flushes
 		telemetry.telemetry_add_drain(tel, 4096)
-		telemetry.telemetry_add_pane(tel, 1920, "Compute_Tiles")
+		telemetry.telemetry_add_pane(tel, 1920)
 		telemetry.telemetry_end_frame(tel, u64(i % 50) * 100_000)
 	}
 	testing.expect_value(t, track.total_allocation_count, 0)

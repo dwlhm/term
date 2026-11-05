@@ -2,12 +2,8 @@ package main
 
 // Shared per-cell colour layout for the GPU harness.
 //
-// The cell shaders read COLOR_WORDS_PER_CELL u32 words per cell (fg ARGB,
-// bg ARGB, underline ARGB). The host owns the same layout through
-// terminal.COLOR_WORDS_PER_CELL / terminal.COLOR_BYTES_PER_CELL, so colour
-// buffers and uploads can never drift back to the old 8-byte/two-word stride.
-// _upload_color_words(..., words_per_cell = 2) is the mutation probe the
-// strategy-equality regression uses to prove such a drift is caught.
+// Each cell owns COLOR_WORDS_PER_CELL u32 words (fg ARGB, bg ARGB, underline
+// ARGB) via terminal.COLOR_WORDS_PER_CELL / terminal.COLOR_BYTES_PER_CELL.
 
 import "core:math"
 
@@ -16,7 +12,7 @@ import atlas "../../core/render/atlas"
 import terminal "../../core/render/terminal"
 import terminal_instance "../../core/render/terminal/instance"
 
-// Packed-cell bits shared with the shaders (terminal_renderer.odin).
+// Packed-cell bits shared with terminal_renderer.odin.
 GPU_CELL_FLAG_DIRECT_COLOR :: u32(8) // cflags bit 3 (hi bit 4)
 GPU_CELL_DECOR_UNDERLINE_SHIFT :: 17 // hi bit 17 == u64 bit 49
 GPU_CELL_DECOR_STRIKE_SHIFT :: 18 // hi bit 18 == u64 bit 50
@@ -24,18 +20,22 @@ GPU_CELL_DECOR_ITALIC_SHIFT :: 19 // hi bit 19 == u64 bit 51
 GPU_CELL_UL_STYLE_SHIFT :: 20 // hi bits 20..22 == u64 bits 52..54
 
 // color_words_at returns the three colour words that belong to one cell.
-color_words_at :: #force_inline proc "contextless" (t: ^Synthetic_Terminal, idx: int) -> (fg, bg, underline: u32) {
-	base := idx * terminal.COLOR_WORDS_PER_CELL
+color_words_at :: #force_inline proc "contextless" (
+	t: ^Synthetic_Terminal,
+	idx: int,
+	words_per_cell: int = terminal.COLOR_WORDS_PER_CELL,
+) -> (fg, bg, underline: u32) {
+	base := idx * words_per_cell
 	return t.colors[base], t.colors[base + 1], t.colors[base + 2]
 }
 
-// unpack_decor mirrors the shader's decor / ul_style extraction.
+// unpack_decor extracts the 3-bit decor mask and 3-bit underline style.
 unpack_decor :: #force_inline proc "contextless" (packed: u64) -> (decor, ul_style: u32) {
 	hi := u32(packed >> 32)
 	return (hi >> GPU_CELL_DECOR_UNDERLINE_SHIFT) & 7, (hi >> GPU_CELL_UL_STYLE_SHIFT) & 7
 }
 
-// argb_to_rgba decodes a 0xFFRRGGBB word exactly like the shader's unpack_argb.
+// argb_to_rgba decodes a 0xFFRRGGBB word into linear RGBA floats.
 argb_to_rgba :: #force_inline proc "contextless" (argb: u32) -> [4]f32 {
 	return {
 		f32((argb >> 16) & 0xFF) / 255.0,
@@ -68,30 +68,6 @@ synthetic_terminal_set_direct_color :: proc(
 	t.colors[base + 2] = underline_argb
 }
 
-// _upload_color_words uploads the terminal's colour words. With a non-default
-// words_per_cell it repacks at the old stride, which leaves the shaders reading
-// the wrong words: the mutation probe for the layout regression.
-_upload_color_words :: proc(
-	h: ^Harness_State,
-	buf: contract.Gpu_Buffer,
-	t: ^Synthetic_Terminal,
-	words_per_cell: u32 = terminal.COLOR_WORDS_PER_CELL,
-) {
-	if rawptr(buf) == nil || len(t.colors) == 0 do return
-	if int(words_per_cell) == terminal.COLOR_WORDS_PER_CELL {
-		contract.write_buffer(h.queue, buf, 0, raw_data(t.colors), u64(len(t.colors)) * size_of(u32))
-		return
-	}
-	n_cells := int(t.cols * t.rows)
-	out := make([]u32, n_cells * int(words_per_cell), context.temp_allocator)
-	for i in 0..<n_cells {
-		src := i * terminal.COLOR_WORDS_PER_CELL
-		dst := i * int(words_per_cell)
-		for w in 0..<int(words_per_cell) do out[dst + w] = t.colors[src + w]
-	}
-	contract.write_buffer(h.queue, buf, 0, raw_data(out), u64(len(out)) * size_of(u32))
-}
-
 // _cell_colors resolves the fg/bg an instance record must use: selection wins,
 // then the per-cell ARGB words, then the palette LUT.
 _cell_colors :: proc(
@@ -99,11 +75,12 @@ _cell_colors :: proc(
 	idx: int,
 	style: u32,
 	cflags: u32,
+	words_per_cell: int = terminal.COLOR_WORDS_PER_CELL,
 ) -> (fg, bg: [4]f32) {
 	if (cflags & 2) != 0 do return SELECTED_FG_FLOAT, SELECTED_BG_FLOAT
 	fg, bg = palette_style_colors(style)
 	if (cflags & GPU_CELL_FLAG_DIRECT_COLOR) == 0 do return
-	fg_argb, bg_argb, _ := color_words_at(t, idx)
+	fg_argb, bg_argb, _ := color_words_at(t, idx, words_per_cell)
 	if fg_argb != 0 do fg = argb_to_rgba(fg_argb)
 	if bg_argb != 0 do bg = argb_to_rgba(bg_argb)
 	return
@@ -123,8 +100,7 @@ _push_decoration_rec :: #force_inline proc(inst: ^terminal_instance.Instance_Ren
 	terminal_instance.instance_renderer_push_overlay(inst, rec)
 }
 
-// _underline_band mirrors ul_band() in tile_compute.wgsl / fullscreen.wgsl for
-// one pixel centre (integer pixel + 0.5).
+// _underline_band evaluates SGR 4:1..4:5 coverage for one pixel centre.
 _underline_band :: proc(
 	ul_style: u32,
 	px, py, cell_x0, cell_y0, cell_w, cell_h: f32,
@@ -149,8 +125,7 @@ _underline_band :: proc(
 	return py >= bottom
 }
 
-// _push_underline emits one quad per contiguous horizontal run of band pixels,
-// matching the shader's pixel coverage for the stored SGR 4:n shape.
+// _push_underline emits one quad per contiguous horizontal run of band pixels.
 _push_underline :: proc(
 	inst: ^terminal_instance.Instance_Renderer,
 	ul_style: u32,
@@ -173,17 +148,15 @@ _push_underline :: proc(
 	}
 }
 
-// _push_cell_instance renders one packed cell through the instance strategy,
-// consuming the same colour words and underline/strike decor as the shaders.
-// With skip_blank it leaves default blank cells to the pass clear colour
-// (partial redraws); a full redraw must pass false so erased cells repaint.
-// Decorations go to the same batch's overlay tail, drawn after the glyph pass.
+// _push_cell_instance renders one packed cell through the instance renderer,
+// including synthetic italic shear (negative u1) and overlay decorations.
 _push_cell_instance :: proc(
 	inst: ^terminal_instance.Instance_Renderer,
 	t: ^Synthetic_Terminal,
 	r, c: u32,
 	cell_w, cell_h: f32,
 	skip_blank: bool = false,
+	mutation: _Color_Mutation = .None,
 ) -> bool {
 	idx := int(r * t.cols + c)
 	packed := t.cells[idx]
@@ -192,6 +165,7 @@ _push_cell_instance :: proc(
 	has_direct := (cflags & GPU_CELL_FLAG_DIRECT_COLOR) != 0
 	has_underline := (decor & 1) != 0
 	has_strike := (decor & 2) != 0
+	has_italic := (decor & 4) != 0
 	if skip_blank && content == ' ' && style == 0 && !has_direct && (cflags & 2) == 0 && !has_underline && !has_strike {
 		return false
 	}
@@ -200,7 +174,12 @@ _push_cell_instance :: proc(
 	if slot == UNRESOLVED_SLOT && content >= 32 && content <= 126 {
 		u0, v0, u1, v1 = atlas.atlas_slot_uv(content - 32, cell_w, cell_h)
 	}
-	fg, bg := _cell_colors(t, idx, style, cflags)
+	if has_italic && mutation != .Disable_Italic_Shear {
+		u1 = -u1
+	}
+
+	words_per_cell := 2 if mutation == .Two_Word_Color_Stride else terminal.COLOR_WORDS_PER_CELL
+	fg, bg := _cell_colors(t, idx, style, cflags, words_per_cell)
 	x := f32(c) * cell_w
 	y := f32(r) * cell_h
 	rec := contract.Instance_Record{
@@ -211,13 +190,14 @@ _push_cell_instance :: proc(
 	}
 	terminal_instance.instance_renderer_push(inst, rec)
 	if has_underline {
-		_, _, ul_argb := color_words_at(t, idx)
+		_, _, ul_argb := color_words_at(t, idx, words_per_cell)
 		ul_color := argb_to_rgba(ul_argb) if ul_argb != 0 else fg
 		_push_underline(inst, ul_style, x, y, cell_w, cell_h, ul_color)
 	}
 	if has_strike {
 		thickness := max(1.0, math.floor(cell_h * 0.06))
-		_push_decoration_rec(inst, x, y + cell_h * 0.55, cell_w, thickness, fg)
+		strike_y := y + cell_h * 0.55 + (1.0 if mutation == .Strike_Offset else 0.0)
+		_push_decoration_rec(inst, x, strike_y, cell_w, thickness, fg)
 	}
 	return true
 }

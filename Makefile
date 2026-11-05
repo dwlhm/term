@@ -21,7 +21,7 @@ TEST_FLAGS ?= -define:ODIN_TEST_THREADS=1
 DEBUG_FLAGS ?= -debug
 RELEASE_FLAGS ?= -o:speed -no-bounds-check
 
-.PHONY: all term release run term-debug harness-features run-harness-features harness-render-chrome run-harness-render-chrome harness-render-terminal run-harness-render-terminal harness-render-composer run-harness-composer test test-app test-holder test-session-core test-font test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-selector test-gpu check esctest clean help bench bench-quick bundle dmg portable dist install uninstall test-unicode-width gen-unicode bench-parser bench-session bench-throughput test-poller
+.PHONY: all term release run term-debug harness-features run-harness-features harness-render-chrome run-harness-render-chrome harness-render-terminal run-harness-render-terminal harness-render-composer run-harness-composer test test-app test-holder test-session-core test-font test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-gpu check esctest clean help bench bench-quick bundle dmg portable dist install uninstall test-unicode-width gen-unicode bench-parser bench-session bench-throughput test-poller
 
 all: term harness-features harness-render-chrome harness-render-terminal harness-composer
 
@@ -133,7 +133,7 @@ bench-session:
 bench-throughput: term
 	python3 -I scripts/stress/throughput.py -t $(OUT_DIR)/term $(ARGS)
 
-test: test-app test-unicode-width test-terminal test-pty test-holder test-session-core test-font test-window test-session test-control test-ipc test-poller test-tabs test-multiplexer test-interaction test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-selector test-gpu test-features test-e2e
+test: test-app test-unicode-width test-terminal test-pty test-holder test-session-core test-font test-window test-session test-control test-ipc test-poller test-tabs test-multiplexer test-interaction test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-gpu test-features test-e2e
 
 # VT conformance suite (esctest2) driven inside a real Term pane; requires a GUI
 # session. Extra esctest flags: make esctest ESCTEST_ARGS="--include=CUP"
@@ -250,9 +250,6 @@ test-gpu: harness-render-terminal
 test-render-contract:
 	$(ODIN) test src/core/render/contract/tests $(CHECK_FLAGS) $(TEST_FLAGS)
 
-test-selector:
-	$(ODIN) test src/core/render/terminal/tests $(CHECK_FLAGS) $(TEST_FLAGS)
-
 check:
 	$(ODIN) check src/cmd/harness_helper $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/cmd/harness_render_chrome $(CHECK_FLAGS)
@@ -285,8 +282,6 @@ check:
 	$(ODIN) check src/core/render/atlas $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/core/render/terminal $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/core/render/terminal/instance $(CHECK_FLAGS) -no-entry-point
-	$(ODIN) check src/core/render/terminal/tile $(CHECK_FLAGS) -no-entry-point
-	$(ODIN) check src/core/render/terminal/fullscreen $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/core/chrome/draw_list $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/core/chrome/tabs $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/core/chrome/splits $(CHECK_FLAGS) -no-entry-point
@@ -327,7 +322,6 @@ help:
 	@echo "  test                        Run all active core unit tests"
 	@echo "  test-composer               Run composer pipeline unit tests"
 	@echo "  test-render-contract        Run render contract & damage unit tests"
-	@echo "  test-selector               Run adaptive strategy selector unit tests"
 	@echo "  check                       Type check all active core modules and harnesses"
 	@echo "  esctest                     Run the esctest2 VT conformance suite inside Term"
 	@echo "  clean                       Remove build artifacts and binaries"

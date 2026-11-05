@@ -1,8 +1,7 @@
 package instance
 
-// Terminal Render Pillar - Strategy A: Quad Instance Batching.
+// Terminal Render Pillar - Instanced Quad Batching.
 //
-// Designed for localized / sparse screen modifications (< 3% dirty cells).
 // Emits canonical 64-byte Instance_Record primitives directly into a GPU buffer.
 // Vertex shader expands each instance into a 2-triangle quad (6 vertices).
 //
@@ -134,6 +133,35 @@ instance_renderer_destroy :: proc(r: ^Instance_Renderer) {
 		r.records = nil
 	}
 	r.available = false
+}
+
+// instance_renderer_ensure_capacity grows the CPU staging slice and GPU buffer
+// when a larger grid requires more instance slots. No-op in steady state.
+instance_renderer_ensure_capacity :: proc(r: ^Instance_Renderer, min_instances: u32) -> bool {
+	if r == nil || !r.available do return false
+	if min_instances <= r.max_instances do return true
+
+	new_records := make([]contract.Instance_Record, int(min_instances), r.allocator)
+	if new_records == nil do return false
+
+	buffer_bytes := u64(min_instances) * u64(INSTANCE_STRIDE)
+	usage := contract.Gpu_Buffer_Usage.Vertex | contract.Gpu_Buffer_Usage.Copy_Dst | contract.Gpu_Buffer_Usage.Storage
+	new_buf := contract.create_buffer(r.device, buffer_bytes, usage, false)
+	if rawptr(new_buf) == nil {
+		delete(new_records, r.allocator)
+		return false
+	}
+
+	if contract.destroy_buffer != nil && rawptr(r.instance_buffer) != nil {
+		contract.destroy_buffer(r.instance_buffer)
+	}
+	if len(r.records) > 0 {
+		delete(r.records, r.allocator)
+	}
+	r.records = new_records
+	r.instance_buffer = new_buf
+	r.max_instances = min_instances
+	return true
 }
 
 // instance_renderer_begin clears the batch.

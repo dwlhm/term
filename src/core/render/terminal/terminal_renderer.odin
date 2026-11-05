@@ -1,122 +1,28 @@
 package render_terminal
 
-// Terminal Content Pillar - Unified Multi-Strategy GPU Renderer Facade.
+// Terminal Content Pillar - Unified Instanced GPU Renderer.
 // Part of Tier 1 Autonomous Core Render Engine (src/core/render/terminal/*).
-//
-// Unifies:
-//   Strategy A: Instanced Quad Batching (`instance/`) — < 3% damage, cursor, emoji overlay.
-//   Strategy B: Compute Tile Binning (`tile/`) — 3% - 65% damage, 16x16 tile binning.
-//   Strategy C: Fullscreen Direct Quad (`fullscreen/`) — >= 65% damage / flood scroll.
-//   Adaptive Online Selector (`selector.odin`) — Selects optimal strategy in ~35.9ns.
 //
 // Invariant: ZERO OS/Platform dependencies, ZERO heap allocations during per-frame render loop.
 
 import "base:runtime"
-import "core:math"
-import "core:time"
 import contract "../contract"
-import atlas "../atlas"
 import "instance"
-import "tile"
-import "fullscreen"
 import kitty "kitty"
-import core_terminal "../../terminal"
-import cell "../../terminal/cell"
-import grid "../../terminal/grid"
-import damage "../../terminal/damage"
 import plat_font "../../../platform/font"
-import uw "../../unicode_width"
 
-GLYPH_WGSL        :: #load("../shaders/glyph.wgsl", string)
-BG_WGSL           :: #load("../shaders/bg.wgsl", string)
-EMOJI_WGSL        :: #load("../shaders/emoji.wgsl", string)
-TILE_COMPUTE_WGSL :: #load("../shaders/tile_compute.wgsl", string)
-TILE_BLIT_WGSL    :: #load("../shaders/tile_blit.wgsl", string)
-FULLSCREEN_WGSL   :: #load("../shaders/fullscreen.wgsl", string)
-
-RAW_PALETTE_COLORS: [16][3]u8 = {
-	{20, 23, 31},    // 0: Default Dark Background ({0.08, 0.09, 0.12})
-	{224, 108, 117}, // 1: Red
-	{152, 195, 121}, // 2: Green
-	{229, 192, 123}, // 3: Yellow
-	{97, 175, 239},  // 4: Blue
-	{198, 120, 221}, // 5: Magenta
-	{86, 182, 194},  // 6: Cyan
-	{171, 178, 191}, // 7: Light Gray
-	{92, 99, 112},   // 8: Dark Gray
-	{255, 120, 130}, // 9: Bright Red
-	{170, 220, 130}, // 10: Bright Green
-	{255, 210, 130}, // 11: Bright Yellow
-	{110, 190, 255}, // 12: Bright Blue
-	{220, 140, 240}, // 13: Bright Magenta
-	{100, 200, 220}, // 14: Bright Cyan
-	{240, 240, 245}, // 15: Bright White
-}
-
-PALETTE_PRECOMPUTED: [16][4]f32
-
-rgb_to_r5g6b5 :: #force_inline proc "contextless" (r, g, b: u8) -> u16 {
-	r5 := (u16(r) * 31 + 127) / 255
-	g6 := (u16(g) * 63 + 127) / 255
-	b5 := (u16(b) * 31 + 127) / 255
-	return (r5 << 11) | (g6 << 5) | b5
-}
-
-unpack_r5g6b5 :: #force_inline proc "contextless" (packed: u16) -> [4]f32 {
-	r := math.round(f32((packed >> 11) & 0x1F) / 31.0 * 255.0) / 255.0
-	g := math.round(f32((packed >> 5) & 0x3F) / 63.0 * 255.0) / 255.0
-	b := math.round(f32(packed & 0x1F) / 31.0 * 255.0) / 255.0
-	return {r, g, b, 1.0}
-}
-
-init_style_lut :: proc(lut: ^[1027]u32) {
-	for i in 0..<16 {
-		c := RAW_PALETTE_COLORS[i]
-		PALETTE_PRECOMPUTED[i] = unpack_r5g6b5(rgb_to_r5g6b5(c[0], c[1], c[2]))
-	}
-
-	fg_packed: [1024]u16
-	bg_packed: [1024]u16
-
-	for s in 0..<1024 {
-		fg_idx := s & 15
-		bg_idx := (s >> 4) & 15
-		if s == 0 {
-			fg_idx = 15
-			bg_idx = 0
-		}
-		fg_c := RAW_PALETTE_COLORS[fg_idx]
-		bg_c := RAW_PALETTE_COLORS[bg_idx]
-		fg_packed[s] = rgb_to_r5g6b5(fg_c[0], fg_c[1], fg_c[2])
-		bg_packed[s] = rgb_to_r5g6b5(bg_c[0], bg_c[1], bg_c[2])
-	}
-
-	for i in 0..<512 {
-		w_fg := u32(fg_packed[i * 2]) | (u32(fg_packed[i * 2 + 1]) << 16)
-		lut[i] = w_fg
-		w_bg := u32(bg_packed[i * 2]) | (u32(bg_packed[i * 2 + 1]) << 16)
-		lut[512 + i] = w_bg
-	}
-
-	sel_fg := rgb_to_r5g6b5(255, 255, 255)
-	sel_bg := rgb_to_r5g6b5(60, 100, 180)
-	lut[1024] = u32(sel_fg) | (u32(sel_bg) << 16)
-}
+GLYPH_WGSL :: #load("../shaders/glyph.wgsl", string)
+BG_WGSL    :: #load("../shaders/bg.wgsl", string)
+EMOJI_WGSL :: #load("../shaders/emoji.wgsl", string)
 
 Terminal_Pipelines :: struct {
-	glyph_pipeline:   contract.Gpu_RenderPipeline,
-	glyph_layout:     contract.Gpu_BindGroupLayout,
-	bg_pipeline:      contract.Gpu_RenderPipeline,
-	bg_layout:        contract.Gpu_BindGroupLayout,
-	emoji_pipeline:   contract.Gpu_RenderPipeline,
-	emoji_layout:     contract.Gpu_BindGroupLayout,
-	compute_pipeline: contract.Gpu_ComputePipeline,
-	compute_layout:   contract.Gpu_BindGroupLayout,
-	blit_pipeline:    contract.Gpu_RenderPipeline,
-	blit_layout:      contract.Gpu_BindGroupLayout,
-	fs_pipeline:      contract.Gpu_RenderPipeline,
-	fs_layout:        contract.Gpu_BindGroupLayout,
-	available:        bool,
+	glyph_pipeline: contract.Gpu_RenderPipeline,
+	glyph_layout:   contract.Gpu_BindGroupLayout,
+	bg_pipeline:    contract.Gpu_RenderPipeline,
+	bg_layout:      contract.Gpu_BindGroupLayout,
+	emoji_pipeline: contract.Gpu_RenderPipeline,
+	emoji_layout:   contract.Gpu_BindGroupLayout,
+	available:      bool,
 }
 
 terminal_pipelines_init :: proc(p: ^Terminal_Pipelines, device: contract.Gpu_Device, format: contract.Gpu_Format) -> bool {
@@ -128,9 +34,9 @@ terminal_pipelines_init :: proc(p: ^Terminal_Pipelines, device: contract.Gpu_Dev
 		{format = .Float32x4, offset = 16, shader_location = 2},
 		{format = .Float32x4, offset = 32, shader_location = 3},
 	}
-	var_glyph_ok: bool
-	p.glyph_pipeline, p.glyph_layout, var_glyph_ok = _create_instance_pipeline(device, GLYPH_WGSL, glyph_attrs, format)
-	if !var_glyph_ok do return false
+	glyph_ok: bool
+	p.glyph_pipeline, p.glyph_layout, glyph_ok = _create_instance_pipeline(device, GLYPH_WGSL, glyph_attrs, format)
+	if !glyph_ok do return false
 
 	bg_attrs := []contract.Gpu_Vertex_Attribute{
 		{format = .Float32x2, offset = 0, shader_location = 0},
@@ -138,30 +44,13 @@ terminal_pipelines_init :: proc(p: ^Terminal_Pipelines, device: contract.Gpu_Dev
 		{format = .Float32x4, offset = 16, shader_location = 2},
 		{format = .Float32x4, offset = 48, shader_location = 3},
 	}
-	var_bg_ok: bool
-	p.bg_pipeline, p.bg_layout, var_bg_ok = _create_instance_pipeline(device, BG_WGSL, bg_attrs, format)
-	if !var_bg_ok do return false
+	bg_ok: bool
+	p.bg_pipeline, p.bg_layout, bg_ok = _create_instance_pipeline(device, BG_WGSL, bg_attrs, format)
+	if !bg_ok do return false
 
-	var_emoji_ok: bool
-	p.emoji_pipeline, p.emoji_layout, var_emoji_ok = _create_instance_pipeline(device, EMOJI_WGSL, glyph_attrs, format)
-	if !var_emoji_ok do return false
-
-	compute_mod := contract.create_shader_module(device, TILE_COMPUTE_WGSL)
-	if rawptr(compute_mod) != nil {
-		p.compute_pipeline = contract.create_compute_pipeline(device, compute_mod, "cs_main")
-		if rawptr(p.compute_pipeline) != nil {
-			p.compute_layout = contract.compute_get_bind_group_layout(p.compute_pipeline, 0)
-		}
-		contract.destroy_shader_module(compute_mod)
-	}
-
-	var_blit_ok: bool
-	p.blit_pipeline, p.blit_layout, var_blit_ok = _create_triangle_pipeline(device, TILE_BLIT_WGSL, "vs_main", "fs_main", format)
-	_ = var_blit_ok
-
-	var_fs_ok: bool
-	p.fs_pipeline, p.fs_layout, var_fs_ok = _create_triangle_pipeline(device, FULLSCREEN_WGSL, "fullscreen_vs_main", "fullscreen_fs_main", format)
-	_ = var_fs_ok
+	emoji_ok: bool
+	p.emoji_pipeline, p.emoji_layout, emoji_ok = _create_instance_pipeline(device, EMOJI_WGSL, glyph_attrs, format)
+	if !emoji_ok do return false
 
 	p.available = true
 	return true
@@ -172,136 +61,42 @@ terminal_pipelines_destroy :: proc(p: ^Terminal_Pipelines) {
 	if rawptr(p.glyph_pipeline) != nil do contract.destroy_render_pipeline(p.glyph_pipeline)
 	if rawptr(p.bg_pipeline) != nil do contract.destroy_render_pipeline(p.bg_pipeline)
 	if rawptr(p.emoji_pipeline) != nil do contract.destroy_render_pipeline(p.emoji_pipeline)
-	if rawptr(p.blit_pipeline) != nil do contract.destroy_render_pipeline(p.blit_pipeline)
-	if rawptr(p.fs_pipeline) != nil do contract.destroy_render_pipeline(p.fs_pipeline)
-	if rawptr(p.compute_pipeline) != nil do contract.destroy_compute_pipeline(p.compute_pipeline)
 
 	if rawptr(p.glyph_layout) != nil && contract.destroy_bind_group_layout != nil do contract.destroy_bind_group_layout(p.glyph_layout)
 	if rawptr(p.bg_layout) != nil && contract.destroy_bind_group_layout != nil do contract.destroy_bind_group_layout(p.bg_layout)
 	if rawptr(p.emoji_layout) != nil && contract.destroy_bind_group_layout != nil do contract.destroy_bind_group_layout(p.emoji_layout)
-	if rawptr(p.blit_layout) != nil && contract.destroy_bind_group_layout != nil do contract.destroy_bind_group_layout(p.blit_layout)
-	if rawptr(p.fs_layout) != nil && contract.destroy_bind_group_layout != nil do contract.destroy_bind_group_layout(p.fs_layout)
-	if rawptr(p.compute_layout) != nil && contract.destroy_bind_group_layout != nil do contract.destroy_bind_group_layout(p.compute_layout)
 	p.available = false
 }
 
 Terminal_Renderer :: struct {
-	device:             contract.Gpu_Device,
-	queue:              contract.Gpu_Queue,
-	format:             contract.Gpu_Format,
+	device:           contract.Gpu_Device,
+	queue:            contract.Gpu_Queue,
+	format:           contract.Gpu_Format,
 
-	pipelines:          ^Terminal_Pipelines,
-	owns_pipelines:     bool,
+	pipelines:        ^Terminal_Pipelines,
+	owns_pipelines:   bool,
 
-	// Strategy A: Instanced Quad Batching
-	inst_rend:          instance.Instance_Renderer,
-	glyph_pipeline:     contract.Gpu_RenderPipeline,
-	glyph_layout:       contract.Gpu_BindGroupLayout,
-	bg_pipeline:        contract.Gpu_RenderPipeline,
-	bg_layout:          contract.Gpu_BindGroupLayout,
+	inst_rend:        instance.Instance_Renderer,
+	glyph_pipeline:   contract.Gpu_RenderPipeline,
+	glyph_layout:     contract.Gpu_BindGroupLayout,
+	bg_pipeline:      contract.Gpu_RenderPipeline,
+	bg_layout:        contract.Gpu_BindGroupLayout,
 
-	// Dedicated RGBA8 Color Emoji Batching
-	emoji_rend:         instance.Instance_Renderer,
-	emoji_pipeline:     contract.Gpu_RenderPipeline,
-	emoji_layout:       contract.Gpu_BindGroupLayout,
+	emoji_rend:       instance.Instance_Renderer,
+	emoji_pipeline:   contract.Gpu_RenderPipeline,
+	emoji_layout:     contract.Gpu_BindGroupLayout,
 
-	// Kitty Graphics Protocol Sub-Renderer
-	kitty_rend:         kitty.Kitty_Renderer,
+	kitty_rend:       kitty.Kitty_Renderer,
 
-	// Strategy B: Compute Tile Binning (16x16 pixel tiles)
-	tile_rend:          tile.Compute_Tile_Renderer,
-	compute_pipeline:   contract.Gpu_ComputePipeline,
-	compute_layout:     contract.Gpu_BindGroupLayout,
-	blit_pipeline:      contract.Gpu_RenderPipeline,
-	blit_layout:        contract.Gpu_BindGroupLayout,
+	last_duration_ns: u64,
+	last_dirty_cells: int,
 
-	// Strategy C: Fullscreen Direct Quad
-	fs_rend:            fullscreen.Fullscreen_Renderer,
-	fs_pipeline:        contract.Gpu_RenderPipeline,
-	fs_layout:          contract.Gpu_BindGroupLayout,
-	fs_color_buffer:    contract.Gpu_Buffer,
+	bound_atlas_view: contract.Gpu_TextureView,
+	bound_emoji_view: contract.Gpu_TextureView,
+	ligature_cache:   plat_font.Ligature_Cache,
 
-	// Shared LUT & Adaptive Strategy Selector State
-	lut_words:          [1027]u32,
-	last_default_bg_packed: u16,
-	last_hover_openable_packed: u16,
-	last_hover_blocked_packed:  u16,
-	strat_state:        Strategy_State,
-	last_strategy:      Render_Strategy,
-	last_duration_ns:   u64,
-	last_dirty_cells:   int,
-
-	// Resource Binding & Tile Cache Tracking
-	bound_atlas_view:   contract.Gpu_TextureView,
-	bound_emoji_view:   contract.Gpu_TextureView,
-	last_term_ptr:      rawptr,
-	last_scroll_offset: int,
-	last_is_focused:    bool,
-	last_eff_opacity:   f32,
-	tile_fb_valid:      bool,
-	ligature_cache:     plat_font.Ligature_Cache,
-
-	// Scratch Storage Buffers (Preallocated for zero heap allocations)
-	packed_cells:       [dynamic]u64,
-	direct_colors:      [dynamic]u32,
-	dirty_tiles:        [dynamic]u32,
-
-	available:          bool,
-	allocator:          runtime.Allocator,
-}
-
-// Decoration flags live in the spare high bits of the packed 64-bit GPU cell:
-// bit 49 = underline, bit 50 = strikethrough (hi >> 17 / hi >> 18).
-GPU_CELL_DECOR_UNDERLINE :: u64(1) << 49
-GPU_CELL_DECOR_STRIKE    :: u64(1) << 50
-GPU_CELL_DECOR_ITALIC    :: u64(1) << 51
-// Underline shape (cell.Underline_Style) occupies bits 20..22 of the packed
-// cell's high word (bits 52..54 of the u64); 0 means single, matching plain
-// SGR 4 without per-cell side storage.
-GPU_CELL_UL_STYLE_SHIFT :: 52
-// Colour layout shared by every render strategy and the GPU harness: one u32
-// word per channel set, in this order. The centre shaders mirror this stride
-// (COLOR_WORDS_PER_CELL in tile_compute.wgsl / fullscreen.wgsl).
-COLOR_WORDS_PER_CELL :: 3 // fg ARGB, bg ARGB, underline ARGB (0 = use fg)
-COLOR_BYTES_PER_CELL :: COLOR_WORDS_PER_CELL * size_of(u32)
-
-// Cell flags travel in the 7-bit cflags field of the packed cell (hi >> 1).
-GPU_CELL_FLAG_SELECTED      :: u32(2)
-GPU_CELL_FLAG_DIRECT_COLOR  :: u32(8)
-GPU_CELL_FLAG_HOVER         :: u32(16)
-GPU_CELL_FLAG_HOVER_BLOCKED :: u32(32)
-
-// Hyperlink_Highlight marks the contiguous OSC 8 run under the pointer so every
-// render strategy can tint it uniformly. `row` is a logical grid row and the
-// column range is inclusive.
-Hyperlink_Highlight :: struct {
-	active:    bool,
-	row:       int,
-	col_start: int,
-	col_end:   int,
-	blocked:   bool,
-}
-
-// Hover tint colors. The sparse instance path uses these [4]f32 values directly
-// while the tile/fullscreen shaders read the same colors from the LUT entries
-// below (written from the theme at encode time).
-HOVER_OPENABLE_BG: [4]f32 : {0.141, 0.322, 0.220, 1.0} // dark green
-HOVER_BLOCKED_BG:  [4]f32 : {0.380, 0.161, 0.149, 1.0} // dark red
-
-// LUT word indices reserved for the hover tints (selection uses 1024).
-LUT_HOVER_OPENABLE_WORD :: 1025
-LUT_HOVER_BLOCKED_WORD  :: 1026
-
-_pack_gpu_cell :: #force_inline proc "contextless" (
-	content: u32,
-	style:   u32,
-	width:   u32,
-	cflags:  u32,
-	slot:    u32,
-) -> u64 {
-	lo := (content & 0x1FFFFF) | ((style & 0x3FF) << 21) | ((width & 1) << 31)
-	hi := ((width >> 1) & 1) | ((cflags & 0x7F) << 1) | ((slot & 0x1FF) << 8)
-	return u64(lo) | (u64(hi) << 32)
+	available:        bool,
+	allocator:        runtime.Allocator,
 }
 
 _create_instance_pipeline :: proc(
@@ -325,25 +120,6 @@ _create_instance_pipeline :: proc(
 	return pipeline, layout, true
 }
 
-_create_triangle_pipeline :: proc(
-	device: contract.Gpu_Device,
-	wgsl_src: string,
-	vs_entry: string,
-	fs_entry: string,
-	format: contract.Gpu_Format,
-) -> (pipeline: contract.Gpu_RenderPipeline, layout: contract.Gpu_BindGroupLayout, ok: bool) {
-	module := contract.create_shader_module(device, wgsl_src)
-	if rawptr(module) == nil do return {}, {}, false
-	defer contract.destroy_shader_module(module)
-
-	pipeline = contract.create_render_pipeline(
-		device, module, vs_entry, module, fs_entry, nil, format, .Alpha_Blend, .Triangle_List,
-	)
-	if rawptr(pipeline) == nil do return {}, {}, false
-	layout = contract.pipeline_get_bind_group_layout(pipeline, 0)
-	return pipeline, layout, true
-}
-
 terminal_renderer_init_with_pipelines :: proc(
 	r: ^Terminal_Renderer,
 	device: contract.Gpu_Device,
@@ -355,43 +131,16 @@ terminal_renderer_init_with_pipelines :: proc(
 	allocator: runtime.Allocator = context.allocator,
 ) -> bool {
 	if r == nil || rawptr(device) == nil || rawptr(queue) == nil || pipes == nil || !pipes.available do return false
-	r.device = device
-	r.queue = queue
-	r.format = format
-	r.allocator = allocator
-	r.last_strategy = .Instance
-	r.last_duration_ns = 0
-	r.last_is_focused = true
-	r.last_eff_opacity = 0.45
+	r.device, r.queue, r.format, r.allocator = device, queue, format, allocator
+	r.pipelines, r.owns_pipelines = pipes, false
+	r.glyph_pipeline, r.glyph_layout = pipes.glyph_pipeline, pipes.glyph_layout
+	r.bg_pipeline, r.bg_layout = pipes.bg_pipeline, pipes.bg_layout
+	r.emoji_pipeline, r.emoji_layout = pipes.emoji_pipeline, pipes.emoji_layout
 
-	r.pipelines = pipes
-	r.owns_pipelines = false
+	init_palette_colors()
 
-	r.glyph_pipeline = pipes.glyph_pipeline
-	r.glyph_layout = pipes.glyph_layout
-	r.bg_pipeline = pipes.bg_pipeline
-	r.bg_layout = pipes.bg_layout
-	r.emoji_pipeline = pipes.emoji_pipeline
-	r.emoji_layout = pipes.emoji_layout
-	r.compute_pipeline = pipes.compute_pipeline
-	r.compute_layout = pipes.compute_layout
-	r.blit_pipeline = pipes.blit_pipeline
-	r.blit_layout = pipes.blit_layout
-	r.fs_pipeline = pipes.fs_pipeline
-	r.fs_layout = pipes.fs_layout
-
-	init_style_lut(&r.lut_words)
-
-	if !instance.instance_renderer_init(&r.inst_rend, device, queue, 16384, atlas_view, format, allocator) {
-		return false
-	}
-
-	entries := []contract.Gpu_Bind_Entry{
-		{binding = 0, buffer = r.inst_rend.uniform_buffer, offset = 0, size = 0, entry_type = .Buffer},
-		{binding = 1, view = atlas_view, entry_type = .Texture_View},
-		{binding = 2, sampler = r.inst_rend.sampler, entry_type = .Sampler},
-	}
-	r.inst_rend.bind_group = contract.create_bind_group(device, r.glyph_layout, entries)
+	if !instance.instance_renderer_init(&r.inst_rend, device, queue, 16384, atlas_view, format, allocator) do return false
+	_bind_glyph_resources(r, atlas_view)
 
 	bg_entries := []contract.Gpu_Bind_Entry{
 		{binding = 0, buffer = r.inst_rend.uniform_buffer, offset = 0, size = 0, entry_type = .Buffer},
@@ -399,49 +148,14 @@ terminal_renderer_init_with_pipelines :: proc(
 	r.inst_rend.bg_bind_group = contract.create_bind_group(device, r.bg_layout, bg_entries)
 	r.inst_rend.pipeline = r.glyph_pipeline
 
-	if !instance.instance_renderer_init(&r.emoji_rend, device, queue, 4096, emoji_view, format, allocator) {
-		return false
-	}
-
-	emoji_entries := []contract.Gpu_Bind_Entry{
-		{binding = 0, buffer = r.emoji_rend.uniform_buffer, offset = 0, size = 0, entry_type = .Buffer},
-		{binding = 1, view = emoji_view, entry_type = .Texture_View},
-		{binding = 2, sampler = r.emoji_rend.sampler, entry_type = .Sampler},
-	}
-	r.emoji_rend.bind_group = contract.create_bind_group(device, r.emoji_layout, emoji_entries)
+	if !instance.instance_renderer_init(&r.emoji_rend, device, queue, 4096, emoji_view, format, allocator) do return false
+	_bind_emoji_resources(r, emoji_view)
 	r.emoji_rend.pipeline = r.emoji_pipeline
 
 	_ = kitty.kitty_renderer_init(&r.kitty_rend, device, queue, r.emoji_pipeline, r.emoji_layout, r.inst_rend.sampler, r.emoji_rend.uniform_buffer, allocator)
-
-	_ = tile.compute_tile_init(&r.tile_rend, device, queue, 24, 80, 10.0, 20.0, atlas_view, format, allocator)
-	r.tile_rend.compute_pipeline = r.compute_pipeline
-	r.tile_rend.compute_layout = r.compute_layout
-	r.tile_rend.blit_pipeline = r.blit_pipeline
-	r.tile_rend.blit_layout = r.blit_layout
-
-	_ = fullscreen.fullscreen_init(&r.fs_rend, device, queue, 24, 80, 10.0, 20.0, atlas_view, format, allocator)
-	r.fs_rend.pipeline = r.fs_pipeline
-	r.fs_rend.layout = r.fs_layout
-
 	plat_font.ligature_cache_init(&r.ligature_cache)
 
-	r.last_default_bg_packed = u16(r.lut_words[512] & 0xFFFF)
-	if rawptr(r.tile_rend.lut_buffer) != nil {
-		contract.write_buffer(queue, r.tile_rend.lut_buffer, 0, &r.lut_words, size_of(r.lut_words))
-	}
-	if rawptr(r.fs_rend.lut_buffer) != nil {
-		contract.write_buffer(queue, r.fs_rend.lut_buffer, 0, &r.lut_words, size_of(r.lut_words))
-	}
-
-	initial_capacity := 500 * 200
-	r.packed_cells = make([dynamic]u64, 80 * 24, initial_capacity, allocator)
-	r.direct_colors = make([dynamic]u32, 80 * 24 * COLOR_WORDS_PER_CELL, initial_capacity * COLOR_WORDS_PER_CELL, allocator)
-	r.dirty_tiles = make([dynamic]u32, 0, initial_capacity / 16, allocator)
-
-	r.bound_atlas_view = atlas_view
-	r.bound_emoji_view = emoji_view
-	_terminal_renderer_ensure_resources(r, 80, 24, 10.0, 20.0, atlas_view, emoji_view)
-
+	r.bound_atlas_view, r.bound_emoji_view = atlas_view, emoji_view
 	r.available = true
 	return true
 }
@@ -472,1238 +186,63 @@ terminal_renderer_init :: proc(
 terminal_renderer_destroy :: proc(r: ^Terminal_Renderer) {
 	if r == nil do return
 
-	// Pipelines and layouts are owned by Terminal_Pipelines (destroyed via terminal_pipelines_destroy).
-	// Nil out all shared handles across sub-renderers to prevent them from destroying shared GPU objects.
-	r.inst_rend.pipeline = contract.Gpu_RenderPipeline(nil)
-	r.inst_rend.layout = contract.Gpu_BindGroupLayout(nil)
-	r.emoji_rend.pipeline = contract.Gpu_RenderPipeline(nil)
-	r.emoji_rend.layout = contract.Gpu_BindGroupLayout(nil)
-	r.tile_rend.compute_pipeline = contract.Gpu_ComputePipeline(nil)
-	r.tile_rend.compute_layout = contract.Gpu_BindGroupLayout(nil)
-	r.tile_rend.blit_pipeline = contract.Gpu_RenderPipeline(nil)
-	r.tile_rend.blit_layout = contract.Gpu_BindGroupLayout(nil)
-	r.fs_rend.pipeline = contract.Gpu_RenderPipeline(nil)
-	r.fs_rend.layout = contract.Gpu_BindGroupLayout(nil)
+	r.inst_rend.pipeline, r.inst_rend.layout = nil, nil
+	r.emoji_rend.pipeline, r.emoji_rend.layout = nil, nil
 
 	instance.instance_renderer_destroy(&r.inst_rend)
 	instance.instance_renderer_destroy(&r.emoji_rend)
 	kitty.kitty_renderer_destroy(&r.kitty_rend)
-	tile.compute_tile_destroy(&r.tile_rend)
-	fullscreen.fullscreen_destroy(&r.fs_rend)
-
-	if rawptr(r.fs_color_buffer) != nil {
-		contract.destroy_buffer(r.fs_color_buffer)
-		r.fs_color_buffer = contract.Gpu_Buffer(nil)
-	}
 
 	if r.owns_pipelines && r.pipelines != nil {
 		terminal_pipelines_destroy(r.pipelines)
 		free(r.pipelines, r.allocator)
-		r.pipelines = nil
 	}
-
-	if len(r.packed_cells) > 0 {
-		delete(r.packed_cells)
-		r.packed_cells = nil
-	}
-	if len(r.direct_colors) > 0 {
-		delete(r.direct_colors)
-		r.direct_colors = nil
-	}
-	if len(r.dirty_tiles) > 0 {
-		delete(r.dirty_tiles)
-		r.dirty_tiles = nil
-	}
-
-	r.available = false
 	r^ = {}
+}
+
+@(private = "file")
+_bind_glyph_resources :: proc(r: ^Terminal_Renderer, atlas_view: contract.Gpu_TextureView) {
+	if rawptr(r.glyph_layout) == nil || rawptr(atlas_view) == nil do return
+	if rawptr(r.inst_rend.bind_group) != nil do contract.destroy_bind_group(r.inst_rend.bind_group)
+	entries := []contract.Gpu_Bind_Entry{
+		{binding = 0, buffer = r.inst_rend.uniform_buffer, offset = 0, size = 0, entry_type = .Buffer},
+		{binding = 1, view = atlas_view, entry_type = .Texture_View},
+		{binding = 2, sampler = r.inst_rend.sampler, entry_type = .Sampler},
+	}
+	r.inst_rend.bind_group = contract.create_bind_group(r.device, r.glyph_layout, entries)
+	r.inst_rend.atlas_view = atlas_view
+}
+
+@(private = "file")
+_bind_emoji_resources :: proc(r: ^Terminal_Renderer, emoji_view: contract.Gpu_TextureView) {
+	if rawptr(r.emoji_layout) == nil || rawptr(emoji_view) == nil do return
+	if rawptr(r.emoji_rend.bind_group) != nil do contract.destroy_bind_group(r.emoji_rend.bind_group)
+	entries := []contract.Gpu_Bind_Entry{
+		{binding = 0, buffer = r.emoji_rend.uniform_buffer, offset = 0, size = 0, entry_type = .Buffer},
+		{binding = 1, view = emoji_view, entry_type = .Texture_View},
+		{binding = 2, sampler = r.emoji_rend.sampler, entry_type = .Sampler},
+	}
+	r.emoji_rend.bind_group = contract.create_bind_group(r.device, r.emoji_layout, entries)
+	r.emoji_rend.atlas_view = emoji_view
 }
 
 _terminal_renderer_ensure_resources :: proc(
 	r: ^Terminal_Renderer,
 	cols, rows: u32,
-	cell_w, cell_h: f32,
 	atlas_view: contract.Gpu_TextureView,
 	emoji_view: contract.Gpu_TextureView,
 ) {
 	if r == nil || cols == 0 || rows == 0 do return
+	cells := cols * rows
+	instance.instance_renderer_ensure_capacity(&r.inst_rend, max(16384, cells * 8))
+	instance.instance_renderer_ensure_capacity(&r.emoji_rend, max(4096, cells))
 
-	total_cells := int(cols * rows)
-	if len(r.packed_cells) < total_cells {
-		resize(&r.packed_cells, total_cells)
+	if rawptr(atlas_view) != nil && atlas_view != r.bound_atlas_view {
+		_bind_glyph_resources(r, atlas_view)
+		r.bound_atlas_view = atlas_view
 	}
-	if len(r.direct_colors) < total_cells * COLOR_WORDS_PER_CELL {
-		resize(&r.direct_colors, total_cells * COLOR_WORDS_PER_CELL)
-	}
-
-	atlas_changed := rawptr(atlas_view) != nil && atlas_view != r.bound_atlas_view
-	emoji_changed := rawptr(emoji_view) != nil && emoji_view != r.bound_emoji_view
-
-	if atlas_changed && rawptr(r.glyph_layout) != nil {
-		if rawptr(r.inst_rend.bind_group) != nil do contract.destroy_bind_group(r.inst_rend.bind_group)
-		entries := []contract.Gpu_Bind_Entry{
-			{binding = 0, buffer = r.inst_rend.uniform_buffer, offset = 0, size = 0, entry_type = .Buffer},
-			{binding = 1, view = atlas_view, entry_type = .Texture_View},
-			{binding = 2, sampler = r.inst_rend.sampler, entry_type = .Sampler},
-		}
-		r.inst_rend.bind_group = contract.create_bind_group(r.device, r.glyph_layout, entries)
-		r.inst_rend.atlas_view = atlas_view
-	}
-
-	if emoji_changed && rawptr(r.emoji_layout) != nil {
-		if rawptr(r.emoji_rend.bind_group) != nil do contract.destroy_bind_group(r.emoji_rend.bind_group)
-		emoji_entries := []contract.Gpu_Bind_Entry{
-			{binding = 0, buffer = r.emoji_rend.uniform_buffer, offset = 0, size = 0, entry_type = .Buffer},
-			{binding = 1, view = emoji_view, entry_type = .Texture_View},
-			{binding = 2, sampler = r.emoji_rend.sampler, entry_type = .Sampler},
-		}
-		r.emoji_rend.bind_group = contract.create_bind_group(r.device, r.emoji_layout, emoji_entries)
-		r.emoji_rend.atlas_view = emoji_view
-	}
-
-	exact_w := max(u32(f32(cols) * cell_w), 1)
-	exact_h := max(u32(f32(rows) * cell_h), 1)
-
-	grid_changed := cols != r.tile_rend.cols || rows != r.tile_rend.rows
-	fb_changed := exact_w != r.tile_rend.fb_w_px || exact_h != r.tile_rend.fb_h_px
-
-	// Ensure shared direct_colors GPU buffer & Strategy C (Fullscreen) GPU resources first
-	if grid_changed || atlas_changed || rawptr(r.fs_rend.bind_group) == nil || rawptr(r.fs_color_buffer) == nil {
-		r.fs_rend.cols = cols
-		r.fs_rend.rows = rows
-		r.fs_rend.cell_w = cell_w
-		r.fs_rend.cell_h = cell_h
-
-		cell_bytes := u64(cols * rows) * fullscreen.FULLSCREEN_CELL_BYTES
-		color_bytes := u64(cols * rows) * COLOR_BYTES_PER_CELL
-		if grid_changed || rawptr(r.fs_rend.cell_buffer) == nil {
-			if rawptr(r.fs_rend.cell_buffer) != nil do contract.destroy_buffer(r.fs_rend.cell_buffer)
-			r.fs_rend.cell_buffer = contract.create_buffer(r.device, cell_bytes, .Storage | .Copy_Dst, false)
-		}
-		if grid_changed || rawptr(r.fs_color_buffer) == nil {
-			if rawptr(r.fs_color_buffer) != nil do contract.destroy_buffer(r.fs_color_buffer)
-			r.fs_color_buffer = contract.create_buffer(r.device, color_bytes, .Storage | .Copy_Dst, false)
-		}
-
-		if rawptr(r.fs_rend.bind_group) != nil do contract.destroy_bind_group(r.fs_rend.bind_group)
-		if rawptr(r.fs_layout) != nil && rawptr(atlas_view) != nil && rawptr(r.fs_color_buffer) != nil {
-			fs_entries := []contract.Gpu_Bind_Entry{
-				{binding = 0, buffer = r.fs_rend.params_buffer, offset = 0, size = 0, entry_type = .Buffer},
-				{binding = 1, buffer = r.fs_rend.cell_buffer, offset = 0, size = 0, entry_type = .Buffer},
-				{binding = 2, buffer = r.fs_rend.lut_buffer, offset = 0, size = 0, entry_type = .Buffer},
-				{binding = 3, view = atlas_view, entry_type = .Texture_View},
-				{binding = 4, sampler = r.fs_rend.sampler, entry_type = .Sampler},
-				{binding = 5, buffer = r.fs_color_buffer, offset = 0, size = 0, entry_type = .Buffer},
-			}
-			r.fs_rend.bind_group = contract.create_bind_group(r.device, r.fs_layout, fs_entries)
-		}
-		r.fs_rend.available = rawptr(r.fs_rend.bind_group) != nil
-	}
-
-	// Ensure Strategy B (Compute_Tiles) GPU resources & bind groups (binding 7 shares r.fs_color_buffer)
-	if grid_changed || fb_changed || atlas_changed || rawptr(r.tile_rend.compute_bind_group) == nil || rawptr(r.tile_rend.blit_bind_group) == nil {
-		r.tile_rend.cols = cols
-		r.tile_rend.rows = rows
-		r.tile_rend.cell_w = cell_w
-		r.tile_rend.cell_h = cell_h
-		r.tile_rend.tile_w = tile.TILE_DEFAULT_W
-		r.tile_rend.tile_h = tile.TILE_DEFAULT_H
-		r.tile_rend.tiles_x = max((cols + r.tile_rend.tile_w - 1) / r.tile_rend.tile_w, 1)
-		r.tile_rend.tiles_y = max((rows + r.tile_rend.tile_h - 1) / r.tile_rend.tile_h, 1)
-		r.tile_rend.tile_count = r.tile_rend.tiles_x * r.tile_rend.tiles_y
-
-		if rawptr(r.tile_rend.framebuffer) == nil || fb_changed {
-			if rawptr(r.tile_rend.fb_view) != nil do contract.destroy_texture_view(r.tile_rend.fb_view)
-			if rawptr(r.tile_rend.framebuffer) != nil do contract.destroy_texture(r.tile_rend.framebuffer)
-			r.tile_rend.fb_w_px = exact_w
-			r.tile_rend.fb_h_px = exact_h
-			usage := contract.Gpu_Texture_Usage.Storage_Binding |
-			         contract.Gpu_Texture_Usage.Texture_Binding |
-			         contract.Gpu_Texture_Usage.Copy_Src
-			r.tile_rend.framebuffer = contract.create_texture(r.device, exact_w, exact_h, .RGBA8_Unorm, usage)
-			r.tile_rend.fb_view = contract.create_texture_view(r.tile_rend.framebuffer)
-		}
-
-		if grid_changed || rawptr(r.tile_rend.cell_buffer) == nil {
-			if rawptr(r.tile_rend.cell_buffer) != nil do contract.destroy_buffer(r.tile_rend.cell_buffer)
-			cell_bytes := u64(cols * rows) * tile.TILE_CELL_BYTES
-			r.tile_rend.cell_buffer = contract.create_buffer(r.device, cell_bytes, .Storage | .Copy_Dst, false)
-
-			if rawptr(r.tile_rend.tile_list_buffer) != nil do contract.destroy_buffer(r.tile_rend.tile_list_buffer)
-			tile_list_bytes := u64(r.tile_rend.tile_count) * size_of(u32)
-			r.tile_rend.tile_list_buffer = contract.create_buffer(r.device, tile_list_bytes, .Storage | .Copy_Dst, false)
-		}
-
-		if rawptr(r.tile_rend.compute_bind_group) != nil do contract.destroy_bind_group(r.tile_rend.compute_bind_group)
-		if rawptr(r.tile_rend.blit_bind_group) != nil do contract.destroy_bind_group(r.tile_rend.blit_bind_group)
-
-		if rawptr(r.compute_layout) != nil && rawptr(atlas_view) != nil && rawptr(r.tile_rend.fb_view) != nil && rawptr(r.fs_color_buffer) != nil {
-			c_entries := []contract.Gpu_Bind_Entry{
-				{binding = 0, buffer = r.tile_rend.params_buffer, offset = 0, size = 0, entry_type = .Buffer},
-				{binding = 1, buffer = r.tile_rend.tile_list_buffer, offset = 0, size = 0, entry_type = .Buffer},
-				{binding = 2, buffer = r.tile_rend.cell_buffer, offset = 0, size = 0, entry_type = .Buffer},
-				{binding = 3, buffer = r.tile_rend.lut_buffer, offset = 0, size = 0, entry_type = .Buffer},
-				{binding = 4, view = atlas_view, entry_type = .Texture_View},
-				{binding = 5, sampler = r.tile_rend.sampler, entry_type = .Sampler},
-				{binding = 6, view = r.tile_rend.fb_view, entry_type = .Texture_View},
-				{binding = 7, buffer = r.fs_color_buffer, offset = 0, size = 0, entry_type = .Buffer},
-			}
-			r.tile_rend.compute_bind_group = contract.create_bind_group(r.device, r.compute_layout, c_entries)
-		}
-
-		if rawptr(r.blit_layout) != nil && rawptr(r.tile_rend.fb_view) != nil {
-			b_entries := []contract.Gpu_Bind_Entry{
-				{binding = 0, view = r.tile_rend.fb_view, entry_type = .Texture_View},
-				{binding = 1, sampler = r.tile_rend.sampler, entry_type = .Sampler},
-			}
-			r.tile_rend.blit_bind_group = contract.create_bind_group(r.device, r.blit_layout, b_entries)
-		}
-
-		r.tile_rend.available = rawptr(r.tile_rend.compute_bind_group) != nil && rawptr(r.tile_rend.blit_bind_group) != nil
-		r.tile_fb_valid = false
-	}
-
-	if rawptr(atlas_view) != nil do r.bound_atlas_view = atlas_view
-	if rawptr(emoji_view) != nil do r.bound_emoji_view = emoji_view
-}
-
-_terminal_renderer_resolve_colors :: #force_inline proc(
-	cell_val: cell.Semantic_Cell,
-	dc: cell.Direct_Color,
-	is_selected: bool,
-	default_bg: [4]f32,
-	is_focused: bool = true,
-) -> (fg, bg: [4]f32) {
-	has_direct_fg := .Has_Direct_Color in cell_val.flags && dc.has_fg
-	has_direct_bg := .Has_Direct_Color in cell_val.flags && dc.has_bg
-
-	fg = {f32(dc.fg[0]) / 255.0, f32(dc.fg[1]) / 255.0, f32(dc.fg[2]) / 255.0, 1.0} if has_direct_fg else PALETTE_PRECOMPUTED[cell_val.fg & 15]
-	bg = {f32(dc.bg[0]) / 255.0, f32(dc.bg[1]) / 255.0, f32(dc.bg[2]) / 255.0, 1.0} if has_direct_bg else (PALETTE_PRECOMPUTED[cell_val.bg & 15] if cell_val.bg != 0 else default_bg)
-
-	if .Bold in cell_val.style && cell_val.fg < 8 && !has_direct_fg {
-		fg = PALETTE_PRECOMPUTED[(cell_val.fg + 8) & 15]
-	}
-	if .Dim in cell_val.style {
-		fg[0] *= 0.6; fg[1] *= 0.6; fg[2] *= 0.6
-	}
-	if .Invert in cell_val.style {
-		fg, bg = bg, fg
-	}
-	if is_selected {
-		fg = {1.0, 1.0, 1.0, 1.0}
-		bg = {0.23, 0.39, 0.70, 0.60} // Selection blue
-	} else if !is_focused {
-		fg[0] *= 0.55
-		fg[1] *= 0.55
-		fg[2] *= 0.55
-		fg[3] = 1.0
-
-		if has_direct_bg || cell_val.bg != 0 {
-			bg[0] *= 0.70
-			bg[1] *= 0.70
-			bg[2] *= 0.70
-			bg[3] = 1.0
-		}
-	}
-	return fg, bg
-}
-
-// _terminal_renderer_underline_rgb resolves the stored SGR 58 colour, falling
-// back to the cell's foreground for the default pen colour (SGR 59).
-_terminal_renderer_underline_rgb :: #force_inline proc(
-	dc: cell.Direct_Color,
-	fg: [4]f32,
-) -> [4]f32 {
-	switch dc.underline.mode {
-	case .Rgb:
-		return {f32(dc.underline.rgb[0]) / 255.0, f32(dc.underline.rgb[1]) / 255.0, f32(dc.underline.rgb[2]) / 255.0, fg[3]}
-	case .Palette:
-		return PALETTE_PRECOMPUTED[dc.underline.index & 15]
-	case .Default:
-	}
-	return fg
-}
-
-_terminal_renderer_push_emoji_quad_only :: #force_inline proc(
-	r: ^Terminal_Renderer,
-	eg: plat_font.Emoji_Glyph,
-	x_pos, y_pos, gw, cell_h: f32,
-	is_focused: bool = true,
-) {
-	base_h := cell_h * 0.95
-	scale := base_h / max(1.0, eg.height)
-	draw_w := eg.width * scale
-	draw_h := eg.height * scale
-	offset_x := (gw - draw_w) * 0.5
-	offset_y := (cell_h - draw_h) * 0.5
-
-	emoji_rec := contract.Instance_Record{
-		pos_size = {x_pos + offset_x, y_pos + offset_y, draw_w, draw_h},
-		uv_rect  = {eg.u0, eg.v0, eg.u1, eg.v1},
-		fg_color = {1, 1, 1, 1.0 if is_focused else 0.50},
-		bg_color = {0, 0, 0, 0},
-	}
-	instance.instance_renderer_push(&r.emoji_rend, emoji_rec)
-}
-
-_terminal_renderer_push_emoji :: #force_inline proc(
-	r: ^Terminal_Renderer,
-	eg: plat_font.Emoji_Glyph,
-	x_pos, y_pos, gw, cell_h: f32,
-	bg: [4]f32,
-	is_focused: bool = true,
-) {
-	bg_rec := contract.Instance_Record{
-		pos_size = {x_pos, y_pos, gw, cell_h},
-		uv_rect  = {0, 0, 0, 0},
-		fg_color = {0, 0, 0, 0},
-		bg_color = bg,
-	}
-	instance.instance_renderer_push(&r.inst_rend, bg_rec)
-	_terminal_renderer_push_emoji_quad_only(r, eg, x_pos, y_pos, gw, cell_h, is_focused)
-}
-
-// _terminal_renderer_push_decoration paints a 1-2px rule using the background
-// instance pass: uv_rect == {0,0,0,0} means "solid fill, ignore the atlas".
-// Rules go through the overlay tail so the instance strategy draws them after
-// the glyph pass, matching the cell shaders' decoration-over-ink order.
-_terminal_renderer_push_decoration :: #force_inline proc(
-	r: ^Terminal_Renderer,
-	x, y, w, h: f32,
-	color: [4]f32,
-) {
-	rec := contract.Instance_Record{
-		pos_size = {x, y, w, h},
-		uv_rect  = {0, 0, 0, 0},
-		fg_color = {0, 0, 0, 0},
-		bg_color = color,
-	}
-	instance.instance_renderer_push_overlay(&r.inst_rend, rec)
-}
-
-// _terminal_renderer_push_underline draws the stored SGR 4:n shape. Geometry
-// mirrors ul_band() in the cell shaders (single/double/dotted/dashed/curly).
-_terminal_renderer_push_underline :: proc(
-	r: ^Terminal_Renderer,
-	ul_style: cell.Underline_Style,
-	x, y, w, cell_h: f32,
-	color: [4]f32,
-) {
-	thickness := max(1.0, math.floor(cell_h * 0.06))
-	base_y := y + cell_h - thickness
-	switch ul_style {
-	case .Double:
-		_terminal_renderer_push_decoration(r, x, base_y, w, thickness, color)
-		_terminal_renderer_push_decoration(r, x, base_y - thickness * 2.0, w, thickness, color)
-	case .Curly:
-		n := max(1, int(w / max(1.0, thickness * 2.0)))
-		seg_w := w / f32(n)
-		for i in 0 ..< n {
-			fx := (f32(i) + 0.5) / f32(n)
-			wave := math.sin(fx * 6.2831853) * cell_h * 0.08
-			_terminal_renderer_push_decoration(r, x + f32(i) * seg_w, base_y - thickness + wave, seg_w, thickness, color)
-		}
-	case .Dotted:
-		n := max(1, int(w / 3.0))
-		seg_w := w / f32(n)
-		for i in 0 ..< n {
-			_terminal_renderer_push_decoration(r, x + f32(i) * seg_w, base_y, seg_w * 0.5, thickness, color)
-		}
-	case .Dashed:
-		n := max(1, int(w / 4.0))
-		seg_w := w / f32(n)
-		for i in 0 ..< n {
-			_terminal_renderer_push_decoration(r, x + f32(i) * seg_w, base_y, seg_w * 0.6, thickness, color)
-		}
-	case .Single, .None:
-		_terminal_renderer_push_decoration(r, x, base_y, w, thickness, color)
-	}
-}
-
-// _terminal_renderer_push_decorations renders underline and strikethrough rules
-// for one cell. The underline uses the stored per-cell shape and colour; the
-// strike keeps the foreground colour.
-_terminal_renderer_push_decorations :: #force_inline proc(
-	r: ^Terminal_Renderer,
-	style: cell.Style_Flags,
-	dc: cell.Direct_Color,
-	x, y, w, cell_h: f32,
-	fg: [4]f32,
-) {
-	if .Underline in style {
-		ul_style := dc.underline_style
-		if ul_style == .None do ul_style = .Single
-		_terminal_renderer_push_underline(r, ul_style, x, y, w, cell_h, _terminal_renderer_underline_rgb(dc, fg))
-	}
-	if .Strike in style {
-		thickness := max(1.0, math.floor(cell_h * 0.06))
-		_terminal_renderer_push_decoration(r, x, y + cell_h * 0.55, w, thickness, fg)
-	}
-}
-
-_terminal_renderer_push_glyph :: #force_inline proc(
-	r: ^Terminal_Renderer,
-	gam: ^plat_font.Glyph_Atlas_Manager,
-	slot: u32,
-	x_pos, y_pos, cell_h: f32,
-	fg, bg: [4]f32,
-) {
-	slot_info := gam.atlas.slots[slot]
-	rec := contract.Instance_Record{
-		pos_size = {x_pos + slot_info.offset_x, y_pos, slot_info.draw_w, cell_h},
-		uv_rect  = {slot_info.u0, slot_info.v0, slot_info.u1, slot_info.v1},
-		fg_color = fg,
-		bg_color = bg,
-	}
-	instance.instance_renderer_push(&r.inst_rend, rec)
-}
-
-// _terminal_renderer_grid_has_italic reports whether any visible cell requests a
-// synthetic italic, so the sparse instance path can defer to the cell shaders.
-_terminal_renderer_grid_has_italic :: proc(
-	term: ^core_terminal.Terminal,
-	rows, cols: int,
-	scroll_offset: int,
-) -> bool {
-	for r_idx in 0..<rows {
-		row := core_terminal.terminal_get_row(term, r_idx - scroll_offset)
-		if row == nil do continue
-		limit := min(cols, len(row.cells))
-		for c in 0..<limit {
-			if .Italic in row.cells[c].style do return true
-		}
-	}
-	return false
-}
-
-_terminal_renderer_is_cell_selected :: #force_inline proc "contextless" (
-	logical_r, c: int,
-	selection_active: bool,
-	sel_r_start, sel_c_start, sel_r_end, sel_c_end: int,
-) -> bool {
-	if !selection_active || logical_r < sel_r_start || logical_r > sel_r_end do return false
-	if sel_r_start == sel_r_end && sel_c_start >= 0 && sel_c_end >= 0 {
-		return c >= min(sel_c_start, sel_c_end) && c <= max(sel_c_start, sel_c_end)
-	}
-	if logical_r == sel_r_start && sel_c_start >= 0 do return c >= sel_c_start
-	if logical_r == sel_r_end && sel_c_end >= 0 do return c <= sel_c_end
-	return true
-}
-
-_terminal_renderer_is_cell_hovered :: #force_inline proc "contextless" (
-	logical_r, c: int,
-	hover: Hyperlink_Highlight,
-) -> bool {
-	if !hover.active || logical_r != hover.row do return false
-	return c >= hover.col_start && c <= hover.col_end
-}
-
-_float_to_argb :: #force_inline proc "contextless" (col: [4]f32) -> u32 {
-	r := u32(clamp(col[0] * 255.0 + 0.5, 0.0, 255.0))
-	g := u32(clamp(col[1] * 255.0 + 0.5, 0.0, 255.0))
-	b := u32(clamp(col[2] * 255.0 + 0.5, 0.0, 255.0))
-	return 0xFF000000 | (r << 16) | (g << 8) | b
-}
-
-@(private = "file")
-_apply_row_ligatures :: proc(
-	cache: ^plat_font.Ligature_Cache,
-	r: ^plat_font.Font_Rasterizer,
-	row: ^grid.Row,
-	cols: int,
-	out_chars: []u32,
-) {
-	limit := min(cols, len(row.cells), len(out_chars))
-	for c in 0..<limit {
-		out_chars[c] = u32(row.cells[c].char)
-	}
-	if cache == nil || r == nil || r.hb_font == nil do return
-
-	// Each maximal symbol run is shaped whole: the font decides ligatures from
-	// the full context, so a run is never split into smaller probes.
-	run_buf: [plat_font.LIGATURE_RUN_MAX]u8
-	col := 0
-	for col < limit {
-		run_len := 0
-		for col + run_len < limit && run_len < len(run_buf) {
-			ch := row.cells[col + run_len].char
-			if ch >= 128 || !plat_font.is_ligature_candidate(u8(ch)) do break
-			run_buf[run_len] = u8(ch)
-			run_len += 1
-		}
-		if run_len == 0 {
-			col += 1
-			continue
-		}
-		if glyphs, is_lig := plat_font.ligature_cache_lookup(cache, r, run_buf[:run_len]); is_lig {
-			for g_id, i in glyphs {
-				if g_id != 0 do out_chars[col + i] = plat_font.CONTENT_LIGATURE_BASE + g_id
-			}
-		}
-		col += run_len
-	}
-}
-
-_pack_f32_to_r5g6b5 :: #force_inline proc "contextless" (col: [4]f32) -> u16 {
-	return rgb_to_r5g6b5(
-		u8(clamp(col[0] * 255.0 + 0.5, 0.0, 255.0)),
-		u8(clamp(col[1] * 255.0 + 0.5, 0.0, 255.0)),
-		u8(clamp(col[2] * 255.0 + 0.5, 0.0, 255.0)),
-	)
-}
-
-// _pack_underline_decor writes the underline shape bits and the per-cell SGR 58
-// colour word for a packed cell. Plain single/default underlines add no side
-// storage beyond the existing decor bit.
-_pack_underline_decor :: #force_inline proc(
-	r: ^Terminal_Renderer,
-	row: ^grid.Row,
-	src, ci: int,
-	style: cell.Style_Flags,
-) {
-	if .Underline not_in style || src < 0 || src >= len(row.cells) do return
-	cell_val := row.cells[src]
-	dc: cell.Direct_Color
-	if .Has_Underline_Decor in cell_val.flags && src < len(row.direct_colors) {
-		dc = row.direct_colors[src]
-	}
-	ul := cell.Underline_Style.Single
-	if .Has_Underline_Decor in cell_val.flags && dc.underline_style > .None do ul = dc.underline_style
-	r.packed_cells[ci] |= GPU_CELL_DECOR_UNDERLINE
-	if ul != .Single do r.packed_cells[ci] |= u64(ul) << GPU_CELL_UL_STYLE_SHIFT
-	if dc.underline.mode != .Default {
-		fg := PALETTE_PRECOMPUTED[cell_val.fg & 15]
-		r.direct_colors[ci * COLOR_WORDS_PER_CELL + 2] = _float_to_argb(_terminal_renderer_underline_rgb(dc, fg))
-	}
-}
-
-_terminal_renderer_pack_grid :: proc(
-	r: ^Terminal_Renderer,
-	term: ^core_terminal.Terminal,
-	gam: ^plat_font.Glyph_Atlas_Manager,
-	emoji_atlas: ^plat_font.Emoji_Atlas_Manager,
-	rows, cols: int,
-	pane_rect: [4]f32,
-	cell_w, cell_h: f32,
-	pad_x, pad_y: f32,
-	scroll_offset: int,
-	active_bg: [4]f32,
-	selection_active: bool,
-	sel_r_start, sel_c_start, sel_r_end, sel_c_end: int,
-	hover: Hyperlink_Highlight = {},
-	is_focused: bool = true,
-) {
-	blank_packed := _pack_gpu_cell(' ', 0, 1, 0, 0)
-	row_chars: [512]u32
-	for r_idx in 0..<rows {
-		logical_r := r_idx - scroll_offset
-		row := core_terminal.terminal_get_row(term, logical_r)
-		y_pos := pane_rect[1] + pad_y + f32(r_idx) * cell_h
-		row_base := r_idx * cols
-
-		if row == nil {
-			for c in 0..<cols {
-				ci := row_base + c
-				r.packed_cells[ci] = blank_packed
-				r.direct_colors[ci * COLOR_WORDS_PER_CELL] = 0
-				r.direct_colors[ci * COLOR_WORDS_PER_CELL + 1] = 0
-				r.direct_colors[ci * COLOR_WORDS_PER_CELL + 2] = 0
-			}
-			continue
-		}
-
-		if gam != nil && gam.fc != nil {
-			_apply_row_ligatures(&r.ligature_cache, &gam.fc.rasterizer, row, cols, row_chars[:min(cols, 512)])
-		} else {
-			limit := min(cols, min(512, len(row.cells)))
-			for c in 0..<limit do row_chars[c] = u32(row.cells[c].char)
-		}
-
-		for c in 0..<cols {
-			ci := row_base + c
-			if c >= len(row.cells) {
-				r.packed_cells[ci] = blank_packed
-				r.direct_colors[ci * COLOR_WORDS_PER_CELL] = 0
-				r.direct_colors[ci * COLOR_WORDS_PER_CELL + 1] = 0
-				r.direct_colors[ci * COLOR_WORDS_PER_CELL + 2] = 0
-				continue
-			}
-
-			cell_val := row.cells[c]
-			is_selected := _terminal_renderer_is_cell_selected(
-				logical_r, c, selection_active, sel_r_start, sel_c_start, sel_r_end, sel_c_end,
-			)
-			is_hovered := !is_selected && _terminal_renderer_is_cell_hovered(logical_r, c, hover)
-
-			fg_idx := u32(cell_val.fg & 15)
-			bg_idx := u32(cell_val.bg & 15)
-			if .Bold in cell_val.style && fg_idx < 8 {
-				fg_idx = (fg_idx + 8) & 15
-			}
-			if .Invert in cell_val.style {
-				fg_idx, bg_idx = bg_idx, fg_idx
-			}
-			// OSC 8 hyperlinks are underlined by default, matching every other
-			// terminal that implements the protocol.
-			cell_style := cell_val.style
-			if .Has_Hyperlink in cell_val.flags do cell_style += {.Underline}
-			style_val := fg_idx | (bg_idx << 4)
-			if style_val == 0 && (.Invert in cell_val.style || (cell_val.fg == 0 && cell_val.char > ' ')) {
-				style_val |= 256
-			}
-
-			cflags: u32 = GPU_CELL_FLAG_SELECTED if is_selected else 0
-			if is_hovered {
-				cflags |= GPU_CELL_FLAG_HOVER
-				if hover.blocked do cflags |= GPU_CELL_FLAG_HOVER_BLOCKED
-			}
-			fg_argb: u32 = 0
-			bg_argb: u32 = 0
-
-			dc: cell.Direct_Color
-			if (.Has_Direct_Color in cell_val.flags || .Has_Underline_Decor in cell_val.flags) && c < len(row.direct_colors) {
-				dc = row.direct_colors[c]
-			}
-			if dc.has_fg || dc.has_bg || .Dim in cell_val.style {
-				cflags |= GPU_CELL_FLAG_DIRECT_COLOR
-				fg_col, bg_col := _terminal_renderer_resolve_colors(cell_val, dc, false, active_bg, true)
-				if dc.has_fg || .Dim in cell_val.style || .Invert in cell_val.style {
-					fg_argb = _float_to_argb(fg_col)
-				}
-				if dc.has_bg || .Invert in cell_val.style {
-					bg_argb = _float_to_argb(bg_col)
-				}
-			}
-			r.direct_colors[ci * COLOR_WORDS_PER_CELL] = fg_argb
-			r.direct_colors[ci * COLOR_WORDS_PER_CELL + 1] = bg_argb
-			r.direct_colors[ci * COLOR_WORDS_PER_CELL + 2] = 0
-
-			if .Wide_Continuation in cell_val.flags && c > 0 && .Wide_Lead in row.cells[c - 1].flags {
-				r.packed_cells[ci] = _pack_gpu_cell(' ', style_val, 0, cflags, 0)
-				continue
-			}
-
-			// If cell is part of an OpenType programming ligature run
-			if c < 512 && row_chars[c] >= plat_font.CONTENT_LIGATURE_BASE {
-				lig_cp := row_chars[c]
-				slot, ok := plat_font.glyph_atlas_get_or_rasterize(gam, rune(lig_cp), false)
-				if !ok do slot = 0
-				r.packed_cells[ci] = _pack_gpu_cell(lig_cp, style_val, 1, cflags, slot)
-				continue
-			}
-
-			ch := cell_val.char
-			is_wide := .Wide_Lead in cell_val.flags
-			width_val: u32 = 2 if is_wide else 1
-			gw := cell_w * 2.0 if is_wide else cell_w
-			x_pos := pane_rect[0] + pad_x + f32(c) * cell_w
-
-			if .Has_Egc in cell_val.flags {
-				if runes := core_terminal.terminal_get_egc_runes(term, ch); len(runes) > 0 {
-					if runes[0] == 0x10EEEE {
-						r.packed_cells[ci] = _pack_gpu_cell(' ', style_val, 1, cflags, 0)
-						continue
-					}
-					if emoji_atlas != nil && plat_font.is_emoji_cluster(runes) {
-						if eg, eok := plat_font.emoji_atlas_get_runes(emoji_atlas, runes); eok {
-							_terminal_renderer_push_emoji_quad_only(r, eg, x_pos, y_pos, gw, cell_h, is_focused)
-						}
-						r.packed_cells[ci] = _pack_gpu_cell(' ', style_val, 1, cflags, 0)
-						continue
-					}
-					if slot, sok := plat_font.glyph_atlas_get_or_rasterize_cluster(gam, runes, is_wide); sok {
-						r.packed_cells[ci] = _pack_gpu_cell(u32(runes[0]), style_val, width_val, cflags, slot)
-						continue
-					}
-					ch = runes[0]
-				} else {
-					r.packed_cells[ci] = _pack_gpu_cell(' ', style_val, 1, cflags, 0)
-					continue
-				}
-			}
-
-			if ch == 0x10EEEE {
-				r.packed_cells[ci] = _pack_gpu_cell(' ', style_val, 1, cflags, 0)
-				continue
-			}
-
-			if emoji_atlas != nil && uw.is_emoji_presentation(ch) {
-				if eg, eok := plat_font.emoji_atlas_get(emoji_atlas, ch); eok {
-					_terminal_renderer_push_emoji_quad_only(r, eg, x_pos, y_pos, gw, cell_h, is_focused)
-				}
-				r.packed_cells[ci] = _pack_gpu_cell(' ', style_val, 1, cflags, 0)
-				continue
-			}
-
-			if ch <= ' ' {
-				r.packed_cells[ci] = _pack_gpu_cell(' ', style_val, width_val, cflags, 0)
-				continue
-			}
-
-			slot, ok := plat_font.glyph_atlas_get_or_rasterize(gam, ch, is_wide)
-			if !ok do slot = 0
-			r.packed_cells[ci] = _pack_gpu_cell(u32(ch), style_val, width_val, cflags, slot)
-		}
-
-		// Apply decorations and concealment once per row so every early-exit cell
-		// (blank, wide continuation, emoji placeholder) is covered uniformly.
-		for c in 0..<min(cols, len(row.cells)) {
-			// A wide glyph's right half must inherit its lead's rules so the
-			// underline is continuous across both cells.
-			src := c
-			if .Wide_Continuation in row.cells[c].flags && c > 0 do src = c - 1
-			style := row.cells[src].style
-			if .Has_Hyperlink in row.cells[src].flags do style += {.Underline}
-			ci := row_base + c
-			if .Strike in style do r.packed_cells[ci] |= GPU_CELL_DECOR_STRIKE
-			if .Italic in style do r.packed_cells[ci] |= GPU_CELL_DECOR_ITALIC
-			_pack_underline_decor(r, row, src, ci, style)
-			if .Hidden in style {
-				r.packed_cells[ci] = (r.packed_cells[ci] & ~u64(0x1FFFFF)) | u64(' ')
-			}
-		}
-	}
-}
-
-// terminal_renderer_encode records the adaptive terminal compute/render passes onto a caller-provided CommandEncoder.
-terminal_renderer_encode :: proc(
-	r: ^Terminal_Renderer,
-	enc: contract.Gpu_CommandEncoder,
-	term: ^core_terminal.Terminal,
-	target_view: contract.Gpu_TextureView,
-	text_atlas: ^plat_font.Text_Atlas,
-	pane_rect: [4]f32,
-	cell_w, cell_h: f32,
-	pad_x, pad_y: f32,
-	scroll_offset: int,
-	screen_w, screen_h: f32,
-	has_custom_bg: bool,
-	custom_bg: [4]f32,
-	selected_logical_r_start: int = -1,
-	selected_c_start: int = -1,
-	selected_logical_r_end: int = -1,
-	selected_c_end: int = -1,
-	selection_active: bool = false,
-	hover: Hyperlink_Highlight = {},
-	hover_openable_bg: [4]f32 = HOVER_OPENABLE_BG,
-	hover_blocked_bg:  [4]f32 = HOVER_BLOCKED_BG,
-	load_op: contract.Gpu_Load_Op = .Load,
-	border_radius: f32 = 0.0,
-	is_focused: bool = true,
-	pane_opacity: f32 = 0.45,
-) {
-	if r == nil || rawptr(enc) == nil || term == nil || rawptr(target_view) == nil || text_atlas == nil do return
-
-	gam := &text_atlas.glyph_atlas
-	emoji_atlas := &text_atlas.emoji_atlas
-
-	// 1. Consume Damage & Form Strategy Inputs
-	journal := core_terminal.terminal_consume_damage(term)
-	rows := max(1, min(term.rows, int((pane_rect[3] - 2.0 * pad_y) / cell_h)))
-	cols := max(1, min(term.cols, int((pane_rect[2] - 2.0 * pad_x) / cell_w)))
-	total_cells := max(1, rows * cols)
-
-	_terminal_renderer_ensure_resources(r, u32(cols), u32(rows), cell_w, cell_h, text_atlas.glyph_view, text_atlas.emoji_view)
-
-	dirty_cells := 0
-	span_count := journal.span_count
-	full_rows := min(journal.full_rows, rows)
-	if journal.has_damage {
-		dirty_w := max(1, min(journal.max_col, cols) - max(journal.min_col, 0))
-		dirty_h := max(1, min(journal.max_row, rows - 1) - max(journal.min_row, 0) + 1)
-		dirty_cells = min(total_cells, dirty_w * dirty_h)
-	}
-
-	strat_inp := Strategy_Inputs{
-		dirty_cells = dirty_cells,
-		total_cells = total_cells,
-		ratio       = f32(dirty_cells) / f32(total_cells),
-		full_rows   = full_rows,
-		span_count  = max(1, span_count) if dirty_cells > 0 else 0,
-		scroll      = (r.last_scroll_offset != scroll_offset),
-	}
-	r.last_dirty_cells = dirty_cells
-
-	t_start := time.tick_now()
-	chosen_strat := strategy_select(strat_inp, &r.strat_state, r.tile_rend.available, r.fs_rend.available)
-	has_kitty := kitty.kitty_renderer_has_images(&r.kitty_rend, term)
-	if has_kitty {
-		chosen_strat = .Instance
-	}
-	// Synthetic italics are sheared in the cell shaders (tile/fullscreen). When
-	// the visible grid contains italic text, stay on a path that can render it
-	// instead of silently dropping the slant in the sparse-instance strategy.
-	if chosen_strat == .Instance && !has_kitty &&
-	   _terminal_renderer_grid_has_italic(term, rows, cols, scroll_offset) &&
-	   r.tile_rend.available {
-		chosen_strat = .Compute_Tiles
-	}
-
-	// 2. Resolve Active Background & Sync LUT Default Background across all bg_idx == 0 entries
-	eff_opacity := clamp(pane_opacity, 0.0, 1.0)
-	if r.last_is_focused != is_focused || r.last_eff_opacity != eff_opacity {
-		r.tile_fb_valid = false
-		r.last_is_focused = is_focused
-		r.last_eff_opacity = eff_opacity
-	}
-
-	active_bg: [4]f32 = {0.08, 0.09, 0.12, eff_opacity}
-	if has_custom_bg {
-		active_bg = {custom_bg[0], custom_bg[1], custom_bg[2], custom_bg[3] * eff_opacity}
-	} else if dc, pal, ok := core_terminal.terminal_sample_bg(term, scroll_offset); ok {
-		if dc.has_bg {
-			active_bg = {f32(dc.bg[0]) / 255.0, f32(dc.bg[1]) / 255.0, f32(dc.bg[2]) / 255.0, eff_opacity}
-		} else if pal != 0 {
-			p_col := PALETTE_PRECOMPUTED[pal & 15]
-			active_bg = {p_col[0], p_col[1], p_col[2], eff_opacity}
-		}
-	}
-
-	if !is_focused {
-		// Inactive pane: darker solid background, maintaining pane opacity across all free space
-		active_bg = {active_bg[0] * 0.70, active_bg[1] * 0.70, active_bg[2] * 0.70, eff_opacity}
-	}
-
-	bg_packed := rgb_to_r5g6b5(
-		u8(clamp(active_bg[0] * 255.0 + 0.5, 0.0, 255.0)),
-		u8(clamp(active_bg[1] * 255.0 + 0.5, 0.0, 255.0)),
-		u8(clamp(active_bg[2] * 255.0 + 0.5, 0.0, 255.0)),
-	)
-	if bg_packed != r.last_default_bg_packed {
-		r.last_default_bg_packed = bg_packed
-		for i in 0..<512 {
-			s0 := i * 2
-			s1 := i * 2 + 1
-			w := r.lut_words[512 + i]
-			if ((s0 >> 4) & 15) == 0 {
-				w = (w & 0xFFFF0000) | u32(bg_packed)
-			}
-			if ((s1 >> 4) & 15) == 0 {
-				w = (w & 0x0000FFFF) | (u32(bg_packed) << 16)
-			}
-			r.lut_words[512 + i] = w
-		}
-		if rawptr(r.tile_rend.lut_buffer) != nil {
-			contract.write_buffer(r.queue, r.tile_rend.lut_buffer, 512 * size_of(u32), &r.lut_words[512], 512 * size_of(u32))
-		}
-		if rawptr(r.fs_rend.lut_buffer) != nil {
-			contract.write_buffer(r.queue, r.fs_rend.lut_buffer, 512 * size_of(u32), &r.lut_words[512], 512 * size_of(u32))
-		}
-		r.tile_fb_valid = false
-	}
-
-	// Hover tints live in the reserved LUT words (1025/1026) so every strategy
-	// shades them identically. Write only when the theme color changes.
-	hover_openable_packed := _pack_f32_to_r5g6b5(hover_openable_bg)
-	hover_blocked_packed := _pack_f32_to_r5g6b5(hover_blocked_bg)
-	if hover_openable_packed != r.last_hover_openable_packed || hover_blocked_packed != r.last_hover_blocked_packed {
-		r.last_hover_openable_packed = hover_openable_packed
-		r.last_hover_blocked_packed = hover_blocked_packed
-		r.lut_words[LUT_HOVER_OPENABLE_WORD] = u32(hover_openable_packed) << 16
-		r.lut_words[LUT_HOVER_BLOCKED_WORD] = u32(hover_blocked_packed) << 16
-		word_offset := u64(LUT_HOVER_OPENABLE_WORD) * size_of(u32)
-		if rawptr(r.tile_rend.lut_buffer) != nil {
-			contract.write_buffer(r.queue, r.tile_rend.lut_buffer, word_offset, &r.lut_words[LUT_HOVER_OPENABLE_WORD], 2 * size_of(u32))
-		}
-		if rawptr(r.fs_rend.lut_buffer) != nil {
-			contract.write_buffer(r.queue, r.fs_rend.lut_buffer, word_offset, &r.lut_words[LUT_HOVER_OPENABLE_WORD], 2 * size_of(u32))
-		}
-		r.tile_fb_valid = false
-	}
-
-	// 3. Prepare Instance & Emoji Uniforms + Pane Background Quad
-	instance.instance_renderer_begin(&r.inst_rend)
-	instance.instance_renderer_begin(&r.emoji_rend)
-	u_data := [4]f32{screen_w, screen_h, cell_w, cell_h}
-	contract.write_buffer(r.queue, r.inst_rend.uniform_buffer, 0, &u_data, size_of([4]f32))
-	contract.write_buffer(r.queue, r.emoji_rend.uniform_buffer, 0, &u_data, size_of([4]f32))
-
-	pane_bg := contract.Instance_Record{
-		pos_size = pane_rect,
-		uv_rect  = {pane_rect[2], pane_rect[3], border_radius, 1.0 if border_radius > 0.0 else 0.0},
-		fg_color = {0, 0, 0, 0},
-		bg_color = active_bg,
-	}
-	instance.instance_renderer_push(&r.inst_rend, pane_bg)
-
-	clear_col: [4]f64 = {0.0, 0.0, 0.0, 0.0}
-	kitty.kitty_renderer_prepare(&r.kitty_rend, term, pane_rect, cell_w, cell_h, pad_x, pad_y, scroll_offset)
-
-	// 4. Execute Strategy-Specific Cell Preparation & Encoding
-	switch chosen_strat {
-	case .Instance:
-		r.tile_fb_valid = false
-		row_chars: [512]u32
-		for r_idx in 0..<rows {
-			logical_r := r_idx - scroll_offset
-			row := core_terminal.terminal_get_row(term, logical_r)
-			if row == nil do continue
-
-			y_pos := pane_rect[1] + pad_y + f32(r_idx) * cell_h
-			if gam != nil && gam.fc != nil {
-				_apply_row_ligatures(&r.ligature_cache, &gam.fc.rasterizer, row, cols, row_chars[:min(cols, 512)])
-			} else {
-				limit := min(cols, min(512, len(row.cells)))
-				for c in 0..<limit do row_chars[c] = u32(row.cells[c].char)
-			}
-
-			for c in 0..<cols {
-				if c >= len(row.cells) do break
-				cell_val := row.cells[c]
-
-				if .Wide_Continuation in cell_val.flags {
-					if c > 0 && .Wide_Lead in row.cells[c - 1].flags do continue
-				}
-
-				dc: cell.Direct_Color
-				if (.Has_Direct_Color in cell_val.flags || .Has_Underline_Decor in cell_val.flags) && c < len(row.direct_colors) {
-					dc = row.direct_colors[c]
-				}
-
-				is_selected := _terminal_renderer_is_cell_selected(
-					logical_r, c, selection_active,
-					selected_logical_r_start, selected_c_start, selected_logical_r_end, selected_c_end,
-				)
-				is_hovered := !is_selected && _terminal_renderer_is_cell_hovered(logical_r, c, hover)
-				// Hyperlinked and hovered cells are underlined by default. This
-				// one style value feeds every glyph branch below.
-				cell_style := cell_val.style
-				if is_hovered do cell_style += {.Underline}
-				if .Has_Hyperlink in cell_val.flags do cell_style += {.Underline}
-
-				if !is_selected && (cell_val.char == 0 || cell_val.char == ' ') && cell_val.bg == 0 && cell_val.style == {} && .Has_Hyperlink not_in cell_val.flags && !dc.has_bg {
-					continue
-				}
-
-				ch := cell_val.char
-				is_wide := .Wide_Lead in cell_val.flags
-				gw := cell_w * 2.0 if is_wide else cell_w
-				x_pos := pane_rect[0] + pad_x + f32(c) * cell_w
-
-				fg, bg := _terminal_renderer_resolve_colors(cell_val, dc, is_selected, active_bg, is_focused)
-				if is_hovered {
-					bg = hover_blocked_bg if hover.blocked else hover_openable_bg
-				}
-				has_authored_bg := (.Has_Direct_Color in cell_val.flags && dc.has_bg) || cell_val.bg != 0 || is_selected || is_hovered || (.Invert in cell_val.style)
-				if !has_authored_bg {
-					bg = {0, 0, 0, 0}
-				}
-				// Concealed text keeps its cell footprint but never shows glyphs.
-				if .Hidden in cell_val.style do fg = bg
-
-				// If cell is part of an OpenType programming ligature run
-				if c < 512 && row_chars[c] >= plat_font.CONTENT_LIGATURE_BASE {
-					lig_cp := row_chars[c]
-					slot, ok := plat_font.glyph_atlas_get_or_rasterize(gam, rune(lig_cp), false)
-					if !ok do slot = 0
-					_terminal_renderer_push_glyph(r, gam, slot, x_pos, y_pos, cell_h, fg, bg)
-					if .Underline in cell_style || .Strike in cell_style {
-						_terminal_renderer_push_decorations(r, cell_style, dc, x_pos, y_pos, gw, cell_h, fg)
-					}
-					continue
-				}
-
-				if .Has_Egc in cell_val.flags {
-					if runes := core_terminal.terminal_get_egc_runes(term, ch); len(runes) > 0 {
-						if runes[0] == 0x10EEEE do continue
-						handled := false
-						if emoji_atlas != nil && plat_font.is_emoji_cluster(runes) {
-							if eg, eok := plat_font.emoji_atlas_get_runes(emoji_atlas, runes); eok {
-								_terminal_renderer_push_emoji(r, eg, x_pos, y_pos, gw, cell_h, bg, is_focused)
-								handled = true
-							}
-						}
-						if !handled {
-							if slot, sok := plat_font.glyph_atlas_get_or_rasterize_cluster(gam, runes, is_wide); sok {
-								_terminal_renderer_push_glyph(r, gam, slot, x_pos, y_pos, cell_h, fg, bg)
-								_terminal_renderer_push_decorations(r, cell_style, dc, x_pos, y_pos, gw, cell_h, fg)
-								handled = true
-							}
-						}
-						if handled do continue
-						ch = runes[0]
-					} else {
-						continue
-					}
-				}
-
-				if ch == 0x10EEEE do continue
-
-				if emoji_atlas != nil && uw.is_emoji_presentation(ch) {
-					if eg, eok := plat_font.emoji_atlas_get(emoji_atlas, ch); eok {
-						_terminal_renderer_push_emoji(r, eg, x_pos, y_pos, gw, cell_h, bg, is_focused)
-					}
-					continue
-				}
-
-				slot, ok := plat_font.glyph_atlas_get_or_rasterize(gam, ch, is_wide)
-				if !ok do slot = 0
-				_terminal_renderer_push_glyph(r, gam, slot, x_pos, y_pos, cell_h, fg, bg)
-				if .Underline in cell_style || .Strike in cell_style {
-					_terminal_renderer_push_decorations(r, cell_style, dc, x_pos, y_pos, gw, cell_h, fg)
-				}
-			}
-		}
-
-		if plat_font.text_atlas_sync_gpu(text_atlas, r.device, r.queue) {
-			_terminal_renderer_ensure_resources(r, u32(cols), u32(rows), cell_w, cell_h, text_atlas.glyph_view, text_atlas.emoji_view)
-		}
-		instance.instance_renderer_flush(&r.inst_rend)
-		instance.instance_renderer_flush(&r.emoji_rend)
-
-		has_kitty := kitty.kitty_renderer_has_images(&r.kitty_rend, term)
-		if r.inst_rend.active_count > 0 || r.emoji_rend.active_count > 0 || load_op == .Clear || has_kitty {
-			pass := contract.begin_render_pass(enc, target_view, clear_col, load_op)
-			if rawptr(pass) != nil {
-				sc_x := u32(clamp(pane_rect[0], 0.0, screen_w))
-				sc_y := u32(clamp(pane_rect[1], 0.0, screen_h))
-				sc_w := max(1, u32(clamp(pane_rect[2], 1.0, max(1.0, screen_w - f32(sc_x)))))
-				sc_h := max(1, u32(clamp(pane_rect[3], 1.0, max(1.0, screen_h - f32(sc_y)))))
-				if contract.render_set_scissor_rect != nil {
-					contract.render_set_scissor_rect(pass, sc_x, sc_y, sc_w, sc_h)
-				}
-				front_count := instance.instance_renderer_front_count(&r.inst_rend)
-				if front_count > 0 {
-					contract.render_set_pipeline(pass, r.bg_pipeline)
-					contract.render_set_bind_group(pass, 0, r.inst_rend.bg_bind_group)
-					contract.render_set_vertex_buffer(pass, 0, r.inst_rend.instance_buffer, 0)
-					contract.render_draw(pass, 6, front_count)
-				}
-				kitty.kitty_renderer_draw(&r.kitty_rend, pass, term)
-				if front_count > 0 {
-					instance.instance_renderer_draw(&r.inst_rend, pass)
-				}
-				// Decorations paint after glyph ink, matching the cell shaders.
-				if r.inst_rend.overlay_count > 0 {
-					contract.render_set_pipeline(pass, r.bg_pipeline)
-					contract.render_set_bind_group(pass, 0, r.inst_rend.bg_bind_group)
-					instance.instance_renderer_draw_overlays(&r.inst_rend, pass)
-				}
-				if r.emoji_rend.active_count > 0 {
-					instance.instance_renderer_draw(&r.emoji_rend, pass)
-				}
-				if contract.render_set_scissor_rect != nil {
-					contract.render_set_scissor_rect(pass, 0, 0, max(1, u32(screen_w)), max(1, u32(screen_h)))
-				}
-				contract.end_render_pass(pass)
-			}
-		}
-
-	case .Compute_Tiles:
-		_terminal_renderer_pack_grid(
-			r, term, gam, emoji_atlas, rows, cols, pane_rect, cell_w, cell_h, pad_x, pad_y,
-			scroll_offset, active_bg, selection_active,
-			selected_logical_r_start, selected_c_start, selected_logical_r_end, selected_c_end,
-			hover, is_focused,
-		)
-		if plat_font.text_atlas_sync_gpu(text_atlas, r.device, r.queue) {
-			_terminal_renderer_ensure_resources(r, u32(cols), u32(rows), cell_w, cell_h, text_atlas.glyph_view, text_atlas.emoji_view)
-		}
-		instance.instance_renderer_flush(&r.inst_rend)
-		instance.instance_renderer_flush(&r.emoji_rend)
-
-		contract.write_buffer(r.queue, r.tile_rend.cell_buffer, 0, raw_data(r.packed_cells[:]), u64(total_cells * size_of(u64)))
-		contract.write_buffer(r.queue, r.fs_color_buffer, 0, raw_data(r.direct_colors[:]), u64(total_cells) * COLOR_BYTES_PER_CELL)
-
-		clear(&r.dirty_tiles)
-		full_tile_sync := !r.tile_fb_valid ||
-		                  r.last_strategy != .Compute_Tiles ||
-		                  r.last_term_ptr != rawptr(term) ||
-		                  r.last_scroll_offset != scroll_offset ||
-		                  !journal.has_damage ||
-		                  journal.full_damage ||
-		                  selection_active
-
-		if full_tile_sync {
-			for tid in 0..<r.tile_rend.tile_count {
-				append(&r.dirty_tiles, tid)
-			}
-		} else {
-			c0 := u32(clamp(journal.min_col, 0, cols - 1))
-			c1 := u32(clamp(journal.max_col, int(c0), cols - 1))
-			r0 := u32(clamp(journal.min_row, 0, rows - 1))
-			r1 := u32(clamp(journal.max_row, int(r0), rows - 1))
-			tx_s := c0 / r.tile_rend.tile_w
-			ty_s := r0 / r.tile_rend.tile_h
-			tx_e := min((c1 + r.tile_rend.tile_w) / r.tile_rend.tile_w, r.tile_rend.tiles_x)
-			ty_e := min((r1 + r.tile_rend.tile_h) / r.tile_rend.tile_h, r.tile_rend.tiles_y)
-			for ty in ty_s..<ty_e {
-				for tx in tx_s..<tx_e {
-					append(&r.dirty_tiles, ty * r.tile_rend.tiles_x + tx)
-				}
-			}
-		}
-
-		if len(r.dirty_tiles) > 0 {
-			t_params := tile.Tile_Params{
-				screen_w     = f32(r.tile_rend.fb_w_px),
-				screen_h     = f32(r.tile_rend.fb_h_px),
-				cols         = u32(cols),
-				rows         = u32(rows),
-				cell_w       = cell_w,
-				cell_h       = cell_h,
-				pad_x        = 0.0,
-				pad_y        = 0.0,
-				tile_w       = r.tile_rend.tile_w,
-				tile_h       = r.tile_rend.tile_h,
-				tiles_x      = r.tile_rend.tiles_x,
-				tiles_y      = r.tile_rend.tiles_y,
-				atlas_w      = atlas.ATLAS_WIDTH,
-				atlas_h      = atlas.ATLAS_HEIGHT,
-				bg_opacity   = 0.0 if eff_opacity < 1.0 else 1.0,
-				cell_opacity = 1.0 if is_focused else 0.55,
-			}
-			contract.write_buffer(r.queue, r.tile_rend.params_buffer, 0, &t_params, size_of(tile.Tile_Params))
-			contract.write_buffer(r.queue, r.tile_rend.tile_list_buffer, 0, raw_data(r.dirty_tiles[:]), u64(len(r.dirty_tiles) * size_of(u32)))
-			tile.compute_tile_dispatch(&r.tile_rend, enc, u32(len(r.dirty_tiles)))
-			r.tile_fb_valid = true
-		}
-
-		pass := contract.begin_render_pass(enc, target_view, clear_col, load_op)
-		if rawptr(pass) != nil {
-			// 1. Draw solid card background (covers pane padding border)
-			if r.inst_rend.active_count > 0 {
-				contract.render_set_pipeline(pass, r.bg_pipeline)
-				contract.render_set_bind_group(pass, 0, r.inst_rend.bg_bind_group)
-				contract.render_set_vertex_buffer(pass, 0, r.inst_rend.instance_buffer, 0)
-				contract.render_draw(pass, 6, r.inst_rend.active_count)
-			}
-
-			// 2. Blit compute tile framebuffer into cell grid viewport
-			vp_x := clamp(pane_rect[0] + pad_x, 0.0, screen_w)
-			vp_y := clamp(pane_rect[1] + pad_y, 0.0, screen_h)
-			vp_w := clamp(f32(r.tile_rend.fb_w_px), 1.0, max(1.0, screen_w - vp_x))
-			vp_h := clamp(f32(r.tile_rend.fb_h_px), 1.0, max(1.0, screen_h - vp_y))
-			if contract.render_set_viewport != nil {
-				contract.render_set_viewport(pass, vp_x, vp_y, vp_w, vp_h, 0.0, 1.0)
-			}
-			if contract.render_set_scissor_rect != nil {
-				contract.render_set_scissor_rect(pass, u32(vp_x), u32(vp_y), u32(vp_w), u32(vp_h))
-			}
-			contract.render_set_pipeline(pass, r.tile_rend.blit_pipeline)
-			contract.render_set_bind_group(pass, 0, r.tile_rend.blit_bind_group)
-			contract.render_draw(pass, 3, 1)
-
-			// 3. Restore full-screen viewport & scissor and overlay emojis if present
-			if contract.render_set_viewport != nil {
-				contract.render_set_viewport(pass, 0.0, 0.0, screen_w, screen_h, 0.0, 1.0)
-			}
-			if contract.render_set_scissor_rect != nil {
-				contract.render_set_scissor_rect(pass, 0, 0, max(1, u32(screen_w)), max(1, u32(screen_h)))
-			}
-			if r.emoji_rend.active_count > 0 {
-				instance.instance_renderer_draw(&r.emoji_rend, pass)
-			}
-			kitty.kitty_renderer_draw(&r.kitty_rend, pass, term)
-			contract.end_render_pass(pass)
-		}
-
-	case .Fullscreen:
-		r.tile_fb_valid = false
-		_terminal_renderer_pack_grid(
-			r, term, gam, emoji_atlas, rows, cols, pane_rect, cell_w, cell_h, pad_x, pad_y,
-			scroll_offset, active_bg, selection_active,
-			selected_logical_r_start, selected_c_start, selected_logical_r_end, selected_c_end,
-			hover, is_focused,
-		)
-		if plat_font.text_atlas_sync_gpu(text_atlas, r.device, r.queue) {
-			_terminal_renderer_ensure_resources(r, u32(cols), u32(rows), cell_w, cell_h, text_atlas.glyph_view, text_atlas.emoji_view)
-		}
-		instance.instance_renderer_flush(&r.emoji_rend)
-
-		contract.write_buffer(r.queue, r.fs_rend.cell_buffer, 0, raw_data(r.packed_cells[:]), u64(total_cells * size_of(u64)))
-		contract.write_buffer(r.queue, r.fs_color_buffer, 0, raw_data(r.direct_colors[:]), u64(total_cells) * COLOR_BYTES_PER_CELL)
-
-		fs_params := fullscreen.Fullscreen_Params{
-			screen_w      = screen_w,
-			screen_h      = screen_h,
-			cols          = u32(cols),
-			rows          = u32(rows),
-			cell_w        = cell_w,
-			cell_h        = cell_h,
-			pad_x         = pane_rect[0] + pad_x,
-			pad_y         = pane_rect[1] + pad_y,
-			atlas_w       = atlas.ATLAS_WIDTH,
-			atlas_h       = atlas.ATLAS_HEIGHT,
-			bg_opacity    = eff_opacity,
-			cell_opacity  = 1.0 if is_focused else 0.55,
-			pane_x        = pane_rect[0],
-			pane_y        = pane_rect[1],
-			pane_w        = pane_rect[2],
-			pane_h        = pane_rect[3],
-			corner_radius = border_radius,
-		}
-		contract.write_buffer(r.queue, r.fs_rend.params_buffer, 0, &fs_params, size_of(fullscreen.Fullscreen_Params))
-
-		pass := contract.begin_render_pass(enc, target_view, clear_col, load_op)
-		if rawptr(pass) != nil {
-			sc_x := u32(clamp(pane_rect[0], 0.0, screen_w))
-			sc_y := u32(clamp(pane_rect[1], 0.0, screen_h))
-			sc_w := max(1, u32(clamp(pane_rect[2], 1.0, max(1.0, screen_w - f32(sc_x)))))
-			sc_h := max(1, u32(clamp(pane_rect[3], 1.0, max(1.0, screen_h - f32(sc_y)))))
-			if contract.render_set_scissor_rect != nil {
-				contract.render_set_scissor_rect(pass, sc_x, sc_y, sc_w, sc_h)
-			}
-			fullscreen.fullscreen_draw(&r.fs_rend, pass)
-
-			if contract.render_set_scissor_rect != nil {
-				contract.render_set_scissor_rect(pass, 0, 0, max(1, u32(screen_w)), max(1, u32(screen_h)))
-			}
-			if r.emoji_rend.active_count > 0 {
-				instance.instance_renderer_draw(&r.emoji_rend, pass)
-			}
-			kitty.kitty_renderer_draw(&r.kitty_rend, pass, term)
-			contract.end_render_pass(pass)
-		}
-	}
-
-	r.last_term_ptr = rawptr(term)
-	r.last_scroll_offset = scroll_offset
-	r.last_strategy = chosen_strat
-	r.last_duration_ns = u64(time.tick_since(t_start))
-	strategy_record(&r.strat_state, chosen_strat, r.last_duration_ns)
-}
-
-// terminal_renderer_render executes the adaptive terminal render pass using a standalone CommandEncoder.
-terminal_renderer_render :: proc(
-	r: ^Terminal_Renderer,
-	term: ^core_terminal.Terminal,
-	target_view: contract.Gpu_TextureView,
-	text_atlas: ^plat_font.Text_Atlas,
-	pane_rect: [4]f32,
-	cell_w, cell_h: f32,
-	pad_x, pad_y: f32,
-	scroll_offset: int,
-	screen_w, screen_h: f32,
-	has_custom_bg: bool,
-	custom_bg: [4]f32,
-	selected_logical_r_start: int = -1,
-	selected_c_start: int = -1,
-	selected_logical_r_end: int = -1,
-	selected_c_end: int = -1,
-	selection_active: bool = false,
-	hover: Hyperlink_Highlight = {},
-	hover_openable_bg: [4]f32 = HOVER_OPENABLE_BG,
-	hover_blocked_bg:  [4]f32 = HOVER_BLOCKED_BG,
-	border_radius: f32 = 0.0,
-	is_focused: bool = true,
-	pane_opacity: f32 = 0.45,
-) {
-	if r == nil || term == nil || rawptr(target_view) == nil || text_atlas == nil do return
-	enc := contract.create_command_encoder(r.device)
-	if rawptr(enc) == nil do return
-	defer contract.release_command_encoder(enc)
-
-	terminal_renderer_encode(
-		r, enc, term, target_view, text_atlas, pane_rect, cell_w, cell_h, pad_x, pad_y,
-		scroll_offset, screen_w, screen_h, has_custom_bg, custom_bg,
-		selected_logical_r_start, selected_c_start, selected_logical_r_end, selected_c_end,
-		selection_active, hover, hover_openable_bg, hover_blocked_bg, .Load, border_radius, is_focused, pane_opacity,
-	)
-
-	cmd := contract.finish_command_buffer(enc)
-	if rawptr(cmd) != nil {
-		contract.submit(r.queue, cmd)
-		contract.release_command_buffer(cmd)
+	if rawptr(emoji_view) != nil && emoji_view != r.bound_emoji_view {
+		_bind_emoji_resources(r, emoji_view)
+		r.bound_emoji_view = emoji_view
 	}
 }

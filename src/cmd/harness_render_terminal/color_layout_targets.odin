@@ -1,18 +1,14 @@
 package main
 
-// Scene builders for the GPU colour-layout regression (see
+// Scene builders for the GPU colour-layout and decoration regression (see
 // color_layout_regression.odin): grids that carry truecolor fg/bg, a coloured
 // SGR 4:n underline, strikethrough and bold/italic cell styles, encoded through
-// the render strategies into equal-sized off-screen targets.
+// Instance_Renderer into equal-sized off-screen targets.
 
 import "vendor:wgpu"
 
-import atlas "../../core/render/atlas"
 import contract "../../core/render/contract"
-import terminal "../../core/render/terminal"
-import fullscreen "../../core/render/terminal/fullscreen"
 import terminal_instance "../../core/render/terminal/instance"
-import tile "../../core/render/terminal/tile"
 
 COLOR_TEST_COLS :: u32(32)
 COLOR_TEST_ROWS :: u32(8)
@@ -63,9 +59,8 @@ _fill_color_test_cells :: proc(t: ^Synthetic_Terminal) {
 	}
 }
 
-// Scene B additionally packs the italic decor bit. Production only shears
-// italics in the cell shaders (the instance strategy defers italic grids to
-// Compute_Tiles), so tile and fullscreen must agree on this scene.
+// Scene B packs the italic decor bit so Instance_Renderer exercises the
+// synthetic italic shear in glyph.wgsl alongside SGR 4:n and strikethrough.
 _fill_italic_decor_cells :: proc(t: ^Synthetic_Terminal) {
 	for r in 0..<t.rows {
 		for c in 0..<t.cols {
@@ -88,12 +83,14 @@ _set_cell_decor_bit :: #force_inline proc(t: ^Synthetic_Terminal, idx: u32, shif
 	t.cells[idx] = u64(u32(t.cells[idx])) | (u64(hi) << 32)
 }
 
-// _Color_Mutation selects a deliberately broken encoding. Decor_Under_Glyph
-// restores the old production order (decorations painted by the background pass
-// before glyphs); the regression must catch it.
+// _Color_Mutation selects a deliberately broken encoding that the pixel
+// regression must detect.
 _Color_Mutation :: enum {
 	None,
+	Two_Word_Color_Stride,
 	Decor_Under_Glyph,
+	Strike_Offset,
+	Disable_Italic_Shear,
 }
 
 _encode_instance_target :: proc(
@@ -109,7 +106,7 @@ _encode_instance_target :: proc(
 	contract.write_buffer(h.queue, inst.uniform_buffer, 0, &u_data, size_of([4]f32))
 	for r in 0..<COLOR_TEST_ROWS {
 		for c in 0..<COLOR_TEST_COLS {
-			_push_cell_instance(inst, t, r, c, COLOR_TEST_CELL_W, COLOR_TEST_CELL_H)
+			_push_cell_instance(inst, t, r, c, COLOR_TEST_CELL_W, COLOR_TEST_CELL_H, false, mutation)
 		}
 	}
 	terminal_instance.instance_renderer_flush(inst)
@@ -138,112 +135,6 @@ _encode_instance_target :: proc(
 		}
 		contract.end_render_pass(pass)
 	}
-}
-
-_encode_tile_target :: proc(
-	h: ^Harness_State,
-	enc: contract.Gpu_CommandEncoder,
-	r: ^tile.Compute_Tile_Renderer,
-	t: ^Synthetic_Terminal,
-	color_buf: contract.Gpu_Buffer,
-	view: contract.Gpu_TextureView,
-) {
-	contract.write_buffer(h.queue, r.cell_buffer, 0, raw_data(t.cells), u64(len(t.cells) * size_of(u64)))
-	_upload_color_words(h, color_buf, t)
-	contract.write_buffer(h.queue, r.lut_buffer, 0, &h.lut_words, size_of(h.lut_words))
-	params := tile.Tile_Params{
-		screen_w     = f32(COLOR_TEST_W),
-		screen_h     = f32(COLOR_TEST_H),
-		cols         = COLOR_TEST_COLS,
-		rows         = COLOR_TEST_ROWS,
-		cell_w       = COLOR_TEST_CELL_W,
-		cell_h       = COLOR_TEST_CELL_H,
-		pad_x        = 0.0,
-		pad_y        = 0.0,
-		tile_w       = r.tile_w,
-		tile_h       = r.tile_h,
-		tiles_x      = r.tiles_x,
-		tiles_y      = r.tiles_y,
-		atlas_w      = atlas.ATLAS_WIDTH,
-		atlas_h      = atlas.ATLAS_HEIGHT,
-		bg_opacity   = 1.0,
-		cell_opacity = 1.0,
-	}
-	contract.write_buffer(h.queue, r.params_buffer, 0, &params, size_of(tile.Tile_Params))
-	tile_list := make([]u32, int(r.tile_count), context.temp_allocator)
-	for i in 0..<len(tile_list) do tile_list[i] = u32(i)
-	contract.write_buffer(h.queue, r.tile_list_buffer, 0, raw_data(tile_list), u64(len(tile_list)) * size_of(u32))
-	tile.compute_tile_dispatch(r, enc, u32(len(tile_list)))
-
-	pass := contract.begin_render_pass(enc, view, COLOR_TEST_DEFAULT_BG, .Clear)
-	if rawptr(pass) != nil {
-		contract.render_set_pipeline(pass, r.blit_pipeline)
-		contract.render_set_bind_group(pass, 0, r.blit_bind_group)
-		contract.render_draw(pass, 3, 1)
-		contract.end_render_pass(pass)
-	}
-}
-
-_encode_fullscreen_target :: proc(
-	h: ^Harness_State,
-	enc: contract.Gpu_CommandEncoder,
-	r: ^fullscreen.Fullscreen_Renderer,
-	t: ^Synthetic_Terminal,
-	color_buf: contract.Gpu_Buffer,
-	view: contract.Gpu_TextureView,
-	words_per_cell: u32 = terminal.COLOR_WORDS_PER_CELL,
-	pipeline_override: contract.Gpu_RenderPipeline = nil,
-	bind_override: contract.Gpu_BindGroup = nil,
-) {
-	contract.write_buffer(h.queue, r.cell_buffer, 0, raw_data(t.cells), u64(len(t.cells) * size_of(u64)))
-	_upload_color_words(h, color_buf, t, words_per_cell)
-	contract.write_buffer(h.queue, r.lut_buffer, 0, &h.lut_words, size_of(h.lut_words))
-	params := fullscreen.Fullscreen_Params{
-		screen_w     = f32(COLOR_TEST_W),
-		screen_h     = f32(COLOR_TEST_H),
-		cols         = COLOR_TEST_COLS,
-		rows         = COLOR_TEST_ROWS,
-		cell_w       = COLOR_TEST_CELL_W,
-		cell_h       = COLOR_TEST_CELL_H,
-		pad_x        = 0.0,
-		pad_y        = 0.0,
-		atlas_w      = atlas.ATLAS_WIDTH,
-		atlas_h      = atlas.ATLAS_HEIGHT,
-		bg_opacity   = 1.0,
-		cell_opacity = 1.0,
-	}
-	contract.write_buffer(h.queue, r.params_buffer, 0, &params, size_of(fullscreen.Fullscreen_Params))
-
-	pass := contract.begin_render_pass(enc, view, COLOR_TEST_DEFAULT_BG, .Clear)
-	if rawptr(pass) != nil {
-		pipeline := r.pipeline
-		bind := r.bind_group
-		if rawptr(pipeline_override) != nil do pipeline = pipeline_override
-		if rawptr(bind_override) != nil do bind = bind_override
-		contract.render_set_pipeline(pass, pipeline)
-		contract.render_set_bind_group(pass, 0, bind)
-		contract.render_draw(pass, 3, 1)
-		contract.end_render_pass(pass)
-	}
-}
-
-// _fullscreen_bind_group builds the binding set for an alternate fullscreen
-// pipeline (a distinct pipeline owns a distinct bind-group layout object).
-_fullscreen_bind_group :: proc(
-	h: ^Harness_State,
-	r: ^fullscreen.Fullscreen_Renderer,
-	color_buf: contract.Gpu_Buffer,
-	pipeline: contract.Gpu_RenderPipeline,
-) -> contract.Gpu_BindGroup {
-	entries := []contract.Gpu_Bind_Entry{
-		{binding = 0, buffer = r.params_buffer, offset = 0, size = 0, entry_type = .Buffer},
-		{binding = 1, buffer = r.cell_buffer, offset = 0, size = 0, entry_type = .Buffer},
-		{binding = 2, buffer = r.lut_buffer, offset = 0, size = 0, entry_type = .Buffer},
-		{binding = 3, view = h.atlas.gpu_view, entry_type = .Texture_View},
-		{binding = 4, sampler = r.sampler, entry_type = .Sampler},
-		{binding = 5, buffer = color_buf, offset = 0, size = 0, entry_type = .Buffer},
-	}
-	return contract.create_bind_group(h.device, contract.pipeline_get_bind_group_layout(pipeline, 0), entries)
 }
 
 _encode_readback :: proc(enc: contract.Gpu_CommandEncoder, tex: contract.Gpu_Texture, buf: contract.Gpu_Buffer, bytes_per_row: u32) {

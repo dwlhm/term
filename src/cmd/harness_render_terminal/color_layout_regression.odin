@@ -1,22 +1,15 @@
 package main
 
-// GPU colour-layout regression: instance, compute-tile and fullscreen must
-// agree pixel-for-pixel for cells that carry truecolor fg/bg plus an SGR 4:3
-// curly underline colour (58:2::255:0:0).
-//
-// This is the guard for the shared COLOR_WORDS_PER_CELL layout. If a host
-// buffer/upload drifts back to two words per cell, the shaders read a
-// neighbouring cell's word (or past the buffer) and the comparison fails.
-// The run also renders the fullscreen target from a deliberately
-// 2-word-per-cell upload and requires the comparator to catch it.
+// GPU colour-layout and decoration regression for Instance_Renderer:
+// verifies deterministic pixel output for cells carrying truecolor fg/bg,
+// SGR 4:1..4:5 coloured underlines, strikethrough, and synthetic italic shear,
+// and verifies that all mutation probes are caught.
 
 import "core:fmt"
 import "vendor:wgpu"
 
 import contract "../../core/render/contract"
-import fullscreen "../../core/render/terminal/fullscreen"
 import terminal_instance "../../core/render/terminal/instance"
-import tile "../../core/render/terminal/tile"
 
 _map_readback :: proc(h: ^Harness_State, buf: contract.Gpu_Buffer, size: u64) -> [^]u8 {
 	done := false
@@ -59,40 +52,29 @@ _compare_pixels :: proc(a, b: [^]u8, bytes_per_row: u32) -> (diff, first_x, firs
 }
 
 _Color_Renderers :: struct {
-	inst: terminal_instance.Instance_Renderer,
-	tile: tile.Compute_Tile_Renderer,
-	fs:   fullscreen.Fullscreen_Renderer,
+	inst_a: terminal_instance.Instance_Renderer,
+	inst_b: terminal_instance.Instance_Renderer,
 }
 
-// _color_renderers_init builds the three strategy renderers. The instance
-// renderer keeps decorations in the same batch (overlay tail), so there is no
-// separate decoration renderer any more.
 _color_renderers_init :: proc(h: ^Harness_State, r: ^_Color_Renderers, sampler: contract.Gpu_Sampler) {
-	terminal_instance.instance_renderer_init(&r.inst, h.device, h.queue, COLOR_TEST_COLS * COLOR_TEST_ROWS, h.atlas.gpu_view, h.format)
-	tile.compute_tile_init(&r.tile, h.device, h.queue, COLOR_TEST_ROWS, COLOR_TEST_COLS, COLOR_TEST_CELL_W, COLOR_TEST_CELL_H, h.atlas.gpu_view, h.format)
-	fullscreen.fullscreen_init(&r.fs, h.device, h.queue, COLOR_TEST_ROWS, COLOR_TEST_COLS, COLOR_TEST_CELL_W, COLOR_TEST_CELL_H, h.atlas.gpu_view, h.format)
-	if rawptr(r.inst.sampler) != nil do contract.destroy_sampler(r.inst.sampler)
-	r.inst.sampler = sampler
-	if rawptr(r.tile.sampler) != nil do contract.destroy_sampler(r.tile.sampler)
-	r.tile.sampler = sampler
-	if rawptr(r.fs.sampler) != nil do contract.destroy_sampler(r.fs.sampler)
-	r.fs.sampler = sampler
+	terminal_instance.instance_renderer_init(&r.inst_a, h.device, h.queue, COLOR_TEST_COLS * COLOR_TEST_ROWS, h.atlas.gpu_view, h.format)
+	terminal_instance.instance_renderer_init(&r.inst_b, h.device, h.queue, COLOR_TEST_COLS * COLOR_TEST_ROWS, h.atlas.gpu_view, h.format)
+	if rawptr(r.inst_a.sampler) != nil do contract.destroy_sampler(r.inst_a.sampler)
+	r.inst_a.sampler = sampler
+	if rawptr(r.inst_b.sampler) != nil do contract.destroy_sampler(r.inst_b.sampler)
+	r.inst_b.sampler = sampler
 	// Decorations emit one quad per band run, so reserve room per cell.
-	_rebuild_instance_resources(h, &r.inst, COLOR_TEST_COLS, COLOR_TEST_ROWS, f32(COLOR_TEST_W), f32(COLOR_TEST_H), 48)
+	_rebuild_instance_resources(h, &r.inst_a, COLOR_TEST_COLS, COLOR_TEST_ROWS, f32(COLOR_TEST_W), f32(COLOR_TEST_H), 48)
+	_rebuild_instance_resources(h, &r.inst_b, COLOR_TEST_COLS, COLOR_TEST_ROWS, f32(COLOR_TEST_W), f32(COLOR_TEST_H), 48)
 }
 
 _color_renderers_destroy :: proc(r: ^_Color_Renderers) {
-	// Pipelines and the shared sampler are owned by Harness_State.
-	r.inst.sampler = contract.Gpu_Sampler(nil)
-	r.inst.pipeline = contract.Gpu_RenderPipeline(nil)
-	r.tile.sampler = contract.Gpu_Sampler(nil)
-	r.tile.compute_pipeline = contract.Gpu_ComputePipeline(nil)
-	r.tile.blit_pipeline = contract.Gpu_RenderPipeline(nil)
-	r.fs.sampler = contract.Gpu_Sampler(nil)
-	r.fs.pipeline = contract.Gpu_RenderPipeline(nil)
-	terminal_instance.instance_renderer_destroy(&r.inst)
-	tile.compute_tile_destroy(&r.tile)
-	fullscreen.fullscreen_destroy(&r.fs)
+	r.inst_a.sampler = contract.Gpu_Sampler(nil)
+	r.inst_a.pipeline = contract.Gpu_RenderPipeline(nil)
+	r.inst_b.sampler = contract.Gpu_Sampler(nil)
+	r.inst_b.pipeline = contract.Gpu_RenderPipeline(nil)
+	terminal_instance.instance_renderer_destroy(&r.inst_a)
+	terminal_instance.instance_renderer_destroy(&r.inst_b)
 }
 
 _run_color_layout_regression :: proc(h: ^Harness_State) -> bool {
@@ -105,7 +87,7 @@ _run_color_layout_regression :: proc(h: ^Harness_State) -> bool {
 	tex_usage := contract.Gpu_Texture_Usage.Render_Attach | contract.Gpu_Texture_Usage.Copy_Src
 	buf_usage := contract.Gpu_Buffer_Usage.Map_Read | contract.Gpu_Buffer_Usage.Copy_Dst
 
-	targets: [3]_Color_Target
+	targets: [2]_Color_Target
 	for &t in targets {
 		t.tex = contract.create_texture(h.device, COLOR_TEST_W, COLOR_TEST_H, h.format, tex_usage)
 		t.view = contract.create_texture_view(t.tex)
@@ -131,13 +113,8 @@ _run_color_layout_regression :: proc(h: ^Harness_State) -> bool {
 	defer if rawptr(nearest_sampler) != nil do contract.destroy_sampler(nearest_sampler)
 
 	renderers: _Color_Renderers
-	color_buf: contract.Gpu_Buffer
-	defer if rawptr(color_buf) != nil do contract.destroy_buffer(color_buf)
 	_color_renderers_init(h, &renderers, nearest_sampler)
 	defer _color_renderers_destroy(&renderers)
-
-	_rebuild_fullscreen_resources(h, &renderers.fs, &color_buf, COLOR_TEST_COLS, COLOR_TEST_ROWS, f32(COLOR_TEST_W), f32(COLOR_TEST_H))
-	_rebuild_tile_resources(h, &renderers.tile, color_buf, COLOR_TEST_COLS, COLOR_TEST_ROWS, f32(COLOR_TEST_W), f32(COLOR_TEST_H))
 
 	term: Synthetic_Terminal
 	synthetic_terminal_init(&term, COLOR_TEST_COLS, COLOR_TEST_ROWS)
@@ -146,26 +123,22 @@ _run_color_layout_regression :: proc(h: ^Harness_State) -> bool {
 
 	enc := contract.create_command_encoder(h.device)
 	if rawptr(enc) == nil do return false
-	_encode_instance_target(h, enc, &renderers.inst, &term, targets[0].view)
-	_encode_tile_target(h, enc, &renderers.tile, &term, color_buf, targets[1].view)
-	_encode_fullscreen_target(h, enc, &renderers.fs, &term, color_buf, targets[2].view)
+	_encode_instance_target(h, enc, &renderers.inst_a, &term, targets[0].view)
+	_encode_instance_target(h, enc, &renderers.inst_b, &term, targets[1].view)
 	for &t in targets do _encode_readback(enc, t.tex, t.buf, bytes_per_row)
 	_submit_encoder(h, enc)
 
-	d_it, x_it, y_it := _readback_compare(h, &targets[0], &targets[1], buf_size, bytes_per_row)
-	d_if, x_if, y_if := _readback_compare(h, &targets[0], &targets[2], buf_size, bytes_per_row)
-	d_tf, x_tf, y_tf := _readback_compare(h, &targets[1], &targets[2], buf_size, bytes_per_row)
+	d_ab, x_ab, y_ab := _readback_compare(h, &targets[0], &targets[1], buf_size, bytes_per_row)
 
 	ok := true
-	if d_it > 0 || d_if > 0 || d_tf > 0 {
-		fmt.printfln("[FAIL] Strategy pixels diverge: instance-tile=%d (%d,%d) instance-fullscreen=%d (%d,%d) tile-fullscreen=%d (%d,%d)",
-			d_it, x_it, y_it, d_if, x_if, y_if, d_tf, x_tf, y_tf)
+	if d_ab > 0 {
+		fmt.printfln("[FAIL] Instance baseline targets diverge: diff=%d (%d,%d)", d_ab, x_ab, y_ab)
 		ok = false
 	} else {
-		fmt.println("[PASS] instance == tile == fullscreen for 256 strike + SGR 4:n + bold/italic cells (0 diff pixels)")
+		fmt.println("[PASS] Instance baseline deterministic for 256 strike + SGR 4:n + bold/italic cells (0 diff pixels)")
 	}
 
-	if !_run_color_layout_mutations(h, &renderers, &targets, color_buf, &term, buf_size, bytes_per_row) {
+	if !_run_color_layout_mutations(h, &renderers, &targets, &term, buf_size, bytes_per_row) {
 		ok = false
 	}
 	return ok

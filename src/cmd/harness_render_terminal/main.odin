@@ -1,11 +1,8 @@
 package main
 
 // Multi-Pane Terminal Render Harness (Phase 4 GUI)
-// Demonstrates all three terminal rendering pillars simultaneously:
-//   - Pane 1: Strategy A (Quad Instance Batching - instance.Instance_Renderer)
-//   - Pane 2: Strategy B (Compute Tile Binning - tile.Compute_Tile_Renderer)
-//   - Pane 3: Strategy C (Fullscreen Quad Direct - fullscreen.Fullscreen_Renderer)
-//   - Pane 4: Strategy Dynamic (Online Strategy Selector - selector.odin)
+// Demonstrates quad instance batching across 4 concurrent panes with varying
+// dirty workloads (sparse typing, moderate block edits, scrolling, and mixed).
 //
 // Invariant: ZERO Horizontal Dependencies across cores, zero dynamic allocations in frame loop.
 
@@ -16,7 +13,6 @@ import "core:math"
 import "core:mem"
 import "core:os"
 import "core:slice"
-import "core:strings"
 import "core:sys/posix"
 import "core:time"
 import "vendor:sdl3"
@@ -84,15 +80,10 @@ import pipeline "../../core/composer/pipeline"
 import atlas "../../core/render/atlas"
 import terminal "../../core/render/terminal"
 import terminal_instance "../../core/render/terminal/instance"
-import tile "../../core/render/terminal/tile"
-import fullscreen "../../core/render/terminal/fullscreen"
 
 // Embedded WGSL shader sources matching backend pipeline contracts
-BG_WGSL           :: #load("../../core/render/shaders/bg.wgsl", string)
-GLYPH_WGSL        :: #load("../../core/render/shaders/glyph.wgsl", string)
-TILE_COMPUTE_WGSL :: #load("../../core/render/shaders/tile_compute.wgsl", string)
-TILE_BLIT_WGSL    :: #load("../../core/render/shaders/tile_blit.wgsl", string)
-FULLSCREEN_WGSL   :: #load("../../core/render/shaders/fullscreen.wgsl", string)
+BG_WGSL    :: #load("../../core/render/shaders/bg.wgsl", string)
+GLYPH_WGSL :: #load("../../core/render/shaders/glyph.wgsl", string)
 
 // Locked Values
 UNRESOLVED_SLOT:       u32 : 0x1FF
@@ -401,49 +392,16 @@ Harness_State :: struct {
 	glyph_layout:     contract.Gpu_BindGroupLayout,
 	bg_pipeline:      contract.Gpu_RenderPipeline,
 	bg_layout:        contract.Gpu_BindGroupLayout,
-	compute_pipeline: contract.Gpu_ComputePipeline,
-	compute_layout:   contract.Gpu_BindGroupLayout,
-	blit_pipeline:    contract.Gpu_RenderPipeline,
-	blit_layout:      contract.Gpu_BindGroupLayout,
-	fs_pipeline:      contract.Gpu_RenderPipeline,
-	fs_layout:        contract.Gpu_BindGroupLayout,
-	// Deliberately broken fullscreen pipeline (strike_hit py + 0.5) that the
-	// colour/decoration regression must catch pixel-for-pixel.
-	fs_mutant_pipeline: contract.Gpu_RenderPipeline,
 
-	// Pane 1: Instance, Tile, Fullscreen
+	// Panes 1..4 (Instance_Renderer)
 	term1:            Synthetic_Terminal,
 	inst1:            terminal_instance.Instance_Renderer,
-	tile1:            tile.Compute_Tile_Renderer,
-	fs1:              fullscreen.Fullscreen_Renderer,
-	fs1_color_buf:    contract.Gpu_Buffer,
-	strat1_state:     terminal.Strategy_State,
-
-	// Pane 2: Instance, Tile, Fullscreen
 	term2:            Synthetic_Terminal,
 	inst2:            terminal_instance.Instance_Renderer,
-	tile2:            tile.Compute_Tile_Renderer,
-	fs2:              fullscreen.Fullscreen_Renderer,
-	fs2_color_buf:    contract.Gpu_Buffer,
-	strat2_state:     terminal.Strategy_State,
-
-	// Pane 3: Instance, Tile, Fullscreen
 	term3:            Synthetic_Terminal,
 	inst3:            terminal_instance.Instance_Renderer,
-	tile3:            tile.Compute_Tile_Renderer,
-	fs3:              fullscreen.Fullscreen_Renderer,
-	fs3_color_buf:    contract.Gpu_Buffer,
-	strat3_state:     terminal.Strategy_State,
-
-	// Pane 4: Adaptive Online Selector
 	term4:            Synthetic_Terminal,
 	inst4:            terminal_instance.Instance_Renderer,
-	tile4:            tile.Compute_Tile_Renderer,
-	fs4:              fullscreen.Fullscreen_Renderer,
-	fs4_color_buf:    contract.Gpu_Buffer,
-	strat4_state:     terminal.Strategy_State,
-	last_strat4:      terminal.Render_Strategy,
-	prev_strat4:      terminal.Render_Strategy,
 	last_duration_ns: u64,
 
 	// Controls & PRNG
@@ -567,201 +525,7 @@ _create_shared_pipelines :: proc(h: ^Harness_State) -> bool {
 	if rawptr(h.bg_pipeline) == nil do return false
 	h.bg_layout = contract.pipeline_get_bind_group_layout(h.bg_pipeline, 0)
 
-	// 3. Compute Tile Pipelines (Compute + Blit)
-	compute_mod := contract.create_shader_module(h.device, TILE_COMPUTE_WGSL)
-	if rawptr(compute_mod) == nil do return false
-	defer contract.destroy_shader_module(compute_mod)
-
-	h.compute_pipeline = contract.create_compute_pipeline(h.device, compute_mod, "cs_main")
-	if rawptr(h.compute_pipeline) == nil do return false
-	h.compute_layout = contract.compute_get_bind_group_layout(h.compute_pipeline, 0)
-
-	blit_mod := contract.create_shader_module(h.device, TILE_BLIT_WGSL)
-	if rawptr(blit_mod) == nil do return false
-	defer contract.destroy_shader_module(blit_mod)
-
-	h.blit_pipeline = contract.create_render_pipeline(
-		h.device,
-		blit_mod,
-		"vs_main",
-		blit_mod,
-		"fs_main",
-		nil,
-		h.format,
-		.Alpha_Blend,
-		.Triangle_List,
-	)
-	if rawptr(h.blit_pipeline) == nil do return false
-	h.blit_layout = contract.pipeline_get_bind_group_layout(h.blit_pipeline, 0)
-
-	// 4. Fullscreen Quad Direct Render Pipeline
-	fs_mod := contract.create_shader_module(h.device, FULLSCREEN_WGSL)
-	if rawptr(fs_mod) == nil do return false
-	defer contract.destroy_shader_module(fs_mod)
-
-	h.fs_pipeline = contract.create_render_pipeline(
-		h.device,
-		fs_mod,
-		"fullscreen_vs_main",
-		fs_mod,
-		"fullscreen_fs_main",
-		nil,
-		h.format,
-		.Alpha_Blend,
-		.Triangle_List,
-	)
-	if rawptr(h.fs_pipeline) == nil do return false
-	h.fs_layout = contract.pipeline_get_bind_group_layout(h.fs_pipeline, 0)
-
-	// 5. Mutation pipeline: the old fullscreen strike bug (py + 0.5).
-	mutant_wgsl, _ := strings.replace_all(
-		FULLSCREEN_WGSL,
-		"strike_hit(decor, py,",
-		"strike_hit(decor, py + 0.5,",
-		context.temp_allocator,
-	)
-	if mutant_wgsl == FULLSCREEN_WGSL {
-		fmt.eprintln("harness error: strike_hit call site not found for the mutation pipeline")
-		return false
-	}
-	mutant_mod := contract.create_shader_module(h.device, mutant_wgsl)
-	if rawptr(mutant_mod) == nil do return false
-	defer contract.destroy_shader_module(mutant_mod)
-
-	h.fs_mutant_pipeline = contract.create_render_pipeline(
-		h.device,
-		mutant_mod,
-		"fullscreen_vs_main",
-		mutant_mod,
-		"fullscreen_fs_main",
-		nil,
-		h.format,
-		.Alpha_Blend,
-		.Triangle_List,
-	)
-	if rawptr(h.fs_mutant_pipeline) == nil do return false
-
 	return true
-}
-
-_rebuild_tile_resources :: proc(
-	h: ^Harness_State,
-	r: ^tile.Compute_Tile_Renderer,
-	color_buf: contract.Gpu_Buffer,
-	cols, rows: u32,
-	pane_w, pane_h: f32,
-) -> bool {
-	cell_w := pane_w / f32(cols)
-	cell_h := pane_h / f32(rows)
-	exact_w := max(u32(f32(cols) * cell_w), 1)
-	exact_h := max(u32(f32(rows) * cell_h), 1)
-
-	r.cols = cols
-	r.rows = rows
-	r.cell_w = cell_w
-	r.cell_h = cell_h
-	r.tile_w = 16
-	r.tile_h = 16
-	r.tiles_x = (cols + r.tile_w - 1) / r.tile_w
-	r.tiles_y = (rows + r.tile_h - 1) / r.tile_h
-	r.tile_count = max(r.tiles_x * r.tiles_y, 1)
-
-	// Recreate Framebuffer if dimension changed
-	if rawptr(r.framebuffer) == nil || r.fb_w_px != exact_w || r.fb_h_px != exact_h {
-		if rawptr(r.fb_view) != nil do contract.destroy_texture_view(r.fb_view)
-		if rawptr(r.framebuffer) != nil do contract.destroy_texture(r.framebuffer)
-
-		r.fb_w_px = exact_w
-		r.fb_h_px = exact_h
-		usage := contract.Gpu_Texture_Usage.Storage_Binding |
-		         contract.Gpu_Texture_Usage.Texture_Binding |
-		         contract.Gpu_Texture_Usage.Copy_Src
-		r.framebuffer = contract.create_texture(h.device, exact_w, exact_h, .RGBA8_Unorm, usage)
-		r.fb_view = contract.create_texture_view(r.framebuffer)
-	}
-
-	// Reallocate cell and tile list buffers
-	cell_bytes := u64(cols * rows) * size_of(u64)
-	if rawptr(r.cell_buffer) != nil do contract.destroy_buffer(r.cell_buffer)
-	r.cell_buffer = contract.create_buffer(h.device, cell_bytes, .Storage | .Copy_Dst, false)
-
-	tile_list_bytes := u64(r.tile_count) * size_of(u32)
-	if rawptr(r.tile_list_buffer) != nil do contract.destroy_buffer(r.tile_list_buffer)
-	r.tile_list_buffer = contract.create_buffer(h.device, tile_list_bytes, .Storage | .Copy_Dst, false)
-
-	// Destroy and recreate bind groups
-	if rawptr(r.compute_bind_group) != nil do contract.destroy_bind_group(r.compute_bind_group)
-	if rawptr(r.blit_bind_group) != nil do contract.destroy_bind_group(r.blit_bind_group)
-
-	c_entries := []contract.Gpu_Bind_Entry{
-		{binding = 0, buffer = r.params_buffer, offset = 0, size = 0, entry_type = .Buffer},
-		{binding = 1, buffer = r.tile_list_buffer, offset = 0, size = 0, entry_type = .Buffer},
-		{binding = 2, buffer = r.cell_buffer, offset = 0, size = 0, entry_type = .Buffer},
-		{binding = 3, buffer = r.lut_buffer, offset = 0, size = 0, entry_type = .Buffer},
-		{binding = 4, view = h.atlas.gpu_view, entry_type = .Texture_View},
-		{binding = 5, sampler = r.sampler, entry_type = .Sampler},
-		{binding = 6, view = r.fb_view, entry_type = .Texture_View},
-		{binding = 7, buffer = color_buf, offset = 0, size = 0, entry_type = .Buffer},
-	}
-	r.compute_bind_group = contract.create_bind_group(h.device, h.compute_layout, c_entries)
-
-	b_entries := []contract.Gpu_Bind_Entry{
-		{binding = 0, view = r.fb_view, entry_type = .Texture_View},
-		{binding = 1, sampler = r.sampler, entry_type = .Sampler},
-	}
-	r.blit_bind_group = contract.create_bind_group(h.device, h.blit_layout, b_entries)
-
-	r.compute_pipeline = h.compute_pipeline
-	r.blit_pipeline = h.blit_pipeline
-	r.has_params = false
-	r.available = true
-	return rawptr(r.compute_bind_group) != nil && rawptr(r.blit_bind_group) != nil
-}
-
-_rebuild_fullscreen_resources :: proc(
-	h: ^Harness_State,
-	r: ^fullscreen.Fullscreen_Renderer,
-	color_buf: ^contract.Gpu_Buffer,
-	cols, rows: u32,
-	pane_w, pane_h: f32,
-) -> bool {
-	cell_w := pane_w / f32(cols)
-	cell_h := pane_h / f32(rows)
-	exact_w := max(u32(f32(cols) * cell_w), 1)
-	exact_h := max(u32(f32(rows) * cell_h), 1)
-	_ = exact_w
-	_ = exact_h
-
-	r.cols = cols
-	r.rows = rows
-	r.cell_w = cell_w
-	r.cell_h = cell_h
-
-	cell_bytes := u64(cols * rows) * fullscreen.FULLSCREEN_CELL_BYTES
-	if rawptr(r.cell_buffer) != nil do contract.destroy_buffer(r.cell_buffer)
-	r.cell_buffer = contract.create_buffer(h.device, cell_bytes, .Storage | .Copy_Dst, false)
-
-	// Colour storage buffer is a separate layout: COLOR_WORDS_PER_CELL u32
-	// words per cell, never the 8-byte cell stride.
-	if rawptr(color_buf^) != nil do contract.destroy_buffer(color_buf^)
-	color_bytes := u64(cols * rows) * terminal.COLOR_BYTES_PER_CELL
-	color_buf^ = contract.create_buffer(h.device, color_bytes, .Storage | .Copy_Dst, false)
-
-	if rawptr(r.bind_group) != nil do contract.destroy_bind_group(r.bind_group)
-
-	fs_entries := []contract.Gpu_Bind_Entry{
-		{binding = 0, buffer = r.params_buffer, offset = 0, size = 0, entry_type = .Buffer},
-		{binding = 1, buffer = r.cell_buffer, offset = 0, size = 0, entry_type = .Buffer},
-		{binding = 2, buffer = r.lut_buffer, offset = 0, size = 0, entry_type = .Buffer},
-		{binding = 3, view = h.atlas.gpu_view, entry_type = .Texture_View},
-		{binding = 4, sampler = r.sampler, entry_type = .Sampler},
-		{binding = 5, buffer = color_buf^, offset = 0, size = 0, entry_type = .Buffer},
-	}
-	r.bind_group = contract.create_bind_group(h.device, h.fs_layout, fs_entries)
-	r.pipeline = h.fs_pipeline
-	r.has_params = false
-	r.available = true
-	return rawptr(r.bind_group) != nil
 }
 
 _rebuild_instance_resources :: proc(
@@ -816,25 +580,21 @@ _rebuild_instance_resources :: proc(
 }
 
 Pane_Context :: struct {
-	term:        ^Synthetic_Terminal,
-	inst:        ^terminal_instance.Instance_Renderer,
-	tile:        ^tile.Compute_Tile_Renderer,
-	fs:          ^fullscreen.Fullscreen_Renderer,
-	color_buf:   ^contract.Gpu_Buffer,
-	strat_state: ^terminal.Strategy_State,
-	layer_id:    composer.Layer_Id,
+	term:     ^Synthetic_Terminal,
+	inst:     ^terminal_instance.Instance_Renderer,
+	layer_id: composer.Layer_Id,
 }
 
 _get_pane_context :: proc(h: ^Harness_State, pane_idx: int) -> Pane_Context {
 	switch pane_idx {
 	case 0:
-		return {&h.term1, &h.inst1, &h.tile1, &h.fs1, &h.fs1_color_buf, &h.strat1_state, 1}
+		return {&h.term1, &h.inst1, 1}
 	case 1:
-		return {&h.term2, &h.inst2, &h.tile2, &h.fs2, &h.fs2_color_buf, &h.strat2_state, 2}
+		return {&h.term2, &h.inst2, 2}
 	case 2:
-		return {&h.term3, &h.inst3, &h.tile3, &h.fs3, &h.fs3_color_buf, &h.strat3_state, 3}
+		return {&h.term3, &h.inst3, 3}
 	case 3:
-		return {&h.term4, &h.inst4, &h.tile4, &h.fs4, &h.fs4_color_buf, &h.strat4_state, 4}
+		return {&h.term4, &h.inst4, 4}
 	}
 	return {}
 }
@@ -858,10 +618,6 @@ _update_renderer_limits :: proc(h: ^Harness_State, cols, rows: u32) {
 	for p in 0..<4 {
 		ctx := _get_pane_context(h, p)
 		_rebuild_instance_resources(h, ctx.inst, cols, rows, h.pane_w, h.pane_h)
-		_rebuild_fullscreen_resources(h, ctx.fs, ctx.color_buf, cols, rows, h.pane_w, h.pane_h)
-		contract.write_buffer(h.queue, ctx.fs.lut_buffer, 0, &h.lut_words, size_of(h.lut_words))
-		_rebuild_tile_resources(h, ctx.tile, ctx.color_buf^, cols, rows, h.pane_w, h.pane_h)
-		contract.write_buffer(h.queue, ctx.tile.lut_buffer, 0, &h.lut_words, size_of(h.lut_words))
 	}
 }
 
@@ -921,10 +677,10 @@ _render_frame :: proc(h: ^Harness_State) {
 	cell_h := h.pane_h / f32(rows)
 
 	// Update Static UI headers for each pane
-	status_buf: [128]u8
-	p1_hdr := "[PANE 1: INSTANCE BATCHING (Strategy A)]"
-	p2_hdr := "[PANE 2: COMPUTE TILES (Strategy B)]"
-	p3_hdr := "[PANE 3: FULLSCREEN DIRECT (Strategy C)]"
+	p1_hdr := "[PANE 1: INSTANCE BATCHING (Sparse)]"
+	p2_hdr := "[PANE 2: INSTANCE BATCHING (Moderate)]"
+	p3_hdr := "[PANE 3: INSTANCE BATCHING (Scroll/Heavy)]"
+	p4_hdr := "[PANE 4: INSTANCE BATCHING (Cycling)]"
 	ctrl_txt := "[Space] Toggle Blast | [R] Resize 80x24 <-> 500x200 | [C] Clear"
 
 	synthetic_terminal_write_text(&h.term1, 0, 1, p1_hdr, 6)
@@ -936,274 +692,58 @@ _render_frame :: proc(h: ^Harness_State) {
 	synthetic_terminal_write_text(&h.term3, 0, 1, p3_hdr, 5)
 	synthetic_terminal_write_text(&h.term3, 1, 1, ctrl_txt, 7)
 
+	synthetic_terminal_write_text(&h.term4, 0, 1, p4_hdr, 2)
+	synthetic_terminal_write_text(&h.term4, 1, 1, ctrl_txt, 7)
+
 	// Continuous Data Blasting
 	if h.blasting {
-		// Pane 1: Sparse Typing bursts (< 3% dirty cells)
 		synthetic_terminal_randomize(&h.term1, &h.rng, 15)
-
-		// Pane 2: Moderate Block modifications (3% - 65% dirty cells)
 		synthetic_terminal_randomize(&h.term2, &h.rng, 160)
-
-		// Pane 3: Rapid Scrolling / Full Grid modifications (> 65% dirty cells)
 		if h.frame_counter % 2 == 0 {
 			synthetic_terminal_scroll(&h.term3, &h.rng)
 		} else {
 			synthetic_terminal_randomize(&h.term3, &h.rng, int(cols * rows / 2))
 		}
-
-		// Pane 4: Dynamically cycling workloads to trigger all 3 branches
 		phase := (h.frame_counter / 60) % 3
 		switch phase {
 		case 0:
-			// Low damage -> picks Instance
 			synthetic_terminal_randomize(&h.term4, &h.rng, 4)
 		case 1:
-			// Moderate damage -> picks Compute Tile
 			synthetic_terminal_randomize(&h.term4, &h.rng, 180)
 		case 2:
-			// Heavy damage -> picks Fullscreen
 			synthetic_terminal_scroll(&h.term4, &h.rng)
 		}
 	}
-
-	// Strategy Decision for Pane 4 via selector.odin (based on workload damage before header stamp)
-	total_cells := int(cols * rows)
-	p4_dirty := int(h.term4.damage.w * h.term4.damage.h)
-	p4_ratio := f32(p4_dirty) / f32(max(total_cells, 1))
-	inp := terminal.Strategy_Inputs{
-		dirty_cells = p4_dirty,
-		total_cells = total_cells,
-		ratio       = p4_ratio,
-		full_rows   = int(h.term4.damage.h) if h.term4.damage.w == cols else 0,
-		span_count  = 1,
-		scroll      = (h.term4.damage.w == cols && h.term4.damage.h >= rows - 2),
-	}
-	t_sel_0 := time.tick_now()
-	h.last_strat4 = terminal.strategy_select(inp, &h.strat4_state, true, true)
-	h.last_duration_ns = u64(time.tick_since(t_sel_0))
-	terminal.strategy_record(&h.strat4_state, h.last_strat4, h.last_duration_ns)
-
-	strat_name := "INSTANCE"
-	switch h.last_strat4 {
-	case .Instance:      strat_name = "INSTANCE"
-	case .Compute_Tiles: strat_name = "COMPUTE_TILES"
-	case .Fullscreen:    strat_name = "FULLSCREEN"
-	}
-	p4_hdr := fmt.bprintf(status_buf[:], "[PANE 4: DYNAMIC SELECTOR] Pick: %-13s (%4dus)    ", strat_name, h.last_duration_ns / 1000)
-	synthetic_terminal_write_text(&h.term4, 0, 1, p4_hdr, 2)
-	synthetic_terminal_write_text(&h.term4, 1, 1, ctrl_txt, 7)
 
 	// Command Encoding & Submissions
 	enc := contract.create_command_encoder(h.device)
 	if rawptr(enc) == nil do return
 	defer contract.release_command_encoder(enc)
 
-	// Upload Cell Data for Pane 2 & Pane 3
-	contract.write_buffer(h.queue, h.tile2.cell_buffer, 0, raw_data(h.term2.cells), u64(len(h.term2.cells) * size_of(u64)))
-	contract.write_buffer(h.queue, h.fs3.cell_buffer, 0, raw_data(h.term3.cells), u64(len(h.term3.cells) * size_of(u64)))
-	_upload_color_words(h, h.fs2_color_buf, &h.term2)
-	_upload_color_words(h, h.fs3_color_buf, &h.term3)
-
-	// Upload Cell Data for Pane 4
-	contract.write_buffer(h.queue, h.tile4.cell_buffer, 0, raw_data(h.term4.cells), u64(len(h.term4.cells) * size_of(u64)))
-	contract.write_buffer(h.queue, h.fs4.cell_buffer, 0, raw_data(h.term4.cells), u64(len(h.term4.cells) * size_of(u64)))
-	_upload_color_words(h, h.fs4_color_buf, &h.term4)
-
-	// 1. Pane 2 Compute Dispatch
-	dirty_tiles2 := make([dynamic]u32, context.temp_allocator)
-	tx_s := h.term2.damage.x / h.tile2.tile_w
-	ty_s := h.term2.damage.y / h.tile2.tile_h
-	tx_e := min((h.term2.damage.x + h.term2.damage.w + h.tile2.tile_w - 1) / h.tile2.tile_w, h.tile2.tiles_x)
-	ty_e := min((h.term2.damage.y + h.term2.damage.h + h.tile2.tile_h - 1) / h.tile2.tile_h, h.tile2.tiles_y)
-
-	for ty in ty_s..<ty_e {
-		for tx in tx_s..<tx_e {
-			append(&dirty_tiles2, ty * h.tile2.tiles_x + tx)
-		}
-	}
-	if len(dirty_tiles2) > 0 {
-		params2 := tile.Tile_Params{
-			screen_w     = h.pane_w,
-			screen_h     = h.pane_h,
-			cols         = cols,
-			rows         = rows,
-			cell_w       = cell_w,
-			cell_h       = cell_h,
-			pad_x        = 0.0,
-			pad_y        = 0.0,
-			tile_w       = h.tile2.tile_w,
-			tile_h       = h.tile2.tile_h,
-			tiles_x      = h.tile2.tiles_x,
-			tiles_y      = h.tile2.tiles_y,
-			atlas_w      = atlas.ATLAS_WIDTH,
-			atlas_h      = atlas.ATLAS_HEIGHT,
-			bg_opacity   = 1.0,
-			cell_opacity = 1.0,
-		}
-		contract.write_buffer(h.queue, h.tile2.params_buffer, 0, &params2, size_of(tile.Tile_Params))
-		contract.write_buffer(h.queue, h.tile2.tile_list_buffer, 0, raw_data(dirty_tiles2), u64(len(dirty_tiles2) * size_of(u32)))
-		tile.compute_tile_dispatch(&h.tile2, enc, u32(len(dirty_tiles2)))
-	}
-
-	// 2. Pane 4 Compute Dispatch (if chosen)
-	dirty_tiles4 := make([dynamic]u32, context.temp_allocator)
-	if h.last_strat4 == .Compute_Tiles {
-		full_tile_sync := (h.prev_strat4 != .Compute_Tiles) || (h.frame_counter <= 1)
-		if full_tile_sync {
-			for t_idx in 0..<h.tile4.tile_count {
-				append(&dirty_tiles4, t_idx)
-			}
-		} else {
-			tx_s4 := h.term4.damage.x / h.tile4.tile_w
-			ty_s4 := h.term4.damage.y / h.tile4.tile_h
-			tx_e4 := min((h.term4.damage.x + h.term4.damage.w + h.tile4.tile_w - 1) / h.tile4.tile_w, h.tile4.tiles_x)
-			ty_e4 := min((h.term4.damage.y + h.term4.damage.h + h.tile4.tile_h - 1) / h.tile4.tile_h, h.tile4.tiles_y)
-			for ty in ty_s4..<ty_e4 {
-				for tx in tx_s4..<tx_e4 {
-					append(&dirty_tiles4, ty * h.tile4.tiles_x + tx)
+	for p in 0..<4 {
+		ctx := _get_pane_context(h, p)
+		l := pipeline.composer_pipeline_get_layer(&h.composer_pipe, ctx.layer_id)
+		if l != nil && rawptr(l.view) != nil {
+			terminal_instance.instance_renderer_begin(ctx.inst)
+			u_data := [4]f32{h.pane_w, h.pane_h, cell_w, cell_h}
+			contract.write_buffer(h.queue, ctx.inst.uniform_buffer, 0, &u_data, size_of([4]f32))
+			for r in 0..<rows {
+				for c in 0..<cols {
+					_push_cell_instance(ctx.inst, ctx.term, r, c, cell_w, cell_h, true)
 				}
 			}
-		}
-		if len(dirty_tiles4) > 0 {
-			params4 := tile.Tile_Params{
-				screen_w     = h.pane_w,
-				screen_h     = h.pane_h,
-				cols         = cols,
-				rows         = rows,
-				cell_w       = cell_w,
-				cell_h       = cell_h,
-				pad_x        = 0.0,
-				pad_y        = 0.0,
-				tile_w       = h.tile4.tile_w,
-				tile_h       = h.tile4.tile_h,
-				tiles_x      = h.tile4.tiles_x,
-				tiles_y      = h.tile4.tiles_y,
-				atlas_w      = atlas.ATLAS_WIDTH,
-				atlas_h      = atlas.ATLAS_HEIGHT,
-				bg_opacity   = 1.0,
-				cell_opacity = 1.0,
+			terminal_instance.instance_renderer_flush(ctx.inst)
+
+			pass := contract.begin_render_pass(enc, l.view, {0.07, 0.08, 0.10, 1.0}, .Clear)
+			if rawptr(pass) != nil {
+				contract.render_set_pipeline(pass, h.bg_pipeline)
+				bg_bg := ctx.inst.bg_bind_group if rawptr(ctx.inst.bg_bind_group) != nil else ctx.inst.bind_group
+				contract.render_set_bind_group(pass, 0, bg_bg)
+				contract.render_set_vertex_buffer(pass, 0, ctx.inst.instance_buffer, 0)
+				contract.render_draw(pass, 6, ctx.inst.active_count)
+				terminal_instance.instance_renderer_draw(ctx.inst, pass)
+				contract.end_render_pass(pass)
 			}
-			contract.write_buffer(h.queue, h.tile4.params_buffer, 0, &params4, size_of(tile.Tile_Params))
-			contract.write_buffer(h.queue, h.tile4.tile_list_buffer, 0, raw_data(dirty_tiles4), u64(len(dirty_tiles4) * size_of(u32)))
-			tile.compute_tile_dispatch(&h.tile4, enc, u32(len(dirty_tiles4)))
-		}
-	}
-	h.prev_strat4 = h.last_strat4
-
-	// Retrieve Backing Layers
-	l1 := pipeline.composer_pipeline_get_layer(&h.composer_pipe, 1)
-	l2 := pipeline.composer_pipeline_get_layer(&h.composer_pipe, 2)
-	l3 := pipeline.composer_pipeline_get_layer(&h.composer_pipe, 3)
-	l4 := pipeline.composer_pipeline_get_layer(&h.composer_pipe, 4)
-
-	// 3. Render Pass: Pane 1 (Instance Quad Batching)
-	if l1 != nil && rawptr(l1.view) != nil {
-		terminal_instance.instance_renderer_begin(&h.inst1)
-		u_data := [4]f32{h.pane_w, h.pane_h, cell_w, cell_h}
-		contract.write_buffer(h.queue, h.inst1.uniform_buffer, 0, &u_data, size_of([4]f32))
-
-		for r in 0..<rows {
-			for c in 0..<cols {
-				_push_cell_instance(&h.inst1, &h.term1, r, c, cell_w, cell_h, true)
-			}
-		}
-		terminal_instance.instance_renderer_flush(&h.inst1)
-
-		pass1 := contract.begin_render_pass(enc, l1.view, {0.07, 0.08, 0.10, 1.0}, .Clear)
-		if rawptr(pass1) != nil {
-			contract.render_set_pipeline(pass1, h.bg_pipeline)
-			bg_bg1 := h.inst1.bg_bind_group if rawptr(h.inst1.bg_bind_group) != nil else h.inst1.bind_group
-			contract.render_set_bind_group(pass1, 0, bg_bg1)
-			contract.render_set_vertex_buffer(pass1, 0, h.inst1.instance_buffer, 0)
-			contract.render_draw(pass1, 6, h.inst1.active_count)
-			terminal_instance.instance_renderer_draw(&h.inst1, pass1)
-			contract.end_render_pass(pass1)
-		}
-	}
-
-	// 4. Render Pass: Pane 2 (Compute Tile Blit)
-	if l2 != nil && rawptr(l2.view) != nil {
-		pass2 := contract.begin_render_pass(enc, l2.view, {0.07, 0.08, 0.10, 1.0}, .Clear)
-		if rawptr(pass2) != nil {
-			contract.render_set_pipeline(pass2, h.tile2.blit_pipeline)
-			contract.render_set_bind_group(pass2, 0, h.tile2.blit_bind_group)
-			contract.render_draw(pass2, 3, 1)
-			contract.end_render_pass(pass2)
-		}
-	}
-
-	// 5. Render Pass: Pane 3 (Fullscreen Quad Direct)
-	if l3 != nil && rawptr(l3.view) != nil {
-		fs_p3 := fullscreen.Fullscreen_Params{
-			screen_w     = h.pane_w,
-			screen_h     = h.pane_h,
-			cols         = cols,
-			rows         = rows,
-			cell_w       = cell_w,
-			cell_h       = cell_h,
-			pad_x        = 0.0,
-			pad_y        = 0.0,
-			atlas_w      = atlas.ATLAS_WIDTH,
-			atlas_h      = atlas.ATLAS_HEIGHT,
-			bg_opacity   = 1.0,
-			cell_opacity = 1.0,
-		}
-		contract.write_buffer(h.queue, h.fs3.params_buffer, 0, &fs_p3, size_of(fullscreen.Fullscreen_Params))
-
-		pass3 := contract.begin_render_pass(enc, l3.view, {0.07, 0.08, 0.10, 1.0}, .Clear)
-		if rawptr(pass3) != nil {
-			fullscreen.fullscreen_draw(&h.fs3, pass3)
-			contract.end_render_pass(pass3)
-		}
-	}
-
-	// 6. Render Pass: Pane 4 (Dynamic Selection Dispatch)
-	if l4 != nil && rawptr(l4.view) != nil {
-		pass4 := contract.begin_render_pass(enc, l4.view, {0.07, 0.08, 0.10, 1.0}, .Clear)
-		if rawptr(pass4) != nil {
-			switch h.last_strat4 {
-			case .Instance:
-				terminal_instance.instance_renderer_begin(&h.inst4)
-				u_data := [4]f32{h.pane_w, h.pane_h, cell_w, cell_h}
-				contract.write_buffer(h.queue, h.inst4.uniform_buffer, 0, &u_data, size_of([4]f32))
-				for r in 0..<rows {
-					for c in 0..<cols {
-						_push_cell_instance(&h.inst4, &h.term4, r, c, cell_w, cell_h, true)
-					}
-				}
-				terminal_instance.instance_renderer_flush(&h.inst4)
-
-				contract.render_set_pipeline(pass4, h.bg_pipeline)
-				bg_bg4 := h.inst4.bg_bind_group if rawptr(h.inst4.bg_bind_group) != nil else h.inst4.bind_group
-				contract.render_set_bind_group(pass4, 0, bg_bg4)
-				contract.render_set_vertex_buffer(pass4, 0, h.inst4.instance_buffer, 0)
-				contract.render_draw(pass4, 6, h.inst4.active_count)
-				terminal_instance.instance_renderer_draw(&h.inst4, pass4)
-
-			case .Compute_Tiles:
-				contract.render_set_pipeline(pass4, h.tile4.blit_pipeline)
-				contract.render_set_bind_group(pass4, 0, h.tile4.blit_bind_group)
-				contract.render_draw(pass4, 3, 1)
-
-			case .Fullscreen:
-				fs_p4 := fullscreen.Fullscreen_Params{
-					screen_w     = h.pane_w,
-					screen_h     = h.pane_h,
-					cols         = cols,
-					rows         = rows,
-					cell_w       = cell_w,
-					cell_h       = cell_h,
-					pad_x        = 0.0,
-					pad_y        = 0.0,
-					atlas_w      = atlas.ATLAS_WIDTH,
-					atlas_h      = atlas.ATLAS_HEIGHT,
-					bg_opacity   = 1.0,
-					cell_opacity = 1.0,
-				}
-				contract.write_buffer(h.queue, h.fs4.params_buffer, 0, &fs_p4, size_of(fullscreen.Fullscreen_Params))
-				fullscreen.fullscreen_draw(&h.fs4, pass4)
-			}
-			contract.end_render_pass(pass4)
 		}
 	}
 
@@ -1374,8 +914,7 @@ _dump_fuzz_pngs :: proc(
 _fuzz_render_and_compare :: proc(
 	h: ^Harness_State,
 	inst: ^terminal_instance.Instance_Renderer,
-	fs: ^fullscreen.Fullscreen_Renderer,
-	fs_color_buf: ^contract.Gpu_Buffer,
+	inst_b: ^terminal_instance.Instance_Renderer,
 	term_a, term_b: ^Synthetic_Terminal,
 	tex_a, tex_b: contract.Gpu_Texture,
 	view_a, view_b: contract.Gpu_TextureView,
@@ -1392,7 +931,7 @@ _fuzz_render_and_compare :: proc(
 	cols := term_a.cols
 	rows := term_a.rows
 
-	// 1. Prepare Instance Renderer (Target A)
+	// 1. Prepare Instance Renderer (Target A - incremental partial damage)
 	terminal_instance.instance_renderer_begin(inst)
 	u_data := [4]f32{f32(fuzz_w), f32(fuzz_h), cell_w, cell_h}
 	contract.write_buffer(h.queue, inst.uniform_buffer, 0, &u_data, size_of([4]f32))
@@ -1434,25 +973,15 @@ _fuzz_render_and_compare :: proc(
 	}
 	terminal_instance.instance_renderer_flush(inst)
 
-	// 2. Prepare Fullscreen Renderer (Target B)
-	contract.write_buffer(h.queue, fs.cell_buffer, 0, raw_data(term_b.cells), u64(len(term_b.cells) * size_of(u64)))
-	contract.write_buffer(h.queue, fs.lut_buffer, 0, &h.lut_words, size_of(h.lut_words))
-	_upload_color_words(h, fs_color_buf^, term_b)
-	fs_p := fullscreen.Fullscreen_Params{
-		screen_w     = f32(fuzz_w),
-		screen_h     = f32(fuzz_h),
-		cols         = cols,
-		rows         = rows,
-		cell_w       = cell_w,
-		cell_h       = cell_h,
-		pad_x        = 0.0,
-		pad_y        = 0.0,
-		atlas_w      = atlas.ATLAS_WIDTH,
-		atlas_h      = atlas.ATLAS_HEIGHT,
-		bg_opacity   = 1.0,
-		cell_opacity = 1.0,
+	// 2. Prepare Ground-Truth Instance Renderer (Target B - full redraw)
+	terminal_instance.instance_renderer_begin(inst_b)
+	contract.write_buffer(h.queue, inst_b.uniform_buffer, 0, &u_data, size_of([4]f32))
+	for r in 0..<rows {
+		for c in 0..<cols {
+			_push_cell_instance(inst_b, term_b, r, c, cell_w, cell_h)
+		}
 	}
-	contract.write_buffer(h.queue, fs.params_buffer, 0, &fs_p, size_of(fullscreen.Fullscreen_Params))
+	terminal_instance.instance_renderer_flush(inst_b)
 
 	// 3. Render Passes
 	enc := contract.create_command_encoder(h.device)
@@ -1482,7 +1011,12 @@ _fuzz_render_and_compare :: proc(
 
 	pass_b := contract.begin_render_pass(enc, view_b, clear_col, .Clear)
 	if rawptr(pass_b) != nil {
-		fullscreen.fullscreen_draw(fs, pass_b)
+		bg_bg_b := inst_b.bg_bind_group if rawptr(inst_b.bg_bind_group) != nil else inst_b.bind_group
+		contract.render_set_pipeline(pass_b, h.bg_pipeline)
+		contract.render_set_bind_group(pass_b, 0, bg_bg_b)
+		contract.render_set_vertex_buffer(pass_b, 0, inst_b.instance_buffer, 0)
+		contract.render_draw(pass_b, 6, inst_b.active_count)
+		terminal_instance.instance_renderer_draw(inst_b, pass_b)
 		contract.end_render_pass(pass_b)
 	}
 
@@ -1699,18 +1233,16 @@ _run_truth_fuzzer_and_negative_tests :: proc(h: ^Harness_State) -> bool {
 	}
 	_rebuild_instance_resources(h, &fuzz_inst, fuzz_cols, fuzz_rows, f32(fuzz_w), f32(fuzz_h))
 
-	fuzz_fs: fullscreen.Fullscreen_Renderer
-	fullscreen.fullscreen_init(&fuzz_fs, h.device, h.queue, fuzz_rows, fuzz_cols, cell_w, cell_h, h.atlas.gpu_view, h.format)
-	if rawptr(fuzz_fs.sampler) != nil do contract.destroy_sampler(fuzz_fs.sampler)
-	fuzz_fs.sampler = nearest_sampler
+	fuzz_inst_b: terminal_instance.Instance_Renderer
+	terminal_instance.instance_renderer_init(&fuzz_inst_b, h.device, h.queue, fuzz_cols * fuzz_rows, h.atlas.gpu_view, h.format)
+	if rawptr(fuzz_inst_b.sampler) != nil do contract.destroy_sampler(fuzz_inst_b.sampler)
+	fuzz_inst_b.sampler = nearest_sampler
 	defer {
-		fuzz_fs.sampler = contract.Gpu_Sampler(nil)
-		fuzz_fs.pipeline = contract.Gpu_RenderPipeline(nil)
-		fullscreen.fullscreen_destroy(&fuzz_fs)
+		fuzz_inst_b.sampler = contract.Gpu_Sampler(nil)
+		fuzz_inst_b.pipeline = contract.Gpu_RenderPipeline(nil)
+		terminal_instance.instance_renderer_destroy(&fuzz_inst_b)
 	}
-	fuzz_fs_color_buf: contract.Gpu_Buffer
-	defer if rawptr(fuzz_fs_color_buf) != nil do contract.destroy_buffer(fuzz_fs_color_buf)
-	_rebuild_fullscreen_resources(h, &fuzz_fs, &fuzz_fs_color_buf, fuzz_cols, fuzz_rows, f32(fuzz_w), f32(fuzz_h))
+	_rebuild_instance_resources(h, &fuzz_inst_b, fuzz_cols, fuzz_rows, f32(fuzz_w), f32(fuzz_h))
 
 	term_a: Synthetic_Terminal
 	synthetic_terminal_init(&term_a, fuzz_cols, fuzz_rows)
@@ -1730,7 +1262,7 @@ _run_truth_fuzzer_and_negative_tests :: proc(h: ^Harness_State) -> bool {
 	fmt.println("  [Negative 1] ±1 column dilation disabled:")
 	synthetic_terminal_clear(&term_a)
 	synthetic_terminal_clear(&term_b)
-	_fuzz_render_and_compare(h, &fuzz_inst, &fuzz_fs, &fuzz_fs_color_buf, &term_a, &term_b, tex_a, tex_b, view_a, view_b, buf_a, buf_b, fuzz_w, fuzz_h, cell_w, cell_h, bytes_per_row, buf_size, true, false, false, {})
+	_fuzz_render_and_compare(h, &fuzz_inst, &fuzz_inst_b, &term_a, &term_b, tex_a, tex_b, view_a, view_b, buf_a, buf_b, fuzz_w, fuzz_h, cell_w, cell_h, bytes_per_row, buf_size, true, false, false, {})
 
 	// Neighbor edit: column 10 and 11 are modified, but damage is marked only at column 11
 	term_a.cells[5 * fuzz_cols + 10] = pack_cell(u32('X'), 2, 1, 0, u32('X') - 32)
@@ -1740,7 +1272,7 @@ _run_truth_fuzzer_and_negative_tests :: proc(h: ^Harness_State) -> bool {
 	term_a.damage = contract.damage_rect_make(11, 5, 1, 1)
 	term_b.damage = term_a.damage
 
-	diff1, _, _, _, _, _, _, _, _, _, _ := _fuzz_render_and_compare(h, &fuzz_inst, &fuzz_fs, &fuzz_fs_color_buf, &term_a, &term_b, tex_a, tex_b, view_a, view_b, buf_a, buf_b, fuzz_w, fuzz_h, cell_w, cell_h, bytes_per_row, buf_size, false, false, false, {neg1_disable_dilation = true})
+	diff1, _, _, _, _, _, _, _, _, _, _ := _fuzz_render_and_compare(h, &fuzz_inst, &fuzz_inst_b, &term_a, &term_b, tex_a, tex_b, view_a, view_b, buf_a, buf_b, fuzz_w, fuzz_h, cell_w, cell_h, bytes_per_row, buf_size, false, false, false, {neg1_disable_dilation = true})
 	if diff1 > 0 {
 		fmt.printfln("  [PASS] Neg-1: Dilate ±1 disabled caught at seed 0, mutation 0 (%d diff pixels)", diff1)
 	} else {
@@ -1754,14 +1286,14 @@ _run_truth_fuzzer_and_negative_tests :: proc(h: ^Harness_State) -> bool {
 	synthetic_terminal_clear(&term_b)
 	term_a.cells[10 * fuzz_cols + 10] = pack_cell(u32('M'), 3, 1, 0, u32('M') - 32)
 	term_b.cells[10 * fuzz_cols + 10] = term_a.cells[10 * fuzz_cols + 10]
-	_fuzz_render_and_compare(h, &fuzz_inst, &fuzz_fs, &fuzz_fs_color_buf, &term_a, &term_b, tex_a, tex_b, view_a, view_b, buf_a, buf_b, fuzz_w, fuzz_h, cell_w, cell_h, bytes_per_row, buf_size, true, false, false, {})
+	_fuzz_render_and_compare(h, &fuzz_inst, &fuzz_inst_b, &term_a, &term_b, tex_a, tex_b, view_a, view_b, buf_a, buf_b, fuzz_w, fuzz_h, cell_w, cell_h, bytes_per_row, buf_size, true, false, false, {})
 
 	term_a.cells[10 * fuzz_cols + 10] = pack_cell(' ', 0, 1, 0, 0)
 	term_b.cells[10 * fuzz_cols + 10] = term_a.cells[10 * fuzz_cols + 10]
 	term_a.damage = contract.damage_rect_make(10, 10, 1, 1)
 	term_b.damage = term_a.damage
 
-	diff2, _, _, _, _, _, _, _, _, _, _ := _fuzz_render_and_compare(h, &fuzz_inst, &fuzz_fs, &fuzz_fs_color_buf, &term_a, &term_b, tex_a, tex_b, view_a, view_b, buf_a, buf_b, fuzz_w, fuzz_h, cell_w, cell_h, bytes_per_row, buf_size, false, false, true, {neg2_disable_space_bg = true})
+	diff2, _, _, _, _, _, _, _, _, _, _ := _fuzz_render_and_compare(h, &fuzz_inst, &fuzz_inst_b, &term_a, &term_b, tex_a, tex_b, view_a, view_b, buf_a, buf_b, fuzz_w, fuzz_h, cell_w, cell_h, bytes_per_row, buf_size, false, false, true, {neg2_disable_space_bg = true})
 	if diff2 > 0 {
 		fmt.printfln("  [PASS] Neg-2: Space background emission disabled caught at seed 0, mutation 0 (%d diff pixels)", diff2)
 	} else {
@@ -1778,7 +1310,7 @@ _run_truth_fuzzer_and_negative_tests :: proc(h: ^Harness_State) -> bool {
 	term_a.damage = contract.damage_rect_make(10, 10, 1, 1)
 	term_b.damage = term_a.damage
 
-	diff3, _, _, _, _, _, _, _, _, _, _ := _fuzz_render_and_compare(h, &fuzz_inst, &fuzz_fs, &fuzz_fs_color_buf, &term_a, &term_b, tex_a, tex_b, view_a, view_b, buf_a, buf_b, fuzz_w, fuzz_h, cell_w, cell_h, bytes_per_row, buf_size, false, false, false, {neg3_reverse_pass_order = true})
+	diff3, _, _, _, _, _, _, _, _, _, _ := _fuzz_render_and_compare(h, &fuzz_inst, &fuzz_inst_b, &term_a, &term_b, tex_a, tex_b, view_a, view_b, buf_a, buf_b, fuzz_w, fuzz_h, cell_w, cell_h, bytes_per_row, buf_size, false, false, false, {neg3_reverse_pass_order = true})
 	if diff3 > 0 {
 		fmt.printfln("  [PASS] Neg-3: Background and glyph pass order reversed caught at seed 0, mutation 0 (%d diff pixels)", diff3)
 	} else {
@@ -1795,7 +1327,7 @@ _run_truth_fuzzer_and_negative_tests :: proc(h: ^Harness_State) -> bool {
 	term_a.damage = contract.damage_rect_make(10, 10, 1, 1)
 	term_b.damage = term_a.damage
 
-	diff4, _, _, _, _, _, _, _, _, _, _ := _fuzz_render_and_compare(h, &fuzz_inst, &fuzz_fs, &fuzz_fs_color_buf, &term_a, &term_b, tex_a, tex_b, view_a, view_b, buf_a, buf_b, fuzz_w, fuzz_h, cell_w, cell_h, bytes_per_row, buf_size, false, false, false, {neg4_reduced_row_damage = true})
+	diff4, _, _, _, _, _, _, _, _, _, _ := _fuzz_render_and_compare(h, &fuzz_inst, &fuzz_inst_b, &term_a, &term_b, tex_a, tex_b, view_a, view_b, buf_a, buf_b, fuzz_w, fuzz_h, cell_w, cell_h, bytes_per_row, buf_size, false, false, false, {neg4_reduced_row_damage = true})
 	if diff4 > 0 {
 		fmt.printfln("  [PASS] Neg-4: Vertical damage reduced by 1 row caught at seed 0, mutation 0 (%d diff pixels)", diff4)
 	} else {
@@ -1809,14 +1341,14 @@ _run_truth_fuzzer_and_negative_tests :: proc(h: ^Harness_State) -> bool {
 	synthetic_terminal_clear(&term_b)
 	term_a.cells[10 * fuzz_cols + 10] = pack_cell(u32('K'), 1, 1, 0, u32('K') - 32)
 	term_b.cells[10 * fuzz_cols + 10] = term_a.cells[10 * fuzz_cols + 10]
-	_fuzz_render_and_compare(h, &fuzz_inst, &fuzz_fs, &fuzz_fs_color_buf, &term_a, &term_b, tex_a, tex_b, view_a, view_b, buf_a, buf_b, fuzz_w, fuzz_h, cell_w, cell_h, bytes_per_row, buf_size, true, false, false, {})
+	_fuzz_render_and_compare(h, &fuzz_inst, &fuzz_inst_b, &term_a, &term_b, tex_a, tex_b, view_a, view_b, buf_a, buf_b, fuzz_w, fuzz_h, cell_w, cell_h, bytes_per_row, buf_size, true, false, false, {})
 
 	term_a.cells[10 * fuzz_cols + 10] = pack_cell(u32('K'), 2, 1, 0, u32('K') - 32)
 	term_b.cells[10 * fuzz_cols + 10] = term_a.cells[10 * fuzz_cols + 10]
 	term_a.damage = contract.damage_rect_make(10, 10, 1, 1)
 	term_b.damage = term_a.damage
 
-	diff5, _, _, _, _, _, _, _, _, _, _ := _fuzz_render_and_compare(h, &fuzz_inst, &fuzz_fs, &fuzz_fs_color_buf, &term_a, &term_b, tex_a, tex_b, view_a, view_b, buf_a, buf_b, fuzz_w, fuzz_h, cell_w, cell_h, bytes_per_row, buf_size, false, true, false, {neg5_skip_attr_damage = true})
+	diff5, _, _, _, _, _, _, _, _, _, _ := _fuzz_render_and_compare(h, &fuzz_inst, &fuzz_inst_b, &term_a, &term_b, tex_a, tex_b, view_a, view_b, buf_a, buf_b, fuzz_w, fuzz_h, cell_w, cell_h, bytes_per_row, buf_size, false, true, false, {neg5_skip_attr_damage = true})
 	if diff5 > 0 {
 		fmt.printfln("  [PASS] Neg-5: Damage skipped for attribute-only changes caught at seed 0, mutation 0 (%d diff pixels)", diff5)
 	} else {
@@ -1833,7 +1365,7 @@ _run_truth_fuzzer_and_negative_tests :: proc(h: ^Harness_State) -> bool {
 	term_a.damage = contract.damage_rect_make(10, 10, 1, 1)
 	term_b.damage = term_a.damage
 
-	diff6, _, _, _, _, _, _, _, _, _, _ := _fuzz_render_and_compare(h, &fuzz_inst, &fuzz_fs, &fuzz_fs_color_buf, &term_a, &term_b, tex_a, tex_b, view_a, view_b, buf_a, buf_b, fuzz_w, fuzz_h, cell_w, cell_h, bytes_per_row, buf_size, false, false, false, {neg6_inject_comparator_byte = true})
+	diff6, _, _, _, _, _, _, _, _, _, _ := _fuzz_render_and_compare(h, &fuzz_inst, &fuzz_inst_b, &term_a, &term_b, tex_a, tex_b, view_a, view_b, buf_a, buf_b, fuzz_w, fuzz_h, cell_w, cell_h, bytes_per_row, buf_size, false, false, false, {neg6_inject_comparator_byte = true})
 	if diff6 > 0 {
 		fmt.printfln("  [PASS] Neg-6: Ground-truth 1-byte injection caught at seed 0, mutation 0 (%d diff pixels)", diff6)
 	} else {
@@ -1855,7 +1387,7 @@ _run_truth_fuzzer_and_negative_tests :: proc(h: ^Harness_State) -> bool {
 		synthetic_terminal_clear(&term_b)
 
 		// Initial baseline frame
-		diff0, _, _, _, _, _, _, _, _, _, _ := _fuzz_render_and_compare(h, &fuzz_inst, &fuzz_fs, &fuzz_fs_color_buf, &term_a, &term_b, tex_a, tex_b, view_a, view_b, buf_a, buf_b, fuzz_w, fuzz_h, cell_w, cell_h, bytes_per_row, buf_size, true, false, false, {})
+		diff0, _, _, _, _, _, _, _, _, _, _ := _fuzz_render_and_compare(h, &fuzz_inst, &fuzz_inst_b, &term_a, &term_b, tex_a, tex_b, view_a, view_b, buf_a, buf_b, fuzz_w, fuzz_h, cell_w, cell_h, bytes_per_row, buf_size, true, false, false, {})
 		if diff0 > 0 {
 			fmt.printfln("[FAIL] Seed %02d baseline frame failed: %d mismatching pixels", seed_idx, diff0)
 			return false
@@ -1869,7 +1401,7 @@ _run_truth_fuzzer_and_negative_tests :: proc(h: ^Harness_State) -> bool {
 			kind, r, c, is_attr_only, is_erase := _apply_fuzz_mutation(&term_a, &term_b, &rng, class)
 			class_counts[kind] += 1
 
-			diff, fx, fy, ra, ga, ba, aa, rb, gb, bb, ab := _fuzz_render_and_compare(h, &fuzz_inst, &fuzz_fs, &fuzz_fs_color_buf, &term_a, &term_b, tex_a, tex_b, view_a, view_b, buf_a, buf_b, fuzz_w, fuzz_h, cell_w, cell_h, bytes_per_row, buf_size, false, is_attr_only, is_erase, {})
+			diff, fx, fy, ra, ga, ba, aa, rb, gb, bb, ab := _fuzz_render_and_compare(h, &fuzz_inst, &fuzz_inst_b, &term_a, &term_b, tex_a, tex_b, view_a, view_b, buf_a, buf_b, fuzz_w, fuzz_h, cell_w, cell_h, bytes_per_row, buf_size, false, is_attr_only, is_erase, {})
 			if diff > 0 {
 				fmt.printfln("[FAIL] Seed: %d, Mutation: %d, Kind: %d, Cell: (%d, %d), First Mismatch Pixel: (%d, %d): A=[%d,%d,%d,%d] vs B=[%d,%d,%d,%d]",
 					seed_idx, edit_idx, kind, r, c, fx, fy, ra, ga, ba, aa, rb, gb, bb, ab)
@@ -1896,42 +1428,39 @@ _run_truth_fuzzer_and_negative_tests :: proc(h: ^Harness_State) -> bool {
 // 6. Automated Multi-Run Shuffled Benchmark Suite (docs/HARNESS_BENCHMARK_PLAN.md §8.3)
 // ============================================================================
 
-STRATEGY_AUTO :: terminal.Render_Strategy(-1)
-
 Terminal_Scenario :: struct {
 	name:        string,
 	cols:        u32,
 	rows:        u32,
 	dirty_ratio: f32,
-	strategy:    terminal.Render_Strategy,
 	pane_count:  int,
 }
 
 base_scenarios := [17]Terminal_Scenario{
-	// Grid Scaling (Dirty 100%, Strategy C)
-	{"Grid Scaling: 80x24 (100% dirty, Strat C)", 80, 24, 1.0, .Fullscreen, 0},
-	{"Grid Scaling: 120x40 (100% dirty, Strat C)", 120, 40, 1.0, .Fullscreen, 0},
-	{"Grid Scaling: 160x50 (100% dirty, Strat C)", 160, 50, 1.0, .Fullscreen, 0},
-	{"Grid Scaling: 500x200 (100% dirty, Strat C)", 500, 200, 1.0, .Fullscreen, 0},
+	// Grid Scaling (Dirty 100%)
+	{"Grid Scaling: 80x24 (100% dirty)", 80, 24, 1.0, 0},
+	{"Grid Scaling: 120x40 (100% dirty)", 120, 40, 1.0, 0},
+	{"Grid Scaling: 160x50 (100% dirty)", 160, 50, 1.0, 0},
+	{"Grid Scaling: 500x200 (100% dirty)", 500, 200, 1.0, 0},
 
-	// Dirty Sweep (120x40, Auto Strategy)
-	{"Dirty Sweep: 0.0% (120x40, Auto)", 120, 40, 0.000, STRATEGY_AUTO, 0},
-	{"Dirty Sweep: 0.1% (120x40, Auto)", 120, 40, 0.001, STRATEGY_AUTO, 0},
-	{"Dirty Sweep: 1.0% (120x40, Auto)", 120, 40, 0.010, STRATEGY_AUTO, 0},
-	{"Dirty Sweep: 5.0% (120x40, Auto)", 120, 40, 0.050, STRATEGY_AUTO, 0},
-	{"Dirty Sweep: 25.0% (120x40, Auto)", 120, 40, 0.250, STRATEGY_AUTO, 0},
-	{"Dirty Sweep: 100.0% (120x40, Auto)", 120, 40, 1.000, STRATEGY_AUTO, 0},
+	// Dirty Sweep (120x40)
+	{"Dirty Sweep: 0.0% (120x40)", 120, 40, 0.000, 0},
+	{"Dirty Sweep: 0.1% (120x40)", 120, 40, 0.001, 0},
+	{"Dirty Sweep: 1.0% (120x40)", 120, 40, 0.010, 0},
+	{"Dirty Sweep: 5.0% (120x40)", 120, 40, 0.050, 0},
+	{"Dirty Sweep: 25.0% (120x40)", 120, 40, 0.250, 0},
+	{"Dirty Sweep: 100.0% (120x40)", 120, 40, 1.000, 0},
 
-	// Crossover Validation (120x40, Auto Strategy)
-	{"Crossover: 2.9% (120x40, Auto -> A)", 120, 40, 0.029, STRATEGY_AUTO, 0},
-	{"Crossover: 3.0% (120x40, Auto -> B)", 120, 40, 0.030, STRATEGY_AUTO, 0},
-	{"Crossover: 64.9% (120x40, Auto -> B)", 120, 40, 0.649, STRATEGY_AUTO, 0},
-	{"Crossover: 65.0% (120x40, Auto -> C)", 120, 40, 0.650, STRATEGY_AUTO, 0},
+	// Intermediate Dirty Ratios (120x40)
+	{"Dirty Sweep: 2.9% (120x40)", 120, 40, 0.029, 0},
+	{"Dirty Sweep: 3.0% (120x40)", 120, 40, 0.030, 0},
+	{"Dirty Sweep: 64.9% (120x40)", 120, 40, 0.649, 0},
+	{"Dirty Sweep: 65.0% (120x40)", 120, 40, 0.650, 0},
 
 	// Strategy Stress (120x40, 5.0% dirty)
-	{"Strategy Stress: Force A (120x40, 5.0%)", 120, 40, 0.050, .Instance, 0},
-	{"Strategy Stress: Force B (120x40, 5.0%)", 120, 40, 0.050, .Compute_Tiles, 0},
-	{"Strategy Stress: Force C (120x40, 5.0%)", 120, 40, 0.050, .Fullscreen, 0},
+	{"Strategy Stress: Force A (120x40, 5.0%)", 120, 40, 0.050, 0},
+	{"Strategy Stress: Repeat 1 (120x40, 5.0%)", 120, 40, 0.050, 0},
+	{"Strategy Stress: Repeat 2 (120x40, 5.0%)", 120, 40, 0.050, 0},
 }
 
 Stats_Summary :: struct {
@@ -2041,154 +1570,62 @@ _encode_pane_raster :: proc(
 	h: ^Harness_State,
 	enc: contract.Gpu_CommandEncoder,
 	ctx: ^Pane_Context,
-	strat: terminal.Render_Strategy,
 	cols, rows: u32,
 	cell_w, cell_h: f32,
-	dirty_tiles_buf: ^[2048]u32,
 ) {
 	l := pipeline.composer_pipeline_get_layer(&h.composer_pipe, ctx.layer_id)
 	if l == nil || rawptr(l.view) == nil do return
 
-	switch strat {
-	case .Instance:
-		is_empty := contract.damage_rect_is_empty(ctx.term.damage)
-		is_full := (ctx.term.damage.x == 0 && ctx.term.damage.y == 0 && ctx.term.damage.w == cols && ctx.term.damage.h == rows)
+	is_empty := contract.damage_rect_is_empty(ctx.term.damage)
+	is_full := (ctx.term.damage.x == 0 && ctx.term.damage.y == 0 && ctx.term.damage.w == cols && ctx.term.damage.h == rows)
 
-		terminal_instance.instance_renderer_begin(ctx.inst)
+	terminal_instance.instance_renderer_begin(ctx.inst)
 
-		if !is_empty {
-			u_data := [4]f32{h.pane_w, h.pane_h, cell_w, cell_h}
-			if !ctx.inst.has_uniforms || ctx.inst.last_uniforms != u_data {
-				contract.write_buffer(h.queue, ctx.inst.uniform_buffer, 0, &u_data, size_of([4]f32))
-				ctx.inst.last_uniforms = u_data
-				ctx.inst.has_uniforms = true
-			}
-
-			x0: u32 = 0
-			x1: u32 = cols
-			y0: u32 = 0
-			y1: u32 = rows
-
-			if !is_full {
-				d := ctx.term.damage
-				x0 = u32(max(int(d.x) - 1, 0))
-				x1 = min(d.x + d.w + 1, cols)
-				y0 = d.y
-				y1 = min(d.y + d.h, rows)
-			}
-
-			for r in y0..<y1 {
-				for c in x0..<x1 {
-					_push_cell_instance(ctx.inst, ctx.term, r, c, cell_w, cell_h, true)
-				}
-			}
-			terminal_instance.instance_renderer_flush(ctx.inst)
+	if !is_empty {
+		u_data := [4]f32{h.pane_w, h.pane_h, cell_w, cell_h}
+		if !ctx.inst.has_uniforms || ctx.inst.last_uniforms != u_data {
+			contract.write_buffer(h.queue, ctx.inst.uniform_buffer, 0, &u_data, size_of([4]f32))
+			ctx.inst.last_uniforms = u_data
+			ctx.inst.has_uniforms = true
 		}
 
-		if ctx.inst.active_count == 0 && !is_full {
-			return
+		x0: u32 = 0
+		x1: u32 = cols
+		y0: u32 = 0
+		y1: u32 = rows
+
+		if !is_full {
+			d := ctx.term.damage
+			x0 = u32(max(int(d.x) - 1, 0))
+			x1 = min(d.x + d.w + 1, cols)
+			y0 = d.y
+			y1 = min(d.y + d.h, rows)
 		}
 
-		load_op := contract.Gpu_Load_Op.Clear if is_full else contract.Gpu_Load_Op.Load
-		pass := contract.begin_render_pass(enc, l.view, {0.07, 0.08, 0.10, 1.0}, load_op)
-		if rawptr(pass) != nil {
-			if ctx.inst.active_count > 0 {
-				contract.render_set_pipeline(pass, h.bg_pipeline)
-				bg_bg := ctx.inst.bg_bind_group if rawptr(ctx.inst.bg_bind_group) != nil else ctx.inst.bind_group
-				contract.render_set_bind_group(pass, 0, bg_bg)
-				contract.render_set_vertex_buffer(pass, 0, ctx.inst.instance_buffer, 0)
-				contract.render_draw(pass, 6, ctx.inst.active_count)
-				terminal_instance.instance_renderer_draw(ctx.inst, pass)
-			}
-			contract.end_render_pass(pass)
-		}
-
-	case .Compute_Tiles:
-		if contract.damage_rect_is_empty(ctx.term.damage) {
-			return
-		}
-		contract.write_buffer(h.queue, ctx.tile.cell_buffer, 0, raw_data(ctx.term.cells), u64(len(ctx.term.cells) * size_of(u64)))
-		_upload_color_words(h, ctx.color_buf^, ctx.term)
-		tx_s := ctx.term.damage.x / ctx.tile.tile_w
-		ty_s := ctx.term.damage.y / ctx.tile.tile_h
-		tx_e := min((ctx.term.damage.x + ctx.term.damage.w + ctx.tile.tile_w - 1) / ctx.tile.tile_w, ctx.tile.tiles_x)
-		ty_e := min((ctx.term.damage.y + ctx.term.damage.h + ctx.tile.tile_h - 1) / ctx.tile.tile_h, ctx.tile.tiles_y)
-		dirty_count := 0
-		for ty in ty_s..<ty_e {
-			for tx in tx_s..<tx_e {
-				if dirty_count < len(dirty_tiles_buf) {
-					dirty_tiles_buf[dirty_count] = ty * ctx.tile.tiles_x + tx
-					dirty_count += 1
-				}
+		for r in y0..<y1 {
+			for c in x0..<x1 {
+				_push_cell_instance(ctx.inst, ctx.term, r, c, cell_w, cell_h, true)
 			}
 		}
-		if dirty_count > 0 {
-			params := tile.Tile_Params{
-				screen_w     = h.pane_w,
-				screen_h     = h.pane_h,
-				cols         = cols,
-				rows         = rows,
-				cell_w       = cell_w,
-				cell_h       = cell_h,
-				pad_x        = 0.0,
-				pad_y        = 0.0,
-				tile_w       = ctx.tile.tile_w,
-				tile_h       = ctx.tile.tile_h,
-				tiles_x      = ctx.tile.tiles_x,
-				tiles_y      = ctx.tile.tiles_y,
-				atlas_w      = atlas.ATLAS_WIDTH,
-				atlas_h      = atlas.ATLAS_HEIGHT,
-				bg_opacity   = 1.0,
-				cell_opacity = 1.0,
-			}
-			if !ctx.tile.has_params || ctx.tile.params != params {
-				contract.write_buffer(h.queue, ctx.tile.params_buffer, 0, &params, size_of(tile.Tile_Params))
-				ctx.tile.params = params
-				ctx.tile.has_params = true
-			}
-			contract.write_buffer(h.queue, ctx.tile.tile_list_buffer, 0, &dirty_tiles_buf[0], u64(dirty_count * size_of(u32)))
-			tile.compute_tile_dispatch(ctx.tile, enc, u32(dirty_count))
+		terminal_instance.instance_renderer_flush(ctx.inst)
+	}
 
-			pass := contract.begin_render_pass(enc, l.view, {0.07, 0.08, 0.10, 1.0}, .Clear)
-			if rawptr(pass) != nil {
-				contract.render_set_pipeline(pass, ctx.tile.blit_pipeline)
-				contract.render_set_bind_group(pass, 0, ctx.tile.blit_bind_group)
-				contract.render_draw(pass, 3, 1)
-				contract.end_render_pass(pass)
-			}
-		}
+	if ctx.inst.active_count == 0 && !is_full {
+		return
+	}
 
-	case .Fullscreen:
-		if contract.damage_rect_is_empty(ctx.term.damage) {
-			return
+	load_op := contract.Gpu_Load_Op.Clear if is_full else contract.Gpu_Load_Op.Load
+	pass := contract.begin_render_pass(enc, l.view, {0.07, 0.08, 0.10, 1.0}, load_op)
+	if rawptr(pass) != nil {
+		if ctx.inst.active_count > 0 {
+			contract.render_set_pipeline(pass, h.bg_pipeline)
+			bg_bg := ctx.inst.bg_bind_group if rawptr(ctx.inst.bg_bind_group) != nil else ctx.inst.bind_group
+			contract.render_set_bind_group(pass, 0, bg_bg)
+			contract.render_set_vertex_buffer(pass, 0, ctx.inst.instance_buffer, 0)
+			contract.render_draw(pass, 6, ctx.inst.active_count)
+			terminal_instance.instance_renderer_draw(ctx.inst, pass)
 		}
-		contract.write_buffer(h.queue, ctx.fs.cell_buffer, 0, raw_data(ctx.term.cells), u64(len(ctx.term.cells) * size_of(u64)))
-		_upload_color_words(h, ctx.color_buf^, ctx.term)
-		fs_p := fullscreen.Fullscreen_Params{
-			screen_w     = h.pane_w,
-			screen_h     = h.pane_h,
-			cols         = cols,
-			rows         = rows,
-			cell_w       = cell_w,
-			cell_h       = cell_h,
-			pad_x        = 0.0,
-			pad_y        = 0.0,
-			atlas_w      = atlas.ATLAS_WIDTH,
-			atlas_h      = atlas.ATLAS_HEIGHT,
-			bg_opacity   = 1.0,
-			cell_opacity = 1.0,
-		}
-		if !ctx.fs.has_params || ctx.fs.params != fs_p {
-			contract.write_buffer(h.queue, ctx.fs.params_buffer, 0, &fs_p, size_of(fullscreen.Fullscreen_Params))
-			ctx.fs.params = fs_p
-			ctx.fs.has_params = true
-		}
-
-		pass := contract.begin_render_pass(enc, l.view, {0.07, 0.08, 0.10, 1.0}, .Clear)
-		if rawptr(pass) != nil {
-			fullscreen.fullscreen_draw(ctx.fs, pass)
-			contract.end_render_pass(pass)
-		}
+		contract.end_render_pass(pass)
 	}
 }
 
@@ -2221,9 +1658,6 @@ execute_scenario_single_run :: proc(
 	total_cells := int(cfg.cols * cfg.rows)
 	dirty_cells := int(f32(total_cells) * cfg.dirty_ratio)
 
-	// Preallocated buffer for dirty tile indices to maintain zero-alloc steady state
-	dirty_tiles_buf: [2048]u32
-
 	f_enc := make([]u64, frames)
 	measured := 0
 	skipped := 0
@@ -2249,7 +1683,7 @@ execute_scenario_single_run :: proc(
 			for p in 0..<cfg.pane_count {
 				ctx := _get_pane_context(h, p)
 				ctx.term.damage = contract.damage_rect_make(0, 0, cfg.cols, cfg.rows)
-				_encode_pane_raster(h, enc_init, &ctx, .Fullscreen, cfg.cols, cfg.rows, cell_w, cell_h, &dirty_tiles_buf)
+				_encode_pane_raster(h, enc_init, &ctx, cfg.cols, cfg.rows, cell_w, cell_h)
 			}
 			cmd_init := contract.finish_command_buffer(enc_init)
 			contract.release_command_encoder(enc_init)
@@ -2273,40 +1707,16 @@ execute_scenario_single_run :: proc(
 				continue
 			}
 
-			strats: [4]terminal.Render_Strategy
 			for p in 0..<cfg.pane_count {
 				ctx := _get_pane_context(h, p)
-
 				ctx.term.damage = {}
 				if dirty_cells > 0 {
 					synthetic_terminal_randomize(ctx.term, &h.rng, dirty_cells)
 				}
-
-				if cfg.strategy != STRATEGY_AUTO {
-					terminal.strategy_pin(ctx.strat_state, cfg.strategy)
-				} else {
-					terminal.strategy_unpin(ctx.strat_state)
-				}
-
-				// Use actual damage from the randomize pass, not the static config ratio.
-				// A stride walk or any other pattern can produce a bbox much larger than
-				// the real dirty area, causing strategy_select to always pick Fullscreen.
-				actual_dirty := int(ctx.term.damage.w * ctx.term.damage.h)
-				actual_ratio := f32(actual_dirty) / f32(max(total_cells, 1))
-				inp := terminal.Strategy_Inputs{
-					dirty_cells = actual_dirty,
-					total_cells = total_cells,
-					ratio       = actual_ratio,
-					full_rows   = int(ctx.term.damage.h) if ctx.term.damage.w == cfg.cols else 0,
-					span_count  = 1,
-					scroll      = (actual_dirty >= total_cells),
-				}
-				strats[p] = terminal.strategy_select(inp, ctx.strat_state, true, true)
 			}
 
 			// t0..t1 covers the full CPU cost of a frame: upload to GPU (write_buffer
 			// inside encode_pane_raster), command encoding, finish, and submit.
-			// This matches the intent of "total including GPU upload".
 			t0 := _get_thread_time_ns()
 
 			enc := contract.create_command_encoder(h.device)
@@ -2319,7 +1729,7 @@ execute_scenario_single_run :: proc(
 			if cfg.name != "[Empty Frame Baseline]" {
 				for p in 0..<cfg.pane_count {
 					ctx := _get_pane_context(h, p)
-					_encode_pane_raster(h, enc, &ctx, strats[p], cfg.cols, cfg.rows, cell_w, cell_h, &dirty_tiles_buf)
+					_encode_pane_raster(h, enc, &ctx, cfg.cols, cfg.rows, cell_w, cell_h)
 				}
 				pipeline.composer_pipeline_composite(&h.composer_pipe, enc, view)
 			} else {
@@ -2372,7 +1782,6 @@ _run_honest_benchmark :: proc(h: ^Harness_State, quick: bool = false) {
 		cols        = 120,
 		rows        = 40,
 		dirty_ratio = 0.0,
-		strategy    = STRATEGY_AUTO,
 		pane_count  = 1,
 	}
 	idx := 1
@@ -2383,7 +1792,6 @@ _run_honest_benchmark :: proc(h: ^Harness_State, quick: bool = false) {
 				cols        = base.cols,
 				rows        = base.rows,
 				dirty_ratio = base.dirty_ratio,
-				strategy    = base.strategy,
 				pane_count  = p,
 			}
 			idx += 1
@@ -2648,28 +2056,6 @@ main :: proc() {
 	for p in 0..<4 {
 		ctx := _get_pane_context(h, p)
 		terminal_instance.instance_renderer_init(ctx.inst, h.device, h.queue, 1024, h.atlas.gpu_view, h.format)
-		tile.compute_tile_init(
-			ctx.tile,
-			h.device,
-			h.queue,
-			GRID_ROWS_NORMAL,
-			GRID_COLS_NORMAL,
-			h.pane_w / f32(GRID_COLS_NORMAL),
-			h.pane_h / f32(GRID_ROWS_NORMAL),
-			h.atlas.gpu_view,
-			h.format,
-		)
-		fullscreen.fullscreen_init(
-			ctx.fs,
-			h.device,
-			h.queue,
-			GRID_ROWS_NORMAL,
-			GRID_COLS_NORMAL,
-			h.pane_w / f32(GRID_COLS_NORMAL),
-			h.pane_h / f32(GRID_ROWS_NORMAL),
-			h.atlas.gpu_view,
-			h.format,
-		)
 	}
 
 	// Allocate and wire resources for Normal 80x24 grid
@@ -2692,10 +2078,7 @@ main :: proc() {
 
 	fmt.println("==========================================================================")
 	fmt.println(">>> Multi-Pane Terminal Render Harness (Phase 4 GUI) Active <<<")
-	fmt.println("  Top-Left     (Pane 1): Strategy A (Instance Quad Batching)")
-	fmt.println("  Top-Right    (Pane 2): Strategy B (Compute Tile 16x16 Binning)")
-	fmt.println("  Bottom-Left  (Pane 3): Strategy C (Fullscreen Quad Direct)")
-	fmt.println("  Bottom-Right (Pane 4): Dynamic Adaptive Selector (~35.9ns)")
+	fmt.println("  All 4 Panes: Instance Quad Batching (Instance_Renderer)")
 	fmt.println("Controls: [Space] Toggle Blasting | [R] Toggle 80x24 <-> 500x200 | [C] Clear | [ESC] Quit")
 	fmt.println("==========================================================================")
 
@@ -2743,21 +2126,10 @@ main :: proc() {
 	// Resource Cleanup
 	for p in 0..<4 {
 		ctx := _get_pane_context(h, p)
-		if rawptr(ctx.color_buf^) != nil do contract.destroy_buffer(ctx.color_buf^)
 		ctx.inst.pipeline = contract.Gpu_RenderPipeline(nil)
-		ctx.tile.compute_pipeline = contract.Gpu_ComputePipeline(nil)
-		ctx.tile.blit_pipeline = contract.Gpu_RenderPipeline(nil)
-		ctx.fs.pipeline = contract.Gpu_RenderPipeline(nil)
-
 		terminal_instance.instance_renderer_destroy(ctx.inst)
-		tile.compute_tile_destroy(ctx.tile)
-		fullscreen.fullscreen_destroy(ctx.fs)
 	}
 
 	if rawptr(h.glyph_pipeline) != nil do contract.destroy_render_pipeline(h.glyph_pipeline)
 	if rawptr(h.bg_pipeline) != nil do contract.destroy_render_pipeline(h.bg_pipeline)
-	if rawptr(h.compute_pipeline) != nil do contract.destroy_compute_pipeline(h.compute_pipeline)
-	if rawptr(h.blit_pipeline) != nil do contract.destroy_render_pipeline(h.blit_pipeline)
-	if rawptr(h.fs_pipeline) != nil do contract.destroy_render_pipeline(h.fs_pipeline)
-	if rawptr(h.fs_mutant_pipeline) != nil do contract.destroy_render_pipeline(h.fs_mutant_pipeline)
 }

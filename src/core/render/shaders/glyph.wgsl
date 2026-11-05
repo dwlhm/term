@@ -67,18 +67,32 @@ fn vs_main(
     let corner = quad_positions[vertex_index];
     let uv_corner = quad_uvs[vertex_index];
 
-    // World position: cell origin + corner * cell_size
-    let world_pos = position + corner * cell_size;
+    // Negative uv_rect.z (u1) signals synthetic italic oblique shear on the
+    // glyph quad while leaving the background pass (bg.wgsl) strictly rectangular.
+    // Negative uv_rect.w (v1) signals synthetic bold weight (SGR 1).
+    let is_italic = uv_rect.z < 0.0;
+    let is_bold = uv_rect.w < 0.0;
+    let u1 = abs(uv_rect.z);
+    let v1 = abs(uv_rect.w);
+    let shear_x = select(0.0, (0.5 - corner.y) * 0.22 * cell_size.x, is_italic);
+
+    // World position: cell origin + corner * cell_size + italic shear
+    let world_pos = vec2<f32>(
+        position.x + corner.x * cell_size.x + shear_x,
+        position.y + corner.y * cell_size.y,
+    );
 
     // Convert to clip space: [0, screen_size] -> [-1, 1]
     let clip_x = (world_pos.x / uniforms.screen_size.x) * 2.0 - 1.0;
     let clip_y = 1.0 - (world_pos.y / uniforms.screen_size.y) * 2.0;
     output.clip_position = vec4<f32>(clip_x, clip_y, 0.0, 1.0);
 
-    // Texture coordinates: interpolate within the atlas UV rect
+    // Texture coordinates: interpolate within the atlas UV rect.
+    // Encode bold state via negative tex_coord.y (offset by -2.0 so v=0.0 is strictly < 0.0).
+    let v_raw = mix(uv_rect.y, v1, uv_corner.y);
     output.tex_coord = vec2<f32>(
-        mix(uv_rect.x, uv_rect.z, uv_corner.x),
-        mix(uv_rect.y, uv_rect.w, uv_corner.y),
+        mix(uv_rect.x, u1, uv_corner.x),
+        select(v_raw, -(v_raw + 2.0), is_bold),
     );
 
     output.color = fg_color;
@@ -88,13 +102,28 @@ fn vs_main(
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    let is_bold = input.tex_coord.y < 0.0;
+    let uv = vec2<f32>(
+        input.tex_coord.x,
+        select(input.tex_coord.y, -input.tex_coord.y - 2.0, is_bold),
+    );
+
     // Sample the atlas (R8 format: alpha is the glyph mask)
-    let alpha = textureSampleLevel(atlas_texture, atlas_sampler, input.tex_coord, 0.0).r;
+    let a0 = textureSampleLevel(atlas_texture, atlas_sampler, uv, 0.0).r;
+    let a1 = select(
+        0.0,
+        textureSampleLevel(atlas_texture, atlas_sampler, uv - vec2<f32>(0.65 / 1024.0, 0.0), 0.0).r * 0.82,
+        is_bold,
+    );
+    let raw_alpha = max(a0, a1);
 
     // Discard fully transparent fragments
-    if (alpha < 0.01) {
+    if (raw_alpha < 0.01) {
         discard;
     }
+
+    // Dark-mode luminance gamma contrast boost
+    let alpha = pow(clamp(raw_alpha, 0.0, 1.0), 0.82);
 
     // Apply foreground color with glyph alpha
     return vec4<f32>(input.color.rgb, input.color.a * alpha);

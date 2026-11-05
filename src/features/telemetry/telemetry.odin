@@ -18,7 +18,6 @@ Frame_Sample :: struct {
 	drain_bytes: int,
 	dirty_cells: int,
 	panes:       int,
-	strategy:    string,
 }
 
 Telemetry :: struct {
@@ -77,11 +76,10 @@ telemetry_add_drain :: #force_inline proc(t: ^Telemetry, bytes: int) {
 	t.pending.drain_bytes += bytes
 }
 
-telemetry_add_pane :: #force_inline proc(t: ^Telemetry, dirty_cells: int, strategy: string) {
+telemetry_add_pane :: #force_inline proc(t: ^Telemetry, dirty_cells: int) {
 	if !t.active do return
 	t.pending.dirty_cells += dirty_cells
 	t.pending.panes += 1
-	t.pending.strategy = strategy
 }
 
 // telemetry_end_frame emits one NDJSON record for the rendered frame and resets the accumulator.
@@ -96,13 +94,12 @@ telemetry_end_frame :: proc(t: ^Telemetry, frame_ns: u64) {
 	line: [LINE_MAX]u8
 	s := fmt.bprintf(
 		line[:],
-		`{{"t_us":%d,"frame_us":%d,"drain_bytes":%d,"dirty_cells":%d,"panes":%d,"strategy":"%s","cpu_us":%d,"peak_rss_kb":%d}}` + "\n",
+		`{{"t_us":%d,"frame_us":%d,"drain_bytes":%d,"dirty_cells":%d,"panes":%d,"cpu_us":%d,"peak_rss_kb":%d}}` + "\n",
 		i64(time.duration_microseconds(time.tick_since(t.start))),
 		frame_ns / 1000,
 		t.pending.drain_bytes,
 		t.pending.dirty_cells,
 		t.pending.panes,
-		t.pending.strategy,
 		t.cpu_us,
 		t.peak_rss_kb,
 	)
