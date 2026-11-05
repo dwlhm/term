@@ -47,7 +47,7 @@ _encode_cell :: proc(
 	if .Wide_Continuation in cell_val.flags && c > 0 && .Wide_Lead in row.cells[c - 1].flags do return
 	dc := row.direct_colors[c] if (.Has_Direct_Color in cell_val.flags || .Has_Underline_Decor in cell_val.flags) && c < len(row.direct_colors) else cell.Direct_Color{}
 	cell_style := cell_val.style + ({.Underline} if is_hovered || .Has_Hyperlink in cell_val.flags else {})
-	if !is_selected && cell_val.char <= ' ' && cell_val.bg == 0 && cell_val.style == {} && .Has_Hyperlink not_in cell_val.flags && !dc.has_bg do return
+	if !is_selected && cell_val.char <= ' ' && cell_val.bg == 0 && cell_style == {} && .Has_Hyperlink not_in cell_val.flags && !dc.has_bg do return
 
 	ch, is_wide, is_italic, is_bold := cell_val.char, .Wide_Lead in cell_val.flags, .Italic in cell_style, .Bold in cell_style
 	gw := cell_w * 2.0 if is_wide else cell_w
@@ -180,17 +180,43 @@ terminal_renderer_encode :: proc(
 		row := core_terminal.terminal_get_row(term, logical_r)
 		if row == nil do continue
 
+		row_has_selection := selection_active && (
+			(selected_logical_r_start <= logical_r && logical_r <= selected_logical_r_end) ||
+			(selected_logical_r_end <= logical_r && logical_r <= selected_logical_r_start)
+		)
+		row_has_hover := hover.active && (logical_r == hover.row)
+
+		// Fast path: completely empty row with no selection or hover
+		if row.occ == 0 && !row_has_selection && !row_has_hover {
+			continue
+		}
+
+		max_c := int(row.occ)
+		if row_has_hover {
+			max_c = max(max_c, hover.col_end + 1)
+		}
+		if row_has_selection {
+			max_c = cols
+		}
+		limit_c := min(cols, min(len(row.cells), max_c))
+
 		y_pos := pane_rect[1] + pad_y + f32(r_idx) * cell_h
 		if gam.fc != nil {
-			_apply_row_ligatures(&r.ligature_cache, &gam.fc.rasterizer, row, cols, row_chars[:min(cols, 512)])
+			_apply_row_ligatures(&r.ligature_cache, &gam.fc.rasterizer, row, limit_c, row_chars[:min(limit_c, 512)])
 		} else {
-			for c in 0..<min(cols, min(512, len(row.cells))) do row_chars[c] = u32(row.cells[c].char)
+			for c in 0..<min(limit_c, 512) do row_chars[c] = u32(row.cells[c].char)
 		}
-		for c in 0..<min(cols, len(row.cells)) {
+		for c in 0..<limit_c {
 			x_pos := pane_rect[0] + pad_x + f32(c) * cell_w
 			is_sel := _terminal_renderer_is_cell_selected(logical_r, c, selection_active, selected_logical_r_start, selected_c_start, selected_logical_r_end, selected_c_end)
 			is_hov := !is_sel && _terminal_renderer_is_cell_hovered(logical_r, c, hover)
-			_encode_cell(r, term, gam, emoji_atlas, row, c, row_chars[c] if c < 512 else 0, x_pos, y_pos, cell_w, cell_h, active_bg, hover_openable_bg, hover_blocked_bg, is_sel, is_hov, hover.blocked, is_focused)
+			_encode_cell(
+				r, term, gam, emoji_atlas, row, c,
+				row_chars[c] if c < 512 else 0,
+				x_pos, y_pos, cell_w, cell_h,
+				active_bg, hover_openable_bg, hover_blocked_bg,
+				is_sel, is_hov, hover.blocked, is_focused,
+			)
 		}
 	}
 
