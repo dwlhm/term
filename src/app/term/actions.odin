@@ -318,6 +318,9 @@ app_show_pane_context_menu :: proc(app: ^Term_App, mx, my: f32) {
 // app_execute_action dispatches higher-level UI and workspace commands.
 app_execute_action :: proc(app: ^Term_App, act: Action_Id) {
 	#partial switch act {
+	case .Automation_Takeover:
+		app_takeover_open(app)
+
 	case .Command_Center_Toggle:
 		command_center_toggle(&app.cmd_center, .Commands, app_command_center_sources(app))
 

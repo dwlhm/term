@@ -62,6 +62,8 @@ Term_App :: struct {
 	session_reg:   sess_feat.Session_Registry,
 	client:        client_feat.Client,
 	quit:          App_Quit_State,
+	takeover:      Takeover_Dialog_State, // taking a session back from an automation
+	automation_notice: Automation_Notice,
 	last_title_sync: time.Time,
 	window_focused:            bool,
 	window_visible:            bool, // false: minimized, covered or screen locked (window_visibility.odin)
@@ -402,6 +404,7 @@ app_run :: proc(app: ^Term_App) {
 		drop_effect_update(&app.drop_effect, dt)
 		_ = command_center_update(&app.cmd_center, dt)
 		_ = quit_dialog_update(&app.quit.dialog, dt)
+		_ = modal_anim_update(&app.takeover.anim, dt)
 
 		drained := mux_feat.multiplexer_drain_all(&app.mux)
 		telemetry.telemetry_add_drain(&app.diag.tel, drained)

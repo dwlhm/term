@@ -158,6 +158,7 @@ Session_Row :: struct {
 	title:        string,
 	status:       string, // OSC 7501 message
 	controller:   string, // the automation that holds its lease ("" = none)
+	controller_pass: bool, // its lease passes a person's input through (a handoff)
 }
 
 Prompt_State :: enum u8 { None = 0, Prompt = 1, Input = 2, Executing = 3 }

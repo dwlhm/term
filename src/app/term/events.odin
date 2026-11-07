@@ -128,7 +128,7 @@ app_handle_mouse_button_down :: proc(app: ^Term_App, ev: sdl3.MouseButtonEvent) 
 	mx := f32(ev.x) * ratio
 	my := f32(ev.y) * ratio
 
-	if quit_dialog_handle_click(app, mx, my) {
+	if quit_dialog_handle_click(app, mx, my) || takeover_dialog_handle_click(app, mx, my) {
 		chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
 		return
 	}
@@ -247,6 +247,7 @@ app_handle_mouse_button_down :: proc(app: ^Term_App, ev: sdl3.MouseButtonEvent) 
 				eff_px, eff_py := pane_grid_pad(p.rect, p.session.term.rows, p.session.term.cols, app.layout.metrics.cell_w, app.layout.metrics.cell_h, app.layout.metrics.pane_pad_x, app.layout.metrics.pane_pad_y)
 				if seq, ok := mouse_protocol_encode(p.session, .Press, u8(ev.button), mx, my, p.rect, app.layout.metrics.cell_w, app.layout.metrics.cell_h, eff_px, eff_py, 0.0, is_shift, is_alt, is_ctrl); ok {
 					sess_feat.session_write(p.session, seq.bytes[:seq.len])
+					app_automation_note_input(app, p.session)
 				}
 				app.mouse.pos = {mx, my}
 				app.mouse.is_down = true
@@ -260,7 +261,7 @@ app_handle_mouse_button_down :: proc(app: ^Term_App, ev: sdl3.MouseButtonEvent) 
 }
 
 app_handle_mouse_wheel :: proc(app: ^Term_App, ev: sdl3.MouseWheelEvent) {
-	if app.quit.dialog.visible do return
+	if app.quit.dialog.anim.visible do return
 	ratio := app.window.pixel_ratio
 	mx := ev.mouse_x * ratio
 	my := ev.mouse_y * ratio
@@ -348,7 +349,7 @@ app_handle_mouse_wheel :: proc(app: ^Term_App, ev: sdl3.MouseWheelEvent) {
 }
 
 app_handle_text_input :: proc(app: ^Term_App, text: string) {
-	if app.quit.dialog.visible do return // modal: typing never reaches a pane
+	if app.quit.dialog.anim.visible || app.takeover.anim.visible do return // modal: typing never reaches a pane
 	if app.suppress_text_input {
 		app.suppress_text_input = false
 		return
@@ -365,12 +366,13 @@ app_handle_text_input :: proc(app: ^Term_App, text: string) {
 			}
 			p.session.scroll_offset = 0 // Auto-scroll to bottom on input
 			sess_feat.session_write_string(p.session, text)
+			app_automation_note_input(app, p.session)
 		}
 	}
 }
 
 app_handle_key_down :: proc(app: ^Term_App, ev: sdl3.KeyboardEvent) {
-	if quit_dialog_handle_key(app, ev.key) {
+	if quit_dialog_handle_key(app, ev.key) || takeover_dialog_handle_key(app, ev.key) {
 		chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
 		return
 	}
@@ -431,6 +433,7 @@ app_handle_key_down :: proc(app: ^Term_App, ev: sdl3.KeyboardEvent) {
 		}
 		p.session.scroll_offset = 0 // Auto-scroll to bottom on input
 		sess_feat.session_write(p.session, res.bytes[:res.len])
+		app_automation_note_input(app, p.session)
 		// A keystroke that SDL also reports as TEXT_INPUT must not be
 		// delivered twice: Option combos arrive as ESC+char and, under the
 		// Kitty "report all keys" flag, plain printable keys arrive as
@@ -668,7 +671,7 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 				dirty.chrome = true
 			}
 
-			if app.quit.dialog.visible {
+			if app.quit.dialog.anim.visible {
 				if app.layout.tab_bar_hover.kind != .None {
 					app.layout.tab_bar_hover = {kind = .None, tab_idx = -1}
 					chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)

@@ -36,6 +36,7 @@ core_row_get :: proc(c: ^Core, s: ^Core_Session, title_buf: []u8) -> ipc.Session
 		title     = title,
 		status    = extension.program_status_msg(&sess.program_status),
 		controller = core_lease_owner(s),
+		controller_pass = s.lease.used && s.lease.pass,
 	}
 }
 

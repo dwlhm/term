@@ -77,6 +77,7 @@ core_viewer_lease_mode :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 	case !s.lease.used || !_lease_is_owner(c, s, vi): core_viewer_fail(c, vi, 0, .Not_Found, "this connection holds no lease on the session")
 	case:
 		s.lease.pass = pass
+		core_broadcast_row(c, s) // windows show that it waits for a person
 		_ok(c, vi)
 	}
 }

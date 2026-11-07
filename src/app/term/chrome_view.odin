@@ -116,6 +116,8 @@ chrome_view_build_draw_list :: proc(
 	drop_effect: ^Drop_Effect_State = nil,
 	sessions: ^sess_feat.Session_Registry = nil,
 	quit: ^App_Quit_State = nil,
+	takeover: ^Takeover_Dialog_State = nil,
+	notice: Automation_Notice = {},
 ) -> (dirty: bool) {
 	if cv == nil do return false
 
@@ -135,6 +137,8 @@ chrome_view_build_draw_list :: proc(
 					chrome_dl.ui_draw_border(&cv.draw_list, pane.rect, {0.18, 0.20, 0.26, 0.35}, layout.metrics.border_radius)
 				}
 			}
+
+			automation_banner_emit(&cv.draw_list, layout, &pane, automation_notice_active(notice, pane.session))
 
 			// 2. Draw Cursor for inactive split panes (focused pane cursor lives on dedicated CURSOR_LAYER_ID)
 			if pane.session != nil {
@@ -275,6 +279,7 @@ chrome_view_build_draw_list :: proc(
 		command_center_emit_draw_list(cmd_center, cc_src, &cv.draw_list, layout)
 	}
 	if quit != nil do quit_dialog_emit_draw_list(&quit.dialog, quit.candidates[:quit.count], &cv.draw_list, layout)
+	takeover_dialog_emit_draw_list(takeover, &cv.draw_list, layout)
 
 	screen_w := layout.screen_w if layout != nil else f32(cv.rend.width)
 	screen_h := layout.screen_h if layout != nil else f32(cv.rend.height)

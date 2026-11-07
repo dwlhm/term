@@ -56,7 +56,31 @@ Terminal_Session :: struct {
 	command_start_time:  time.Time,
 	osc_52_ctx:          extension.Osc_52_Context,
 	osc_color_cfg:       extension.Osc_Color_Config,
+	controller:          Session_Controller, // an automation holding it (term auto)
 	allocator:       runtime.Allocator,
+}
+
+// Session_Controller: the automation that holds a session's input, as the core
+// reports it in session rows.
+Session_Controller :: struct {
+	name_buf: [64]u8,
+	name_len: int,
+	pass:     bool, // it waits for a person to type (a handoff)
+}
+
+session_set_controller :: proc(sess: ^Terminal_Session, name: string, pass: bool) -> (changed: bool) {
+	if sess == nil do return false
+	c := &sess.controller
+	n := min(len(name), len(c.name_buf))
+	changed = string(c.name_buf[:c.name_len]) != name[:n] || c.pass != pass
+	copy(c.name_buf[:], name[:n])
+	c.name_len, c.pass = n, pass
+	return
+}
+
+session_controller :: proc(sess: ^Terminal_Session) -> (name: string, pass: bool) {
+	if sess == nil do return "", false
+	return string(sess.controller.name_buf[:sess.controller.name_len]), sess.controller.pass
 }
 
 _session_emit_responder :: proc(term: rawptr, response: []u8) -> bool {

@@ -14,9 +14,9 @@ Qd_Ctx :: struct {
 }
 
 quit_dialog_emit_draw_list :: proc(d: ^Quit_Dialog_State, cands: []Quit_Candidate, dl: ^chrome_dl.Ui_Draw_List, layout: ^Layout_State) {
-	if d == nil || dl == nil || layout == nil || (!d.visible && !d.closing) do return
+	if d == nil || dl == nil || layout == nil || !modal_anim_shown(d.anim) do return
 	s := max(1.0, layout.metrics.scale)
-	e := chrome_modal_ease(d.anim_t)
+	e := chrome_modal_ease(d.anim.t)
 	rows := min(len(cands), QUIT_VISIBLE_ROWS)
 	first := clamp(d.selected - rows + 1, 0, max(0, len(cands) - rows))
 	mw := min(580.0 * s, layout.screen_w - 32.0 * s)
@@ -24,7 +24,7 @@ quit_dialog_emit_draw_list :: proc(d: ^Quit_Dialog_State, cands: []Quit_Candidat
 	mx, my := (layout.screen_w - mw) * 0.5, max(72.0 * s, layout.screen_h * 0.2) + (1.0 - e) * 8.0 * s
 	chrome_draw_modal_frame(dl, layout, {mx, my, mw, mh}, e)
 	ctx := Qd_Ctx{d = d, dl = dl, m = layout.metrics, s = s, e = e, r = {mx, my, mw, mh}}
-	if d.visible do d.modal_rect = ctx.r
+	if d.anim.visible do d.modal_rect = ctx.r
 	_qd_header(ctx, len(cands))
 	d.row_count = 0
 	for k in 0..<rows do _qd_row(ctx, k, first + k, &cands[first + k], {mx + 6.0 * s, my + 72.0 * s + f32(k) * 52.0 * s, mw - 12.0 * s, 48.0 * s})
@@ -44,7 +44,7 @@ _qd_header :: proc(ctx: Qd_Ctx, n: int) {
 @(private = "file")
 _qd_row :: proc(ctx: Qd_Ctx, k, i: int, c: ^Quit_Candidate, r: [4]f32) {
 	s, d := ctx.s, ctx.d
-	if d.visible {
+	if d.anim.visible {
 		d.row_rects[k], d.row_idx[k] = r, i
 		d.row_count = k + 1
 	}
@@ -73,21 +73,14 @@ _qd_footer :: proc(ctx: Qd_Ctx, y: f32) {
 	HINTS := [][2]string{{"space", "Toggle"}, {"esc", "Cancel"}}
 	chrome_draw_key_hints(ctx.dl, ctx.m, ctx.e, ctx.r[0] + 14.0 * s, y + 18.0 * s, HINTS)
 	bx := ctx.r[0] + ctx.r[2] - P
-	th := FONT_CHROME_BODY * s
 	for bi := len(Quit_Button) - 1; bi >= 0; bi -= 1 {
 		b := Quit_Button(bi)
 		label := QUIT_BUTTON_LABELS[b]
-		bw := chrome_text_width(ctx.m, label, th) + 24.0 * s
+		bw := chrome_button_w(ctx.m, label)
 		bx -= bw
 		br := [4]f32{bx, y + 12.0 * s, bw, 32.0 * s}
-		if ctx.d.visible do ctx.d.button_rects[b] = br
-		primary := b == .Quit
-		chrome_dl.ui_draw_rounded_rect(ctx.dl, br, chrome_with_alpha(COLOR_CHROME_ACCENT_SOFT if primary else COLOR_CHROME_RAISED, ctx.e), 8.0 * s)
-		chrome_dl.ui_draw_border(ctx.dl, br, chrome_with_alpha(COLOR_CHROME_BORDER, ctx.e), 8.0 * s)
-		tc := COLOR_CHROME_ACCENT if primary else (COLOR_CHROME_DANGER if b == .Kill_All else COLOR_CHROME_TEXT)
-		trect := [4]f32{bx + 12.0 * s, br[1] + (br[3] - th) * 0.5, bw - 24.0 * s, th}
-		if primary do chrome_dl.ui_draw_text_bold(ctx.dl, trect, label, chrome_with_alpha(tc, ctx.e))
-		else do chrome_dl.ui_draw_text(ctx.dl, trect, label, chrome_with_alpha(tc, ctx.e))
+		if ctx.d.anim.visible do ctx.d.button_rects[b] = br
+		chrome_draw_button(ctx.dl, ctx.m, ctx.e, br, label, .Primary if b == .Quit else (.Danger if b == .Kill_All else .Normal))
 		bx -= 8.0 * s
 	}
 }

@@ -275,3 +275,25 @@ _got :: proc(id: u32, bytes: string) -> bool {
 	for row in snap.screen do for run in row.runs do if strings.contains(run.text, want) do return true
 	return false
 }
+
+@(test)
+test_lease_window_takeover_through_the_client :: proc(t: ^testing.T) {
+	tiers := tiers_start()
+	v := view_open()
+	sess := view_spawn(v, {"/usr/bin/env", "python3", "-I", "-c", ECHO_FIXTURE, ""})
+	id := view_attached(v, sess)
+	defer { view_close(v); tiers_stop(tiers) }
+	owner: Driver
+	testing.expect(t, _driver(&owner))
+	defer _drop(&owner)
+	_lease(&owner, id, "flow.lua:take")
+	_pass(&owner, id, true)
+	rows: [16]ipc.Session_Row
+	got_pass := false
+	for row in cli_list_rows(rows[:]) do if row.id == id do got_pass = row.controller == "flow.lua:take" && row.controller_pass
+	testing.expect(t, got_pass, "rows carry the controller and its pass mode")
+	client.client_takeover(&v.c, sess)
+	_, took := _event(&owner, .Takeover)
+	testing.expect(t, took, "the window's takeover reaches the core over the pane's link")
+	testing.expect_value(t, _controller(id), "")
+}

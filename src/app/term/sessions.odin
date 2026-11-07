@@ -55,11 +55,13 @@ app_sessions_poll :: proc(app: ^Term_App) -> (dirty: bool) {
 @(private = "file")
 _apply_row :: proc(app: ^Term_App, row: plat_ipc.Session_Row) -> bool {
 	shown := app_shown_session(app, row.id)
+	controlled := false // an automation took or left it: its banner changes
 	if shown != nil {
 		sess_feat.session_set_info(shown, i32(row.pid), 0, row.state != .Exited, int(row.exit_code), row.process, row.cwd)
 		app_quit_note_row(app, row)
+		controlled = sess_feat.session_set_controller(shown, row.controller, row.controller_pass)
 	}
-	return sess_feat.session_registry_apply_row(&app.session_reg, row, shown != nil)
+	return sess_feat.session_registry_apply_row(&app.session_reg, row, shown != nil) || controlled
 }
 
 // app_shown_session is the pane session of this viewer showing core session id.

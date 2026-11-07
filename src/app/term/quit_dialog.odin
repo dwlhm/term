@@ -12,9 +12,7 @@ QUIT_BUTTON_LABELS := [Quit_Button]string{.Kill_All = "Kill all", .Keep_All = "K
 QUIT_VISIBLE_ROWS :: 7
 
 Quit_Dialog_State :: struct {
-	visible:      bool,
-	closing:      bool,
-	anim_t:       f32,
+	anim:         Modal_Anim,
 	selected:     int,
 	hover:        int, // -1: none
 	// Written by the renderer, read by the hit tests.
@@ -26,27 +24,18 @@ Quit_Dialog_State :: struct {
 }
 
 quit_dialog_open :: proc(d: ^Quit_Dialog_State) {
-	d^ = {visible = true, hover = -1}
+	d^ = {hover = -1}
+	modal_anim_open(&d.anim)
 }
 
-quit_dialog_close :: proc(d: ^Quit_Dialog_State) {
-	if !d.visible do return
-	d.visible, d.closing = false, true
-}
+quit_dialog_close :: proc(d: ^Quit_Dialog_State) { modal_anim_close(&d.anim) }
 
-quit_dialog_update :: proc(d: ^Quit_Dialog_State, dt: f32) -> (animating: bool) {
-	if d.visible do d.anim_t = min(1.0, d.anim_t + dt / 0.12)
-	else if d.closing {
-		d.anim_t = max(0.0, d.anim_t - dt / 0.09)
-		d.closing = d.anim_t > 0
-	}
-	return (d.anim_t > 0 && d.anim_t < 1) || d.closing
-}
+quit_dialog_update :: proc(d: ^Quit_Dialog_State, dt: f32) -> (animating: bool) { return modal_anim_update(&d.anim, dt) }
 
 // quit_dialog_handle_key: true when the dialog consumed the key (it is modal).
 quit_dialog_handle_key :: proc(app: ^Term_App, key: sdl3.Keycode) -> bool {
 	d := &app.quit.dialog
-	if !d.visible do return false
+	if !d.anim.visible do return false
 	cands := app_quit_candidates(app)
 	switch key {
 	case sdl3.K_ESCAPE:
@@ -63,7 +52,7 @@ quit_dialog_handle_key :: proc(app: ^Term_App, key: sdl3.Keycode) -> bool {
 
 quit_dialog_handle_click :: proc(app: ^Term_App, mx, my: f32) -> bool {
 	d := &app.quit.dialog
-	if !d.visible do return false
+	if !d.anim.visible do return false
 	cands := app_quit_candidates(app)
 	for k in 0..<d.row_count {
 		i := d.row_idx[k]
@@ -82,7 +71,7 @@ quit_dialog_handle_click :: proc(app: ^Term_App, mx, my: f32) -> bool {
 
 quit_dialog_handle_motion :: proc(app: ^Term_App, mx, my: f32) -> (changed: bool) {
 	d := &app.quit.dialog
-	if !d.visible do return false
+	if !d.anim.visible do return false
 	hover := -1
 	for k in 0..<d.row_count do if tab_bar_point_in(d.row_rects[k], mx, my) do hover = d.row_idx[k]
 	changed = hover != d.hover

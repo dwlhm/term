@@ -37,7 +37,7 @@ test_quit_asks_only_about_active_rows_and_cancels :: proc(t: ^testing.T) {
 	testing.expect_value(t, app.quit.phase, Quit_Phase.Asking)
 	testing.expect_value(t, app.quit.count, 1)
 	testing.expect(t, app.quit.candidates[0].keep, "running programs default to keep running")
-	testing.expect(t, app.quit.dialog.visible, "dialog open")
+	testing.expect(t, app.quit.dialog.anim.visible, "dialog open")
 	testing.expect(t, quit_dialog_handle_key(app, sdl3.K_SPACE), "space handled")
 	testing.expect(t, !app.quit.candidates[0].keep, "space toggles to kill")
 	quit_dialog_handle_key(app, sdl3.K_ESCAPE)

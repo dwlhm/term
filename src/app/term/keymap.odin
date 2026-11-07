@@ -56,6 +56,7 @@ Action_Id :: enum {
 	Toggle_Fullscreen,
 	App_Quit,
 	App_Reload_Config,
+	Automation_Takeover,
 }
 
 // Action_Category groups the Command Center list; declaration order is display order.
@@ -98,6 +99,7 @@ ACTION_CATALOG := []Action_Metadata{
 	{.Tab_Close,             "Close Tab",                  "⌘W",       "Close the active tab", .Tabs},
 	{.Tab_Detach,            "Detach Pane to Background",  "⌥⌘B",      "Move the focused pane to background sessions", .Sessions},
 	{.Sessions_Toggle,       "Background Sessions",        "⌥⌘A",      "Attach, inspect or kill background sessions", .Sessions},
+	{.Automation_Takeover,   "Take Over from Automation",  "⇧⌘.",      "Stop the automation (term auto) driving this pane", .Sessions},
 	{.Tab_Next,              "Next Tab",                   "^Tab",     "Switch to the next tab", .Tabs},
 	{.Tab_Prev,              "Previous Tab",               "⇧^Tab",    "Switch to previous tab", .Tabs},
 	{.Tab_Overview_Toggle,   "Show All Tabs",              "⇧⌘A / ⇧⌘O","Open tab overview and quick switcher", .Tabs},
@@ -153,6 +155,7 @@ keymap_evaluate :: proc(key: sdl3.Keycode, mod: sdl3.Keymod) -> (Action_Id, bool
 			case sdl3.K_RIGHTBRACKET:       return .Tab_Next, true
 			case sdl3.K_LEFTBRACKET:        return .Tab_Prev, true
 			case sdl3.K_R:                  return .App_Reload_Config, true
+			case sdl3.K_PERIOD, sdl3.K_GREATER: return .Automation_Takeover, true
 			case sdl3.K_PLUS, sdl3.K_EQUALS: return .Font_Zoom_In, true
 			case sdl3.K_LEFT:               return .Select_Line_Start, true
 			case sdl3.K_RIGHT:              return .Select_Line_End, true
