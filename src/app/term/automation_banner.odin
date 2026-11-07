@@ -13,11 +13,15 @@ import sess_feat "../../features/session"
 
 AUTOMATION_HELD_NOTICE :: 3 * time.Second
 
-// Automation_Notice: the last time a person's input went to a held session
-// (the session is only compared, never read through).
+// Automation_Notice: a moment's message on one pane (the session is only
+// compared, never read through): its input is held, or a takeover found no
+// automation to take the session back from.
+Automation_Notice_Kind :: enum u8 { Held, None }
+
 Automation_Notice :: struct {
 	session: ^sess_feat.Terminal_Session,
 	until:   time.Tick,
+	kind:    Automation_Notice_Kind,
 }
 
 // app_automation_note_input: a person typed or clicked into sess; when an
@@ -25,21 +29,27 @@ Automation_Notice :: struct {
 app_automation_note_input :: proc(app: ^Term_App, sess: ^sess_feat.Terminal_Session) {
 	owner, pass := sess_feat.session_controller(sess)
 	if len(owner) == 0 || pass do return
-	app.automation_notice = {sess, time.tick_add(time.tick_now(), AUTOMATION_HELD_NOTICE)}
+	app.automation_notice = {sess, time.tick_add(time.tick_now(), AUTOMATION_HELD_NOTICE), .Held}
 }
 
-// automation_notice_active: the held-input warning shows for sess now.
+// automation_notice_active: the notice shows for sess now.
 automation_notice_active :: proc(n: Automation_Notice, sess: ^sess_feat.Terminal_Session) -> bool {
 	return sess != nil && n.session == sess && time.tick_diff(time.tick_now(), n.until) > 0
 }
 
-automation_banner_emit :: proc(dl: ^chrome_dl.Ui_Draw_List, layout: ^Layout_State, pane: ^mux_feat.Pane_Entry, held: bool) {
+// automation_banner_emit draws a pane's banner; notice is the pane's active
+// notice, if any.
+automation_banner_emit :: proc(dl: ^chrome_dl.Ui_Draw_List, layout: ^Layout_State, pane: ^mux_feat.Pane_Entry, notice: Maybe(Automation_Notice_Kind)) {
 	if layout == nil || pane.session == nil do return
 	owner, pass := sess_feat.session_controller(pane.session)
-	if len(owner) == 0 do return
+	kind, noticed := notice.?
+	if len(owner) == 0 && !(noticed && kind == .None) do return
+	held := noticed && kind == .Held
 	text: string
 	dot := COLOR_CHROME_ACCENT
 	switch {
+	case len(owner) == 0:
+		text, dot = "No automation drives a pane here", COLOR_CHROME_TEXT_FAINT
 	case pass:
 		text, dot = fmt.tprintf("%s waits for you: type here", owner), COLOR_CHROME_SUCCESS
 	case held:

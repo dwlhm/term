@@ -138,7 +138,7 @@ chrome_view_build_draw_list :: proc(
 				}
 			}
 
-			automation_banner_emit(&cv.draw_list, layout, &pane, automation_notice_active(notice, pane.session))
+			automation_banner_emit(&cv.draw_list, layout, &pane, notice.kind if automation_notice_active(notice, pane.session) else nil)
 
 			// 2. Draw Cursor for inactive split panes (focused pane cursor lives on dedicated CURSOR_LAYER_ID)
 			if pane.session != nil {

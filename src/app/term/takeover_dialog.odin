@@ -5,6 +5,7 @@ package term
 // at once; what the person typed while it held the session is dropped.
 // ↵ takes over · esc cancels.
 
+import "core:time"
 import "vendor:sdl3"
 import chrome_dl "../../core/chrome/draw_list"
 import mux_feat "../../features/multiplexer"
@@ -23,17 +24,36 @@ Takeover_Dialog_State :: struct {
 	button_rects: [Takeover_Button][4]f32, // written by the renderer
 }
 
-// app_takeover_open asks to take the focused pane's session back; it does
-// nothing when no automation holds it.
+// app_takeover_open asks to take a session back: the focused pane's, else
+// the one an automation holds in the active tab. With none, the focused pane
+// says so for a moment.
 app_takeover_open :: proc(app: ^Term_App) {
-	p := mux_feat.multiplexer_get_focused_pane(&app.mux)
-	if p == nil || p.session == nil do return
+	p := _controlled_pane(app)
+	if p == nil {
+		if f := mux_feat.multiplexer_get_focused_pane(&app.mux); f != nil && f.session != nil {
+			app.automation_notice = {f.session, time.tick_add(time.tick_now(), AUTOMATION_HELD_NOTICE), .None}
+		}
+		return
+	}
 	owner, _ := sess_feat.session_controller(p.session)
-	if len(owner) == 0 do return
 	d := &app.takeover
 	d^ = {session_id = client_feat.client_session_id(&app.client, p.session)}
 	d.owner_len = copy(d.owner_buf[:], owner)
 	modal_anim_open(&d.anim)
+}
+
+// _controlled_pane: the focused pane when an automation holds it, else the
+// first pane of the active tab that one holds.
+@(private = "file")
+_controlled_pane :: proc(app: ^Term_App) -> ^mux_feat.Pane_Entry {
+	held :: proc(p: ^mux_feat.Pane_Entry) -> bool {
+		owner, _ := sess_feat.session_controller(p.session)
+		return p.session != nil && len(owner) > 0
+	}
+	if f := mux_feat.multiplexer_get_focused_pane(&app.mux); f != nil && held(f) do return f
+	active := app.tabs_mgr.model.active_idx
+	for &p in app.mux.panes do if held(&p) && app_tab_of_pane(app, p.id) == active do return &p
+	return nil
 }
 
 takeover_dialog_handle_key :: proc(app: ^Term_App, key: sdl3.Keycode) -> bool {

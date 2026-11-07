@@ -79,7 +79,7 @@ app_detach_focused_pane :: proc(app: ^Term_App) -> bool {
 	pane_id := app.mux.focused_pane_id
 	p := mux_feat.multiplexer_get_pane(&app.mux, pane_id)
 	if p == nil || p.session == nil do return false
-	tab_idx := _tab_of_pane(app, pane_id)
+	tab_idx := app_tab_of_pane(app, pane_id)
 	if tab_idx < 0 do return false
 	sess_feat.session_provider_release(&app.mux.provider, p.session, false)
 	p.session = nil
@@ -106,8 +106,8 @@ app_detach_focused_pane :: proc(app: ^Term_App) -> bool {
 	return true
 }
 
-@(private = "file")
-_tab_of_pane :: proc(app: ^Term_App, pane_id: u32) -> int {
+// app_tab_of_pane: the index of the tab holding pane_id (-1: none).
+app_tab_of_pane :: proc(app: ^Term_App, pane_id: u32) -> int {
 	for &tab, i in app.tabs_mgr.entries {
 		if tab.active_pane_id == pane_id || chrome_splits.split_tree_find_leaf(tab.split_tree, pane_id) != nil do return i
 	}
