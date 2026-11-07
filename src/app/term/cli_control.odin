@@ -26,6 +26,7 @@ app_run_control_cli :: proc(args: []string) -> (handled: bool, exit_code: int) {
 	switch args[1] {
 	case "--help", "-h", "help": return true, app_cli_help()
 	case "skill":                return true, app_cli_skill(args[2:])
+	case "auto":                 return true, app_cli_auto(args[2:])
 	case "show", "quit": line = strings.join(args[1:], " ", context.temp_allocator)
 	case "session":
 		if handled, code := app_cli_agent(args[2:]); handled do return true, code

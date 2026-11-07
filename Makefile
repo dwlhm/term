@@ -31,7 +31,7 @@ ifeq ($(UNAME_S),Darwin)
 LUA_CFLAGS += -mmacosx-version-min=$(MIN_OS_VERSION)
 endif
 
-.PHONY: all lua term release run term-debug harness-features run-harness-features harness-render-chrome run-harness-render-chrome harness-render-terminal run-harness-render-terminal harness-render-composer run-harness-composer test test-app test-holder test-session-core test-font test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-gpu check esctest clean help bench bench-quick bundle dmg portable dist install uninstall test-unicode-width gen-unicode bench-parser bench-session bench-throughput test-poller
+.PHONY: all lua test-automation term release run term-debug harness-features run-harness-features harness-render-chrome run-harness-render-chrome harness-render-terminal run-harness-render-terminal harness-render-composer run-harness-composer test test-app test-holder test-session-core test-font test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-gpu check esctest clean help bench bench-quick bundle dmg portable dist install uninstall test-unicode-width gen-unicode bench-parser bench-session bench-throughput test-poller
 
 all: term harness-features harness-render-chrome harness-render-terminal harness-composer
 
@@ -162,7 +162,7 @@ bench-session:
 bench-throughput: term
 	python3 -I scripts/stress/throughput.py -t $(OUT_DIR)/term $(ARGS)
 
-test: test-app test-unicode-width test-terminal test-pty test-holder test-session-core test-font test-window test-session test-control test-ipc test-poller test-tabs test-multiplexer test-interaction test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-gpu test-features test-e2e
+test: test-app test-automation test-unicode-width test-terminal test-pty test-holder test-session-core test-font test-window test-session test-control test-ipc test-poller test-tabs test-multiplexer test-interaction test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-gpu test-features test-e2e
 
 # VT conformance suite (esctest2) driven inside a real Term pane; requires a GUI
 # session. Extra esctest flags: make esctest ESCTEST_ARGS="--include=CUP"
@@ -172,6 +172,9 @@ esctest: term
 
 test-app: $(LUA_LIB)
 	$(ODIN) test src/app/term $(TEST_FLAGS)
+
+test-automation: $(LUA_LIB)
+	$(ODIN) test src/features/automation/tests $(TEST_FLAGS)
 
 test-terminal:
 	$(ODIN) test src/core/terminal/tests $(TEST_FLAGS)

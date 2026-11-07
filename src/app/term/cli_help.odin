@@ -48,12 +48,13 @@ app_cli_help :: proc() -> int {
 	fmt.println("term — GPU terminal emulator with persistent sessions\n")
 	fmt.println("  term                         open a window (or show the running one)")
 	fmt.println("  term session <verb> …        sessions (below)")
+	fmt.println("  term auto <check|snapshot> …          automation contracts (term auto --help)")
 	fmt.println("  term skill <setup|status|show|remove>   agent skill for AI coding agents")
 	fmt.println("  term show | term quit\n")
 	fmt.println("SESSION VERBS:")
 	for v in SESSION_VERBS do fmt.printfln("  %-8s %s", v.name, v.summary)
 	fmt.println("\nInside a term session, $TERM_SESSION_ID is your own id (term session whoami).")
-	fmt.println("Exit codes: 0 ok · 1 error · 2 no session core · 3 timed out · 4 wait --text ended first")
+	fmt.println("Exit codes: 0 ok · 1 error · 2 no session core · 3 timed out · 4 wait --text ended first · 5 rejected")
 	fmt.println("Details: term session <verb> --help")
 	return 0
 }
