@@ -188,9 +188,27 @@ _parser_handle_osc_133 :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Trac
 			g.rows[phys].is_prompt = true
 		}
 		_parser_clear_prompt_rows(g, p.cursor.row + 1, g.row_count)
-	case 'C', 'D':
-		p.prompt_state = .None
+	case 'C':
+		p.prompt_state = .Executing
 		_parser_clear_prompt_rows(g, 0, g.row_count)
+		p.cmd_out = {started = true, start = g.scrolled + i64(p.cursor.row)}
+	case 'D':
+		p.prompt_state = .None
+		p.cmd_seq += 1
+		if p.cmd_out.started && !p.cmd_out.ended {
+			p.cmd_out.ended, p.cmd_out.end, p.cmd_out.end_col = true, g.scrolled + i64(p.cursor.row), p.cursor.col
+		}
+		_parser_clear_prompt_rows(g, 0, g.row_count)
+		if len(payload) > 1 && payload[1] == ';' {
+			code_str := payload[2:]
+			if semi := strings.index_byte(code_str, ';'); semi >= 0 {
+				code_str = code_str[:semi]
+			}
+			if code, ok := strconv.parse_int(code_str); ok {
+				p.has_cmd_exit = true
+				p.last_cmd_exit = i32(code)
+			}
+		}
 	}
 }
 

@@ -28,6 +28,7 @@ Grid :: struct {
 	origin:        int,
 	history_count: int,
 	history_limit: int, // 0 for the alternate screen: scrolling never becomes scrollback
+	scrolled:      i64, // rows ever scrolled off the top: line = scrolled + row names a row across scrolls
 	allocator:     runtime.Allocator,
 }
 
@@ -248,6 +249,7 @@ grid_scroll_up :: proc(
 	if t == 0 && b == g.row_count - 1 {
 		g.origin = (g.origin + actual) & g.mask
 		g.history_count = min(g.history_count + actual, g.history_limit)
+		g.scrolled += i64(actual)
 		// Clear bottom exposed rows
 		for i in 0..<actual {
 			lr := g.row_count - actual + i

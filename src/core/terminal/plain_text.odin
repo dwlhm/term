@@ -32,17 +32,20 @@ terminal_row_last_content_col :: proc(row: ^grid.Row) -> int {
 // terminal_text appends up to `history` scrollback lines and the active screen:
 // soft-wrapped rows joined, trailing blanks and trailing empty lines dropped.
 terminal_text :: proc(t: ^Terminal, b: ^strings.Builder, history: int) {
-	g := &t.grid
-	from := -min(history, g.history_count)
+	terminal_text_rows(t, &t.grid, b, -min(history, t.grid.history_count), t.grid.row_count)
+}
+
+// terminal_text_rows appends rows [from, to) of g the same way.
+terminal_text_rows :: proc(t: ^Terminal, g: ^grid.Grid, b: ^strings.Builder, from, to: int) {
 	start := len(b.buf)
 	keep := start // end of the last line with content
-	for r in from ..< g.row_count {
+	for r in from ..< to {
 		row := grid.grid_get_row(g, r)
 		if row == nil do continue
 		last := terminal_row_last_content_col(row)
 		for c in 0 ..= last do terminal_cell_append_utf8(b, &t.egc_pool, row.cells[c])
 		if last >= 0 do keep = len(b.buf)
-		if !row.wrap || r == g.row_count - 1 do strings.write_byte(b, '\n')
+		if !row.wrap || r == to - 1 do strings.write_byte(b, '\n')
 	}
 	resize(&b.buf, keep)
 	if keep > start do strings.write_byte(b, '\n')

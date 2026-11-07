@@ -39,8 +39,18 @@ Mouse_Format :: enum u8 {
 
 Prompt_State :: enum u8 {
 	None,
-	Prompt, // OSC 133;A / 133;P: shell is drawing prompt
-	Input,  // OSC 133;B: shell is at prompt waiting for / editing command input
+	Prompt,    // OSC 133;A / 133;P: shell is drawing prompt
+	Input,     // OSC 133;B: shell is at prompt waiting for / editing command input
+	Executing, // OSC 133;C: shell is executing command
+}
+
+Cmd_Output :: struct {
+	started:   bool, // 133;C seen
+	ended:     bool, // 133;D seen after it
+	head_lost: bool, // its first lines left the scrollback before a resize
+	start:     i64,
+	end:      i64,
+	end_col:  int,
 }
 
 Cursor :: struct {
@@ -102,6 +112,12 @@ Parser :: struct {
 
 	in_alt_screen:    bool,
 	prompt_state:     Prompt_State,
+	has_cmd_exit:     bool,
+	last_cmd_exit:    i32,
+	cmd_seq:          u32, // commands finished (OSC 133;D), for edge waits
+	// Where the last command's output lies (OSC 133;C to 133;D) as grid lines
+	// (grid.scrolled + row); terminal_cmd_output reads it.
+	cmd_out:          Cmd_Output,
 	sync_output:      bool, // (?2026) synchronized update: hold presentation
 	// OSC 8 hyperlink currently in effect for newly written cells.
 	active_link:      u16,

@@ -221,6 +221,7 @@ terminal_feed_string :: proc(t: ^Terminal, s: string) {
 terminal_resize :: proc(t: ^Terminal, new_rows, new_cols: int) {
 	if t == nil || (new_rows == t.rows && new_cols == t.cols) do return
 	old_cur_r := t.parser.cursor.row
+	cmd_lines := _cmd_output_lines(t)
 	t.rows = max(1, new_rows)
 	t.cols = max(1, new_cols)
 	disp := 0
@@ -240,6 +241,7 @@ terminal_resize :: proc(t: ^Terminal, new_rows, new_cols: int) {
 	t.parser.cursor.col = clamp(t.parser.cursor.col, 0, t.cols - 1)
 	t.parser.scroll_top = clamp(t.parser.scroll_top, 0, t.rows - 1)
 	t.parser.scroll_bottom = max(0, t.rows - 1)
+	_cmd_output_relocate(t, cmd_lines)
 
 	// Keep saved cursor in sync with reflow displacement so DECRC (\x1b8 / CSI u) restores accurately
 	if !in_alt do t.parser.cursor.saved_row += t.parser.cursor.row - old_cur_r
