@@ -42,7 +42,7 @@ run_pump :: proc(r: ^Runner, want: u8, timeout: time.Duration) -> (f: ipc.Stream
 	deadline := time.tick_add(time.tick_now(), timeout)
 	for {
 		if intrinsics.atomic_load(&_sigint) != 0 do run_stop(r, .Cancelled, "interrupted (SIGINT)")
-		if r.stop != .Ok || (want == 0 && r.replied) do return {}, false
+		if !run_running(r) || (want == 0 && r.replied) do return {}, false
 		ipc.stream_flush(&r.conn)
 		if frame, got := ipc.stream_next(&r.conn); got {
 			if _dispatch(r, frame) do continue
@@ -65,7 +65,13 @@ _dispatch :: proc(r: ^Runner, f: ipc.Stream_Frame) -> bool {
 	rd := ipc.wire_reader(f.payload)
 	switch f.kind {
 	case ipc.MSG_LEASE_EVENT: _lease_event(r, ipc.dec_lease_event(&rd))
-	case ipc.MSG_REQUEST:     run_reply_request(r, ipc.dec_next_result(&rd))
+	case ipc.MSG_REQUEST:
+		if r.awaiting_request do return false // serve: a request for the agent, the answer it waits for
+		run_reply_request(r, ipc.dec_next_result(&rd))
+	case ipc.MSG_TELL_RESULT:
+		res := ipc.dec_tell_result(&rd)
+		if r.serving_id == 0 || res.id != r.serving_id || res.phase != .Finished do return false
+		r.ended, r.end_status = true, res.status // answered or cancelled elsewhere
 	case ipc.MSG_EVENT:       // a session row changed: not for the runner
 	case:                     return false
 	}

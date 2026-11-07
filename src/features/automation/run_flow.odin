@@ -19,7 +19,7 @@ run_choose :: proc(r: ^Runner) {
 	cases := lua.absindex(L, -1)
 	defer lua.settop(L, cases - 1)
 	deadline := time.tick_add(time.tick_now(), r.expect)
-	for r.stop == .Ok {
+	for run_running(r) {
 		gen, ok := run_push_screen(r)
 		if !ok do return
 		screen := lua.absindex(L, -1)
@@ -119,7 +119,7 @@ run_handoff :: proc(r: ^Runner) {
 	run_listen(r)
 	r.asking, r.replied = true, false
 	defer r.asking = false
-	for r.stop == .Ok && !r.replied {
+	for run_running(r) && !r.replied {
 		if time.tick_diff(time.tick_now(), r.deadline) <= 0 {
 			run_stop(r, .Timeout, "the handoff did not end before the run's time limit")
 			return

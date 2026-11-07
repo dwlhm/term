@@ -27,6 +27,7 @@ Run_Options :: struct {
 	args:       []string, // positional, or --name value
 	session:    u32,
 	trace_path: string,
+	serve:      bool, // term auto serve: the contract's serve function, once per request
 }
 
 Runner :: struct {
@@ -49,6 +50,12 @@ Runner :: struct {
 	evidence: string, // the screen when it failed
 	done:     bool,
 	result:   string,
+	// term auto serve: the request being served; ended once it finished
+	// elsewhere (answered by the agent, cancelled by its sender)
+	serving_id: u64,
+	awaiting_request: bool,
+	ended:      bool,
+	end_status: ipc.Tell_Status,
 	// t.ask / t.handoff replies: the run's endpoint and a terminal stdin
 	endpoint:  u32,
 	listening: bool, // a `next` waits on the endpoint
@@ -58,6 +65,9 @@ Runner :: struct {
 	reply:     string,
 	stdin_tty: bool,
 }
+
+// run_running: the run goes on (not stopped, its request not ended).
+run_running :: proc(r: ^Runner) -> bool { return r.stop == .Ok && !r.ended }
 
 // run_stop ends the run with code (the first reason wins).
 run_stop :: proc(r: ^Runner, code: Run_Code, msg: string) {
@@ -91,7 +101,7 @@ run_contract :: proc(opts: Run_Options) -> Run_Code {
 
 // _run_prepare loads and checks the contract and leaves the function on the
 // stack.
-@(private = "file")
+@(private)
 _run_prepare :: proc(r: ^Runner, opts: Run_Options) -> bool {
 	vm, ok := vm_open(adapter_dirs())
 	if !ok {
@@ -128,7 +138,7 @@ _run_prepare :: proc(r: ^Runner, opts: Run_Options) -> bool {
 	lua.getfield(L, -2, "adapter") // matching sees the contract's adapter
 	lua.setfield(L, -2, "_adapter")
 	lua.pop(L, 1)
-	if lua.getfield(L, -1, strings.clone_to_cstring(opts.function, context.temp_allocator)) != .Function || opts.function == "serve" {
+	if lua.getfield(L, -1, strings.clone_to_cstring(opts.function, context.temp_allocator)) != .Function || (opts.function == "serve") != opts.serve {
 		run_stop(r, .Contract, fmt.tprintf("%s has no function %q (it has: %s)", opts.contract, opts.function, strings.join(info.functions[:], ", ", context.temp_allocator)))
 		return false
 	}
@@ -161,7 +171,7 @@ _run_timeouts :: proc(r: ^Runner) {
 	lua.pop(L, 1)
 }
 
-@(private = "file")
+@(private)
 _limit :: proc(r: ^Runner) -> time.Duration {
 	L := r.vm.L
 	limit := RUN_LIMIT_DEFAULT
@@ -178,7 +188,7 @@ _limit :: proc(r: ^Runner) -> time.Duration {
 _seconds :: proc(s: lua.Number) -> time.Duration { return time.Duration(s * f64(time.Second)) }
 
 // _run_report prints the result or the failure with its evidence.
-@(private = "file")
+@(private)
 _run_report :: proc(r: ^Runner) -> Run_Code {
 	if r.stop == .Ok {
 		if r.done && len(r.result) > 0 do fmt.println(r.result)
@@ -193,7 +203,7 @@ _run_report :: proc(r: ^Runner) -> Run_Code {
 	return r.stop
 }
 
-@(private = "file")
+@(private)
 _run_cleanup :: proc(r: ^Runner) {
 	if r.leased do run_release(r, false)
 	ipc.stream_conn_destroy(&r.conn)

@@ -137,11 +137,13 @@ end
 
 local ADAPTER_MT = { __name = "term.adapter" }
 local ADAPTER_FIELDS = { api = "number", name = "string", detect = "function", elements = "function",
-  state = "table", interrupts = "table", steps = "table" }
+  state = "table", interrupts = "table", steps = "table", cancel = "function" }
 
--- t.adapter{name, detect, elements?, state?, interrupts?, steps?}: what one
--- program's screens mean. detect(screen) says whether a screen is that
--- program's; elements(screen, base) refines the generic elements.
+-- t.adapter{name, detect, elements?, state?, interrupts?, steps?, cancel?}:
+-- what one program's screens mean. detect(screen) says whether a screen is
+-- that program's; elements(screen, base) refines the generic elements;
+-- cancel() returns the steps that stop what the program is doing (a served
+-- request was cancelled).
 function t.adapter(a)
   if type(a) ~= "table" then error("t.adapter takes a table", 2) end
   for k, v in pairs(a) do

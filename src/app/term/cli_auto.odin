@@ -14,6 +14,8 @@ import plat_ipc "../../platform/ipc"
 AUTO_VERBS := [?]Verb_Help{
 	{"run", "[--session id] [--trace file] <contract.lua> <function> [params…]", "Run a contract function on a session",
 		"The function returns steps; the runner leases the session and carries them out:\nactions wait for their target and for the screen to settle, a person's Esc or\n^C cancels (on.finally still runs), other input is held. Params: positional\nor --name value; missing ones are asked for. Questions (t.ask, t.handoff) are\nJSON lines on stdout, answered with `term auto reply`. Exit: 0 ok · 1 contract\n· 2 no core · 3 timed out · 4 the program ended · 5 session taken · 6 the\nscreen did not come or t.fail · 7 taken back or cancelled."},
+	{"serve", "[--session id] [--trace file] <contract.lua>", "Answer requests to a session's program with the contract's serve function",
+		"Waits in `next` as the session (found by the adapter's detect, or --session):\neach `term session tell <id> <text>` becomes serve(text, {id, from}) → steps on\nthe leased session. A request ends when the program answers it itself\n(`term session answer`), when the steps end (t.done answers it), or when its\nsender cancels it (the adapter's cancel steps run). Refused while the program\nreports working or blocked (OSC 7501). ^C stops serving."},
 	{"reply", "<id> <answer>", "Answer a running contract's question (t.ask, a param, the end of a handoff)", ""},
 	{"check", "<contract.lua>", "Validate a contract without running it",
 		"Loads it in the sandbox and checks its shape: api, functions, params,\non, timeouts. Prints its functions."},
@@ -35,6 +37,7 @@ app_cli_auto :: proc(args: []string) -> int {
 	if len(args) > 1 && (args[1] == "--help" || args[1] == "-h") do return _auto_verb_help(args[0])
 	switch args[0] {
 	case "run":      return _auto_run(args[1:])
+	case "serve":    return _auto_serve(args[1:])
 	case "reply":    return _auto_reply(args[1:])
 	case "check":    return _auto_check(args[1:])
 	case "snapshot": return _auto_snapshot(args[1:])
@@ -166,27 +169,44 @@ _print_snap_row :: proc(row: plat_ipc.Snap_Row, prefix: string) {
 	fmt.println(strings.to_string(b))
 }
 
+// _run_options reads --session and --trace before the positional args.
 @(private = "file")
-_auto_run :: proc(args: []string) -> int {
-	opts: auto.Run_Options
-	rest := args
-	bad := false
-	for !bad && len(rest) >= 2 && strings.has_prefix(rest[0], "--") {
+_run_options :: proc(args: []string) -> (opts: auto.Run_Options, rest: []string, ok: bool) {
+	rest = args
+	for len(rest) >= 2 && strings.has_prefix(rest[0], "--") {
 		switch rest[0] {
 		case "--session":
-			id, ok := strconv.parse_uint(rest[1], 10)
-			opts.session, bad = u32(id), !ok
+			id, parsed := strconv.parse_uint(rest[1], 10)
+			if !parsed do return
+			opts.session = u32(id)
 		case "--trace": opts.trace_path = rest[1]
-		case:           bad = true
+		case:           return
 		}
 		rest = rest[2:]
 	}
-	if bad || len(rest) < 2 {
+	return opts, rest, true
+}
+
+@(private = "file")
+_auto_run :: proc(args: []string) -> int {
+	opts, rest, ok := _run_options(args)
+	if !ok || len(rest) < 2 {
 		fmt.eprintln("usage: term auto run [--session id] [--trace file] <contract.lua> <function> [params…]")
 		return 1
 	}
 	opts.contract, opts.function, opts.args = rest[0], rest[1], rest[2:]
 	return auto.run_exit_code(auto.run_contract(opts))
+}
+
+@(private = "file")
+_auto_serve :: proc(args: []string) -> int {
+	opts, rest, ok := _run_options(args)
+	if !ok || len(rest) != 1 {
+		fmt.eprintln("usage: term auto serve [--session id] [--trace file] <contract.lua>")
+		return 1
+	}
+	opts.contract = rest[0]
+	return auto.run_exit_code(auto.run_serve(opts))
 }
 
 // _auto_reply answers a question: a broker request to the run's endpoint.

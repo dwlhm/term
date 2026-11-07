@@ -75,3 +75,39 @@ tell_body :: proc(to: u32, body: string) {
 		if res.phase == .Finished || res.phase == .Rejected do return
 	}
 }
+
+// rig_wait_listening: a worker waits in `next` for session id.
+rig_wait_listening :: proc(id: u32) {
+	rows: [16]ipc.Session_Row
+	for _ in 0 ..< 250 {
+		for row in cli_list_rows(rows[:]) do if row.id == id && row.request.listening > 0 do return
+		time.sleep(20 * time.Millisecond)
+	}
+}
+
+// rig_answer_as answers request id as worker session by (what the agent does
+// with `term session answer` from inside its session).
+rig_answer_as :: proc(by: u32, id: u64, text: string) -> bool {
+	conn: ipc.Stream_Conn
+	if !cli_conn(&conn) do return false
+	defer ipc.stream_conn_destroy(&conn)
+	b: [256]u8
+	w := ipc.wire_writer(b[:])
+	ipc.enc_answer(&w, {by = by, id = id, text = text})
+	ipc.stream_send(&conn, ipc.MSG_ANSWER, 0, ipc.wire_bytes_written(&w))
+	for _ in 0 ..< 50 {
+		f, got := client.client_wait_frame(&conn, 100)
+		if got && (f.kind == ipc.MSG_OK || f.kind == ipc.MSG_FAIL) do return f.kind == ipc.MSG_OK
+	}
+	return false
+}
+
+// rig_wait_screen waits (up to ms) until session id's screen shows text.
+rig_wait_screen :: proc(id: u32, text: string, ms := 5000) -> bool {
+	for _ in 0 ..< ms / 50 {
+		snap, _, _ := cli_snapshot(id)
+		for row in snap.screen do for run in row.runs do if strings.contains(run.text, text) do return true
+		time.sleep(50 * time.Millisecond)
+	}
+	return false
+}

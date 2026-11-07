@@ -19,7 +19,7 @@ run_wait_for :: proc(r: ^Runner, idx: c.int, present: bool, timeout: time.Durati
 	target := lua.absindex(L, idx)
 	deadline := time.tick_add(time.tick_now(), timeout)
 	handled: [8]bool
-	for r.stop == .Ok {
+	for run_running(r) {
 		gen := run_push_screen(r) or_return // screen
 		matched := run_match(r, -1, target) or_return // screen, match
 		if matched == present {

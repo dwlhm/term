@@ -44,8 +44,8 @@ core_viewer_lease :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 		core_viewer_fail(c, vi, 0, .Bad_Request, "malformed lease request (owner: 1 to 64 bytes)")
 	case s.lease.used:
 		core_viewer_fail(c, vi, 0, .Busy, "an automation holds this session")
-	case broker_row(&c.broker, s.id).serving > 0:
-		core_viewer_fail(c, vi, 0, .Busy, "a request runs in this session")
+	case broker_types_into(&c.broker, s.id):
+		core_viewer_fail(c, vi, 0, .Busy, "a shell request runs in this session")
 	case:
 		s.lease = {used = true, viewer_idx = vi, viewer_seq = c.viewers[vi].seq, owner_len = len(owner)}
 		copy(s.lease.owner_buf[:], owner)

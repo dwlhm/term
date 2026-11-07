@@ -24,7 +24,7 @@ run_exec :: proc(r: ^Runner, idx: c.int) {
 	defer lua.pop(L, 1)
 	n := lua.rawlen(L, -1)
 	for i in 1 ..= n {
-		if r.stop != .Ok || r.done do return
+		if !run_running(r) || r.done do return
 		if time.tick_diff(time.tick_now(), r.deadline) <= 0 {
 			run_stop(r, .Timeout, "the run went over its time limit (timeouts.run)")
 			return

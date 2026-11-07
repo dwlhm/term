@@ -90,6 +90,17 @@ broker_row :: proc(b: ^Broker, sid: u32) -> (m: ipc.Row_Request) {
 	return
 }
 
+// broker_types_into: a request may type into session sid — its shell adapter
+// runs one, or one still waits for a taker (the shell may get it). A request
+// a worker took never touches the session's input.
+broker_types_into :: proc(b: ^Broker, sid: u32) -> bool {
+	for &r in b.reqs {
+		if r.to != sid do continue
+		if r.phase == .Starting || (r.phase == .Running && r.kind == .Shell) do return true
+	}
+	return false
+}
+
 broker_body :: proc(r: ^Broker_Request) -> string { return string(r.body[:r.body_len]) }
 broker_text :: proc(r: ^Broker_Request) -> string { return string(r.text[:r.text_len]) }
 broker_progress_text :: proc(r: ^Broker_Request) -> string { return string(r.progress[:r.progress_len]) }

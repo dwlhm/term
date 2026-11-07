@@ -32,6 +32,9 @@ _BUNDLED := [?]struct {
 }{
 	{"lazygit", #load("adapters/lazygit.lua", string)},
 	{"fzf", #load("adapters/fzf.lua", string)},
+	{"agent", #load("adapters/agent.lua", string)},
+	{"claude_code", #load("adapters/claude_code.lua", string)},
+	{"opencode", #load("adapters/opencode.lua", string)},
 }
 
 bundled_adapter_names :: proc() -> []string {
