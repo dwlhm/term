@@ -50,8 +50,23 @@ app_cli_skill_setup :: proc() -> int {
 		}
 	}
 	_ensure_local_bin_symlink(home)
+	_permissions_setup(home)
 	fmt.printfln("Setup complete: %d agent host(s) updated.", count)
 	return 0
+}
+
+// _permissions_setup lets agents answer served requests (term auto serve).
+@(private = "file")
+_permissions_setup :: proc(home: string) {
+	for p in AGENT_PERMISSIONS {
+		if permission_state(home, p) == .No_Host do continue
+		changed, ok := permission_install(home, p)
+		switch {
+		case !ok:     fmt.printfln("  ! %-20s cannot edit ~/%s (not plain JSON?): add %s", p.name, p.file, permission_rules(p))
+		case changed: fmt.printfln("  ✔ %-20s may run term session answer/progress (~/%s, backup .term-backup)", p.name, p.file)
+		case:         fmt.printfln("  ✔ %-20s may run term session answer/progress already", p.name)
+		}
+	}
 }
 
 app_cli_skill_status :: proc() -> int {
@@ -68,6 +83,14 @@ app_cli_skill_status :: proc() -> int {
 		case .Current:  fmt.printfln("  ✔ %-20s [installed: ~/%s/SKILL.md]", h.name, h.skills_path)
 		case .Outdated: fmt.printfln("  ! %-20s [outdated: run term skill setup]", h.name)
 		case .Missing:  fmt.printfln("  ! %-20s [host active, skill missing]", h.name)
+		}
+	}
+	for p in AGENT_PERMISSIONS {
+		switch permission_state(home, p) {
+		case .No_Host:
+		case .Installed:  fmt.printfln("  ✔ %-20s [may answer served requests: ~/%s]", p.name, p.file)
+		case .Missing:    fmt.printfln("  ! %-20s [cannot answer served requests: run term skill setup]", p.name)
+		case .Unreadable: fmt.printfln("  ! %-20s [~/%s is not plain JSON: add %s]", p.name, p.file, permission_rules(p))
 		}
 	}
 	bin_path, _ := filepath.join({home, ".local/bin/term"}, context.temp_allocator)
@@ -94,6 +117,10 @@ app_cli_skill_remove :: proc() -> int {
 			_ = os.remove(skill_file)
 			fmt.printfln("  ✔ Removed ~/%s/SKILL.md", h.skills_path)
 		}
+	}
+	for p in AGENT_PERMISSIONS {
+		if permission_state(home, p) != .Installed do continue
+		if changed, ok := permission_remove(home, p); ok && changed do fmt.printfln("  ✔ Removed the term session answer permission from ~/%s", p.file)
 	}
 	return 0
 }
@@ -141,7 +168,8 @@ _skill_usage :: proc() -> int {
 	fmt.println("usage: term skill <setup | status | show | remove>")
 	fmt.println()
 	fmt.println("Manage AI agent skill integration for term:")
-	fmt.println("  setup     Scan machine and install term skill to all detected AI agents")
+	fmt.println("  setup     Scan machine and install term skill to all detected AI agents, and let")
+	fmt.println("            Claude Code / OpenCode run `term session answer|progress` (term auto serve)")
 	fmt.println("  status    Show active agent hosts and skill installation status")
 	fmt.println("  show      Print bundled SKILL.md specification to stdout")
 	fmt.println("  remove    Uninstall term skill from all detected AI agents")
