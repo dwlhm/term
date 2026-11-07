@@ -12,7 +12,8 @@ description: >-
   shell runs inside term ($TERM_PROGRAM is "term" or $TERM_SESSION_ID is set) or the user
   mentions "term session": run a command in another shell and get its output, ask another
   agent or program in a session and get its answer, take requests as a worker, start
-  background sessions, look at a session's screen.
+  background sessions, look at a session's screen, drive a TUI (lazygit, vim, fzf, an agent
+  TUI) with a contract (` + "`" + `term auto` + "`" + `).
   This is NOT Luvus: never use the luvus CLI/skill for term sessions.
 ---
 
@@ -90,4 +91,30 @@ EP=$(term session new --endpoint indexer)
 term session next --as "$EP"
 ` + "`" + `` + "`" + `` + "`" + `
 The socket protocol behind these verbs is in docs/PROTOCOL.md: any program can speak it directly.
+
+## Driving TUIs: term auto
+For a full-screen program (lazygit, vim, fzf, dialog, an agent TUI) write a contract instead of
+sending raw keys: steps wait for screens, encode keys for the program's modes, and stop when a
+person takes over. Look first, then write steps against what you saw:
+` + "`" + `` + "`" + `` + "`" + `bash
+term auto snapshot <id>                      # screen + elements: @e1 Button "OK" [21,37 8x1] focused
+term auto adapters                           # lazygit, fzf, claude_code, opencode, …
+term auto check flow.lua && term auto run --session <id> flow.lua save --name notes.txt  # runner options first
+` + "`" + `` + "`" + `` + "`" + `
+` + "`" + `` + "`" + `` + "`" + `lua
+local t = require "term"
+return t.contract {
+  save = function(name)   -- pure: params → steps
+    return { t.expect("~"), t.press("i"), t.type("hello\n"), t.press("Escape"), t.type(":w " .. name .. "\n"), t.expect("written") }
+  end,
+}
+` + "`" + `` + "`" + `` + "`" + `
+Steps: press(keys) · type(text) · paste(text) · click(target) · scroll(target, n) · expect/gone(target) ·
+read(target, fn) · choose · retry · call · ask · handoff · done(value) · fail(msg). A target is screen text,
+a locator {role=, name=, match=, selected=, …}, or fn(screen). Exit 0 ok · 6 the screen did not come (the
+error shows the step, the screen and its elements) · 7 a person took it back. Asks print a JSON line with
+the reply command (` + "`" + `term auto reply <id> <answer>` + "`" + `). Reference: docs/AUTOMATION.md.
+
+When ` + "`" + `term auto serve` + "`" + ` hands you a request, do it, then run (not just write) the command it names:
+` + "`" + `term session answer <id> '<your answer>'` + "`" + `.
 `

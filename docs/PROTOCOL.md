@@ -117,12 +117,16 @@ u32 id · u8 state (1 Idle, 2 Busy, 3 Exited) · bool active · bool attached ·
 u32 pid · u32 elapsed_s · u32 quiet_s (since its program last printed) ·
 i32 exit_code · bool endpoint · u32 serving · u64 serving_id · u32 awaiting ·
 u32 listening · str process · str cwd · str title · str status · str controller
-(the automation holding its lease, empty when none).
+(the automation holding its lease, empty when none) · bool controller_pass (its
+lease passes a person's input through: a handoff).
 
 The other verbs (`observe`, `read`, `send`, `signal`, `watch`, `new`) are in
 `src/platform/ipc/stream_msg.odin`, next to the message numbers.
 
 ## Automation: snapshot, settle, act and lease
+
+The primitives `term auto` is built on ([AUTOMATION.md](AUTOMATION.md) describes
+contracts, steps, elements and adapters).
 
 What a program shows, parsed once by the core (never raw PTY bytes), a wait
 for the screen to change, and input for it. None of them resizes, scrolls or
