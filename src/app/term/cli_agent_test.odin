@@ -26,7 +26,8 @@ test_cli_parse_new :: proc(t: ^testing.T) {
 	testing.expect_value(t, spec.argv[0], "make")
 
 	testing.expect(t, app_cli_parse_new({}, &spec), "no args = shell")
-	testing.expect_value(t, spec.argc, 1)
+	testing.expect_value(t, spec.argc, 2)
+	testing.expect_value(t, spec.argv[1], "-l") // a login shell, said explicitly
 	testing.expect_value(t, spec.size, plat_ipc.Size_Msg{cols = 120, rows = 36})
 
 	bad := [][]string{{"-s"}, {"-s", "200"}, {"-s", "0x5"}, {"-s", "x5"}, {"-s", "10000x5"}, {"-s", "5x-1"}, {"-e", "=v"}, {"-e", "NOEQ"}, {"-x", "1"}, {"-d"}}

@@ -132,8 +132,10 @@ client_spawn :: proc(c: ^Client, config: session.Session_Config) -> ^session.Ter
 	if len(config.argv) > 0 {
 		spec.argc = min(len(config.argv), ipc.STREAM_MAX_ARGV)
 		for i in 0..<spec.argc do spec.argv[i] = config.argv[i]
+	} else if len(config.shell) > 0 {
+		spec.argv[0], spec.argv[1], spec.argc = config.shell, "-l", 2 // a shell tab is a login shell
 	} else {
-		spec.argv[0], spec.argc = config.shell, 1
+		spec.argv[0], spec.argc = "", 1 // the holder's default: $SHELL as a login shell
 	}
 	spec.cwd = config.cwd
 	spec.size = session.session_config_size(config)

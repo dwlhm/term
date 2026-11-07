@@ -85,3 +85,16 @@ test_spawn_raw_resolves_bare_name_on_path :: proc(t: ^testing.T) {
 	}
 	testing.expect(t, posix.WIFEXITED(status) && posix.WEXITSTATUS(status) == 127, "unresolved name exits 127")
 }
+
+@(test)
+test_spawn_raw_runs_a_program_without_args_as_given :: proc(t: ^testing.T) {
+	// Regression: a named program with no arguments got the login-shell "-l"
+	// (`term session new -- lazygit` ran `lazygit -l`, its log tail mode).
+	bare := pty.Pty_Config{shell = "/usr/bin/printenv", cols = 80, rows = 24}
+	master, pid, err := pty.pty_spawn_raw(bare, {"ONLY_ME=1"})
+	testing.expect_value(t, err, pty.Pty_Error.None)
+	out := read_until(master, "ONLY_ME", 3000)
+	testing.expectf(t, strings.contains(out, "ONLY_ME=1"), "printenv ran with no args (a stray -l would print nothing): %q", out)
+	pty.pty_hangup(master, pid)
+	posix.waitpid(posix.pid_t(pid), nil, {})
+}

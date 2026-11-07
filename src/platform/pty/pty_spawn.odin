@@ -108,17 +108,19 @@ _child_exec :: proc(pair: ^_Pty_Pair, ws: ^Winsize, cwd, exe: cstring, argv, env
 	posix._exit(127)
 }
 
-// argv = [program, args...]; no args → a login shell ("-l").
+// argv = [program, args...] exactly as given; no program → $SHELL (else
+// /bin/sh) as a login shell ("-l"). A caller that wants a named shell to be a
+// login shell passes "-l" itself.
 @(private = "file")
 _exec_argv :: proc(cfg: Pty_Config) -> []cstring {
-	prog := cfg.shell
-	if len(prog) == 0 do prog = os.get_env("SHELL", context.temp_allocator)
+	prog, login := cfg.shell, len(cfg.shell) == 0
+	if login do prog = os.get_env("SHELL", context.temp_allocator)
 	if len(prog) == 0 do prog = "/bin/sh"
-	extra := len(cfg.argv) if len(cfg.argv) > 0 else 1
-	out := make([]cstring, extra + 2)
+	args := len(cfg.argv) + (1 if login else 0)
+	out := make([]cstring, args + 2) // program, args, nil
 	out[0] = strings.clone_to_cstring(prog)
-	if len(cfg.argv) == 0 do out[1] = strings.clone_to_cstring("-l")
-	for arg, i in cfg.argv do out[i + 1] = strings.clone_to_cstring(arg)
+	if login do out[1] = strings.clone_to_cstring("-l")
+	for arg, i in cfg.argv do out[i + 1 + (1 if login else 0)] = strings.clone_to_cstring(arg)
 	return out
 }
 

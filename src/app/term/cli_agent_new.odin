@@ -42,7 +42,7 @@ app_cli_parse_new :: proc(args: []string, spec: ^plat_ipc.Spawn_Msg) -> bool {
 		for i in 0..<spec.argc do spec.argv[i] = rest[i + 1]
 	} else {
 		shell := os.get_env("SHELL", context.temp_allocator)
-		spec.argv[0], spec.argc = shell if len(shell) > 0 else "/bin/sh", 1
+		spec.argv[0], spec.argv[1], spec.argc = shell if len(shell) > 0 else "/bin/sh", "-l", 2 // a login shell
 	}
 	return true
 }
