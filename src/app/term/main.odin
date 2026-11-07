@@ -447,12 +447,13 @@ app_run :: proc(app: ^Term_App) {
 
 main :: proc() {
 	if handled, code := client_feat.client_tier_main(os.args); handled do os.exit(code)
-	_ = signals_block_quit_set()
+	// CLI verbs keep default signals: ^C/SIGTERM end a `term session run|tell`.
 	if handled, code := app_run_control_cli(os.args); handled {
 		os.exit(code)
 	}
 	opts, should_continue := app_parse_cli_args(os.args)
 	if !should_continue do return
+	_ = signals_block_quit_set() // before SDL or any thread exists
 
 	app := new(Term_App)
 	defer free(app)

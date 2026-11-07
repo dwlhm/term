@@ -21,8 +21,9 @@ Signal_Router :: struct {
 }
 
 // signals_block_quit_set blocks {SIGTERM, SIGINT, SIGHUP, SIGUSR2} in the
-// calling thread with pthread_sigmask. MUST be the first call in main(),
-// before SDL or any PTY/font thread exists, so every later thread inherits it.
+// calling thread with pthread_sigmask. main() calls it once the CLI verbs
+// are ruled out (they keep default signals) and before SDL or any PTY/font
+// thread exists, so every later thread inherits it.
 signals_block_quit_set :: proc() -> bool {
 	set := _quit_set()
 	return posix.pthread_sigmask(.BLOCK, &set, nil) == .NONE
