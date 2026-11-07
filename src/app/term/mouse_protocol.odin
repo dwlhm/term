@@ -3,10 +3,10 @@ package term
 // Terminal Open Mouse & Focus Protocol Encoder (XTerm / SGR 1006 / SGR-Pixel 1016)
 // Part of Tier 3 Application Shell (src/app/term/*).
 
-import "core:fmt"
 import "vendor:sdl3"
 
 import cursor "../../core/cursor"
+import ie "../../core/terminal/input_encode"
 import sess_feat "../../features/session"
 
 Mouse_Event_Kind :: enum {
@@ -23,7 +23,8 @@ mouse_protocol_should_handle :: proc(sess: ^sess_feat.Terminal_Session, is_shift
 	return sess.term.parser.mouse_mode != .None
 }
 
-// mouse_protocol_encode serializes a mouse event into VT sequence based on active mode & format.
+// mouse_protocol_encode maps a window mouse event onto the pane's cells and
+// encodes it the way the program asked for (core/terminal/input_encode).
 mouse_protocol_encode :: proc(
 	sess: ^sess_feat.Terminal_Session,
 	kind: Mouse_Event_Kind,
@@ -36,62 +37,39 @@ mouse_protocol_encode :: proc(
 	is_shift: bool = false,
 	is_alt: bool = false,
 	is_ctrl: bool = false,
-) -> (res: string, ok: bool) {
-	if sess == nil do return "", false
-	p := &sess.term.parser
-	if p.mouse_mode == .None do return "", false
-
-	#partial switch p.mouse_mode {
-	case .X10:
-		if kind != .Press do return "", false
-	case .Normal:
-		if kind == .Motion do return "", false
-	}
-
+) -> (res: ie.Encoded, ok: bool) {
+	if sess == nil do return {}, false
 	rel_x := max(0.0, pixel_x - pane_rect[0] - pad_x)
 	rel_y := max(0.0, pixel_y - pane_rect[1] - pad_y)
-	col := clamp(int(rel_x / max(1.0, cell_w)) + 1, 1, sess.term.cols)
-	row := clamp(int(rel_y / max(1.0, cell_h)) + 1, 1, sess.term.rows)
-
-	cb := 0
-	if kind == .Wheel {
-		if wheel_y > 0.0 do cb = 64
-		else if wheel_y < 0.0 do cb = 65
-		else do return "", false
-	} else {
-		switch button {
-		case sdl3.BUTTON_LEFT:   cb = 0
-		case sdl3.BUTTON_MIDDLE: cb = 1
-		case sdl3.BUTTON_RIGHT:  cb = 2
-		case:                    cb = 3
-		}
+	ev := ie.Mouse_Event{
+		button = _mouse_button(button),
+		col    = clamp(int(rel_x / max(1.0, cell_w)) + 1, 1, sess.term.cols),
+		row    = clamp(int(rel_y / max(1.0, cell_h)) + 1, 1, sess.term.rows),
+		px     = int(rel_x) + 1,
+		py     = int(rel_y) + 1,
 	}
-
-	if kind == .Motion do cb += 32
-	if is_shift do cb += 4
-	if is_alt   do cb += 8
-	if is_ctrl  do cb += 16
-
-	switch p.mouse_format {
-	case .Sgr:
-		terminator := 'M' if (kind != .Release) else 'm'
-		return fmt.tprintf("\x1b[<%d;%d;%d%c", cb, col, row, terminator), true
-
-	case .Sgr_Pixel:
-		terminator := 'M' if (kind != .Release) else 'm'
-		px := int(rel_x) + 1
-		py := int(rel_y) + 1
-		return fmt.tprintf("\x1b[<%d;%d;%d%c", cb, px, py, terminator), true
-
-	case .X10:
-		if kind == .Release do cb = 3 + (cb & 28)
-		c_byte := u8(clamp(col + 32, 33, 255))
-		r_byte := u8(clamp(row + 32, 33, 255))
-		cb_byte := u8(clamp(cb + 32, 32, 255))
-		return fmt.tprintf("\x1b[M%c%c%c", rune(cb_byte), rune(c_byte), rune(r_byte)), true
+	switch kind {
+	case .Press:   ev.kind = .Press
+	case .Release: ev.kind = .Release
+	case .Motion:  ev.kind = .Motion
+	case .Wheel:
+		if wheel_y == 0.0 do return {}, false
+		ev.kind = .Wheel_Up if wheel_y > 0.0 else .Wheel_Down
 	}
+	if is_shift do ev.mods += {.Shift}
+	if is_alt do ev.mods += {.Alt}
+	if is_ctrl do ev.mods += {.Ctrl}
+	return ie.encode_mouse(ev, ie.mouse_modes(&sess.term.parser))
+}
 
-	return "", false
+@(private = "file")
+_mouse_button :: proc(button: u8) -> ie.Mouse_Button {
+	switch button {
+	case sdl3.BUTTON_LEFT:   return .Left
+	case sdl3.BUTTON_MIDDLE: return .Middle
+	case sdl3.BUTTON_RIGHT:  return .Right
+	}
+	return .None
 }
 
 // mouse_protocol_report_focus emits Focus In (\x1b[I) or Focus Out (\x1b[O) if DECSET 1004 is active.

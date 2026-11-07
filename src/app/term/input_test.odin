@@ -1,64 +1,50 @@
 package term
 
+// SDL keys must reach input_encode as the keys they are: the byte tables
+// themselves are tested in core/terminal/tests/input_encode_key_test.odin.
+
+import "core:strings"
 import "core:testing"
 import "vendor:sdl3"
+import ie "../../core/terminal/input_encode"
 
-@test
-test_input_encode_cmd_shortcuts :: proc(t: ^testing.T) {
-	// Cmd + Backspace -> ^U (\x15)
-	res, ok := input_encode_key(sdl3.K_BACKSPACE, sdl3.KMOD_GUI)
-	testing.expect(t, ok, "Cmd+Backspace must be encoded")
-	testing.expect_value(t, res.len, 1)
-	testing.expect_value(t, res.bytes[0], 0x15)
-
-	// Cmd + Delete -> ^U (\x15) (Mac delete key consistently clears line)
-	res_del, ok_del := input_encode_key(sdl3.K_DELETE, sdl3.KMOD_GUI)
-	testing.expect(t, ok_del, "Cmd+Delete must be encoded")
-	testing.expect_value(t, res_del.len, 1)
-	testing.expect_value(t, res_del.bytes[0], 0x15)
-
-	// Cmd + Left (without Shift) -> ^A (\x01)
-	res_left, ok_left := input_encode_key(sdl3.K_LEFT, sdl3.KMOD_GUI)
-	testing.expect(t, ok_left, "Cmd+Left must be encoded")
-	testing.expect_value(t, res_left.len, 1)
-	testing.expect_value(t, res_left.bytes[0], 0x01)
-
-	// Cmd + Right (without Shift) -> ^E (\x05)
-	res_right, ok_right := input_encode_key(sdl3.K_RIGHT, sdl3.KMOD_GUI)
-	testing.expect(t, ok_right, "Cmd+Right must be encoded")
-	testing.expect_value(t, res_right.len, 1)
-	testing.expect_value(t, res_right.bytes[0], 0x05)
-
-	// Other Cmd shortcuts must not be handled by raw input encoder
-	_, ok_c := input_encode_key(sdl3.K_C, sdl3.KMOD_GUI)
-	testing.expect(t, !ok_c, "Cmd+C must not be encoded by raw encoder")
+@(private = "file")
+_sdl :: proc(key: sdl3.Keycode, mod: sdl3.Keymod, flags: u8 = 0) -> string {
+	ev, mapped := sdl_key_event(key, mod, .Press)
+	if !mapped do return "<unmapped>"
+	res, ok := ie.encode_key(ev, {kitty_flags = flags})
+	if !ok do return "<none>"
+	return strings.clone(string(res.bytes[:res.len]), context.temp_allocator) // res lives on this stack frame
 }
 
 @test
-test_input_encode_word_delete :: proc(t: ^testing.T) {
-	// Option + Backspace -> \x1b\x7f
-	res_opt_bs, ok_opt_bs := input_encode_key(sdl3.K_BACKSPACE, sdl3.KMOD_ALT)
-	testing.expect(t, ok_opt_bs, "Option+Backspace must be encoded")
-	testing.expect_value(t, res_opt_bs.len, 2)
-	testing.expect_value(t, res_opt_bs.bytes[0], 0x1b)
-	testing.expect_value(t, res_opt_bs.bytes[1], 0x7f)
+test_sdl_key_mapping :: proc(t: ^testing.T) {
+	ev, ok := sdl_key_event(sdl3.K_A, sdl3.KMOD_LSHIFT | sdl3.KMOD_RGUI, .Repeat)
+	testing.expect(t, ok)
+	testing.expect_value(t, ev.key, ie.Key.Char)
+	testing.expect_value(t, ev.char, 'a')
+	testing.expect_value(t, ev.mods, ie.Mods{.Shift, .Super})
+	testing.expect_value(t, ev.kind, ie.Key_Event_Kind.Repeat)
 
-	// Option + Delete -> \x1b\x7f
-	res_opt_del, ok_opt_del := input_encode_key(sdl3.K_DELETE, sdl3.KMOD_ALT)
-	testing.expect(t, ok_opt_del, "Option+Delete must be encoded")
-	testing.expect_value(t, res_opt_del.len, 2)
-	testing.expect_value(t, res_opt_del.bytes[0], 0x1b)
-	testing.expect_value(t, res_opt_del.bytes[1], 0x7f)
+	ev, ok = sdl_key_event(sdl3.K_SPACE, sdl3.KMOD_NONE, .Press)
+	testing.expect(t, ok && ev.key == .Char && ev.char == ' ')
+	ev, ok = sdl_key_event(sdl3.K_KP_ENTER, sdl3.KMOD_NONE, .Press)
+	testing.expect(t, ok && ev.key == .Enter)
+	ev, ok = sdl_key_event(sdl3.K_APPLICATION, sdl3.KMOD_NONE, .Press)
+	testing.expect(t, ok && ev.key == .Context_Menu)
+	_, ok = sdl_key_event(sdl3.K_KP_1, sdl3.KMOD_NONE, .Press)
+	testing.expect(t, !ok, "keypad digits are not encoded")
+}
 
-	// Ctrl + Backspace -> ^W (\x17)
-	res_ctrl_bs, ok_ctrl_bs := input_encode_key(sdl3.K_BACKSPACE, sdl3.KMOD_CTRL)
-	testing.expect(t, ok_ctrl_bs, "Ctrl+Backspace must be encoded")
-	testing.expect_value(t, res_ctrl_bs.len, 1)
-	testing.expect_value(t, res_ctrl_bs.bytes[0], 0x17)
-
-	// Ctrl + Delete -> ^W (\x17)
-	res_ctrl_del, ok_ctrl_del := input_encode_key(sdl3.K_DELETE, sdl3.KMOD_CTRL)
-	testing.expect(t, ok_ctrl_del, "Ctrl+Delete must be encoded")
-	testing.expect_value(t, res_ctrl_del.len, 1)
-	testing.expect_value(t, res_ctrl_del.bytes[0], 0x17)
+@test
+test_sdl_keys_encode_end_to_end :: proc(t: ^testing.T) {
+	testing.expect_value(t, _sdl(sdl3.K_BACKSPACE, sdl3.KMOD_GUI), "\x15")
+	testing.expect_value(t, _sdl(sdl3.K_LEFT, sdl3.KMOD_GUI), "\x01")
+	testing.expect_value(t, _sdl(sdl3.K_C, sdl3.KMOD_GUI), "<none>")
+	testing.expect_value(t, _sdl(sdl3.K_BACKSPACE, sdl3.KMOD_ALT), "\x1b\x7f")
+	testing.expect_value(t, _sdl(sdl3.K_DELETE, sdl3.KMOD_CTRL), "\x17")
+	testing.expect_value(t, _sdl(sdl3.K_LEFTBRACKET, sdl3.KMOD_CTRL), "\x1b")
+	testing.expect_value(t, _sdl(sdl3.K_SEMICOLON, sdl3.KMOD_CTRL, ie.KITTY_KBD_DISAMBIGUATE), "\x1b[59;5u")
+	testing.expect_value(t, _sdl(sdl3.K_F5, sdl3.KMOD_NONE), "\x1b[15~")
+	testing.expect_value(t, _sdl(sdl3.K_A, sdl3.KMOD_NONE), "<none>")
 }

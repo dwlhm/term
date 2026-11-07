@@ -3,10 +3,10 @@ package feature_session_core
 // The IO half of a stitch: wheel encoding for the program's mouse mode,
 // screen snapshots, the reply text and the hold buffer. Nothing here sleeps.
 
-import "core:fmt"
 import "core:strings"
 import terminal "../../core/terminal"
 import grid "../../core/terminal/grid"
+import ie "../../core/terminal/input_encode"
 import ipc "../../platform/ipc"
 
 // _stitch_reply answers the read with the stitched history and the screen the
@@ -74,28 +74,22 @@ _stitch_input :: proc(c: ^Core, s: ^Core_Session, bytes: []u8) {
 	core_holder_send(c, s.holder, ipc.MSG_INPUT, s.id, bytes)
 }
 
-// _stitch_wheel encodes one wheel notch the way the program asked for mouse
-// reports: SGR 1006, SGR-pixel 1016 or the legacy X10 bytes. 0 = no reports
-// (Term only models those three formats).
+// _stitch_wheel encodes one wheel notch at the screen centre the way the
+// program asked for mouse reports. 0 = it wants none.
 @(private)
 _stitch_wheel :: proc(t: ^terminal.Terminal, down: bool, out: []u8) -> int {
-	if t.parser.mouse_mode == .None do return 0
-	button := 65 if down else 64
 	col := clamp(t.cols / 2, 1, t.cols)
 	row := clamp(t.rows / 2, 1, t.rows)
-	s: string
-	switch t.parser.mouse_format {
-	case .Sgr:
-		s = fmt.bprintf(out, "\x1b[<%d;%d;%dM", button, col, row)
-	case .Sgr_Pixel:
-		cw := t.parser.cell_w if t.parser.cell_w > 0 else 1
-		ch := t.parser.cell_h if t.parser.cell_h > 0 else 1
-		s = fmt.bprintf(out, "\x1b[<%d;%d;%dM", button, (col - 1) * cw + 1, (row - 1) * ch + 1)
-	case .X10:
-		s = fmt.bprintf(out, "\x1b[M%c%c%c", rune(u8(min(255, 32 + button))),
-			rune(u8(min(255, 32 + col))), rune(u8(min(255, 32 + row))))
+	cw := t.parser.cell_w if t.parser.cell_w > 0 else 1
+	ch := t.parser.cell_h if t.parser.cell_h > 0 else 1
+	ev := ie.Mouse_Event{
+		kind = .Wheel_Down if down else .Wheel_Up,
+		col  = col, row = row,
+		px   = (col - 1) * cw + 1, py = (row - 1) * ch + 1,
 	}
-	return len(s)
+	enc, ok := ie.encode_mouse(ev, ie.mouse_modes(&t.parser))
+	if !ok do return 0
+	return copy(out, enc.bytes[:enc.len])
 }
 
 // _stitch_read snapshots the visible screen into a page.

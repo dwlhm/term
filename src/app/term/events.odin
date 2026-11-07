@@ -16,6 +16,7 @@ import chrome_hit "../../core/chrome/hit_test"
 import chrome_splits "../../core/chrome/splits"
 import damage "../../core/terminal/damage"
 import core_terminal "../../core/terminal"
+import ie "../../core/terminal/input_encode"
 import tabs_feat "../../features/tabs"
 import mux_feat "../../features/multiplexer"
 import sess_feat "../../features/session"
@@ -245,7 +246,7 @@ app_handle_mouse_button_down :: proc(app: ^Term_App, ev: sdl3.MouseButtonEvent) 
 			if mouse_protocol_should_handle(p.session, is_shift) {
 				eff_px, eff_py := pane_grid_pad(p.rect, p.session.term.rows, p.session.term.cols, app.layout.metrics.cell_w, app.layout.metrics.cell_h, app.layout.metrics.pane_pad_x, app.layout.metrics.pane_pad_y)
 				if seq, ok := mouse_protocol_encode(p.session, .Press, u8(ev.button), mx, my, p.rect, app.layout.metrics.cell_w, app.layout.metrics.cell_h, eff_px, eff_py, 0.0, is_shift, is_alt, is_ctrl); ok {
-					sess_feat.session_write_string(p.session, seq)
+					sess_feat.session_write(p.session, seq.bytes[:seq.len])
 				}
 				app.mouse.pos = {mx, my}
 				app.mouse.is_down = true
@@ -316,7 +317,7 @@ app_handle_mouse_wheel :: proc(app: ^Term_App, ev: sdl3.MouseWheelEvent) {
 			for _ in 0..<count {
 				eff_px, eff_py := pane_grid_pad(target_pane.rect, sess.term.rows, sess.term.cols, app.layout.metrics.cell_w, app.layout.metrics.cell_h, app.layout.metrics.pane_pad_x, app.layout.metrics.pane_pad_y)
 				if seq, ok := mouse_protocol_encode(sess, .Wheel, 0, mx, my, target_pane.rect, app.layout.metrics.cell_w, app.layout.metrics.cell_h, eff_px, eff_py, wheel_dir, is_shift, is_alt, is_ctrl); ok {
-					sess_feat.session_write_string(sess, seq)
+					sess_feat.session_write(sess, seq.bytes[:seq.len])
 				}
 			}
 			return
@@ -422,32 +423,35 @@ app_handle_key_down :: proc(app: ^Term_App, ev: sdl3.KeyboardEvent) {
 	if ok {
 		app_execute_action(app, act)
 	} else {
-		app_cursor := p != nil && p.session != nil && p.session.term.parser.cursor_key_mode
-		kbd_flags: u8 = 0
-		if p != nil && p.session != nil {
-			kbd_flags = core_terminal.terminal_kitty_keyboard_flags(&p.session.term)
+		if p == nil || p.session == nil do return
+		kev, res, encoded := _encode_sdl_key(p.session, ev, .Repeat if ev.repeat else .Press)
+		if !encoded do return
+		if app.mouse.selection.active {
+			mouse_clear_selection(&app.mouse)
 		}
-		kitty_event := INPUT_EVENT_REPEAT if ev.repeat else INPUT_EVENT_PRESS
-		res, encoded := input_encode_key(ev.key, ev.mod, app_cursor, kbd_flags, kitty_event)
-		if encoded {
-			if p != nil && p.session != nil {
-				if app.mouse.selection.active {
-					mouse_clear_selection(&app.mouse)
-				}
-				p.session.scroll_offset = 0 // Auto-scroll to bottom on input
-				sess_feat.session_write(p.session, res.bytes[:res.len])
-				// A keystroke that SDL also reports as TEXT_INPUT must not be
-				// delivered twice: Option combos arrive as ESC+char and, under the
-				// Kitty "report all keys" flag, plain printable keys arrive as
-				// CSI u while the platform still emits the character as text.
-				if (ev.mod & sdl3.KMOD_GUI) == sdl3.KMOD_NONE &&
-				   (ev.mod & sdl3.KMOD_CTRL) == sdl3.KMOD_NONE &&
-				   _key_is_printable(ev.key) {
-					app.suppress_text_input = true
-				}
-			}
+		p.session.scroll_offset = 0 // Auto-scroll to bottom on input
+		sess_feat.session_write(p.session, res.bytes[:res.len])
+		// A keystroke that SDL also reports as TEXT_INPUT must not be
+		// delivered twice: Option combos arrive as ESC+char and, under the
+		// Kitty "report all keys" flag, plain printable keys arrive as
+		// CSI u while the platform still emits the character as text.
+		if kev.mods & {.Super, .Ctrl} == {} && ie.key_is_printable(kev) {
+			app.suppress_text_input = true
 		}
 	}
+}
+
+// _encode_sdl_key encodes an SDL key for the program in sess, with the modes
+// it asked for (DECCKM, Kitty keyboard flags).
+@(private = "file")
+_encode_sdl_key :: proc(sess: ^sess_feat.Terminal_Session, ev: sdl3.KeyboardEvent, kind: ie.Key_Event_Kind) -> (kev: ie.Key_Event, res: ie.Encoded, ok: bool) {
+	kev = sdl_key_event(ev.key, ev.mod, kind) or_return
+	modes := ie.Key_Modes{
+		app_cursor  = sess.term.parser.cursor_key_mode,
+		kitty_flags = core_terminal.terminal_kitty_keyboard_flags(&sess.term),
+	}
+	res = ie.encode_key(kev, modes) or_return
+	return kev, res, true
 }
 
 // app_handle_key_up reports key releases when the application enabled the Kitty
@@ -456,13 +460,9 @@ app_handle_key_up :: proc(app: ^Term_App, ev: sdl3.KeyboardEvent) {
 	p := mux_feat.multiplexer_get_focused_pane(&app.mux)
 	if p == nil || p.session == nil do return
 
-	flags := core_terminal.terminal_kitty_keyboard_flags(&p.session.term)
-	if flags & KITTY_KBD_EVENT_TYPES == 0 do return
-	// Keys sent as legacy bytes must never produce a release event: the legacy
-	// sequence has no event field, so the client would see the key twice.
-	if !_kitty_should_encode(ev.key, ev.mod, flags) do return
-
-	res, encoded := input_encode_key(ev.key, ev.mod, false, flags, INPUT_EVENT_RELEASE)
+	// encode_key reports a release only under Kitty event-type reporting and
+	// never for keys sent as legacy bytes (they have no event field).
+	_, res, encoded := _encode_sdl_key(p.session, ev, .Release)
 	if !encoded do return
 	sess_feat.session_write(p.session, res.bytes[:res.len])
 }
@@ -826,13 +826,11 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 
 			// Report mouse motion only to the focused pane when hovered or when dragging within it
 			if pane != nil && pane.is_focused && mouse_protocol_should_handle(sess, is_shift) {
+				// The tracking mode (?1002 drag / ?1003 any motion) decides what is reported.
 				btn := app.mouse.button if app.mouse.is_down else u8(0)
-				is_btn_down := app.mouse.is_down
-				if sess.term.parser.mouse_mode == .Any_Event || (sess.term.parser.mouse_mode == .Button_Event && is_btn_down) {
-					eff_px, eff_py := pane_grid_pad(pane_rect, sess.term.rows, sess.term.cols, app.layout.metrics.cell_w, app.layout.metrics.cell_h, app.layout.metrics.pane_pad_x, app.layout.metrics.pane_pad_y)
-					if seq, ok := mouse_protocol_encode(sess, .Motion, btn, mx, my, pane_rect, app.layout.metrics.cell_w, app.layout.metrics.cell_h, eff_px, eff_py, 0.0, is_shift, is_alt, is_ctrl); ok {
-						sess_feat.session_write_string(sess, seq)
-					}
+				eff_px, eff_py := pane_grid_pad(pane_rect, sess.term.rows, sess.term.cols, app.layout.metrics.cell_w, app.layout.metrics.cell_h, app.layout.metrics.pane_pad_x, app.layout.metrics.pane_pad_y)
+				if seq, ok := mouse_protocol_encode(sess, .Motion, btn, mx, my, pane_rect, app.layout.metrics.cell_w, app.layout.metrics.cell_h, eff_px, eff_py, 0.0, is_shift, is_alt, is_ctrl); ok {
+					sess_feat.session_write(sess, seq.bytes[:seq.len])
 				}
 			} else {
 				prev_sel := app.mouse.selection
@@ -878,7 +876,7 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 			if pane != nil && mouse_protocol_should_handle(pane.session, is_shift) {
 				eff_px, eff_py := pane_grid_pad(pane.rect, pane.session.term.rows, pane.session.term.cols, app.layout.metrics.cell_w, app.layout.metrics.cell_h, app.layout.metrics.pane_pad_x, app.layout.metrics.pane_pad_y)
 				if seq, ok := mouse_protocol_encode(pane.session, .Release, u8(ev.button.button), mx, my, pane.rect, app.layout.metrics.cell_w, app.layout.metrics.cell_h, eff_px, eff_py, 0.0, is_shift, is_alt, is_ctrl); ok {
-					sess_feat.session_write_string(pane.session, seq)
+					sess_feat.session_write(pane.session, seq.bytes[:seq.len])
 				}
 			}
 			mouse_on_button_up(&app.mouse, u8(ev.button.button))
