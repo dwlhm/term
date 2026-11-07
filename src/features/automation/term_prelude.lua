@@ -133,6 +133,65 @@ local function fits(e, loc, by_ref, screen)
   return true
 end
 
+-- Adapters ------------------------------------------------------------------
+
+local ADAPTER_MT = { __name = "term.adapter" }
+local ADAPTER_FIELDS = { api = "number", name = "string", detect = "function", elements = "function",
+  state = "table", interrupts = "table", steps = "table" }
+
+-- t.adapter{name, detect, elements?, state?, interrupts?, steps?}: what one
+-- program's screens mean. detect(screen) says whether a screen is that
+-- program's; elements(screen, base) refines the generic elements.
+function t.adapter(a)
+  if type(a) ~= "table" then error("t.adapter takes a table", 2) end
+  for k, v in pairs(a) do
+    if not ADAPTER_FIELDS[k] then error("adapter field '" .. tostring(k) .. "' is unknown", 2) end
+    if type(v) ~= ADAPTER_FIELDS[k] then error("adapter." .. k .. " must be a " .. ADAPTER_FIELDS[k], 2) end
+  end
+  if type(a.name) ~= "string" or type(a.detect) ~= "function" then error("an adapter needs a name and detect(screen)", 2) end
+  if a.api ~= nil and a.api ~= 1 then error("adapter api " .. tostring(a.api) .. " is not supported (api 1)", 2) end
+  for i, it in ipairs(a.interrupts or {}) do
+    if type(it) ~= "table" or it[1] == nil then error("adapter.interrupts[" .. i .. "] must be {target, steps}", 2) end
+  end
+  a.state, a.interrupts, a.steps, a.api = a.state or {}, a.interrupts or {}, a.steps or {}, 1
+  return setmetatable(a, ADAPTER_MT)
+end
+
+function t.is_adapter(a) return getmetatable(a) == ADAPTER_MT end
+
+-- t._adapter: the adapter of the contract being run (set by the runner).
+local cache = setmetatable({}, { __mode = "k" })
+local DEFAULTS = { name = "", text = "", selected = false, focused = false, checked = false, width = 1, height = 1 }
+
+-- t.elements(screen): the screen's elements, refined by the adapter. Marked
+-- elements stay as the program marked them; new elements get the next refs.
+function t.elements(screen)
+  local hit = cache[screen]
+  if hit then return hit end
+  local base, a = screen:elements(), t._adapter
+  local es = base
+  if a and a.elements then
+    es = a.elements(screen, base)
+    if type(es) ~= "table" then error(a.name .. ".elements must return a list of elements", 0) end
+    local marked, kept, n = {}, {}, #base
+    for _, e in ipairs(base) do if e.source ~= "inferred" then marked[e.ref] = e end end
+    for i, e in ipairs(es) do
+      if type(e) ~= "table" or type(e.role) ~= "string" or type(e.row) ~= "number" or type(e.col) ~= "number" then
+        error(a.name .. ".elements: an element needs role, row and col", 0)
+      end
+      if e.ref and marked[e.ref] then es[i] = marked[e.ref] end
+      if es[i].ref then kept[es[i].ref] = true end
+    end
+    for ref, e in pairs(marked) do if not kept[ref] then es[#es + 1] = e end end
+    for _, e in ipairs(es) do
+      if not e.ref then n = n + 1; e.ref = "@e" .. n; e.source = e.source or ("adapter:" .. a.name) end
+      for k, v in pairs(DEFAULTS) do if e[k] == nil then e[k] = v end end
+    end
+  end
+  cache[screen] = es
+  return es
+end
+
 -- t.match(screen, target): the element (a table), true (a predicate that
 -- held) or nil.
 function t.match(screen, target)
@@ -142,10 +201,12 @@ function t.match(screen, target)
     if r == nil or r == false then return nil end
     return r
   end
-  local es = screen:elements()
+  local es = t.elements(screen)
   if kind == "string" then
-    local n = string.match(target, "^@e(%d+)$")
-    if n then return es[tonumber(n)] end
+    if string.match(target, "^@e%d+$") then
+      for _, e in ipairs(es) do if e.ref == target then return e end end
+      return nil
+    end
     return find_text(screen, target)
   end
   local by_ref = {}

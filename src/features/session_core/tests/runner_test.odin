@@ -210,3 +210,25 @@ test_runner_rejects_handmade_steps :: proc(t: ^testing.T) {
 		testing.expect_value(t, _run(id, body, "f"), auto.Run_Code.Contract)
 	}
 }
+
+@(test)
+test_runner_finds_its_session_with_the_adapter :: proc(t: ^testing.T) {
+	tiers := tiers_start()
+	v := view_open()
+	other := view_attached(v, view_sh(v, "echo NOT IT; /bin/sleep 20"))
+	id := _lines(v)
+	defer { view_close(v); tiers_stop(tiers) }
+	testing.expect(t, echo_screen_has(id, "READY"), "the fixture is up before detect looks")
+	body := `local lines = t.adapter {
+  name = "lines",
+  detect = function(s) return string.find(s:line(1), "READY", 1, true) ~= nil end,
+  interrupts = { { "GOT:oops", t.type("go\n") } },
+}
+return t.contract { adapter = lines, f = function() return { t.type("oops\n"), t.expect("DONE"), t.done("found") } end }`
+	testing.expect_value(t, _run(0, body, "f"), auto.Run_Code.Ok) // no --session: detect picks it; the interrupt sends go
+	testing.expect(t, echo_screen_has(id, "GOT:go"), "the adapter's interrupt ran")
+	testing.expect_value(t, _run(other, body, "f"), auto.Run_Code.Failed) // --session that is not its program
+	second := _lines(v)
+	testing.expect(t, echo_screen_has(second, "READY"))
+	testing.expect_value(t, _run(0, body, "f"), auto.Run_Code.Failed) // two candidates: it will not guess
+}

@@ -77,11 +77,8 @@ run_contract :: proc(opts: Run_Options) -> Run_Code {
 		return _run_report(&r)
 	}
 	if !run_push_params(&r, opts.function, opts.args) do return _run_report(&r)
-	if opts.session == 0 {
-		run_stop(&r, .Contract, "which session? pass --session <id> (term session ls)")
-		return _run_report(&r)
-	}
 	r.sid = opts.session
+	if !run_pick_session(&r) do return _run_report(&r)
 	owner := fmt.tprintf("%s:%s", filepath.base(opts.contract), opts.function)
 	if run_lease(&r, owner) {
 		run_trace(&r, "start", fmt.tprintf(`"session":%d,"owner":%q`, r.sid, owner))
@@ -126,7 +123,11 @@ _run_prepare :: proc(r: ^Runner, opts: Run_Options) -> bool {
 		run_stop(r, .Contract, e)
 		return false
 	}
+	lua.pushvalue(L, -1)
 	lua.setfield(L, lua.REGISTRYINDEX, RUN_TERM_KEY)
+	lua.getfield(L, -2, "adapter") // matching sees the contract's adapter
+	lua.setfield(L, -2, "_adapter")
+	lua.pop(L, 1)
 	if lua.getfield(L, -1, strings.clone_to_cstring(opts.function, context.temp_allocator)) != .Function || opts.function == "serve" {
 		run_stop(r, .Contract, fmt.tprintf("%s has no function %q (it has: %s)", opts.contract, opts.function, strings.join(info.functions[:], ", ", context.temp_allocator)))
 		return false

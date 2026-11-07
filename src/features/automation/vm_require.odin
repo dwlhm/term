@@ -23,6 +23,23 @@ Builtin_Module :: struct {
 	open: lua.CFunction,
 }
 
+// Adapters that ship with term; a file of the same name in an adapter
+// directory wins (a project or a user can replace one).
+@(private = "file")
+_BUNDLED := [?]struct {
+	name:   string,
+	source: string,
+}{
+	{"lazygit", #load("adapters/lazygit.lua", string)},
+	{"fzf", #load("adapters/fzf.lua", string)},
+}
+
+bundled_adapter_names :: proc() -> []string {
+	names := make([]string, len(_BUNDLED), context.temp_allocator)
+	for b, i in _BUNDLED do names[i] = b.name
+	return names
+}
+
 @(private = "file")
 _BUILTINS := [?]Builtin_Module{
 	{"term", term_module_open},
@@ -98,7 +115,15 @@ _require_load :: proc(L: ^lua.State, name: string) -> (err: string, ok: bool) {
 		if lua.pcall(L, 0, 1, 0) != lua.OK do return _pop_text(L), false
 		return "", true
 	}
-	return strings.concatenate({"adapter '", name, "' not found in the adapter directories"}, context.temp_allocator), false
+	short := name[len(ADAPTER_PREFIX):]
+	for b in _BUNDLED {
+		if b.name != short do continue
+		cname := strings.clone_to_cstring(strings.concatenate({"=term.adapter.", short}, context.temp_allocator), context.temp_allocator)
+		if lua.luaL_loadbufferx(L, raw_data(b.source), c.size_t(len(b.source)), cname, "t") != lua.OK do return _pop_text(L), false
+		if lua.pcall(L, 0, 1, 0) != lua.OK do return _pop_text(L), false
+		return "", true
+	}
+	return strings.concatenate({"adapter '", name, "' not found in the adapter directories or among the bundled ones"}, context.temp_allocator), false
 }
 
 // _plain_name: lowercase letters, digits and '_' only (no paths).

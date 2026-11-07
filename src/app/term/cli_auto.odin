@@ -17,8 +17,10 @@ AUTO_VERBS := [?]Verb_Help{
 	{"reply", "<id> <answer>", "Answer a running contract's question (t.ask, a param, the end of a handoff)", ""},
 	{"check", "<contract.lua>", "Validate a contract without running it",
 		"Loads it in the sandbox and checks its shape: api, functions, params,\non, timeouts. Prints its functions."},
-	{"snapshot", "<id> [-n lines] [--json] [--save file]", "The parsed screen and its elements (for writing contracts)",
-		"Never resizes, scrolls or focuses the session. Lists the elements found on it\n(marked by the program: OSC 133, OSC 8; inferred: panels, dialogs, buttons,\ntoggles, inputs, list items, bars) with 1-based [row,col width x height].\n-n adds scrollback lines; --save writes the JSON snapshot to a file\n(term.screen.load reads it)."},
+	{"snapshot", "<id> [-n lines] [--json] [--save file] [--adapter name]", "The parsed screen and its elements (for writing contracts)",
+		"Never resizes, scrolls or focuses the session. Lists the elements found on it\n(marked by the program: OSC 133, OSC 8; inferred: panels, dialogs, buttons,\ntoggles, inputs, list items, bars) with 1-based [row,col width x height].\n--adapter shows them as that adapter refines them. -n adds scrollback lines;\n--save writes the JSON snapshot to a file (term.screen.load reads it)."},
+	{"adapters", "", "List the adapters contracts can require (term.adapter.<name>)",
+		"First match wins: ./.term/adapters, then ~/.config/term/adapters (or\n$XDG_CONFIG_HOME/term/adapters), then the bundled ones."},
 }
 
 AUTO_EXIT_CONTRACT :: 1 // the contract is invalid, or Lua failed
@@ -36,6 +38,7 @@ app_cli_auto :: proc(args: []string) -> int {
 	case "reply":    return _auto_reply(args[1:])
 	case "check":    return _auto_check(args[1:])
 	case "snapshot": return _auto_snapshot(args[1:])
+	case "adapters": return _auto_adapters()
 	}
 	fmt.eprintfln("term: unknown auto verb %q (term auto --help)", args[0])
 	return 1
@@ -82,9 +85,9 @@ _auto_check :: proc(args: []string) -> int {
 
 @(private = "file")
 _auto_snapshot :: proc(args: []string) -> int {
-	id, history, as_json, save, ok := _parse_snapshot_args(args)
+	id, history, as_json, save, adapter, ok := _parse_snapshot_args(args)
 	if !ok {
-		fmt.eprintln("usage: term auto snapshot <id> [-n lines] [--json] [--save file]")
+		fmt.eprintln("usage: term auto snapshot <id> [-n lines] [--json] [--save file] [--adapter name]")
 		return 1
 	}
 	conn: plat_ipc.Stream_Conn
@@ -96,6 +99,7 @@ _auto_snapshot :: proc(args: []string) -> int {
 	plat_ipc.stream_send(&conn, plat_ipc.MSG_SNAPSHOT, 0, plat_ipc.wire_bytes_written(&w))
 	f, code := app_agent_answer(&conn, plat_ipc.MSG_SNAPSHOT_RESULT)
 	if code != 0 do return code
+	if len(adapter) > 0 do return _print_adapted(f.payload, adapter)
 	r := plat_ipc.wire_reader(f.payload)
 	snap := plat_ipc.dec_snapshot(&r, context.temp_allocator)
 	if !plat_ipc.wr_done(&r) {
@@ -118,17 +122,20 @@ _auto_snapshot :: proc(args: []string) -> int {
 }
 
 @(private = "file")
-_parse_snapshot_args :: proc(args: []string) -> (id, history: u32, as_json: bool, save: string, ok: bool) {
+_parse_snapshot_args :: proc(args: []string) -> (id, history: u32, as_json: bool, save, adapter: string, ok: bool) {
 	rest := args
 	for len(rest) > 0 {
 		switch rest[0] {
 		case "--json":
 			as_json, rest = true, rest[1:]
 			continue
-		case "-n", "--save":
+		case "-n", "--save", "--adapter":
 			if len(rest) < 2 do return
-			if rest[0] == "--save" do save = rest[1]
-			else do history = u32(strconv.parse_uint(rest[1], 10) or_return)
+			switch rest[0] {
+			case "--save":    save = rest[1]
+			case "--adapter": adapter = rest[1]
+			case:             history = u32(strconv.parse_uint(rest[1], 10) or_return)
+			}
 			rest = rest[2:]
 			continue
 		}
@@ -136,7 +143,7 @@ _parse_snapshot_args :: proc(args: []string) -> (id, history: u32, as_json: bool
 		id = u32(strconv.parse_uint(rest[0], 10) or_return)
 		rest = rest[1:]
 	}
-	return id, history, as_json, save, id != 0
+	return id, history, as_json, save, adapter, id != 0
 }
 
 @(private = "file")
@@ -195,4 +202,22 @@ _auto_reply :: proc(args: []string) -> int {
 		return 1
 	}
 	return app_cli_agent_tell(u32(id), {args[1], "-t", "30"})
+}
+
+@(private = "file")
+_print_adapted :: proc(payload: []u8, adapter: string) -> int {
+	text, detected, err := auto.adapter_elements(payload, adapter)
+	if len(err) > 0 {
+		fmt.eprintfln("term: %s", err)
+		return AUTO_EXIT_CONTRACT
+	}
+	fmt.printfln("adapter %s: detect %s", adapter, "accepts this screen" if detected else "says this is not its program")
+	fmt.println(text)
+	return 0
+}
+
+@(private = "file")
+_auto_adapters :: proc() -> int {
+	for a in auto.adapter_list() do fmt.printfln("  %-14s %s", a.name, a.source)
+	return 0
 }

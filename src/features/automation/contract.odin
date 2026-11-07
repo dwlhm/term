@@ -128,7 +128,7 @@ _check_entry :: proc(L: ^lua.State, key: string, info: ^Contract_Info) -> string
 			return fmt.tprintf("api %s is not supported: this term runs api %d", lua.tostring(L, -1), CONTRACT_API)
 		}
 	case "adapter":
-		if tp != .Table do return "adapter must be an adapter table (require \"term.adapter.<name>\")"
+		if tp != .Table || !_is_adapter(L) do return "adapter must be made with t.adapter{...} (require \"term.adapter.<name>\")"
 	case "on":       return _check_on(L)
 	case "timeouts": return _check_timeouts(L)
 	case "params":
@@ -239,4 +239,14 @@ _is_name :: proc(s: string) -> bool {
 		}
 	}
 	return true
+}
+
+// _is_adapter: the table on top was made by t.adapter (its metatable is named so).
+@(private = "file")
+_is_adapter :: proc(L: ^lua.State) -> bool {
+	if lua.getmetatable(L, -1) == 0 do return false
+	defer lua.pop(L, 1)
+	lua.getfield(L, -1, "__name")
+	defer lua.pop(L, 1)
+	return lua.tostring(L, -1) == "term.adapter"
 }
