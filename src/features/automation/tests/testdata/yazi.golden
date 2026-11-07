@@ -1,0 +1,5 @@
+@e1 Panel "" [1,1 16x40]
+@e2 Panel "" [1,16 60x40]
+@e3 Panel "" [1,75 46x40]
+@e4 Listitem "\U000f0219 b.txt" [3,18 56x1] in @e2
+@e5 Listitem "\U000f0219 a.txt" [2,18 56x1] in @e2 selected

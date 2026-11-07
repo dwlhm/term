@@ -9,6 +9,7 @@ import terminal "../../core/terminal"
 import cell "../../core/terminal/cell"
 import extension "../../core/terminal/extension"
 import grid "../../core/terminal/grid"
+import parser "../../core/terminal/parser"
 import ipc "../../platform/ipc"
 import session "../session"
 
@@ -75,6 +76,7 @@ _snap_head :: proc(s: ^Core_Session) -> ipc.Snapshot {
 	shape, blinking, visible := terminal.terminal_cursor_style(t)
 	process := session.session_process_name(sess)
 	if len(process) == 0 do process = extension.program_status_app(st)
+	out_start, out_end := _snap_output(p)
 	return {
 		id = s.id, gen = s.gen,
 		cols = u16(t.grid.col_count), rows = u16(t.grid.row_count), top_line = t.grid.scrolled,
@@ -86,6 +88,7 @@ _snap_head :: proc(s: ^Core_Session) -> ipc.Snapshot {
 		mouse_mode = u8(p.mouse_mode), mouse_format = u8(p.mouse_format),
 		prompt_state = ipc.Prompt_State(p.prompt_state),
 		has_cmd_exit = p.has_cmd_exit, cmd_exit_code = p.last_cmd_exit, cmd_seq = p.cmd_seq,
+		output_start = out_start, output_end = out_end,
 		exited = s.exited, exit_code = s.exit.code,
 		status_state = u8(st.state), status_app = extension.program_status_app(st),
 		status_kind = string(st.kind_buf[:st.kind_len]), status_msg = extension.program_status_msg(st),
@@ -152,4 +155,13 @@ _snap_style :: proc(ch: cell.Semantic_Cell, dc: cell.Direct_Color) -> ipc.Snap_S
 _snap_note_link :: proc(c: ^Core, id: u16) {
 	for known in c.snap_links do if known == id do return
 	append(&c.snap_links, id)
+}
+
+// _snap_output: the last command's output lines on the main screen.
+@(private = "file")
+_snap_output :: proc(p: ^parser.Parser) -> (start, end: i64) {
+	o := &p.cmd_out
+	if !o.started || p.in_alt_screen do return -1, -1
+	if !o.ended do return o.start, -1
+	return o.start, o.end + (1 if o.end_col > 0 else 0)
 }

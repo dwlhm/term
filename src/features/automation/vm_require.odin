@@ -26,6 +26,7 @@ Builtin_Module :: struct {
 @(private = "file")
 _BUILTINS := [?]Builtin_Module{
 	{"term", term_module_open},
+	{"term.screen", screen_module_open},
 }
 
 _vm_install_require :: proc(vm: ^Vm) {

@@ -170,8 +170,9 @@ in `stream_codec_auto.odin`.
   screen, only lines `>= since` when since is set: pass the last `top_line` to
   get what scrolled off since then. `history_truncated` says more matched.
 - **Result.** A head (gen, size, `top_line`, cursor, modes: alt screen, DECCKM,
-  ?2004, ?1004, ?2026, Kitty flags, mouse mode and format; OSC 133 state;
-  exit; OSC 7501 state, app, kind, message; title; process), then
+  ?2004, ?1004, ?2026, Kitty flags, mouse mode and format; OSC 133 state and
+  the last command's output as lines [output_start, output_end) (-1: none / still
+  running); exit; OSC 7501 state, app, kind, message; title; process), then
   u32 n + n history rows, u32 n + n screen rows, u32 n + n links (u16 id ·
   str uri). A row is i64 line · bool wrap · bool prompt · u32 n + n runs; a
   run is u16 cells (a wide character counts 2) · u8 fg · u8 bg · bool rgb fg ·

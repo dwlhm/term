@@ -14,8 +14,8 @@ import plat_ipc "../../platform/ipc"
 AUTO_VERBS := [?]Verb_Help{
 	{"check", "<contract.lua>", "Validate a contract without running it",
 		"Loads it in the sandbox and checks its shape: api, functions, params,\non, timeouts. Prints its functions."},
-	{"snapshot", "<id> [-n lines] [--json] [--save file]", "The parsed screen of a session (for writing contracts)",
-		"Never resizes, scrolls or focuses the session. -n adds scrollback lines;\n--save writes the JSON snapshot to a file (term.screen.load reads it)."},
+	{"snapshot", "<id> [-n lines] [--json] [--save file]", "The parsed screen and its elements (for writing contracts)",
+		"Never resizes, scrolls or focuses the session. Lists the elements found on it\n(marked by the program: OSC 133, OSC 8; inferred: panels, dialogs, buttons,\ntoggles, inputs, list items, bars) with 1-based [row,col width x height].\n-n adds scrollback lines; --save writes the JSON snapshot to a file\n(term.screen.load reads it)."},
 }
 
 AUTO_EXIT_CONTRACT :: 1 // the contract is invalid, or Lua failed
@@ -140,6 +140,10 @@ _print_snapshot :: proc(s: plat_ipc.Snapshot) {
 	fmt.printfln("session %d · %dx%d · gen %d · cursor %d,%d · %s%s", s.id, s.cols, s.rows, s.gen, s.cursor_row, s.cursor_col, s.process, alt)
 	for row in s.history do _print_snap_row(row, "│ ")
 	for row in s.screen do _print_snap_row(row, "")
+	screen := auto.screen_build(s, context.temp_allocator)
+	es := auto.screen_elements(&screen, context.temp_allocator)
+	if len(es) > 0 do fmt.println("\nelements (refs last until the next snapshot):")
+	for _, i in es do fmt.printfln("  %s", auto.element_describe(es, i))
 }
 
 @(private = "file")

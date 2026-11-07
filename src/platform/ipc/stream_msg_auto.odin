@@ -84,6 +84,8 @@ Snapshot :: struct {
 	has_cmd_exit:    bool,
 	cmd_exit_code:   i32,
 	cmd_seq:         u32,
+	output_start:    i64, // the last command's output (OSC 133;C..D) as lines [start, end);
+	output_end:      i64, // -1 start: none (or an alternate screen); -1 end: it still runs
 	exited:          bool,
 	exit_code:       i32,
 	status_state:    u8, // OSC 7501: 0 clear, 1 idle, 2 working, 3 blocked, 4 done, 5 error

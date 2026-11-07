@@ -1,0 +1,4 @@
+@e1 Listitem "apple" [2,1 100x1] selected
+@e2 Listitem "banana" [3,1 100x1]
+@e3 Listitem "cherry" [4,1 100x1]
+@e4 Listitem "date" [5,1 100x1]

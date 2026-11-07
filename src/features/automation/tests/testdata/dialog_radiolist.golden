@@ -1,0 +1,7 @@
+@e1 Dialog "" [9,30 40x12]
+@e2 Panel "" [11,32 36x7] in @e1
+@e3 Radio "a" [12,44 3x1] in @e2 focused checked
+@e4 Radio "b" [13,44 3x1] in @e2
+@e5 Radio "c" [14,44 3x1] in @e2
+@e6 Button "OK" [19,38 8x1] in @e1 focused
+@e7 Button "Cancel" [19,50 8x1] in @e1

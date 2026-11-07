@@ -24,6 +24,7 @@ enc_snapshot_head :: proc(w: ^Wire_Writer, m: Snapshot) {
 	ww_bool(w, m.report_focus); ww_bool(w, m.sync_output)
 	ww_u8(w, m.kitty_flags); ww_u8(w, m.mouse_mode); ww_u8(w, m.mouse_format)
 	ww_u8(w, u8(m.prompt_state)); ww_bool(w, m.has_cmd_exit); ww_i32(w, m.cmd_exit_code); ww_u32(w, m.cmd_seq)
+	ww_i64(w, m.output_start); ww_i64(w, m.output_end)
 	ww_bool(w, m.exited); ww_i32(w, m.exit_code)
 	ww_u8(w, m.status_state); ww_str(w, m.status_app); ww_str(w, m.status_kind); ww_str(w, m.status_msg)
 	ww_str(w, m.title); ww_str(w, m.process)
@@ -43,6 +44,7 @@ _dec_snapshot_head :: proc(r: ^Wire_Reader, m: ^Snapshot) {
 	if ps > u8(Prompt_State.Executing) do r.ok = false
 	m.prompt_state = Prompt_State(ps)
 	m.has_cmd_exit, m.cmd_exit_code, m.cmd_seq = wr_bool(r), wr_i32(r), wr_u32(r)
+	m.output_start, m.output_end = wr_i64(r), wr_i64(r)
 	m.exited, m.exit_code = wr_bool(r), wr_i32(r)
 	m.status_state, m.status_app, m.status_kind, m.status_msg = wr_u8(r), wr_str(r), wr_str(r), wr_str(r)
 	m.title, m.process = wr_str(r), wr_str(r)

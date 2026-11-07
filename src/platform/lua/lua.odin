@@ -56,6 +56,7 @@ foreign lua {
 	pushcclosure :: proc(L: ^State, fn: CFunction, n: c.int) ---
 	pushlightuserdata :: proc(L: ^State, p: rawptr) ---
 	touserdata   :: proc(L: ^State, idx: c.int) -> rawptr ---
+	newuserdatauv :: proc(L: ^State, size: c.size_t, nuvalue: c.int) -> rawptr ---
 	createtable  :: proc(L: ^State, narr, nrec: c.int) ---
 	getfield     :: proc(L: ^State, idx: c.int, k: cstring) -> Type ---
 	setfield     :: proc(L: ^State, idx: c.int, k: cstring) ---

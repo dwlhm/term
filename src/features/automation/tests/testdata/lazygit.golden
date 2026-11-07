@@ -1,0 +1,5 @@
+@e1 Panel "[1] Status" [1,1 40x3]
+@e2 Dialog "" [13,21 80x16]
+@e3 Panel "Command log" [30,41 80x10]
+@e4 Panel "[5] Stash" [37,1 40x3] text="0 of 0"
+@e5 Panel "[2] Files - Worktrees - Submodules" [4,1 40x11]

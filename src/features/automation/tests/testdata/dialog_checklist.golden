@@ -1,0 +1,8 @@
+@e1 Dialog "" [8,25 50x15]
+@e2 Panel "" [10,27 46x10] in @e1
+@e3 Checkbox "cheese" [11,39 3x1] in @e2 focused checked
+@e4 Checkbox "ham" [12,39 3x1] in @e2
+@e5 Checkbox "olive" [13,39 3x1] in @e2 checked
+@e6 Checkbox "mush" [14,39 3x1] in @e2
+@e7 Button "OK" [21,37 8x1] in @e1 focused
+@e8 Button "Cancel" [21,51 8x1] in @e1

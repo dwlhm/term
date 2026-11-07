@@ -1,0 +1,4 @@
+@e1 Dialog "" [11,30 40x8]
+@e2 Input "" [13,32 36x3] text="Ada" in @e1 focused
+@e3 Button "OK" [17,38 8x1] in @e1 focused
+@e4 Button "Cancel" [17,50 8x1] in @e1

@@ -1,0 +1,2 @@
+@e1 Button "Yes" [3,2 9x1] focused
+@e2 Button "No" [3,13 8x1]
