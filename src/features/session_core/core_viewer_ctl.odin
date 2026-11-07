@@ -91,7 +91,8 @@ core_viewer_observe :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 	case .None:      ps = .None
 	}
 
-	row := core_row_get(c, s)
+	title_buf: [256]u8
+	row := core_row_get(c, s, title_buf[:])
 	max_text_len := max(0, ipc.STREAM_MAX_PAYLOAD - 4096)
 	text_len := min(len(c.text), max_text_len)
 	text_slice := c.text[len(c.text) - text_len:]

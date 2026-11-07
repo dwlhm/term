@@ -8,10 +8,11 @@ import ipc "../../platform/ipc"
 import session "../session"
 import extension "../../core/terminal/extension"
 
-core_row_get :: proc(c: ^Core, s: ^Core_Session) -> ipc.Session_Row {
+// core_row_get: the row's title may be written into title_buf, which must
+// outlive the row.
+core_row_get :: proc(c: ^Core, s: ^Core_Session, title_buf: []u8) -> ipc.Session_Row {
 	sess := s.sess
-	title_buf: [256]u8
-	title := session.session_resolve_title(sess, title_buf[:], "Shell")
+	title := session.session_resolve_title(sess, title_buf, "Shell")
 	active := !s.exited && session.session_is_running_job(sess)
 	state: ipc.Session_State = .Exited if s.exited else (.Busy if active else .Idle)
 	attached := false
@@ -38,7 +39,8 @@ core_row_get :: proc(c: ^Core, s: ^Core_Session) -> ipc.Session_Row {
 }
 
 core_row_write :: proc(w: ^ipc.Wire_Writer, c: ^Core, s: ^Core_Session) {
-	ipc.enc_row(w, core_row_get(c, s))
+	title_buf: [256]u8
+	ipc.enc_row(w, core_row_get(c, s, title_buf[:]))
 }
 
 // core_row_changed broadcasts an EVENT when what a row shows changed
