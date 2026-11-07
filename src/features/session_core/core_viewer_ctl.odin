@@ -18,7 +18,7 @@ core_viewer_kill :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 // core_viewer_send types bytes into a session: like a person typing.
 core_viewer_send :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 	s := _target(c, vi, r, true, false)
-	if s == nil || _no_program(c, vi, s) do return
+	if s == nil || _no_program(c, vi, s) || core_lease_fail(c, s, vi) do return
 	core_broker_human_input(c, s, r.buf[r.off:])
 	core_holder_send(c, s.holder, ipc.MSG_INPUT, s.id, r.buf[r.off:])
 	_ok(c, vi)
@@ -27,7 +27,7 @@ core_viewer_send :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 // core_viewer_signal: the holder delivers it like ^C, to the foreground group.
 core_viewer_signal :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 	s := _target(c, vi, r, true, false)
-	if s == nil || _no_program(c, vi, s) do return
+	if s == nil || _no_program(c, vi, s) || core_lease_fail(c, s, vi) do return
 	sig := ipc.wr_i32(r)
 	if !ipc.wr_done(r) || sig < 1 || sig > 64 {
 		core_viewer_fail(c, vi, 0, .Bad_Request, "bad signal number")
@@ -42,7 +42,7 @@ core_viewer_signal :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 // leads its size (core_apply_leader), so that request fails as Busy.
 core_viewer_resize :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 	s := _target(c, vi, r, true, false)
-	if s == nil do return
+	if s == nil || core_lease_fail(c, s, vi) do return
 	size := ipc.dec_size(r)
 	switch {
 	case !ipc.wr_done(r) || size.cols == 0 || size.rows == 0:

@@ -35,6 +35,7 @@ core_row_get :: proc(c: ^Core, s: ^Core_Session, title_buf: []u8) -> ipc.Session
 		cwd       = session.session_get_cwd_path(sess) if sess.cwd_len > 0 else session.session_process_cwd(sess),
 		title     = title,
 		status    = extension.program_status_msg(&sess.program_status),
+		controller = core_lease_owner(s),
 	}
 }
 

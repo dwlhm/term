@@ -160,6 +160,7 @@ _reject_reason :: proc(res: plat_ipc.Tell_Result) -> string {
 	case .Too_Large:       return fmt.tprintf("request over %d bytes", plat_ipc.TELL_BODY_MAX)
 	case .Multi_Line:      return fmt.tprintf("session %d is a shell: one single-line command per request", res.to)
 	case .Full:            return "too many requests in flight"
+	case .Leased:          return fmt.tprintf("session %d is held by an automation (term auto); a person can take it back in its window", res.to)
 	}
 	return "rejected"
 }

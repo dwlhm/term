@@ -12,7 +12,7 @@ import ipc "../../platform/ipc"
 
 core_viewer_act :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 	s := _target(c, vi, r, true, false)
-	if s == nil || _no_program(c, vi, s) do return
+	if s == nil || _no_program(c, vi, s) || core_lease_fail(c, s, vi) do return
 	k := ipc.wr_u8(r)
 	if k < u8(ipc.Act_Kind.Keys) || k > u8(ipc.Act_Kind.Mouse) {
 		core_viewer_fail(c, vi, 0, .Bad_Request, "malformed act request")

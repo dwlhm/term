@@ -119,7 +119,7 @@ enc_row :: proc(w: ^Wire_Writer, m: Session_Row) {
 	ww_u32(w, m.id); ww_u8(w, u8(m.state)); ww_bool(w, m.active); ww_bool(w, m.attached)
 	ww_u32(w, m.pid); ww_u32(w, m.elapsed_s); ww_u32(w, m.quiet_s); ww_i32(w, m.exit_code); ww_bool(w, m.endpoint)
 	enc_row_request(w, m.request)
-	ww_str(w, m.process); ww_str(w, m.cwd); ww_str(w, m.title); ww_str(w, m.status)
+	ww_str(w, m.process); ww_str(w, m.cwd); ww_str(w, m.title); ww_str(w, m.status); ww_str(w, m.controller)
 }
 
 dec_row :: proc(r: ^Wire_Reader) -> (m: Session_Row) {
@@ -130,7 +130,7 @@ dec_row :: proc(r: ^Wire_Reader) -> (m: Session_Row) {
 	m.active, m.attached = wr_bool(r), wr_bool(r)
 	m.pid, m.elapsed_s, m.quiet_s, m.exit_code, m.endpoint = wr_u32(r), wr_u32(r), wr_u32(r), wr_i32(r), wr_bool(r)
 	m.request = dec_row_request(r)
-	m.process, m.cwd, m.title, m.status = wr_str(r), wr_str(r), wr_str(r), wr_str(r)
+	m.process, m.cwd, m.title, m.status, m.controller = wr_str(r), wr_str(r), wr_str(r), wr_str(r), wr_str(r)
 	return
 }
 

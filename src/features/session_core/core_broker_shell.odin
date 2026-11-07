@@ -31,7 +31,7 @@ core_broker_shell_edges :: proc(c: ^Core, s: ^Core_Session, e: Shell_Edges) {
 core_broker_human_input :: proc(c: ^Core, s: ^Core_Session, typed: []u8) {
 	p := _party_find(&c.broker, s.id)
 	if p == nil || p.shell < 0 do return // the shell adapter runs nothing here: the common case
-	broker_human_input(&c.broker, s.id, _human_kind(typed), _shell_output(c, s, to_cursor = true))
+	broker_human_input(&c.broker, s.id, core_human_kind(typed), _shell_output(c, s, to_cursor = true))
 	core_broker_apply(c)
 }
 
@@ -116,10 +116,9 @@ _shell_output :: proc(c: ^Core, s: ^Core_Session, to_cursor := false) -> string 
 	return string(c.text[:])
 }
 
-// _human_kind: ^C or Esc (also as kitty-keyboard CSI 99;5u / CSI 27u or
+// core_human_kind: ^C or Esc (also as kitty-keyboard CSI 99;5u / CSI 27u or
 // modifyOtherKeys CSI 27;5;99~) stops what runs; any other input takes over.
-@(private = "file")
-_human_kind :: proc(typed: []u8) -> Human_Input {
+core_human_kind :: proc(typed: []u8) -> Human_Input {
 	s := string(typed)
 	switch {
 	case strings.index_byte(s, 0x03) >= 0, s == "\x1b", strings.has_prefix(s, "\x1b[27;5;99~"):

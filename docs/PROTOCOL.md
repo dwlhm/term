@@ -85,7 +85,7 @@ u32 from · u32 to · str progress · str text.
 | enum | values |
 |---|---|
 | phase | 1 Accepted · 2 Rejected · 3 Running · 4 Progress · 5 Finished |
-| reject | 0 None · 1 Empty · 2 Too_Large (body > 16 KiB) · 3 Busy · 4 Not_Listening · 5 Multi_Line (a shell takes one line) · 6 Full |
+| reject | 0 None · 1 Empty · 2 Too_Large (body > 16 KiB) · 3 Busy · 4 Not_Listening · 5 Multi_Line (a shell takes one line) · 6 Full · 7 Leased (an automation holds it) |
 | status | 0 Done · 1 Failed · 2 Cancelled · 3 Interrupted (a person typed into the shell) · 4 Timeout · 5 Error (a side went away) |
 
 `REQUEST` (91): u64 id · u32 from · u64 parent · str body.
@@ -116,12 +116,13 @@ is:
 u32 id · u8 state (1 Idle, 2 Busy, 3 Exited) · bool active · bool attached ·
 u32 pid · u32 elapsed_s · u32 quiet_s (since its program last printed) ·
 i32 exit_code · bool endpoint · u32 serving · u64 serving_id · u32 awaiting ·
-u32 listening · str process · str cwd · str title · str status.
+u32 listening · str process · str cwd · str title · str status · str controller
+(the automation holding its lease, empty when none).
 
 The other verbs (`observe`, `read`, `send`, `signal`, `watch`, `new`) are in
 `src/platform/ipc/stream_msg.odin`, next to the message numbers.
 
-## Automation: snapshot, settle and act
+## Automation: snapshot, settle, act and lease
 
 What a program shows, parsed once by the core (never raw PTY bytes), a wait
 for the screen to change, and input for it. None of them resizes, scrolls or
@@ -134,6 +135,9 @@ in `stream_codec_auto.odin`.
 | `SNAPSHOT` (103) | u32 session · u32 history (≤ 10 000) · i64 since (< 0: none) | `SNAPSHOT_RESULT` (92) · `FAIL` 1 / 3 / 5 (a `read` is scrolling it) |
 | `SETTLE` (104) | u32 session · u64 since · u32 quiet_ms · u32 timeout_ms (0: none) | `SETTLE_RESULT` (93) u32 session · u64 gen · bool exited · i32 exit_code · `FAIL` 1 / 7 |
 | `ACT` (105) | u32 session · u8 kind (1 keys · 2 text · 3 mouse) · body | `ACT_RESULT` (94) u32 session · u64 gen (the generation the input went in at) · `FAIL` 1 / 2 / 3 / 5 / 8 |
+| `LEASE` (106) | u32 session · str owner (1..64 bytes, shown in windows) | `OK` · `FAIL` 3 / 5 (leased, or a request runs there) |
+| `LEASE_RELEASE` (107) | u32 session · bool flush (held input reaches the program) | `OK` · `FAIL` 1 (no lease of this connection) |
+| `LEASE_MODE` (108) | u32 session · bool pass (a person's input goes through: a handoff) | `OK` · `FAIL` 1 |
 
 - **Generation.** `gen` grows with every output chunk and every resize. `SETTLE`
   answers when `gen > since` and the program printed nothing for `quiet_ms`, or
@@ -151,6 +155,16 @@ in `stream_codec_auto.odin`.
   1 release, 2 motion, 3 wheel up, 4 wheel down) · u8 button (0 left,
   1 middle, 2 right, 3 none) · u8 mods · u16 col · u16 row (1-based cells).
   Input counts as typing: it ends a shell-adapter request like `send`.
+- **Lease.** One connection may hold a session's input. While it does, input
+  from anyone else (`ACT`, `SEND`, `SIGNAL`, `SESSION_SIZE`, a history `READ`
+  of a full-screen program) gets `FAIL` 5, `TELL` is rejected with reject 7
+  (`Leased`), and what people type in windows is held (≤ 64 KiB) unless pass
+  mode is on. The owner gets `LEASE_EVENT` (95) frames at any time: u32
+  session · u8 kind (1 Human, 2 Takeover, 3 Exited, 4 Removed) · bool
+  interrupt (^C or Esc) · u32 bytes held · i32 exit code · str bytes typed.
+  The lease ends on `LEASE_RELEASE`, when the owner's connection closes (held
+  input is dropped), when a window sends `V_TAKEOVER` (109) on its attach
+  channel after the person confirmed, or when the session exits or is killed.
 - **Lines.** A line number is `top_line + row`; it stays the same as the line
   scrolls into history. `history` returns at most that many lines above the
   screen, only lines `>= since` when since is set: pass the last `top_line` to

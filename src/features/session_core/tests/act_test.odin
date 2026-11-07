@@ -23,8 +23,8 @@ while True:
     os.write(1, ("IN:" + d.hex() + "\r\n").encode())
 `
 
-@(private = "file")
-_echo :: proc(v: ^View, modes: string) -> u32 {
+// echo_open starts ECHO_FIXTURE asking for modes and waits for it.
+echo_open :: proc(v: ^View, modes: string) -> u32 {
 	id := view_attached(v, view_spawn(v, {"/usr/bin/env", "python3", "-I", "-c", ECHO_FIXTURE, modes}))
 	_snap_until_text(id, "READY")
 	return id
@@ -51,9 +51,8 @@ _screen :: proc(id: u32) -> string {
 	return strings.to_string(b)
 }
 
-// _received waits for the program to report want (raw bytes) as one read.
-@(private = "file")
-_received :: proc(id: u32, want: string) -> bool {
+// echo_received waits for the program to report want (raw bytes) as one read.
+echo_received :: proc(id: u32, want: string) -> bool {
 	return _snap_until_text(id, strings.concatenate({"IN:", string(hex.encode(transmute([]u8)want, context.temp_allocator)), "\n"}, context.temp_allocator))
 }
 
@@ -121,20 +120,20 @@ SUPER   :: u8(8)
 test_act_keys_follow_the_program_modes :: proc(t: ^testing.T) {
 	tiers := tiers_start()
 	v := view_open()
-	plain := _echo(v, "")
-	app := _echo(v, "\\x1b[?1h")
-	kitty := _echo(v, "\\x1b[>10u") // all keys as escape codes + event types
+	plain := echo_open(v, "")
+	app := echo_open(v, "\\x1b[?1h")
+	kitty := echo_open(v, "\\x1b[>10u") // all keys as escape codes + event types
 	defer { view_close(v); tiers_stop(tiers) }
 
 	_, ok := _keys(plain, {key = K_UP}, {key = K_CHAR, char = 'c', mods = CTRL})
 	testing.expect(t, ok)
-	testing.expect(t, _received(plain, "\x1b[A\x03"), "legacy arrow and ^C in one write")
+	testing.expect(t, echo_received(plain, "\x1b[A\x03"), "legacy arrow and ^C in one write")
 	_, ok = _keys(plain, {key = K_CHAR, char = 'q', mods = SHIFT}, {key = K_F5}, {key = K_ENTER})
-	testing.expect(t, ok && _received(plain, "Q\x1b[15~\r"), "a plain character goes in as text")
+	testing.expect(t, ok && echo_received(plain, "Q\x1b[15~\r"), "a plain character goes in as text")
 	_, ok = _keys(app, {key = K_UP})
-	testing.expect(t, ok && _received(app, "\x1bOA"), "DECCKM arrows")
+	testing.expect(t, ok && echo_received(app, "\x1bOA"), "DECCKM arrows")
 	_, ok = _keys(kitty, {key = K_CHAR, char = 'a'})
-	testing.expect(t, ok && _received(kitty, "\x1b[97;1:1u\x1b[97;1:3u"), "a tap is press + release under Kitty event types")
+	testing.expect(t, ok && echo_received(kitty, "\x1b[97;1:1u\x1b[97;1:3u"), "a tap is press + release under Kitty event types")
 
 	code, refused := _keys(plain, {key = K_CHAR, char = 'c', mods = SUPER})
 	testing.expect(t, !refused && code == .Unsupported, "Super+c has no encoding")
@@ -150,21 +149,21 @@ test_act_keys_follow_the_program_modes :: proc(t: ^testing.T) {
 test_act_text_pastes_or_types :: proc(t: ^testing.T) {
 	tiers := tiers_start()
 	v := view_open()
-	typed := _echo(v, "")
-	pasted := _echo(v, "\\x1b[?2004h")
-	kitty := _echo(v, "\\x1b[>10u")
+	typed := echo_open(v, "")
+	pasted := echo_open(v, "\\x1b[?2004h")
+	kitty := echo_open(v, "\\x1b[>10u")
 	defer { view_close(v); tiers_stop(tiers) }
 
 	_, ok := _text(typed, "hi\nyo\r\nend")
-	testing.expect(t, ok && _received(typed, "hi\ryo\rend"), "newlines are Enter")
+	testing.expect(t, ok && echo_received(typed, "hi\ryo\rend"), "newlines are Enter")
 	_, ok = _text(typed, "ab", paste = true)
-	testing.expect(t, ok && _received(typed, "ab"), "a paste without ?2004 is typed")
+	testing.expect(t, ok && echo_received(typed, "ab"), "a paste without ?2004 is typed")
 	_, ok = _text(pasted, "a\x1b[201~b\n", paste = true)
-	testing.expect(t, ok && _received(pasted, "\x1b[200~ab\r\x1b[201~"), "one paste; an embedded end marker is dropped")
+	testing.expect(t, ok && echo_received(pasted, "\x1b[200~ab\r\x1b[201~"), "one paste; an embedded end marker is dropped")
 	_, ok = _text(pasted, ":wq\n")
-	testing.expect(t, ok && _received(pasted, ":wq\r"), "typed text is keys even where pastes are bracketed")
+	testing.expect(t, ok && echo_received(pasted, ":wq\r"), "typed text is keys even where pastes are bracketed")
 	_, ok = _text(kitty, "aB")
-	testing.expect(t, ok && _received(kitty, "\x1b[97;1:1u\x1b[97;1:3u\x1b[98;2:1u\x1b[98;2:3u"), "typed under Kitty: key events, uppercase = Shift")
+	testing.expect(t, ok && echo_received(kitty, "\x1b[97;1:1u\x1b[97;1:3u\x1b[98;2:1u\x1b[98;2:3u"), "typed under Kitty: key events, uppercase = Shift")
 	code, refused := _text(typed, "")
 	testing.expect(t, !refused && code == .Bad_Request)
 }
@@ -173,14 +172,14 @@ test_act_text_pastes_or_types :: proc(t: ^testing.T) {
 test_act_mouse_only_when_reported :: proc(t: ^testing.T) {
 	tiers := tiers_start()
 	v := view_open()
-	none := _echo(v, "")
-	sgr := _echo(v, "\\x1b[?1000h\\x1b[?1006h")
+	none := echo_open(v, "")
+	sgr := echo_open(v, "\\x1b[?1000h\\x1b[?1006h")
 	defer { view_close(v); tiers_stop(tiers) }
 
 	code, refused := _mouse(none, {kind = 0, button = 0, col = 3, row = 4})
 	testing.expect(t, !refused && code == .Unsupported, "a program without mouse reports refuses clicks")
 	_, ok := _mouse(sgr, {kind = 0, button = 0, col = 3, row = 4})
-	testing.expect(t, ok && _received(sgr, "\x1b[<0;3;4M"), "SGR press")
+	testing.expect(t, ok && echo_received(sgr, "\x1b[<0;3;4M"), "SGR press")
 	code, refused = _mouse(sgr, {kind = 2, button = 0, col = 3, row = 4})
 	testing.expect(t, !refused && code == .Unsupported, "?1000 reports no drags")
 	code, refused = _mouse(sgr, {kind = 0, col = 81, row = 1})
@@ -191,7 +190,7 @@ test_act_mouse_only_when_reported :: proc(t: ^testing.T) {
 test_act_reports_the_generation_and_refuses_ended_targets :: proc(t: ^testing.T) {
 	tiers := tiers_start()
 	v := view_open()
-	id := _echo(v, "")
+	id := echo_open(v, "")
 	gone := view_attached(v, view_sh(v, "exit 0"))
 	defer { view_close(v); tiers_stop(tiers) }
 

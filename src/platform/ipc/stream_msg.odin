@@ -157,6 +157,7 @@ Session_Row :: struct {
 	cwd:          string,
 	title:        string,
 	status:       string, // OSC 7501 message
+	controller:   string, // the automation that holds its lease ("" = none)
 }
 
 Prompt_State :: enum u8 { None = 0, Prompt = 1, Input = 2, Executing = 3 }

@@ -162,6 +162,7 @@ core_session_exited :: proc(c: ^Core, s: ^Core_Session, exit: ipc.Exit_Msg, reas
 	}
 	core_watch_trigger(c, s, .Exit)
 	core_broker_session_gone(c, s.id, exit.code)
+	core_lease_session_ended(c, s, false)
 	core_broadcast_row(c, s)
 }
 
@@ -182,6 +183,7 @@ core_session_kill :: proc(c: ^Core, s: ^Core_Session) {
 	id := s.id
 	core_watch_target_gone(c, s)
 	core_broker_session_gone(c, id, s.exit.code)
+	core_lease_session_ended(c, s, true)
 	core_session_free(c, s)
 	b := _i32_bytes(i32(id))
 	for &v in c.viewers do if v.used && v.hello do ipc.stream_send(&v.conn, ipc.MSG_REMOVED, 0, b[:])
@@ -189,6 +191,7 @@ core_session_kill :: proc(c: ^Core, s: ^Core_Session) {
 
 core_session_free :: proc(c: ^Core, s: ^Core_Session) {
 	core_stitch_free(s)
+	delete(s.lease.held) // a lease still open when the session goes
 	if s.sess != nil do session.session_destroy(s.sess)
 	s^ = {}
 }

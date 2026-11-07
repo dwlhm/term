@@ -10,6 +10,11 @@ MSG_ACT             :: u8(105) // u32 session + u8 Act_Kind + its body → MSG_A
 MSG_SNAPSHOT_RESULT :: u8(92)  // Snapshot
 MSG_SETTLE_RESULT   :: u8(93)  // Settle_Result
 MSG_ACT_RESULT      :: u8(94)  // u32 session + u64 gen: the screen generation the input went in at
+MSG_LEASE           :: u8(106) // u32 session + str owner → MSG_OK | MSG_FAIL (Busy: leased, or a request runs there)
+MSG_LEASE_RELEASE   :: u8(107) // u32 session + bool flush (held input reaches the program) → MSG_OK | MSG_FAIL
+MSG_LEASE_MODE      :: u8(108) // u32 session + bool pass (a person's input goes through: a handoff) → MSG_OK | MSG_FAIL
+MSG_LEASE_EVENT     :: u8(95)  // Lease_Event, core → the lease owner, whenever it happens
+MSG_V_TAKEOVER      :: u8(109) // viewer → core on an attach channel: the person took the session back
 
 SNAPSHOT_HISTORY_MAX :: 10_000 // history lines one snapshot may carry
 
@@ -135,4 +140,27 @@ Act_Mouse :: struct {
 	mods:   u8,
 	col:    u16, // 1-based cell
 	row:    u16,
+}
+
+// A lease gives one connection the session's input: everyone else's typing is
+// held (or passed through in pass mode) and reported to it, other drivers and
+// broker requests are refused. It ends on release, when its connection
+// closes, on a takeover from a window, or when the session ends.
+LEASE_OWNER_MAX :: 64
+LEASE_HELD_MAX  :: 64 * 1024 // held input past this is dropped
+
+Lease_Event_Kind :: enum u8 {
+	Human    = 1, // a person typed (held unless pass mode)
+	Takeover = 2, // a person took the session back in a window: the lease ended
+	Exited   = 3, // the program ended: the lease ended
+	Removed  = 4, // the session was killed: the lease ended
+}
+
+Lease_Event :: struct {
+	id:        u32,
+	kind:      Lease_Event_Kind,
+	interrupt: bool, // Human: ^C or Esc
+	held:      u32,  // Human: bytes held so far
+	exit_code: i32,  // Exited
+	bytes:     string, // Human: what was typed (the program's encoding)
 }

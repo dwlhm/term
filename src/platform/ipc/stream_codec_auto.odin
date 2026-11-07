@@ -153,3 +153,16 @@ dec_act_key :: proc(r: ^Wire_Reader) -> Act_Key {
 dec_act_mouse :: proc(r: ^Wire_Reader) -> Act_Mouse {
 	return {kind = wr_u8(r), button = wr_u8(r), mods = wr_u8(r), col = wr_u16(r), row = wr_u16(r)}
 }
+
+enc_lease_event :: proc(w: ^Wire_Writer, m: Lease_Event) {
+	ww_u32(w, m.id); ww_u8(w, u8(m.kind)); ww_bool(w, m.interrupt); ww_u32(w, m.held); ww_i32(w, m.exit_code); ww_str(w, m.bytes)
+}
+
+dec_lease_event :: proc(r: ^Wire_Reader) -> (m: Lease_Event) {
+	m.id = wr_u32(r)
+	k := wr_u8(r)
+	if k < u8(Lease_Event_Kind.Human) || k > u8(Lease_Event_Kind.Removed) do r.ok = false
+	m.kind = Lease_Event_Kind(k) if r.ok else .Human
+	m.interrupt, m.held, m.exit_code, m.bytes = wr_bool(r), wr_u32(r), wr_i32(r), wr_str(r)
+	return
+}

@@ -83,6 +83,7 @@ Core_Session :: struct {
 	last_prompt_state: ipc.Prompt_State,
 	last_cmd_seq:      u32,
 	output_ns:         i64, // when its program last printed (or the session began)
+	lease:             Core_Lease, // an automation holding its input (core_auto_lease.odin)
 	gen:               u64, // screen generation: +1 per output chunk or resize (MSG_SNAPSHOT / MSG_SETTLE)
 	endpoint:          Core_Endpoint, // a virtual session (core_endpoint.odin)
 }

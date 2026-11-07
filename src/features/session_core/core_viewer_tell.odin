@@ -18,6 +18,10 @@ core_viewer_tell :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 		return
 	}
 	from := req.from if core_session_find(c, req.from) != nil else 0 // a stale $TERM_SESSION_ID
+	if s.lease.used {
+		_send_result(c, vi, {phase = .Rejected, reject = .Leased, from = from, to = req.to})
+		return
+	}
 	waiter := vi if req.wait else -1
 	id, reject := broker_tell(&c.broker, from, req.to, req.body, req.timeout_ms, _now(), core_shell_readiness(s), waiter, req.parent, req.shell)
 	_send_result(c, vi, {id = id, phase = .Rejected if reject != .None else .Accepted, reject = reject, from = from, to = req.to})

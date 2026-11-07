@@ -33,6 +33,7 @@ _viewer_drop :: proc(c: ^Core, vi: int) {
 	was_viewer := c.viewers[vi].hello && c.viewers[vi].role == .Viewer
 	core_watchers_cancel_viewer(c, vi)
 	core_settles_cancel_viewer(c, vi)
+	core_leases_viewer_gone(c, vi)
 	broker_viewer_gone(&c.broker, vi)
 	core_broker_apply(c)
 	core_endpoints_owner_gone(c, vi)
@@ -89,6 +90,9 @@ _viewer_frame :: proc(c: ^Core, vi: int, f: ipc.Stream_Frame) -> bool {
 	case ipc.MSG_SNAPSHOT:   core_viewer_snapshot(c, vi, &r)
 	case ipc.MSG_SETTLE:     core_viewer_settle(c, vi, &r)
 	case ipc.MSG_ACT:        core_viewer_act(c, vi, &r)
+	case ipc.MSG_LEASE:         core_viewer_lease(c, vi, &r)
+	case ipc.MSG_LEASE_RELEASE: core_viewer_lease_release(c, vi, &r)
+	case ipc.MSG_LEASE_MODE:    core_viewer_lease_mode(c, vi, &r)
 	case ipc.MSG_SESSION_SIGNAL: core_viewer_signal(c, vi, &r)
 	case ipc.MSG_SESSION_SIZE:   core_viewer_resize(c, vi, &r)
 	case ipc.MSG_DETACH:
@@ -155,6 +159,7 @@ _read :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 		core_viewer_fail(c, vi, 0, .Not_Found, "no such session")
 		return
 	}
+	if history > 0 && terminal.terminal_in_alt_screen(&s.sess.term) && core_lease_fail(c, s, vi) do return
 	start := core_stitch_begin(c, s, vi, int(history))
 	switch start {
 	case .Started:

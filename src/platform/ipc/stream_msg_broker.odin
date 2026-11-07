@@ -30,6 +30,7 @@ Tell_Reject :: enum u8 {
 	Not_Listening, // no worker waits in `next` and no shell prompt to type at
 	Multi_Line,    // a shell target runs one command per request
 	Full,          // too many requests in flight
+	Leased,        // an automation holds the session (term auto)
 }
 
 Tell_Status :: enum u8 {Done, Failed, Cancelled, Interrupted, Timeout, Error}
