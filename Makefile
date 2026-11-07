@@ -21,19 +21,38 @@ TEST_FLAGS ?= -define:ODIN_TEST_THREADS=1
 DEBUG_FLAGS ?= -debug
 RELEASE_FLAGS ?= -o:speed -no-bounds-check
 
-.PHONY: all term release run term-debug harness-features run-harness-features harness-render-chrome run-harness-render-chrome harness-render-terminal run-harness-render-terminal harness-render-composer run-harness-composer test test-app test-holder test-session-core test-font test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-gpu check esctest clean help bench bench-quick bundle dmg portable dist install uninstall test-unicode-width gen-unicode bench-parser bench-session bench-throughput test-poller
+# Lua 5.4 for `term auto` contracts (third_party/lua-5.4.9), built here and
+# linked statically by src/platform/lua.
+LUA_DIR    := third_party/lua-5.4.9/src
+LUA_LIB    := build/lua/liblua.a
+LUA_OBJ    := $(patsubst $(LUA_DIR)/%.c,build/lua/%.o,$(wildcard $(LUA_DIR)/*.c))
+LUA_CFLAGS ?= -O2 -std=gnu99 -Wall -DLUA_USE_POSIX
+ifeq ($(UNAME_S),Darwin)
+LUA_CFLAGS += -mmacosx-version-min=$(MIN_OS_VERSION)
+endif
+
+.PHONY: all lua term release run term-debug harness-features run-harness-features harness-render-chrome run-harness-render-chrome harness-render-terminal run-harness-render-terminal harness-render-composer run-harness-composer test test-app test-holder test-session-core test-font test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-gpu check esctest clean help bench bench-quick bundle dmg portable dist install uninstall test-unicode-width gen-unicode bench-parser bench-session bench-throughput test-poller
 
 all: term harness-features harness-render-chrome harness-render-terminal harness-composer
 
-term:
+term: $(LUA_LIB)
 	@mkdir -p $(OUT_DIR)
 	$(ODIN) build src/app/term -out:$(OUT_DIR)/term $(RELEASE_FLAGS) $(COMMON_FLAGS)
 
 release: term
 
-term-debug:
+term-debug: $(LUA_LIB)
 	@mkdir -p $(OUT_DIR)
 	$(ODIN) build src/app/term -out:$(OUT_DIR)/term $(DEBUG_FLAGS) $(COMMON_FLAGS)
+
+lua: $(LUA_LIB)
+
+$(LUA_LIB): $(LUA_OBJ)
+	ar rcs $@ $^
+
+build/lua/%.o: $(LUA_DIR)/%.c
+	@mkdir -p build/lua
+	$(CC) $(LUA_CFLAGS) -c $< -o $@
 
 run: term
 	./$(OUT_DIR)/term
@@ -151,7 +170,7 @@ esctest: term
 	@chmod +x scripts/run_esctest.sh
 	scripts/run_esctest.sh $(ESCTEST_ARGS)
 
-test-app:
+test-app: $(LUA_LIB)
 	$(ODIN) test src/app/term $(TEST_FLAGS)
 
 test-terminal:
@@ -260,7 +279,7 @@ test-gpu: harness-render-terminal
 test-render-contract:
 	$(ODIN) test src/core/render/contract/tests $(CHECK_FLAGS) $(TEST_FLAGS)
 
-check:
+check: $(LUA_LIB)
 	$(ODIN) check src/cmd/harness_helper $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/cmd/harness_render_chrome $(CHECK_FLAGS)
 	$(ODIN) check src/cmd/harness_render_terminal $(CHECK_FLAGS)
