@@ -57,6 +57,7 @@ core_viewer_resize :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 		return
 	}
 	session.session_resize(s.sess, size.cols, size.rows, size.xpixel, size.ypixel)
+	s.gen += 1 // the screen reflowed
 	_ = terminal.terminal_consume_damage(&s.sess.term)
 	_ok(c, vi)
 }

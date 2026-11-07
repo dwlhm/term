@@ -120,6 +120,37 @@ u32 listening · str process · str cwd · str title · str status.
 The other verbs (`observe`, `read`, `send`, `signal`, `watch`, `new`) are in
 `src/platform/ipc/stream_msg.odin`, next to the message numbers.
 
+## Automation: snapshot and settle
+
+What a program shows, parsed once by the core (never raw PTY bytes), and a wait
+for the screen to change. Neither resizes, scrolls or focuses the session.
+Field-by-field types are in `src/platform/ipc/stream_msg_auto.odin`, the order
+in `stream_codec_auto.odin`.
+
+| kind | payload | answer |
+|---|---|---|
+| `SNAPSHOT` (103) | u32 session · u32 history (≤ 10 000) · i64 since (< 0: none) | `SNAPSHOT_RESULT` (92) · `FAIL` 1 / 3 / 5 (a `read` is scrolling it) |
+| `SETTLE` (104) | u32 session · u64 since · u32 quiet_ms · u32 timeout_ms (0: none) | `SETTLE_RESULT` (93) u32 session · u64 gen · bool exited · i32 exit_code · `FAIL` 1 / 7 |
+
+- **Generation.** `gen` grows with every output chunk and every resize. `SETTLE`
+  answers when `gen > since` and the program printed nothing for `quiet_ms`, or
+  at once when the session exited. Pass the `gen` of your last snapshot.
+- **Lines.** A line number is `top_line + row`; it stays the same as the line
+  scrolls into history. `history` returns at most that many lines above the
+  screen, only lines `>= since` when since is set: pass the last `top_line` to
+  get what scrolled off since then. `history_truncated` says more matched.
+- **Result.** A head (gen, size, `top_line`, cursor, modes: alt screen, DECCKM,
+  ?2004, ?1004, ?2026, Kitty flags, mouse mode and format; OSC 133 state;
+  exit; OSC 7501 state, app, kind, message; title; process), then
+  u32 n + n history rows, u32 n + n screen rows, u32 n + n links (u16 id ·
+  str uri). A row is i64 line · bool wrap · bool prompt · u32 n + n runs; a
+  run is u16 cells (a wide character counts 2) · u8 fg · u8 bg · bool rgb fg ·
+  bool rgb bg · 3 × u8 fg rgb · 3 × u8 bg rgb · u8 style bits (bold, dim,
+  italic, underline, inverse, strike, blink, hidden) · u8 underline shape ·
+  u16 link · str text. Rows end at their last cell with content or
+  attributes. fg 7 / bg 0 are also the defaults: the grid does not tell them
+  apart. A snapshot that does not fit in one frame drops history first.
+
 ## Example: a worker in Python
 
 ```python

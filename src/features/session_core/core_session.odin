@@ -122,6 +122,7 @@ core_session_output :: proc(c: ^Core, s: ^Core_Session, bytes: []u8) {
 	// A command starting or ending prints something: look at the foreground (and
 	// resync viewers that skipped output) once it settles.
 	s.output_ns = _now()
+	s.gen += 1
 	s.settle_due_ns = s.output_ns + CORE_SETTLE_MS * 1_000_000
 	edges := core_shell_edges(s)
 	core_watch_output(c, s, edges)

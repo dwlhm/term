@@ -83,6 +83,7 @@ Core_Session :: struct {
 	last_prompt_state: ipc.Prompt_State,
 	last_cmd_seq:      u32,
 	output_ns:         i64, // when its program last printed (or the session began)
+	gen:               u64, // screen generation: +1 per output chunk or resize (MSG_SNAPSHOT / MSG_SETTLE)
 	endpoint:          Core_Endpoint, // a virtual session (core_endpoint.odin)
 }
 
@@ -117,13 +118,17 @@ Core :: struct {
 	sessions:    [CORE_MAX_SESSIONS]Core_Session,
 	viewers:     [CORE_MAX_VIEWERS]Core_Viewer,
 	watchers:    [CORE_MAX_WATCHERS]Core_Watcher,
+	settles:     [CORE_MAX_SETTLES]Core_Settle,
 	broker:      Broker,
 	broker_due_ns: i64, // next request deadline (0 = none)
 	typed:       [dynamic]u8, // input the broker types into a session
 	viewer_out:  [dynamic]u8,
 	replies:     [dynamic]u8,
 	paint:       [dynamic]u8,
-	text:        [dynamic]u8, // MSG_READ answer
+	text:        [dynamic]u8, // MSG_READ answer, MSG_SNAPSHOT row text
+	snap_runs:   [dynamic]ipc.Snap_Run, // one snapshot row
+	snap_spans:  [dynamic][2]int, // its runs' text in c.text
+	snap_links:  [dynamic]u16, // OSC 8 ids one snapshot refers to
 	msg:         []u8, // one encoded payload
 }
 
@@ -222,6 +227,9 @@ core_destroy :: proc(c: ^Core) {
 	delete(c.replies)
 	delete(c.paint)
 	delete(c.text)
+	delete(c.snap_runs)
+	delete(c.snap_spans)
+	delete(c.snap_links)
 	delete(c.typed)
 	delete(c.msg)
 	broker_destroy(&c.broker)

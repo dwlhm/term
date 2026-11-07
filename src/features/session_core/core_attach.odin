@@ -93,6 +93,7 @@ core_apply_leader :: proc(c: ^Core, s: ^Core_Session) {
 	t := &s.sess.term
 	if int(leader.size.cols) == t.cols && int(leader.size.rows) == t.rows do return
 	session.session_resize(s.sess, leader.size.cols, leader.size.rows, leader.size.xpixel, leader.size.ypixel)
+	s.gen += 1 // the screen reflowed
 	_ = terminal.terminal_consume_damage(t)
 }
 

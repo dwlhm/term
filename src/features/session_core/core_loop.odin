@@ -52,6 +52,7 @@ _core_step :: proc(c: ^Core) {
 	core_stitch_tick(c)
 	if c.broker_due_ns > 0 && _now() >= c.broker_due_ns do core_broker_tick(c, _now())
 	core_watchers_due(c, _now())
+	core_settles_due(c, _now())
 	for &h in c.holders do if h.used do ipc.stream_flush(&h.conn)
 	for &v in c.viewers do if v.used do ipc.stream_flush(&v.conn)
 }
@@ -74,6 +75,7 @@ _timeout_ms :: proc(c: ^Core) -> int {
 		if s.settle_due_ns != 0 do due = _earliest(due, s.settle_due_ns)
 		if s.stitch != nil && s.stitch.active do due = _earliest(due, core_stitch_due_ns(&s))
 	}
+	if settle := core_settles_next_ns(c); settle >= 0 do due = _earliest(due, settle)
 	if c.empty_since > 0 do due = _earliest(due, c.empty_since + c.grace_ns)
 	if due < 0 do return -1
 	return max(0, int((due - _now()) / 1_000_000) + 1)
