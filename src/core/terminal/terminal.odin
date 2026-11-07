@@ -226,17 +226,24 @@ terminal_resize :: proc(t: ^Terminal, new_rows, new_cols: int) {
 	disp := 0
 	grid.grid_resize(&t.grid, &t.damage, t.rows, t.cols, &t.parser.cursor.row, &t.parser.cursor.col, &t.parser.cursor.pending_wrap, &disp)
 	// Keep the hidden buffer in sync without letting its damage leak into the
-	// visible one (its rows are marked on the next screen switch anyway).
+	// visible one (its rows are marked on the next screen switch anyway). A
+	// hidden main screen reflows with its cursor, the one ?1049h saved: leaving
+	// the full-screen program puts it back on the same line.
+	in_alt := t.parser.in_alt_screen
 	hidden_disp := 0
-	grid.grid_resize(&t.alt_grid, &t.alt_damage, t.rows, t.cols, nil, nil, nil, &hidden_disp)
+	if in_alt {
+		grid.grid_resize(&t.alt_grid, &t.alt_damage, t.rows, t.cols, &t.parser.cursor.saved_row, &t.parser.cursor.saved_col, nil, &hidden_disp)
+	} else {
+		grid.grid_resize(&t.alt_grid, &t.alt_damage, t.rows, t.cols, nil, nil, nil, &hidden_disp)
+	}
 	t.parser.cursor.row = clamp(t.parser.cursor.row, 0, t.rows - 1)
 	t.parser.cursor.col = clamp(t.parser.cursor.col, 0, t.cols - 1)
 	t.parser.scroll_top = clamp(t.parser.scroll_top, 0, t.rows - 1)
 	t.parser.scroll_bottom = max(0, t.rows - 1)
 
 	// Keep saved cursor in sync with reflow displacement so DECRC (\x1b8 / CSI u) restores accurately
-	delta_r := t.parser.cursor.row - old_cur_r
-	t.parser.cursor.saved_row = clamp(t.parser.cursor.saved_row + delta_r, 0, t.rows - 1)
+	if !in_alt do t.parser.cursor.saved_row += t.parser.cursor.row - old_cur_r
+	t.parser.cursor.saved_row = clamp(t.parser.cursor.saved_row, 0, t.rows - 1)
 	t.parser.cursor.saved_col = clamp(t.parser.cursor.saved_col, 0, t.cols - 1)
 
 	// Notify extensions of terminal resize and grid vertical displacement
