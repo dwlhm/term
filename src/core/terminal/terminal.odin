@@ -106,12 +106,19 @@ terminal_hyperlink_span :: proc(t: ^Terminal, row, col: int) -> (col_start, col_
 	return col_start, col_end, true
 }
 
+OSC_7501_SUPPORTED :: "\x1b]7501;?1\x1b\\"
+
 _terminal_on_osc :: proc(user_data: rawptr, osc_id: int, payload: string) -> bool {
 	if user_data == nil do return false
 	t := (^Terminal)(user_data)
 	if osc_id == 0 || osc_id == 2 {
 		t.title_len = min(len(payload), len(t.title_buf))
 		copy(t.title_buf[:t.title_len], payload[:t.title_len])
+	}
+	// OSC 7501 ; ? asks whether the terminal takes program status reports:
+	// agent TUIs (claude-code) only report once it says yes ("?" first).
+	if osc_id == extension.OSC_PROGRAM_STATUS && len(payload) > 0 && payload[0] == '?' {
+		return parser.parser_emit_response(&t.parser, transmute([]u8)string(OSC_7501_SUPPORTED))
 	}
 	return extension.registry_dispatch_osc(&t.extensions, osc_id, payload, user_data)
 }

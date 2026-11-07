@@ -49,6 +49,8 @@ program_status_title :: proc "contextless" (p: ^Program_Status) -> string {
 	return string(p.title_buf[:p.title_len])
 }
 
+OSC_PROGRAM_STATUS :: 7501
+
 Osc_7501_Sink :: #type proc(user_data: rawptr, status: Program_Status) -> bool
 
 Osc_7501_Context :: struct {

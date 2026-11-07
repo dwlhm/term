@@ -221,7 +221,7 @@ session_create :: proc(size: ipc.Size_Msg, link: Session_Link, allocator: runtim
 		sink      = _osc_7501_sink,
 		user_data = rawptr(sess),
 	}
-	terminal.terminal_register_osc(&sess.term, 7501, extension.osc_7501_handler, rawptr(&sess.osc_7501_ctx))
+	terminal.terminal_register_osc(&sess.term, extension.OSC_PROGRAM_STATUS, extension.osc_7501_handler, rawptr(&sess.osc_7501_ctx))
 
 	sess.osc_color_cfg.responder = _session_emit_responder
 	sess.osc_color_cfg.user_data = rawptr(sess)

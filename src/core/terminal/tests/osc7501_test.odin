@@ -6,6 +6,8 @@ import "core:encoding/base64"
 import "core:fmt"
 import "core:testing"
 import extension "../extension"
+import term "../"
+import parser "../parser"
 
 @test
 test_osc_7501_state_and_properties :: proc(t: ^testing.T) {
@@ -46,4 +48,19 @@ test_osc_7501_clear_and_done_states :: proc(t: ^testing.T) {
 
 	_, ok_bad := extension.osc_7501_parse("app=missing_state")
 	testing.expect(t, !ok_bad, "payload without state must be rejected")
+}
+
+@test
+test_osc_7501_probe_is_answered :: proc(t: ^testing.T) {
+	// claude-code asks OSC 7501 ; ? and reports its state only after a reply
+	// whose data starts with "?".
+	terminal: term.Terminal
+	term.terminal_init(&terminal, 6, 40)
+	defer term.terminal_destroy(&terminal)
+	term.terminal_feed_string(&terminal, "\x1b]7501;?\x1b\\")
+	buf: [64]u8
+	n := parser.parser_drain_response(&terminal.parser, buf[:])
+	testing.expect_value(t, string(buf[:n]), "\x1b]7501;?1\x1b\\")
+	term.terminal_feed_string(&terminal, "\x1b]7501;state=idle:app=x\x1b\\")
+	testing.expect_value(t, parser.parser_drain_response(&terminal.parser, buf[:]), 0) // a report is not a query
 }
