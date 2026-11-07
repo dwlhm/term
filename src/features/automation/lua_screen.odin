@@ -26,22 +26,29 @@ Screen_Ref :: struct {
 	ready:    bool, // elements found (lazily)
 }
 
-// lua_push_screen pushes a screen for snap; data is copied into the screen's
-// own arena only when owned is false.
-lua_push_screen :: proc(L: ^lua.State, snap: ipc.Snapshot, data: []u8 = nil) -> bool {
+// lua_push_screen pushes a screen for a snapshot payload (MSG_SNAPSHOT_RESULT,
+// or JSON saved by `term auto snapshot --save`). The payload is copied into
+// the screen's own arena: the screen outlives the frame it came in.
+lua_push_screen :: proc(L: ^lua.State, payload: []u8, json := false) -> bool {
 	ref := (^Screen_Ref)(lua.newuserdatauv(L, size_of(Screen_Ref), 0))
 	ref^ = {}
+	_push_screen_mt(L)
+	lua.setmetatable(L, -2) // from here __gc frees the arena
 	if virtual.arena_init_growing(&ref.arena) != nil do return false
 	a := virtual.arena_allocator(&ref.arena)
-	snap := snap
-	if data != nil {
-		parsed, ok := snapshot_parse(data, a)
+	data := make([]u8, len(payload), a)
+	copy(data, payload)
+	snap: ipc.Snapshot
+	if json {
+		ok: bool
+		snap, ok = snapshot_parse(data, a)
 		if !ok do return false
-		snap = parsed
+	} else {
+		r := ipc.wire_reader(data)
+		snap = ipc.dec_snapshot(&r, a)
+		if !ipc.wr_done(&r) do return false
 	}
 	ref.screen = screen_build(snap, a)
-	_push_screen_mt(L)
-	lua.setmetatable(L, -2)
 	return true
 }
 
@@ -60,8 +67,9 @@ _screen_load :: proc "c" (L: ^lua.State) -> c.int {
 	if !strings.has_suffix(path, ".json") do return _fail(L, "term.screen.load reads a snapshot saved with term auto snapshot --save (.json)")
 	data, err := os_read(path)
 	if err do return _fail(L, "term.screen.load: cannot read that snapshot")
-	defer delete(data)
-	if !lua_push_screen(L, {}, data) do return _fail(L, "term.screen.load: not a snapshot")
+	pushed := lua_push_screen(L, data, json = true)
+	delete(data) // before a failure: lua.error does not return
+	if !pushed do return _fail(L, "term.screen.load: not a snapshot")
 	return 1
 }
 

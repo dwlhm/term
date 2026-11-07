@@ -185,7 +185,7 @@ test-pty:
 test-holder:
 	$(ODIN) test src/features/holder/tests $(CHECK_FLAGS) $(TEST_FLAGS)
 
-test-session-core:
+test-session-core: $(LUA_LIB)
 	$(ODIN) test src/features/session_core/tests $(CHECK_FLAGS) $(TEST_FLAGS)
 
 test-font:

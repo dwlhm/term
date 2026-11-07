@@ -73,6 +73,7 @@ foreign lua {
 	error        :: proc(L: ^State) -> c.int ---
 	sethook      :: proc(L: ^State, f: Hook, mask, count: c.int) ---
 	rawequal     :: proc(L: ^State, idx1, idx2: c.int) -> c.int ---
+	getlocal     :: proc(L: ^State, ar: rawptr, n: c.int) -> cstring --- // ar nil: parameter names of the function on top
 }
 
 @(default_calling_convention = "c")

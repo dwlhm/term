@@ -12,6 +12,9 @@ import auto "../../features/automation"
 import plat_ipc "../../platform/ipc"
 
 AUTO_VERBS := [?]Verb_Help{
+	{"run", "[--session id] [--trace file] <contract.lua> <function> [params…]", "Run a contract function on a session",
+		"The function returns steps; the runner leases the session and carries them out:\nactions wait for their target and for the screen to settle, a person's Esc or\n^C cancels (on.finally still runs), other input is held. Params: positional\nor --name value; missing ones are asked for. Questions (t.ask, t.handoff) are\nJSON lines on stdout, answered with `term auto reply`. Exit: 0 ok · 1 contract\n· 2 no core · 3 timed out · 4 the program ended · 5 session taken · 6 the\nscreen did not come or t.fail · 7 taken back or cancelled."},
+	{"reply", "<id> <answer>", "Answer a running contract's question (t.ask, a param, the end of a handoff)", ""},
 	{"check", "<contract.lua>", "Validate a contract without running it",
 		"Loads it in the sandbox and checks its shape: api, functions, params,\non, timeouts. Prints its functions."},
 	{"snapshot", "<id> [-n lines] [--json] [--save file]", "The parsed screen and its elements (for writing contracts)",
@@ -29,6 +32,8 @@ app_cli_auto :: proc(args: []string) -> int {
 	}
 	if len(args) > 1 && (args[1] == "--help" || args[1] == "-h") do return _auto_verb_help(args[0])
 	switch args[0] {
+	case "run":      return _auto_run(args[1:])
+	case "reply":    return _auto_reply(args[1:])
 	case "check":    return _auto_check(args[1:])
 	case "snapshot": return _auto_snapshot(args[1:])
 	}
@@ -152,4 +157,42 @@ _print_snap_row :: proc(row: plat_ipc.Snap_Row, prefix: string) {
 	strings.write_string(&b, prefix)
 	for run in row.runs do strings.write_string(&b, run.text)
 	fmt.println(strings.to_string(b))
+}
+
+@(private = "file")
+_auto_run :: proc(args: []string) -> int {
+	opts: auto.Run_Options
+	rest := args
+	bad := false
+	for !bad && len(rest) >= 2 && strings.has_prefix(rest[0], "--") {
+		switch rest[0] {
+		case "--session":
+			id, ok := strconv.parse_uint(rest[1], 10)
+			opts.session, bad = u32(id), !ok
+		case "--trace": opts.trace_path = rest[1]
+		case:           bad = true
+		}
+		rest = rest[2:]
+	}
+	if bad || len(rest) < 2 {
+		fmt.eprintln("usage: term auto run [--session id] [--trace file] <contract.lua> <function> [params…]")
+		return 1
+	}
+	opts.contract, opts.function, opts.args = rest[0], rest[1], rest[2:]
+	return auto.run_exit_code(auto.run_contract(opts))
+}
+
+// _auto_reply answers a question: a broker request to the run's endpoint.
+@(private = "file")
+_auto_reply :: proc(args: []string) -> int {
+	if len(args) != 2 {
+		fmt.eprintln("usage: term auto reply <id> <answer>")
+		return 1
+	}
+	id, ok := strconv.parse_uint(args[0], 10)
+	if !ok {
+		fmt.eprintln("usage: term auto reply <id> <answer>")
+		return 1
+	}
+	return app_cli_agent_tell(u32(id), {args[1], "-t", "30"})
 }

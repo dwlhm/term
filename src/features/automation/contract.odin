@@ -33,13 +33,21 @@ contract_info_destroy :: proc(info: ^Contract_Info) {
 	delete(info.functions)
 }
 
-// term_module_open pushes the `term` module.
+@(private = "file")
+TERM_PRELUDE :: #load("term_prelude.lua", string)
+
+// term_module_open pushes the `term` module: contract and api from here,
+// step builders and matching from term_prelude.lua.
 term_module_open :: proc "c" (L: ^lua.State) -> c.int {
-	lua.createtable(L, 0, 2)
+	lua.createtable(L, 0, 24)
 	lua.pushinteger(L, CONTRACT_API)
 	lua.setfield(L, -2, "api")
 	lua.pushcfunction(L, _contract_new)
 	lua.setfield(L, -2, "contract")
+	src := TERM_PRELUDE
+	if lua.luaL_loadbufferx(L, raw_data(src), c.size_t(len(src)), "=term", "t") != lua.OK do return lua.error(L)
+	lua.insert(L, -2)
+	if lua.pcall(L, 1, 1, 0) != lua.OK do return lua.error(L)
 	return 1
 }
 
@@ -148,7 +156,7 @@ _check_on :: proc(L: ^lua.State) -> string {
 		case !slice.contains(_ON_KEYS[:], key):
 			e = fmt.tprintf("on.%s is unknown: on takes %s", key, strings.join(_ON_KEYS[:], ", ", context.temp_allocator))
 		case key == "human" && tp != .Function:
-			e = "on.human must be a function (input → \"hold\" | \"cancel\" | \"pass\")"
+			e = "on.human must be a function (input → \"hold\" | \"cancel\")"
 		case key == "interrupt" && tp != .Table:
 			e = "on.interrupt must be a table: state → steps"
 		case (key == "unexpected" || key == "finally") && tp != .Function && tp != .Table:
