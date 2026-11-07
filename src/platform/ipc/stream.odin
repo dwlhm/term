@@ -24,7 +24,7 @@ STREAM_DATA_CHUNK    :: 64 * 1024
 STREAM_WINDOW        :: 256 * 1024 // credit a stream starts with
 STREAM_MAX_PENDING   :: 4 << 20    // queued for a slow viewer before it gets a repaint instead
 STREAM_MAX_CHANNELS  :: 64
-STREAM_PROTO_VERSION :: 1
+STREAM_PROTO_VERSION :: 2
 
 // Kinds shared by every link. Link-specific messages live in stream_msg.odin.
 STREAM_DATA   :: u8(0) // stream payload bytes

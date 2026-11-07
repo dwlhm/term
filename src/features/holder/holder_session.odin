@@ -33,7 +33,10 @@ _session_spawn :: proc(h: ^Holder, id: u32, m: ^ipc.Spawn_Msg) -> (s: ^Session, 
 		xpixel = int(m.xpixel),
 		ypixel = int(m.ypixel),
 	}
-	master, pid, err := pty.pty_spawn_raw(cfg, m.env[:m.envc])
+	env := make([]string, m.envc + 1, context.temp_allocator)
+	copy(env, m.env[:m.envc])
+	env[m.envc] = fmt.tprintf("%s=%d", ipc.SESSION_ID_ENV, id)
+	master, pid, err := pty.pty_spawn_raw(cfg, env)
 	free_all(context.temp_allocator)
 	if err != .None do return nil, fmt.bprintf(h.msg_buf[:], "spawn failed: %v", err)
 	s = &h.sessions[index]

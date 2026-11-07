@@ -33,16 +33,26 @@ MSG_CREATE :: u8(61) // u32 token + Spawn_Msg → MSG_ATTACHED (the creator is a
 MSG_KILL   :: u8(62) // u32 id → MSG_OK | MSG_FAIL
 MSG_ATTACH :: u8(63) // u32 token + Attach_Msg → MSG_ATTACHED | MSG_FAIL
 MSG_DETACH :: u8(64) // u32 channel
+MSG_OBSERVE :: u8(65) // u32 id + u32 lines → MSG_OBSERVE_RESULT | MSG_FAIL
 MSG_READ   :: u8(66) // u32 id + u32 history lines → MSG_TEXT (plain screen text) | MSG_FAIL
 MSG_SEND   :: u8(67) // u32 id + raw bytes for the program → MSG_OK | MSG_FAIL
 MSG_SESSION_SIGNAL :: u8(68) // u32 id + i32 signal (foreground group) → MSG_OK | MSG_FAIL
 MSG_SESSION_SIZE   :: u8(69) // u32 id + Size_Msg (only while no window shows it) → MSG_OK | MSG_FAIL
+MSG_TELL           :: u8(74) // Tell_Request → MSG_TELL_RESULT Accepted | Rejected (wait: Progress…, Finished later) | MSG_FAIL
+MSG_CANCEL         :: u8(75) // u64 request id → MSG_OK | MSG_FAIL
+MSG_NEXT           :: u8(76) // u32 worker session + u32 timeout_ms → MSG_REQUEST (when one comes) | MSG_FAIL
+MSG_ANSWER         :: u8(79) // Answer_Msg → MSG_OK | MSG_FAIL
+MSG_PROGRESS       :: u8(100) // Answer_Msg → MSG_OK | MSG_FAIL
+MSG_RESULT         :: u8(101) // Result_Request → MSG_TELL_RESULT Running | Finished (follow: Progress… first) | MSG_FAIL
+MSG_ENDPOINT       :: u8(102) // str name + bool owned → MSG_OK + u32 session id | MSG_FAIL
+MSG_WATCH          :: u8(77) // Watch_Request → MSG_WATCH_RESULT | MSG_OK | MSG_FAIL
 
 // viewer → core, on an attach channel
 MSG_V_INPUT  :: u8(70) // raw bytes typed into the session
 MSG_V_RESIZE :: u8(71) // Size_Msg
 MSG_V_FOCUS  :: u8(72) // bool
 MSG_V_FACTS  :: u8(73) // Facts_Msg
+MSG_V_REPLY  :: u8(78) // raw bytes the viewer's Terminal answered a query with (not typed)
 
 // core → viewer/cli
 MSG_SESSIONS :: u8(80) // u32 count + Session_Row each
@@ -52,12 +62,16 @@ MSG_FAIL     :: u8(84) // u32 token + u8 Fail_Code + reason text
 MSG_OK       :: u8(85)
 MSG_REMOVED  :: u8(86) // u32 id: the session is gone
 MSG_TEXT     :: u8(87) // UTF-8 text (MSG_READ)
+MSG_OBSERVE_RESULT :: u8(88) // Observe_Result
+MSG_TELL_RESULT    :: u8(89) // Tell_Result
+MSG_WATCH_RESULT   :: u8(90) // Watch_Result
+MSG_REQUEST        :: u8(91) // Next_Result
 
 Stream_Role :: enum u8 { Core = 1, Holder, Viewer, Cli }
 
 Goodbye :: enum u8 { Handover = 1, Shutdown }
 
-Fail_Code :: enum u8 { Not_Found = 1, Exited, Bad_Request, Spawn_Failed, Busy, Version }
+Fail_Code :: enum u8 { Not_Found = 1, Exited, Bad_Request, Spawn_Failed, Busy, Version, Timeout }
 
 Hello_Msg :: struct {
 	version: u32,
@@ -128,15 +142,55 @@ Facts_Msg :: struct {
 Session_State :: enum u8 { Idle = 1, Busy, Exited }
 
 Session_Row :: struct {
-	id:        u32,
-	state:     Session_State,
-	active:    bool, // a CLI/TUI runs (quit asks before killing it)
-	attached:  bool,
-	pid:       u32,
-	elapsed_s: u32,
-	exit_code: i32,
-	process:   string,
-	cwd:       string,
-	title:     string,
-	status:    string, // OSC 7501 message
+	id:           u32,
+	state:        Session_State,
+	active:       bool, // a CLI/TUI runs (quit asks before killing it)
+	attached:     bool,
+	pid:          u32,
+	elapsed_s:    u32,
+	quiet_s:      u32, // seconds since its program last printed
+	endpoint:     bool, // a virtual session: no program, a name, requests only
+	exit_code:    i32,
+	request:      Row_Request,
+	process:      string,
+	cwd:          string,
+	title:        string,
+	status:       string, // OSC 7501 message
+}
+
+Prompt_State :: enum u8 { None = 0, Prompt = 1, Input = 2, Executing = 3 }
+
+Observe_Result :: struct {
+	row:           Session_Row,
+	cols:          u16,
+	rows:          u16,
+	is_alt:        bool,
+	prompt_state:  Prompt_State,
+	has_cmd_exit:  bool,
+	cmd_exit_code: i32,
+	cmd_seq:       u32, // commands finished so far: `watch --since` baseline
+	text:          string,
+}
+
+Watch_Event :: enum u8 {
+	Prompt    = 0,
+	Executing = 1,
+	Exit      = 2,
+}
+Watch_Event_Flags :: distinct bit_set[Watch_Event; u8]
+
+Watch_Request :: struct {
+	id:             u32,
+	events:         Watch_Event_Flags,
+	timeout_ms:     u32,
+	has_since:      bool, // Prompt: answer at once when cmd_seq > since and the shell is at a prompt
+	since:          u32,
+}
+
+Watch_Result :: struct {
+	id:           u32,
+	event:        Watch_Event,
+	exit_code:    i32,
+	prompt_state: Prompt_State,
+	cmd_seq:      u32,
 }

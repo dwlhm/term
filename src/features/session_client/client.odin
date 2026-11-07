@@ -33,6 +33,7 @@ Client_Link :: struct {
 	sess:        ^session.Terminal_Session,
 	pending:     [CLIENT_PENDING_IN]u8,
 	pending_len: int,
+	pending_size: Maybe(ipc.Size_Msg), // the latest resize before ATTACHED: sent first on bind
 	observe:     bool,
 	cancelled:   bool, // released before the core answered: undo the attach when it does
 	cancel_kill: bool,

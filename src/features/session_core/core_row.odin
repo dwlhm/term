@@ -8,7 +8,7 @@ import ipc "../../platform/ipc"
 import session "../session"
 import extension "../../core/terminal/extension"
 
-core_row_write :: proc(w: ^ipc.Wire_Writer, c: ^Core, s: ^Core_Session) {
+core_row_get :: proc(c: ^Core, s: ^Core_Session) -> ipc.Session_Row {
 	sess := s.sess
 	title_buf: [256]u8
 	title := session.session_resolve_title(sess, title_buf[:], "Shell")
@@ -18,19 +18,27 @@ core_row_write :: proc(w: ^ipc.Wire_Writer, c: ^Core, s: ^Core_Session) {
 	for &a in s.attaches do attached ||= a.used && !a.observe
 	process := session.session_process_name(sess)
 	if len(process) == 0 && sess.program_status.app_len > 0 do process = extension.program_status_app(&sess.program_status)
-	ipc.enc_row(w, {
+	if s.endpoint.used do process, title = core_endpoint_name(s), core_endpoint_name(s)
+	return {
 		id        = s.id,
 		state     = state,
 		active    = active,
 		attached  = attached,
 		pid       = u32(max(sess.info.pid, 0)),
 		elapsed_s = u32(max(i64(0), _now_unix() - s.started_unix)) if s.started_unix > 0 else 0,
+		quiet_s   = u32(max(i64(0), _now() - s.output_ns) / 1_000_000_000),
 		exit_code = s.exit.code,
+		request   = broker_row(&c.broker, s.id),
+		endpoint  = s.endpoint.used,
 		process   = process,
 		cwd       = session.session_get_cwd_path(sess) if sess.cwd_len > 0 else session.session_process_cwd(sess),
 		title     = title,
 		status    = extension.program_status_msg(&sess.program_status),
-	})
+	}
+}
+
+core_row_write :: proc(w: ^ipc.Wire_Writer, c: ^Core, s: ^Core_Session) {
+	ipc.enc_row(w, core_row_get(c, s))
 }
 
 // core_row_changed broadcasts an EVENT when what a row shows changed
@@ -39,8 +47,9 @@ core_row_changed :: proc(c: ^Core, s: ^Core_Session) {
 	w := ipc.wire_writer(c.msg)
 	core_row_write(&w, c, s)
 	row := ipc.wire_bytes_written(&w)
-	// pid … elapsed_s start after id(4) state(1) active(1) attached(1) pid(4); skip elapsed (4).
-	h := hash.fnv64a(row[:11]) ~ hash.fnv64a(row[15:])
+	// pid … elapsed_s start after id(4) state(1) active(1) attached(1) pid(4);
+	// skip elapsed_s and quiet_s (4 + 4): clocks, not facts that changed.
+	h := hash.fnv64a(row[:11]) ~ hash.fnv64a(row[19:])
 	if h == s.row_hash do return
 	s.row_hash = h
 	_broadcast(c, ipc.MSG_EVENT, row)
@@ -86,3 +95,4 @@ _send_sessions :: proc(c: ^Core, vi: int) {
 	for &s in c.sessions do if s.used do core_row_write(&w, c, &s)
 	if w.ok do ipc.stream_send(&c.viewers[vi].conn, ipc.MSG_SESSIONS, 0, ipc.wire_bytes_written(&w))
 }
+

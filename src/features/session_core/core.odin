@@ -66,31 +66,35 @@ Core_Link :: struct {
 }
 
 Core_Session :: struct {
-	used:          bool,
-	exited:        bool,
-	proc_pending:  bool,
-	settle_due_ns: i64, // output settles then: foreground process query + stale viewer resync (0 = nothing due)
-	id:            u32,
-	holder:        int,
-	started_unix:  i64,
-	row_hash:      u64,
-	exit:          ipc.Exit_Msg,
-	sess:          ^session.Terminal_Session,
-	relay:         terminal.Relay,
-	link:          Core_Link,
-	stitch:        ^Stitch_State, // nil until a read asks for alt-screen history
-	attaches:      [CORE_MAX_ATTACH]Core_Attach,
+	used:              bool,
+	exited:            bool,
+	proc_pending:      bool,
+	settle_due_ns:     i64, // output settles then: foreground process query + stale viewer resync (0 = nothing due)
+	id:                u32,
+	holder:            int,
+	started_unix:      i64,
+	row_hash:          u64,
+	exit:              ipc.Exit_Msg,
+	sess:              ^session.Terminal_Session,
+	relay:             terminal.Relay,
+	link:              Core_Link,
+	stitch:            ^Stitch_State, // nil until a read asks for alt-screen history
+	attaches:          [CORE_MAX_ATTACH]Core_Attach,
+	last_prompt_state: ipc.Prompt_State,
+	last_cmd_seq:      u32,
+	output_ns:         i64, // when its program last printed (or the session began)
+	endpoint:          Core_Endpoint, // a virtual session (core_endpoint.odin)
 }
 
 Core_Viewer :: struct {
-	used:         bool,
-	hello:        bool,
-	role:         ipc.Stream_Role,
-	seq:          u32, // per accepted connection: a stitch answers only its own reader
-	list_waiting: bool,
-	list_due_ns:  i64,
-	next_channel: u32,
-	conn:         ipc.Stream_Conn,
+	used:          bool,
+	hello:         bool,
+	role:          ipc.Stream_Role,
+	seq:           u32, // per accepted connection: a stitch answers only its own reader
+	list_waiting:  bool,
+	list_due_ns:   i64,
+	next_channel:  u32,
+	conn:          ipc.Stream_Conn,
 }
 
 Core :: struct {
@@ -112,6 +116,10 @@ Core :: struct {
 	holders:     [CORE_MAX_HOLDERS]Core_Holder,
 	sessions:    [CORE_MAX_SESSIONS]Core_Session,
 	viewers:     [CORE_MAX_VIEWERS]Core_Viewer,
+	watchers:    [CORE_MAX_WATCHERS]Core_Watcher,
+	broker:      Broker,
+	broker_due_ns: i64, // next request deadline (0 = none)
+	typed:       [dynamic]u8, // input the broker types into a session
 	viewer_out:  [dynamic]u8,
 	replies:     [dynamic]u8,
 	paint:       [dynamic]u8,
@@ -138,6 +146,8 @@ core_new :: proc() -> ^Core {
 	reserve(&c.viewer_out, 256 * 1024)
 	reserve(&c.replies, 4096)
 	reserve(&c.paint, 1 << 20)
+	reserve(&c.typed, BROKER_TEXT_CAP + 1024)
+	broker_init(&c.broker, _now)
 	return c
 }
 
@@ -212,7 +222,9 @@ core_destroy :: proc(c: ^Core) {
 	delete(c.replies)
 	delete(c.paint)
 	delete(c.text)
+	delete(c.typed)
 	delete(c.msg)
+	broker_destroy(&c.broker)
 	poller.poller_destroy(&c.poller)
 	free(c)
 }

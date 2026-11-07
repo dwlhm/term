@@ -8,7 +8,6 @@ import client "../../session_client"
 import ipc "../../../platform/ipc"
 
 // cli_ctl sends one channel-0 request: id + extra bytes; OK → ok, FAIL → its code.
-@(private = "file")
 cli_ctl :: proc(kind: u8, id: u32, extra: []u8 = nil) -> (ok: bool, code: ipc.Fail_Code) {
 	conn: ipc.Stream_Conn
 	if !cli_conn(&conn) do return
@@ -47,7 +46,6 @@ size_bytes :: proc(cols, rows: u16) -> [8]u8 {
 }
 
 // cli_screen reads a session's visible screen without attaching.
-@(private = "file")
 cli_screen :: proc(id: u32) -> string {
 	conn: ipc.Stream_Conn
 	if !cli_conn(&conn) do return ""
@@ -64,7 +62,6 @@ cli_screen :: proc(id: u32) -> string {
 	}
 }
 
-@(private = "file")
 wait_cli_screen :: proc(id: u32, want: string, ms := 5000) -> bool {
 	for _ in 0..<ms / 20 {
 		if contains(cli_screen(id), want) do return true

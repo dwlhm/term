@@ -485,5 +485,6 @@ main :: proc() {
 	}
 	defer app_destroy(app)
 
+	app_onboarding_check(app)
 	app_run(app)
 }

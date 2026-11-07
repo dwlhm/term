@@ -7,8 +7,11 @@ package term
 //            is checked (every WAIT_TEXT_POLL_MS): history would scroll a
 //            full-screen program on every check. Text that scrolls past between
 //            two checks is missed; wait for a line that stays, or --exit + read -n.
-// Exit codes: 0 done · 1 error · 2 no core · 3 timed out · 4 (--text) the
-// session exited or was removed first. Also the `send` unescape helper.
+//   --listening [--quiet s]  until a worker of the session waits in `next`
+//            (cli_agent_wait_listen.odin)
+// Exit codes: 0 done · 1 error · 2 no core · 3 timed out (or --quiet) · 4
+// (--text, --listening) the session exited or was removed first. Also the
+// `send` unescape helper.
 
 import "core:fmt"
 import "core:strconv"
@@ -27,18 +30,24 @@ WAIT_START_MS :: 1000 // a session that is idle at first gets this long to start
 WAIT_TEXT_POLL_MS :: 100
 
 @(private = "file")
-Wait_Mode :: enum {Idle, Exit, Text}
+Wait_Mode :: enum {Idle, Exit, Text, Listening}
 
 app_cli_agent_wait :: proc(id: u32, args: []string) -> int {
 	mode := Wait_Mode.Idle
 	text: string
-	limit := 600.0
+	limit, quiet := 600.0, 0.0
 	for rest := args; len(rest) > 0; {
 		switch {
 		case rest[0] == "--exit" && mode == .Idle:
 			mode, rest = .Exit, rest[1:]
 		case rest[0] == "--text" && mode == .Idle && len(rest) >= 2 && len(rest[1]) > 0:
 			mode, text, rest = .Text, rest[1], rest[2:]
+		case rest[0] == "--listening" && mode == .Idle:
+			mode, rest = .Listening, rest[1:]
+		case rest[0] == "--quiet" && len(rest) >= 2:
+			v, ok := app_arg_seconds(rest, 1)
+			if !ok do return _wait_usage()
+			quiet, rest = v, rest[2:]
 		case rest[0] == "-t" && len(rest) >= 2:
 			v, ok := strconv.parse_f64(rest[1])
 			if !ok || v <= 0 do return _wait_usage()
@@ -51,7 +60,9 @@ app_cli_agent_wait :: proc(id: u32, args: []string) -> int {
 	if !app_agent_conn(&conn, false) do return 2
 	defer plat_ipc.stream_conn_destroy(&conn)
 	deadline := time.tick_now()._nsec + i64(limit * 1e9)
+	if quiet > 0 && mode != .Listening do return _wait_usage()
 	if mode == .Text do return _wait_text(&conn, id, text, deadline)
+	if mode == .Listening do return app_wait_listening(&conn, id, deadline, quiet)
 	plat_ipc.stream_send(&conn, plat_ipc.MSG_LIST, 0)
 	return _wait_rows(&conn, id, deadline, mode == .Exit)
 }
@@ -165,20 +176,20 @@ _screen_answer :: proc(conn: ^plat_ipc.Stream_Conn, id: u32, exited: ^bool, exit
 // _first_row waits for the SESSIONS answer and finds id in it.
 @(private = "file")
 _first_row :: proc(conn: ^plat_ipc.Stream_Conn, id: u32) -> (plat_ipc.Session_Row, bool) {
-	f, ok := app_agent_answer(conn, plat_ipc.MSG_SESSIONS)
-	if !ok do return {}, false
+	f, code := app_agent_answer(conn, plat_ipc.MSG_SESSIONS)
+	if code != 0 do return {}, false
 	row, found := _find_row(f.payload, id)
 	if !found do fmt.eprintln("term: no such session")
 	return row, found
 }
 
-@(private = "file")
+@(private)
 _removed_id :: proc(payload: []u8) -> u32 {
 	r := plat_ipc.wire_reader(payload)
 	return plat_ipc.wr_u32(&r)
 }
 
-@(private = "file")
+@(private)
 _find_row :: proc(payload: []u8, id: u32) -> (row: plat_ipc.Session_Row, found: bool) {
 	r := plat_ipc.wire_reader(payload)
 	count := plat_ipc.wr_u32(&r)

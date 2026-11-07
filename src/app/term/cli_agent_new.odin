@@ -3,6 +3,8 @@ package term
 // `term session new [-d dir] [-s COLSxROWS] [-e KEY=VAL]… [-- prog args…]`:
 // the core creates the session and the CLI prints its id. Without a program
 // the session runs $SHELL; -e entries win over the inherited environment.
+// `term session new --endpoint <name>`: a virtual session (no program) that
+// lives until killed; an app takes its requests with `next --as <id>`.
 
 import "core:fmt"
 import "core:os"
@@ -56,6 +58,7 @@ app_cli_parse_size :: proc(s: string) -> (size: plat_ipc.Size_Msg, ok: bool) {
 }
 
 app_cli_agent_new :: proc(args: []string) -> int {
+	if len(args) > 0 && args[0] == "--endpoint" do return _new_endpoint(args[1:])
 	spec: plat_ipc.Spawn_Msg
 	if !app_cli_parse_new(args, &spec) {
 		fmt.eprintln(APP_CLI_USAGE)
@@ -73,10 +76,30 @@ app_cli_agent_new :: proc(args: []string) -> int {
 	if !app_agent_conn(&conn, true) do return 2
 	defer plat_ipc.stream_conn_destroy(&conn)
 	plat_ipc.stream_send(&conn, plat_ipc.MSG_CREATE, 0, plat_ipc.wire_bytes_written(&w))
-	f, ok := app_agent_answer(&conn, plat_ipc.MSG_ATTACHED)
-	if !ok do return 1
+	f, code := app_agent_answer(&conn, plat_ipc.MSG_ATTACHED)
+	if code != 0 do return code
 	r := plat_ipc.wire_reader(f.payload)
 	_, id := plat_ipc.wr_u32(&r), plat_ipc.wr_u32(&r)
 	fmt.println(id) // closing the connection detaches: the program keeps running
+	return 0
+}
+
+@(private = "file")
+_new_endpoint :: proc(args: []string) -> int {
+	if len(args) != 1 || len(args[0]) == 0 || len(args[0]) > 64 {
+		fmt.eprintln("usage: term session new --endpoint <name (1..64 bytes)>")
+		return 1
+	}
+	conn: plat_ipc.Stream_Conn
+	if !app_agent_conn(&conn, true) do return 2
+	defer plat_ipc.stream_conn_destroy(&conn)
+	b: [96]u8
+	w := plat_ipc.wire_writer(b[:])
+	plat_ipc.ww_str(&w, args[0]); plat_ipc.ww_bool(&w, false) // outlives this CLI: until killed
+	plat_ipc.stream_send(&conn, plat_ipc.MSG_ENDPOINT, 0, plat_ipc.wire_bytes_written(&w))
+	f, code := app_agent_answer(&conn, plat_ipc.MSG_OK)
+	if code != 0 do return code
+	r := plat_ipc.wire_reader(f.payload)
+	fmt.println(plat_ipc.wr_i32(&r))
 	return 0
 }

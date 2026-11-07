@@ -33,6 +33,8 @@ core_adopt_holders :: proc(c: ^Core) {
 	deadline := _now() + 2 * 1_000_000_000
 	for _core_unwelcomed(c) && _now() < deadline do _core_step(c)
 	core_sweep_snapshots(c)
+	core_endpoints_restore(c)
+	core_restore_broker(c)
 }
 
 core_current_holder :: proc(c: ^Core) -> int {

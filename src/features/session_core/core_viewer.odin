@@ -31,6 +31,10 @@ _viewer_drop :: proc(c: ^Core, vi: int) {
 		for &a in s.attaches do if a.used && a.viewer == vi do core_detach(c, &s, &a, false)
 	}
 	was_viewer := c.viewers[vi].hello && c.viewers[vi].role == .Viewer
+	core_watchers_cancel_viewer(c, vi)
+	broker_viewer_gone(&c.broker, vi)
+	core_broker_apply(c)
+	core_endpoints_owner_gone(c, vi)
 	ipc.stream_conn_destroy(&c.viewers[vi].conn)
 	c.viewers[vi] = {}
 	if c.owned && was_viewer && !_any_viewer(c) do for &s in c.sessions do if s.used do core_session_kill(c, &s)
@@ -70,8 +74,17 @@ _viewer_frame :: proc(c: ^Core, vi: int, f: ipc.Stream_Frame) -> bool {
 	case ipc.MSG_CREATE: _create(c, vi, &r)
 	case ipc.MSG_ATTACH: _attach(c, vi, &r)
 	case ipc.MSG_KILL:   core_viewer_kill(c, vi, &r)
+	case ipc.MSG_OBSERVE: core_viewer_observe(c, vi, &r)
 	case ipc.MSG_READ:   _read(c, vi, &r)
 	case ipc.MSG_SEND:   core_viewer_send(c, vi, &r)
+	case ipc.MSG_TELL:   core_viewer_tell(c, vi, &r)
+	case ipc.MSG_CANCEL: core_viewer_cancel(c, vi, &r)
+	case ipc.MSG_NEXT:     core_viewer_next(c, vi, &r)
+	case ipc.MSG_ANSWER:   core_viewer_answer(c, vi, &r, true)
+	case ipc.MSG_PROGRESS: core_viewer_answer(c, vi, &r, false)
+	case ipc.MSG_RESULT:   core_viewer_result(c, vi, &r)
+	case ipc.MSG_ENDPOINT: core_viewer_endpoint(c, vi, &r)
+	case ipc.MSG_WATCH:      core_viewer_watch(c, vi, &r)
 	case ipc.MSG_SESSION_SIGNAL: core_viewer_signal(c, vi, &r)
 	case ipc.MSG_SESSION_SIZE:   core_viewer_resize(c, vi, &r)
 	case ipc.MSG_DETACH:

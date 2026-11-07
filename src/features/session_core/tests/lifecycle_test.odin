@@ -146,3 +146,18 @@ test_list_waits_for_proc_info :: proc(t: ^testing.T) {
 	view_close(v)
 	testing.expect(t, tiers_stop(tiers), "tiers end")
 }
+
+// A window sizes a new pane before the core answers the create: that size must
+// reach the program, not the size the create asked for.
+@(test)
+test_resize_while_pending_reaches_program :: proc(t: ^testing.T) {
+	tiers := tiers_start()
+	v := view_open()
+	s := view_sh(v, "sleep 0.3; stty size; sleep 30")
+	session.session_resize(s, 132, 40)
+	testing.expect(t, view_attached(v, s) != 0, "create attaches")
+	ok := view_wait_screen(v, s, "40 132")
+	testing.expect(t, ok, "the program sees the size set while pending")
+	view_close(v)
+	testing.expect(t, tiers_stop(tiers), "tiers end and remove the dir")
+}

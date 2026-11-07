@@ -14,7 +14,7 @@ import client_feat "../../features/session_client"
 import plat_ipc "../../platform/ipc"
 
 @(private = "file")
-CLI_COLUMNS :: 8
+CLI_COLUMNS :: 9
 
 @(private = "file")
 CLI_WAIT_MS :: 3000
@@ -84,7 +84,7 @@ _cli_print_sessions :: proc(payload: []u8) {
 	r := plat_ipc.wire_reader(payload)
 	count := int(plat_ipc.wr_u32(&r))
 	table := make([dynamic][CLI_COLUMNS]string, context.temp_allocator)
-	append(&table, [CLI_COLUMNS]string{"ID", "STATE", "SHOWN", "PID", "ELAPSED", "PROCESS", "CWD", "STATUS"})
+	append(&table, [CLI_COLUMNS]string{"ID", "STATE", "SHOWN", "PID", "ELAPSED", "PROCESS", "CWD", "REQUEST", "STATUS"})
 	for _ in 0..<count {
 		row := plat_ipc.dec_row(&r)
 		if !r.ok do break
@@ -111,8 +111,19 @@ _cli_cells :: proc(r: plat_ipc.Session_Row) -> [CLI_COLUMNS]string {
 	state := [plat_ipc.Session_State]string{.Idle = "idle", .Busy = "busy", .Exited = "exited"}
 	return {
 		fmt.tprintf("%d", r.id), state[r.state], "yes" if r.attached else "-", fmt.tprintf("%d", r.pid),
-		_cli_elapsed(int(r.elapsed_s)), _cli_clean(r.process), _cli_home_relative(_cli_clean(r.cwd)), _cli_clean(r.status),
+		_cli_elapsed(int(r.elapsed_s)), fmt.tprintf("%s (endpoint)", _cli_clean(r.process)) if r.endpoint else _cli_clean(r.process), _cli_home_relative(_cli_clean(r.cwd)), _cli_request(r.request), _cli_clean(r.status),
 	}
+}
+
+// _cli_request: "serves #7" (+N more), "awaits 2", "listens 1" (free worker slots).
+@(private = "file")
+_cli_request :: proc(m: plat_ipc.Row_Request) -> string {
+	b := strings.builder_make(context.temp_allocator)
+	if m.serving > 0 do fmt.sbprintf(&b, "serves #%d%s ", m.serving_id, fmt.tprintf("+%d", m.serving - 1) if m.serving > 1 else "")
+	if m.awaiting > 0 do fmt.sbprintf(&b, "awaits %d ", m.awaiting)
+	if m.listening > 0 do fmt.sbprintf(&b, "listens %d ", m.listening)
+	out := strings.trim_right(strings.to_string(b), " ")
+	return out if len(out) > 0 else "-"
 }
 
 // _cli_clean drops control characters a program may have put in its title/status.

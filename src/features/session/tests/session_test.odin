@@ -19,6 +19,7 @@ Loopback_Link :: struct {
 loopback_session :: proc(l: ^Loopback_Link, cols: u16 = 80, rows: u16 = 24) -> ^session.Terminal_Session {
 	return session.session_create({cols = cols, rows = rows}, {
 		write    = proc(user: rawptr, data: []u8) { append(&(^Loopback_Link)(user).written, ..data) },
+		reply    = proc(user: rawptr, data: []u8) { append(&(^Loopback_Link)(user).written, ..data) },
 		resize   = proc(user: rawptr, size: ipc.Size_Msg) {
 			l := (^Loopback_Link)(user)
 			l.size, l.resized = size, l.resized + 1

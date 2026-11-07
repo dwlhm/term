@@ -190,7 +190,7 @@ _new_link :: proc(c: ^Client, size: ipc.Size_Msg) -> ^Client_Link {
 		if l.state != .Free do continue
 		c.next_token += 1
 		l = {state = .Pending, token = c.next_token, client = c}
-		l.sess = session.session_create(size, {write = _link_write, resize = _link_resize, consumed = _link_consumed, user = &l})
+		l.sess = session.session_create(size, {write = _link_write, reply = _link_reply, resize = _link_resize, consumed = _link_consumed, user = &l})
 		return &l
 	}
 	return nil

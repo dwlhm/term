@@ -23,9 +23,10 @@ core_session_count :: proc(c: ^Core) -> int {
 _session_new :: proc(c: ^Core, id: u32, holder: int, size: ipc.Size_Msg) -> ^Core_Session {
 	for &s in c.sessions {
 		if s.used do continue
-		s = {used = true, id = id, holder = holder, started_unix = _now_unix()}
+		s = {used = true, id = id, holder = holder, started_unix = _now_unix(), output_ns = _now()}
 		s.link = {core = c, id = id}
-		s.sess = session.session_create(size, {write = _link_write, resize = _link_resize, user = &s.link})
+		// The core's own Terminal has no typist: its replies and writes both go to the program.
+		s.sess = session.session_create(size, {write = _link_write, reply = _link_write, resize = _link_resize, user = &s.link})
 		c.next_id = max(c.next_id, id + 1)
 		return &s
 	}
@@ -120,7 +121,11 @@ core_session_output :: proc(c: ^Core, s: ^Core_Session, bytes: []u8) {
 	}
 	// A command starting or ending prints something: look at the foreground (and
 	// resync viewers that skipped output) once it settles.
-	s.settle_due_ns = _now() + CORE_SETTLE_MS * 1_000_000
+	s.output_ns = _now()
+	s.settle_due_ns = s.output_ns + CORE_SETTLE_MS * 1_000_000
+	edges := core_shell_edges(s)
+	core_watch_output(c, s, edges)
+	core_broker_shell_edges(c, s, edges)
 	core_row_changed(c, s)
 }
 
@@ -154,6 +159,8 @@ core_session_exited :: proc(c: ^Core, s: ^Core_Session, exit: ipc.Exit_Msg, reas
 		else do ipc.stream_channel_finish(&v.conn, a.channel)
 		a = {}
 	}
+	core_watch_trigger(c, s, .Exit)
+	core_broker_session_gone(c, s.id, exit.code)
 	core_broadcast_row(c, s)
 }
 
@@ -172,6 +179,8 @@ core_session_kill :: proc(c: ^Core, s: ^Core_Session) {
 	core_stitch_abort(c, s)
 	for &a in s.attaches do if a.used do ipc.stream_channel_close(&c.viewers[a.viewer].conn, a.channel, "killed")
 	id := s.id
+	core_watch_target_gone(c, s)
+	core_broker_session_gone(c, id, s.exit.code)
 	core_session_free(c, s)
 	b := _i32_bytes(i32(id))
 	for &v in c.viewers do if v.used && v.hello do ipc.stream_send(&v.conn, ipc.MSG_REMOVED, 0, b[:])

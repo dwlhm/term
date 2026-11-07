@@ -280,7 +280,7 @@ session_flush_responses :: proc(sess: ^Terminal_Session) {
 	for {
 		resp_n := terminal.terminal_drain_response(&sess.term, resp_buf[:])
 		if resp_n <= 0 do break
-		session_write(sess, resp_buf[:resp_n])
+		if sess.link.reply != nil do sess.link.reply(sess.link.user, resp_buf[:resp_n])
 	}
 }
 

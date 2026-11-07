@@ -138,7 +138,11 @@ core_attach_frame :: proc(c: ^Core, vi: int, f: ipc.Stream_Frame) {
 	case ipc.MSG_V_INPUT:
 		// The typist owns the size first: its input is read at its size.
 		core_attach_touch(c, s, a)
+		core_broker_human_input(c, s, f.payload)
 		if core_stitch_hold(s, f.payload) do return // delivered when the stitch ends
+		if !s.exited do core_holder_send(c, s.holder, ipc.MSG_INPUT, s.id, f.payload)
+	case ipc.MSG_V_REPLY:
+		if core_stitch_hold(s, f.payload) do return
 		if !s.exited do core_holder_send(c, s.holder, ipc.MSG_INPUT, s.id, f.payload)
 	case ipc.MSG_V_RESIZE:
 		size := ipc.dec_size(&r)

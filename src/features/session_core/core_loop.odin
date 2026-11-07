@@ -50,6 +50,8 @@ _core_step :: proc(c: ^Core) {
 	core_lists_due(c)
 	core_settle_due(c, _now())
 	core_stitch_tick(c)
+	if c.broker_due_ns > 0 && _now() >= c.broker_due_ns do core_broker_tick(c, _now())
+	core_watchers_due(c, _now())
 	for &h in c.holders do if h.used do ipc.stream_flush(&h.conn)
 	for &v in c.viewers do if v.used do ipc.stream_flush(&v.conn)
 }
@@ -59,7 +61,14 @@ _core_step :: proc(c: ^Core) {
 @(private = "file")
 _timeout_ms :: proc(c: ^Core) -> int {
 	due := i64(-1)
-	for &v in c.viewers do if v.used && v.list_waiting do due = _earliest(due, v.list_due_ns)
+	for &v in c.viewers {
+		if !v.used do continue
+		if v.list_waiting do due = _earliest(due, v.list_due_ns)
+	}
+	if c.broker_due_ns > 0 do due = _earliest(due, c.broker_due_ns)
+	for &w in c.watchers {
+		if w.used && w.due_ns > 0 do due = _earliest(due, w.due_ns)
+	}
 	for &s in c.sessions {
 		if !s.used do continue
 		if s.settle_due_ns != 0 do due = _earliest(due, s.settle_due_ns)

@@ -117,7 +117,8 @@ dec_facts :: proc(r: ^Wire_Reader) -> (m: Facts_Msg) {
 
 enc_row :: proc(w: ^Wire_Writer, m: Session_Row) {
 	ww_u32(w, m.id); ww_u8(w, u8(m.state)); ww_bool(w, m.active); ww_bool(w, m.attached)
-	ww_u32(w, m.pid); ww_u32(w, m.elapsed_s); ww_i32(w, m.exit_code)
+	ww_u32(w, m.pid); ww_u32(w, m.elapsed_s); ww_u32(w, m.quiet_s); ww_i32(w, m.exit_code); ww_bool(w, m.endpoint)
+	enc_row_request(w, m.request)
 	ww_str(w, m.process); ww_str(w, m.cwd); ww_str(w, m.title); ww_str(w, m.status)
 }
 
@@ -127,8 +128,72 @@ dec_row :: proc(r: ^Wire_Reader) -> (m: Session_Row) {
 	if state < u8(Session_State.Idle) || state > u8(Session_State.Exited) do r.ok = false
 	m.state = Session_State(state)
 	m.active, m.attached = wr_bool(r), wr_bool(r)
-	m.pid, m.elapsed_s, m.exit_code = wr_u32(r), wr_u32(r), wr_i32(r)
+	m.pid, m.elapsed_s, m.quiet_s, m.exit_code, m.endpoint = wr_u32(r), wr_u32(r), wr_u32(r), wr_i32(r), wr_bool(r)
+	m.request = dec_row_request(r)
 	m.process, m.cwd, m.title, m.status = wr_str(r), wr_str(r), wr_str(r), wr_str(r)
+	return
+}
+
+enc_observe_result :: proc(w: ^Wire_Writer, m: Observe_Result) {
+	enc_row(w, m.row)
+	ww_u16(w, m.cols); ww_u16(w, m.rows)
+	ww_bool(w, m.is_alt)
+	ww_u8(w, u8(m.prompt_state))
+	ww_bool(w, m.has_cmd_exit)
+	ww_i32(w, m.cmd_exit_code)
+	ww_u32(w, m.cmd_seq)
+	ww_str(w, m.text)
+}
+
+dec_observe_result :: proc(r: ^Wire_Reader) -> (m: Observe_Result) {
+	m.row = dec_row(r)
+	m.cols, m.rows = wr_u16(r), wr_u16(r)
+	m.is_alt = wr_bool(r)
+	ps := wr_u8(r)
+	if ps > u8(Prompt_State.Executing) do r.ok = false
+	m.prompt_state = Prompt_State(ps)
+	m.has_cmd_exit = wr_bool(r)
+	m.cmd_exit_code = wr_i32(r)
+	m.cmd_seq = wr_u32(r)
+	m.text = wr_str(r)
+	return
+}
+
+enc_watch_req :: proc(w: ^Wire_Writer, m: Watch_Request) {
+	ww_u32(w, m.id)
+	ww_u8(w, transmute(u8)m.events)
+	ww_u32(w, m.timeout_ms)
+	ww_bool(w, m.has_since)
+	ww_u32(w, m.since)
+}
+
+dec_watch_req :: proc(r: ^Wire_Reader) -> (m: Watch_Request) {
+	m.id = wr_u32(r)
+	m.events = transmute(Watch_Event_Flags)wr_u8(r)
+	m.timeout_ms = wr_u32(r)
+	m.has_since = wr_bool(r)
+	m.since = wr_u32(r)
+	return
+}
+
+enc_watch_result :: proc(w: ^Wire_Writer, m: Watch_Result) {
+	ww_u32(w, m.id)
+	ww_u8(w, u8(m.event))
+	ww_i32(w, m.exit_code)
+	ww_u8(w, u8(m.prompt_state))
+	ww_u32(w, m.cmd_seq)
+}
+
+dec_watch_result :: proc(r: ^Wire_Reader) -> (m: Watch_Result) {
+	m.id = wr_u32(r)
+	ev := wr_u8(r)
+	if ev > u8(Watch_Event.Exit) do r.ok = false
+	m.event = Watch_Event(ev)
+	m.exit_code = wr_i32(r)
+	ps := wr_u8(r)
+	if ps > u8(Prompt_State.Executing) do r.ok = false
+	m.prompt_state = Prompt_State(ps)
+	m.cmd_seq = wr_u32(r)
 	return
 }
 

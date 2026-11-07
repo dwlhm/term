@@ -8,6 +8,9 @@ import "core:fmt"
 import "core:os"
 import "core:sys/posix"
 
+// SESSION_ID_ENV names the session a program runs in (set for every spawn,
+// last so it wins over an inherited one): `term session` verbs default to it.
+SESSION_ID_ENV :: "TERM_SESSION_ID"
 SESSION_DIR_ENV :: "TERM_SESSION_DIR" // a private session (Standalone runs, tests)
 // "1": one viewer process owns the session dir (client_use_private_session):
 // the core ends every session when that owner's last viewer link goes.

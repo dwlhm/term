@@ -56,6 +56,16 @@ install: bundle
 	@rm -rf /Applications/Term.app
 	ditto $(OUT_DIR)/Term.app /Applications/Term.app
 	@echo "Installed Term.app to /Applications successfully."
+	@mkdir -p $(HOME)/.local/bin
+	@ln -sf /Applications/Term.app/Contents/MacOS/term $(HOME)/.local/bin/term
+	@echo "Configuring Term agent skills..."
+	@/Applications/Term.app/Contents/MacOS/term skill setup || true
+
+link: term
+	@mkdir -p $(HOME)/.local/bin
+	@ln -sf $(CURDIR)/$(OUT_DIR)/term $(HOME)/.local/bin/term
+	@echo "Linked $(CURDIR)/$(OUT_DIR)/term -> $(HOME)/.local/bin/term"
+	@$(CURDIR)/$(OUT_DIR)/term skill setup || true
 
 uninstall:
 	@echo "Uninstalling Term.app from /Applications..."

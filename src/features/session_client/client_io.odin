@@ -95,6 +95,9 @@ _bind_attached :: proc(c: ^Client, payload: []u8) {
 		}
 		if l.state != .Pending do continue
 		l.id, l.channel, l.state = id, channel, .Attached
+		// The size first: held input then reaches a program that already has it.
+		if size, resized := l.pending_size.?; resized do client_send_size(c, channel, size)
+		l.pending_size = nil
 		if l.pending_len > 0 do ipc.stream_send(&c.conn, ipc.MSG_V_INPUT, channel, l.pending[:l.pending_len])
 		l.pending_len = 0
 		return

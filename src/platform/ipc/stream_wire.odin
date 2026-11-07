@@ -37,6 +37,7 @@ ww_u16 :: proc(w: ^Wire_Writer, v: u16) { if d := _room(w, 2); d != nil do d[0],
 ww_u32 :: proc(w: ^Wire_Writer, v: u32) { if d := _room(w, 4); d != nil do _put_u32(d, v) }
 ww_i32 :: proc(w: ^Wire_Writer, v: i32) { ww_u32(w, u32(v)) }
 ww_u64 :: proc(w: ^Wire_Writer, v: u64) { ww_u32(w, u32(v)); ww_u32(w, u32(v >> 32)) }
+ww_i64 :: proc(w: ^Wire_Writer, v: i64) { ww_u64(w, u64(v)) }
 ww_bool :: proc(w: ^Wire_Writer, v: bool) { ww_u8(w, 1 if v else 0) }
 
 ww_bytes :: proc(w: ^Wire_Writer, b: []u8) {
@@ -77,6 +78,8 @@ wr_u64 :: proc(r: ^Wire_Reader) -> u64 {
 	lo := u64(wr_u32(r))
 	return lo | u64(wr_u32(r)) << 32
 }
+
+wr_i64 :: proc(r: ^Wire_Reader) -> i64 { return i64(wr_u64(r)) }
 
 wr_bool :: proc(r: ^Wire_Reader) -> bool { return wr_u8(r) != 0 }
 
