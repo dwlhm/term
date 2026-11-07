@@ -71,7 +71,8 @@ Stream_Role :: enum u8 { Core = 1, Holder, Viewer, Cli }
 
 Goodbye :: enum u8 { Handover = 1, Shutdown }
 
-Fail_Code :: enum u8 { Not_Found = 1, Exited, Bad_Request, Spawn_Failed, Busy, Version, Timeout }
+// Unsupported: the program did not ask for that input (mouse reports, a key it has no encoding for).
+Fail_Code :: enum u8 { Not_Found = 1, Exited, Bad_Request, Spawn_Failed, Busy, Version, Timeout, Unsupported }
 
 Hello_Msg :: struct {
 	version: u32,

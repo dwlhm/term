@@ -6,8 +6,10 @@ package platform_ipc
 
 MSG_SNAPSHOT        :: u8(103) // Snapshot_Request → MSG_SNAPSHOT_RESULT | MSG_FAIL
 MSG_SETTLE          :: u8(104) // Settle_Request → MSG_SETTLE_RESULT | MSG_FAIL (Timeout, Not_Found)
+MSG_ACT             :: u8(105) // u32 session + u8 Act_Kind + its body → MSG_ACT_RESULT | MSG_FAIL
 MSG_SNAPSHOT_RESULT :: u8(92)  // Snapshot
 MSG_SETTLE_RESULT   :: u8(93)  // Settle_Result
+MSG_ACT_RESULT      :: u8(94)  // u32 session + u64 gen: the screen generation the input went in at
 
 SNAPSHOT_HISTORY_MAX :: 10_000 // history lines one snapshot may carry
 
@@ -105,4 +107,32 @@ Settle_Result :: struct {
 	gen:       u64,
 	exited:    bool,
 	exit_code: i32,
+}
+
+// MSG_ACT: input encoded by the core for the modes the program has asked for
+// at that moment. Keys are taps (press, then release when the program reports
+// releases). Values mirror core/terminal/input_encode: Act_Key.key is its Key,
+// mods its Mods bits (1 Shift, 2 Alt, 4 Ctrl, 8 Super).
+Act_Kind :: enum u8 {
+	Keys  = 1, // u32 n + n Act_Key
+	Text  = 2, // bool paste + str. Typed: every character is a key tap (\n Enter, \t Tab);
+	           // paste: one bracketed paste when the program enabled ?2004, else typed
+	Mouse = 3, // Act_Mouse
+}
+
+ACT_KEYS_MAX :: 64
+ACT_TEXT_MAX :: 64 * 1024
+
+Act_Key :: struct {
+	key:  u8,
+	char: u32, // Key.Char only: printable ASCII
+	mods: u8,
+}
+
+Act_Mouse :: struct {
+	kind:   u8, // input_encode.Mouse_Kind: 0 press, 1 release, 2 motion, 3 wheel up, 4 wheel down
+	button: u8, // 0 left, 1 middle, 2 right, 3 none
+	mods:   u8,
+	col:    u16, // 1-based cell
+	row:    u16,
 }

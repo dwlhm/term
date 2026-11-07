@@ -129,6 +129,7 @@ Core :: struct {
 	snap_runs:   [dynamic]ipc.Snap_Run, // one snapshot row
 	snap_spans:  [dynamic][2]int, // its runs' text in c.text
 	snap_links:  [dynamic]u16, // OSC 8 ids one snapshot refers to
+	act:         [dynamic]u8, // one MSG_ACT's encoded input
 	msg:         []u8, // one encoded payload
 }
 
@@ -230,6 +231,7 @@ core_destroy :: proc(c: ^Core) {
 	delete(c.snap_runs)
 	delete(c.snap_spans)
 	delete(c.snap_links)
+	delete(c.act)
 	delete(c.typed)
 	delete(c.msg)
 	broker_destroy(&c.broker)

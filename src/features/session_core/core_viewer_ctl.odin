@@ -118,7 +118,7 @@ core_viewer_observe :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 
 // _target reads the session id and answers FAIL when the session is unknown,
 // or (live) has exited.
-@(private = "file")
+@(private)
 _target :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader, live: bool, exact := true) -> ^Core_Session {
 	id := ipc.wr_u32(r)
 	s := core_session_find(c, id)
@@ -132,7 +132,7 @@ _target :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader, live: bool, exact := tru
 }
 
 // _no_program fails a request that needs a program when s is an endpoint.
-@(private = "file")
+@(private)
 _no_program :: proc(c: ^Core, vi: int, s: ^Core_Session) -> bool {
 	if !s.endpoint.used do return false
 	core_viewer_fail(c, vi, 0, .Bad_Request, "an endpoint runs no program: talk to it with tell")

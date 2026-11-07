@@ -45,7 +45,8 @@ connection is closed.
 | `EVENT` (83) | a session row that changed (broadcast to every client: skip it, or follow rows) |
 
 FAIL codes: 1 Not_Found · 2 Exited (a request ended) · 3 Bad_Request ·
-4 Spawn_Failed · 5 Busy · 6 Version · 7 Timeout.
+4 Spawn_Failed · 5 Busy · 6 Version · 7 Timeout · 8 Unsupported (the program did not
+ask for that input: mouse reports, a key it has no encoding for).
 
 ## Requests (the broker)
 
@@ -120,10 +121,11 @@ u32 listening · str process · str cwd · str title · str status.
 The other verbs (`observe`, `read`, `send`, `signal`, `watch`, `new`) are in
 `src/platform/ipc/stream_msg.odin`, next to the message numbers.
 
-## Automation: snapshot and settle
+## Automation: snapshot, settle and act
 
-What a program shows, parsed once by the core (never raw PTY bytes), and a wait
-for the screen to change. Neither resizes, scrolls or focuses the session.
+What a program shows, parsed once by the core (never raw PTY bytes), a wait
+for the screen to change, and input for it. None of them resizes, scrolls or
+focuses the session.
 Field-by-field types are in `src/platform/ipc/stream_msg_auto.odin`, the order
 in `stream_codec_auto.odin`.
 
@@ -131,10 +133,24 @@ in `stream_codec_auto.odin`.
 |---|---|---|
 | `SNAPSHOT` (103) | u32 session · u32 history (≤ 10 000) · i64 since (< 0: none) | `SNAPSHOT_RESULT` (92) · `FAIL` 1 / 3 / 5 (a `read` is scrolling it) |
 | `SETTLE` (104) | u32 session · u64 since · u32 quiet_ms · u32 timeout_ms (0: none) | `SETTLE_RESULT` (93) u32 session · u64 gen · bool exited · i32 exit_code · `FAIL` 1 / 7 |
+| `ACT` (105) | u32 session · u8 kind (1 keys · 2 text · 3 mouse) · body | `ACT_RESULT` (94) u32 session · u64 gen (the generation the input went in at) · `FAIL` 1 / 2 / 3 / 5 / 8 |
 
 - **Generation.** `gen` grows with every output chunk and every resize. `SETTLE`
   answers when `gen > since` and the program printed nothing for `quiet_ms`, or
   at once when the session exited. Pass the `gen` of your last snapshot.
+- **Input.** The core encodes `ACT` with the modes the program has asked for
+  at that moment (DECCKM, Kitty flags, ?2004, mouse mode and format), the same
+  encoder the window uses. Keys: u32 n (1..64) + n × (u8 key · u32 char ·
+  u8 mods); key and mods are `core/terminal/input_encode` `Key` and `Mods`
+  (1 Shift, 2 Alt, 4 Ctrl, 8 Super), char is printable ASCII for `Key.Char`;
+  each key is a tap (press, then release when the program reports releases).
+  Text: bool paste · str (1 byte..64 KiB). Typed text is one key tap per
+  character (`\n` Enter, `\t` Tab, an uppercase letter is Shift + the
+  letter); a paste is one bracketed paste when the program enabled ?2004
+  (an embedded `ESC [201~` is dropped), else typed. Mouse: u8 kind (0 press,
+  1 release, 2 motion, 3 wheel up, 4 wheel down) · u8 button (0 left,
+  1 middle, 2 right, 3 none) · u8 mods · u16 col · u16 row (1-based cells).
+  Input counts as typing: it ends a shell-adapter request like `send`.
 - **Lines.** A line number is `top_line + row`; it stays the same as the line
   scrolls into history. `history` returns at most that many lines above the
   screen, only lines `>= since` when since is set: pass the last `top_line` to

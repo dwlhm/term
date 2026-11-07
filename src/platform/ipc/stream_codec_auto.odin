@@ -129,3 +129,27 @@ dec_settle_result :: proc(r: ^Wire_Reader) -> (m: Settle_Result) {
 	m.id, m.gen, m.exited, m.exit_code = wr_u32(r), wr_u64(r), wr_bool(r), wr_i32(r)
 	return
 }
+
+enc_act_keys :: proc(w: ^Wire_Writer, id: u32, keys: []Act_Key) {
+	ww_u32(w, id); ww_u8(w, u8(Act_Kind.Keys)); ww_u32(w, u32(len(keys)))
+	for k in keys {
+		ww_u8(w, k.key); ww_u32(w, k.char); ww_u8(w, k.mods)
+	}
+}
+
+enc_act_text :: proc(w: ^Wire_Writer, id: u32, text: string, paste: bool) {
+	ww_u32(w, id); ww_u8(w, u8(Act_Kind.Text)); ww_bool(w, paste); ww_str(w, text)
+}
+
+enc_act_mouse :: proc(w: ^Wire_Writer, id: u32, m: Act_Mouse) {
+	ww_u32(w, id); ww_u8(w, u8(Act_Kind.Mouse))
+	ww_u8(w, m.kind); ww_u8(w, m.button); ww_u8(w, m.mods); ww_u16(w, m.col); ww_u16(w, m.row)
+}
+
+dec_act_key :: proc(r: ^Wire_Reader) -> Act_Key {
+	return {key = wr_u8(r), char = wr_u32(r), mods = wr_u8(r)}
+}
+
+dec_act_mouse :: proc(r: ^Wire_Reader) -> Act_Mouse {
+	return {kind = wr_u8(r), button = wr_u8(r), mods = wr_u8(r), col = wr_u16(r), row = wr_u16(r)}
+}

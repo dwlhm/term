@@ -88,6 +88,7 @@ _viewer_frame :: proc(c: ^Core, vi: int, f: ipc.Stream_Frame) -> bool {
 	case ipc.MSG_WATCH:      core_viewer_watch(c, vi, &r)
 	case ipc.MSG_SNAPSHOT:   core_viewer_snapshot(c, vi, &r)
 	case ipc.MSG_SETTLE:     core_viewer_settle(c, vi, &r)
+	case ipc.MSG_ACT:        core_viewer_act(c, vi, &r)
 	case ipc.MSG_SESSION_SIGNAL: core_viewer_signal(c, vi, &r)
 	case ipc.MSG_SESSION_SIZE:   core_viewer_resize(c, vi, &r)
 	case ipc.MSG_DETACH:
