@@ -1,21 +1,27 @@
 package term
 
-// Opt-in runtime diagnostics for stress testing: telemetry stream and grid snapshots.
+// Opt-in runtime diagnostics: telemetry stream, grid snapshots and (env
+// TERM_DEBUG_KEYS=1) every key and text event on stderr, to see what the
+// platform delivers for a shortcut.
 // Part of Tier 3 Application Shell (src/app/term/*).
 
 import "core:fmt"
+import "core:os"
+import "vendor:sdl3"
 import telemetry "../../features/telemetry"
 
 Diagnostics :: struct {
 	tel:           telemetry.Telemetry,
 	grid_dump_dir: string,
 	dump_seq:      int,
+	debug_keys:    bool,
 }
 
 diagnostics_init :: proc(d: ^Diagnostics, opts: Cli_Options) {
 	if len(opts.telemetry_path) > 0 && !telemetry.telemetry_open(&d.tel, opts.telemetry_path) {
 		fmt.eprintfln("warning: cannot open telemetry file %q", opts.telemetry_path)
 	}
+	d.debug_keys = os.get_env("TERM_DEBUG_KEYS", context.temp_allocator) == "1"
 	d.grid_dump_dir = opts.grid_dump_dir
 	if len(d.grid_dump_dir) > 0 && !telemetry.grid_dump_install_signal() {
 		fmt.eprintln("warning: cannot install SIGUSR1 grid dump handler")
@@ -44,4 +50,15 @@ diagnostics_dump_grids :: proc(app: ^Term_App) {
 diagnostics_shutdown :: proc(app: ^Term_App) {
 	diagnostics_dump_grids(app)
 	telemetry.telemetry_close(&app.diag.tel)
+}
+
+// diagnostics_key logs a key event (TERM_DEBUG_KEYS=1).
+diagnostics_key :: proc(d: ^Diagnostics, what: string, ev: sdl3.KeyboardEvent) {
+	if !d.debug_keys do return
+	fmt.eprintfln("term: %s key=0x%x (%q) scancode=%v mod=0x%x repeat=%v", what, u32(ev.key), sdl3.GetKeyName(ev.key), ev.scancode, transmute(u16)ev.mod, ev.repeat)
+}
+
+// diagnostics_text logs a text input event (TERM_DEBUG_KEYS=1).
+diagnostics_text :: proc(d: ^Diagnostics, text: string) {
+	if d.debug_keys do fmt.eprintfln("term: text %q", text)
 }

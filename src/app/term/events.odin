@@ -891,11 +891,13 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 			dirty.term = true
 			dirty.chrome = true
 			cursor_reset_blink(&app.cursor, u64(time.duration_nanoseconds(time.since(app.start_time))))
+			diagnostics_text(&app.diag, string(ev.text.text))
 			app_handle_text_input(app, string(ev.text.text))
 		case .KEY_DOWN:
 			dirty.term = true
 			dirty.chrome = true
 			cursor_reset_blink(&app.cursor, u64(time.duration_nanoseconds(time.since(app.start_time))))
+			diagnostics_key(&app.diag, "down", ev.key)
 			app_handle_key_down(app, ev.key)
 			if app_update_hyperlink_hover(app) do dirty.term = true
 		case .KEY_UP:
