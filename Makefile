@@ -228,10 +228,10 @@ IPC_GREEN_LIST := \
 	test_P7_unsafe_dirs_are_refused \
 	test_P8_call_gets_its_answer \
 	test_P9_application_fail_code_reaches_the_client \
-	test_P9_fail_with_reserved_code_3_asserts \
-	test_P9_fail_with_reserved_code_5_asserts \
-	test_P9_fail_with_reserved_code_6_asserts \
-	test_P9_fail_with_reserved_code_7_asserts \
+	test_P9_application_sends_bad_request \
+	test_P9_application_sends_busy \
+	test_P9_application_sends_timeout \
+	test_P9_fail_with_version_code_asserts \
 	test_P10_unanswered_call_times_out_at_5s \
 	test_P11_server_gone_ends_a_forever_wait \
 	test_P12_notice_before_the_answer \

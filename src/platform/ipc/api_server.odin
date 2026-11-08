@@ -175,7 +175,7 @@ reply :: proc(s: ^Server, req: Request, body: ..[]u8) {
 }
 
 fail :: proc(s: ^Server, req: Request, code: u8, reason: string) {
-	when ODIN_TEST do assert(code != FAIL_BAD_REQUEST && code != FAIL_BUSY && code != FAIL_VERSION && code != FAIL_TIMEOUT, _ASSERT_RESERVED_FAIL)
+	when ODIN_TEST do assert(code != FAIL_VERSION, _ASSERT_RESERVED_FAIL)
 	k := _server(s)
 	if k == nil do return
 	if k.line != nil {

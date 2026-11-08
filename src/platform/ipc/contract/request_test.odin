@@ -1,6 +1,6 @@
 package platform_ipc_contract
 
-// P9 (reserved codes), P16–P18: the Server's side of a request. Raw peers
+// P9 (FAIL codes the package shares or keeps), P16–P18: the Server's side of a request. Raw peers
 // send exactly the frames under test; the server runs on the test thread.
 
 import "core:sys/posix"
@@ -46,10 +46,41 @@ _reserved_code_asserts :: proc(t: ^testing.T, code: u8) {
 	ipc.fail(&in_.srv, req, code, "reserved")
 }
 
-@(test) test_P9_fail_with_reserved_code_3_asserts :: proc(t: ^testing.T) { _reserved_code_asserts(t, ipc.FAIL_BAD_REQUEST) }
-@(test) test_P9_fail_with_reserved_code_5_asserts :: proc(t: ^testing.T) { _reserved_code_asserts(t, ipc.FAIL_BUSY) }
-@(test) test_P9_fail_with_reserved_code_6_asserts :: proc(t: ^testing.T) { _reserved_code_asserts(t, ipc.FAIL_VERSION) }
-@(test) test_P9_fail_with_reserved_code_7_asserts :: proc(t: ^testing.T) { _reserved_code_asserts(t, ipc.FAIL_TIMEOUT) }
+// FAIL_VERSION belongs to the handshake: an application never sends it.
+@(test) test_P9_fail_with_version_code_asserts :: proc(t: ^testing.T) { _reserved_code_asserts(t, ipc.FAIL_VERSION) }
+
+// FAIL_BAD_REQUEST, FAIL_BUSY and FAIL_TIMEOUT keep their meaning when the
+// application sends them (a body it cannot use, a limit it hit, a wait that
+// ran out): they reach the client as Error{.Failed, code} (spec v23 K10).
+@(private = "file")
+_Coded :: struct {
+	code: u8,
+}
+
+@(private = "file")
+_shared_code_reaches_the_client :: proc(t: ^testing.T, code: u8) {
+	testing.set_fail_timeout(t, 10 * time.Second)
+	dir := test_dir()
+	defer test_dir_remove(dir)
+	coded := _Coded{code}
+	o := Owner{data = &coded, handle = proc(o: ^Owner, ev: ipc.Server_Event) {
+		if req, ok := ev.(ipc.Request); ok do ipc.fail(&o.srv, req, (^_Coded)(o.data).code, "shared")
+	}}
+	if !owner_open(t, &o, {dir, "s"}) do return
+	defer owner_close(&o)
+	c: ipc.Client
+	if !open_client(t, &c, {dir, "s"}) do return
+	defer ipc.client_close(&c)
+	b := u32le_bytes(1)
+	_, err := ipc.client_call(&c, TEST_PING, b[:])
+	expect_kind(t, err, .Failed, "PING")
+	testing.expect_value(t, err.code, code)
+	testing.expect_value(t, err.reason, "shared")
+}
+
+@(test) test_P9_application_sends_bad_request :: proc(t: ^testing.T) { _shared_code_reaches_the_client(t, ipc.FAIL_BAD_REQUEST) }
+@(test) test_P9_application_sends_busy :: proc(t: ^testing.T) { _shared_code_reaches_the_client(t, ipc.FAIL_BUSY) }
+@(test) test_P9_application_sends_timeout :: proc(t: ^testing.T) { _shared_code_reaches_the_client(t, ipc.FAIL_TIMEOUT) }
 
 @(test)
 test_P16_second_reply_asserts :: proc(t: ^testing.T) {

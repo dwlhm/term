@@ -32,7 +32,7 @@ test_protocol :: proc() -> ipc.Protocol {
 }
 
 // Messages that the package rejects in test builds (spec 7.2).
-ASSERT_RESERVED_FAIL :: "ipc: fail code is reserved by the package"
+ASSERT_RESERVED_FAIL :: "ipc: FAIL_VERSION is the handshake's"
 ASSERT_SECOND_REPLY  :: "ipc: request already answered"
 
 dec_u32 :: proc(r: ^ipc.Wire_Reader) -> u32 { return ipc.wr_u32(r) }

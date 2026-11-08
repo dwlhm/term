@@ -66,7 +66,9 @@ Error_Kind :: enum u8 {
 	Listener_Broken, // the server or link can no longer accept
 }
 
-// FAIL codes the package uses itself; applications use any other non-zero code.
+// FAIL codes the package uses itself. An application may send BAD_REQUEST,
+// BUSY and TIMEOUT with the same meaning; VERSION is the handshake's alone.
+// Applications use any other non-zero code for their own failures.
 FAIL_BAD_REQUEST :: u8(3)
 FAIL_BUSY        :: u8(5)
 FAIL_VERSION     :: u8(6)

@@ -10,7 +10,7 @@ package platform_ipc
 @(private)
 _ASSERT_SECOND_REPLY :: "ipc: request already answered"
 @(private)
-_ASSERT_RESERVED_FAIL :: "ipc: fail code is reserved by the package"
+_ASSERT_RESERVED_FAIL :: "ipc: FAIL_VERSION is the handshake's"
 @(private)
 _ASSERT_NOT_NOTICE :: "ipc: kind is not a notice in the catalog"
 @(private)
