@@ -45,7 +45,7 @@ run_wait_reply :: proc(r: ^Runner) -> (text: string, ok: bool) {
 	run_listen(r)
 	r.asking, r.replied = true, false
 	defer r.asking = false
-	_, _ = run_pump(r, 0, time.tick_diff(time.tick_now(), r.deadline))
+	run_wait_events(r, time.tick_diff(time.tick_now(), r.deadline), proc(r: ^Runner) -> bool { return r.replied })
 	if !r.replied {
 		run_stop(r, .Timeout, "no answer came before the run's time limit")
 		return "", false
@@ -56,7 +56,7 @@ run_wait_reply :: proc(r: ^Runner) -> (text: string, ok: bool) {
 // run_reply_request takes a broker request that reached the run's endpoint.
 run_reply_request :: proc(r: ^Runner, req: proto.Next_Result) {
 	delete(r.reply)
-	r.reply, r.replied, r.reply_id, r.listening = strings.clone(strings.trim_space(req.body)), true, req.id, false
+	r.reply, r.replied, r.reply_id = strings.clone(strings.trim_space(req.body)), true, req.id
 }
 
 // run_reply_stdin takes a line typed on the terminal.
@@ -77,7 +77,7 @@ run_answer_reply :: proc(r: ^Runner, failed: bool, text: string) {
 	b: [512]u8
 	w := ipc.wire_writer(b[:])
 	proto.enc_answer(&w, {by = r.endpoint, id = r.reply_id, failed = failed, text = text[:min(len(text), 400)]})
-	_, _ = run_request(r, proto.MSG_ANSWER, ipc.wire_bytes_written(&w), proto.MSG_OK, 5 * time.Second)
+	_, _ = run_call(r, proto.MSG_ANSWER, ipc.wire_bytes_written(&w), ipc.CALL_DEFAULT)
 	r.reply_id = 0
 }
 
@@ -101,28 +101,28 @@ _invalid :: proc(text, kind: string, choices: []string) -> string {
 
 // run_ensure_endpoint creates the run's endpoint (owned: it ends with the run).
 run_ensure_endpoint :: proc(r: ^Runner) -> bool {
-	r.stdin_tty = bool(posix.isatty(0))
+	if r.stdin == 0 && posix.isatty(0) do r.stdin = posix.dup(0)
 	if r.endpoint != 0 do return true
 	b: [64]u8
 	w := ipc.wire_writer(b[:])
-	ipc.ww_str(&w, fmt.tprintf("auto-%d", posix.getpid()))
-	ipc.ww_bool(&w, true)
-	f, ok := run_request(r, proto.MSG_ENDPOINT, ipc.wire_bytes_written(&w), proto.MSG_OK, 5 * time.Second)
-	if !ok || f.kind == proto.MSG_FAIL {
+	proto.enc_endpoint_req(&w, {name = fmt.tprintf("auto-%d", posix.getpid()), owned = true})
+	a, err := run_call(r, proto.MSG_ENDPOINT, ipc.wire_bytes_written(&w), ipc.CALL_DEFAULT)
+	if err.kind != .None {
 		run_stop(r, .Contract, "cannot open a reply endpoint")
 		return false
 	}
-	rd := ipc.wire_reader(f.payload)
+	rd := ipc.wire_reader(a.body)
 	r.endpoint = ipc.wr_u32(&rd)
 	return r.endpoint != 0
 }
 
 // run_listen waits in `next` on the endpoint (one slot, kept until a reply).
 run_listen :: proc(r: ^Runner) {
-	if r.listening do return
+	if r.listen != 0 do return
 	b: [8]u8
 	w := ipc.wire_writer(b[:])
-	ipc.ww_u32(&w, r.endpoint); ipc.ww_u32(&w, 0)
-	ipc.stream_send(&r.conn, proto.MSG_NEXT, 0, ipc.wire_bytes_written(&w))
-	r.listening = true
+	proto.enc_next_req(&w, {r.endpoint, 0})
+	tk, err := ipc.client_start(&r.client, proto.MSG_NEXT, ipc.wire_bytes_written(&w))
+	if err.kind != .None do run_stop(r, .No_Core, "the session core went away")
+	r.listen = tk
 }

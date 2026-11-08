@@ -19,15 +19,15 @@ cli_watch :: proc(id: u32, events: proto.Watch_Event_Flags, timeout_ms: u32) -> 
 // cli_watch_req sends one watch; fail is the FAIL code ({} = answered).
 @(private = "file")
 cli_watch_req :: proc(req: proto.Watch_Request) -> (res: proto.Watch_Result, fail: proto.Fail_Code) {
-	conn: ipc.Stream_Conn
+	conn: Cli
 	if !cli_conn(&conn) do return {}, .Bad_Request
-	defer ipc.stream_conn_destroy(&conn)
+	defer cli_close(&conn)
 	buf: [64]u8
 	w := ipc.wire_writer(buf[:])
 	proto.enc_watch_req(&w, req)
-	ipc.stream_send(&conn, proto.MSG_WATCH, 0, ipc.wire_bytes_written(&w))
+	cli_send(&conn, proto.MSG_WATCH, ipc.wire_bytes_written(&w))
 	for {
-		f, got := client.client_wait_frame(&conn, int(req.timeout_ms + 2000))
+		f, got := cli_frame(&conn, int(req.timeout_ms + 2000))
 		if !got do return {}, .Busy
 		switch f.kind {
 		case proto.MSG_FAIL:

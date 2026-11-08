@@ -79,6 +79,7 @@ _client_connect :: proc(k: ^_Client, path: string, opts: Client_Opts) -> Error {
 	if err.kind == .No_Server && len(opts.start) > 0 do fd, err = _start_server(path, opts)
 	if err.kind != .None do return err
 	stream_conn_reserve(&k.conn, 0, k.allocator)
+	_socket_buffers(fd)
 	if !stream_conn_attach(&k.conn, fd) do return {kind = .Closed, reason = "cannot set up the connection"}
 	hb: [_HELLO_MAX]u8
 	stream_send(&k.conn, k.proto.hello_kind, 0, _hello_body(hb[:], k.proto.version, opts.role))

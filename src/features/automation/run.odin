@@ -10,6 +10,7 @@ import "core:fmt"
 import "core:os"
 import "core:path/filepath"
 import "core:strings"
+import "core:sys/posix"
 import "core:time"
 import lua "../../platform/lua"
 import proto "../session_proto"
@@ -38,7 +39,7 @@ Run_Options :: struct {
 
 Runner :: struct {
 	vm:       ^Vm,
-	conn:     ipc.Stream_Conn,
+	client:   ipc.Client,
 	sid:      u32,
 	leased:   bool,
 	stop:     Run_Code,
@@ -59,17 +60,17 @@ Runner :: struct {
 	// term auto serve: the request being served; ended once it finished
 	// elsewhere (answered by the agent, cancelled by its sender)
 	serving_id: u64,
-	awaiting_request: bool,
+	watch:      ipc.Ticket, // the RESULT wait that says when it ended (0 = none)
 	ended:      bool,
 	end_status: proto.Tell_Status,
 	// t.ask / t.handoff replies: the run's endpoint and a terminal stdin
 	endpoint:  u32,
-	listening: bool, // a `next` waits on the endpoint
+	listen:    ipc.Ticket, // a `next` that waits on the endpoint (0 = none)
 	reply_id:  u64,  // the broker request a reply came in (0: stdin)
 	asking:    bool,
 	replied:   bool,
 	reply:     string,
-	stdin_tty: bool,
+	stdin:     posix.FD, // a terminal stdin, dup'ed (a call's watch fd cannot be 0); 0 = none
 }
 
 // run_running: the run goes on (not stopped, its request not ended).
@@ -212,7 +213,8 @@ _run_report :: proc(r: ^Runner) -> Run_Code {
 @(private)
 _run_cleanup :: proc(r: ^Runner) {
 	if r.leased do run_release(r, false)
-	ipc.stream_conn_destroy(&r.conn)
+	run_disconnect(r)
+	if r.stdin > 0 do posix.close(r.stdin)
 	if r.tracing do os.close(r.trace)
 	if r.vm != nil do vm_close(r.vm)
 	delete(r.stop_msg)

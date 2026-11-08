@@ -58,15 +58,15 @@ echo_received :: proc(id: u32, want: string) -> bool {
 }
 
 cli_act :: proc(payload: proc(w: ^ipc.Wire_Writer, id: u32, data: rawptr), id: u32, data: rawptr) -> (gen: u64, code: proto.Fail_Code, ok: bool) {
-	conn: ipc.Stream_Conn
+	conn: Cli
 	if !cli_conn(&conn) do return
-	defer ipc.stream_conn_destroy(&conn)
+	defer cli_close(&conn)
 	buf: [4096]u8
 	w := ipc.wire_writer(buf[:])
 	payload(&w, id, data)
-	ipc.stream_send(&conn, proto.MSG_ACT, 0, ipc.wire_bytes_written(&w))
+	cli_send(&conn, proto.MSG_ACT, ipc.wire_bytes_written(&w))
 	for {
-		f := client.client_wait_frame(&conn, 4000) or_return
+		f := cli_frame(&conn, 4000) or_return
 		r := ipc.wire_reader(f.payload)
 		switch f.kind {
 		case proto.MSG_ACT_RESULT:

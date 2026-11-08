@@ -97,6 +97,7 @@ _server_accept :: proc(data: rawptr, fd: posix.FD) {
 	k := (^_Server)(data)
 	for &slot in k.peers {
 		if slot.state != .Free do continue
+		_socket_buffers(fd)
 		if !stream_conn_attach(&slot.conn, fd) do return
 		due := time.tick_now()._nsec + i64(k.opts.hello_ms) * 1_000_000
 		id, ok := _poll_add(k.set, {fd = fd, want = {.IN}, on = _peer_ready, data = &slot, due = due, on_due = _peer_hello_late})
@@ -213,6 +214,12 @@ _peer_flush :: proc(slot: ^_Peer_Slot) {
 		_peer_drop(slot)
 		return
 	}
+	_peer_arm(slot)
+}
+
+// _peer_arm waits for room to write while something is queued.
+@(private)
+_peer_arm :: proc(slot: ^_Peer_Slot) {
 	if s := _poll_source(slot.srv.set, slot.src); s != nil && !slot.closing {
 		s.want = {.IN, .OUT} if stream_wants_write(&slot.conn) else {.IN}
 	}

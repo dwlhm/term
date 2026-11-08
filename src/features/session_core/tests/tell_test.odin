@@ -15,7 +15,7 @@ test_tell_shell_blocking_result :: proc(t: ^testing.T) {
 	v := view_open()
 	id := view_attached(v, view_sh(v, TELL_REPL))
 	// Sent right away: the shell may not show its first prompt yet (Starting).
-	conn: ipc.Stream_Conn
+	conn: Cli
 	res, ok := tell_send(&conn, {to = id, body = "printf 'a\\nb\\n'; sh -c 'exit 3'"})
 	testing.expect(t, ok && res.phase == .Accepted, "accepted")
 	res, ok = tell_next(&conn, 5000)
@@ -23,12 +23,12 @@ test_tell_shell_blocking_result :: proc(t: ^testing.T) {
 	testing.expect_value(t, res.status, proto.Tell_Status.Failed)
 	testing.expect_value(t, res.exit_code, 3)
 	testing.expect_value(t, res.text, "a\nb\n")
-	ipc.stream_conn_destroy(&conn)
+	cli_close(&conn)
 
 	res, ok = tell_send(&conn, {to = id, body = "true"})
 	res, ok = tell_next(&conn, 5000)
 	testing.expect(t, ok && res.status == .Done && res.exit_code == 0, "second request on a free shell")
-	ipc.stream_conn_destroy(&conn)
+	cli_close(&conn)
 	view_close(v)
 	testing.expect(t, tiers_stop(tiers), "tiers end and remove the dir")
 }
@@ -38,15 +38,15 @@ test_tell_rejects_and_cancel :: proc(t: ^testing.T) {
 	tiers := tiers_start()
 	v := view_open()
 	id := view_attached(v, view_sh(v, TELL_REPL))
-	conn, other: ipc.Stream_Conn
+	conn, other: Cli
 	res, _ := tell_send(&conn, {to = id, body = "sleep 30"})
 	testing.expect(t, res.phase == .Accepted, "first accepted")
 	busy, _ := tell_send(&other, {to = id, body = "true"})
 	testing.expect(t, busy.phase == .Rejected && busy.reject == .Busy, "second rejected: busy")
-	ipc.stream_conn_destroy(&other)
+	cli_close(&other)
 	multi, _ := tell_send(&other, {to = id + 1000, body = "x"})
 	testing.expect(t, multi.phase != .Accepted, "unknown target is no request")
-	ipc.stream_conn_destroy(&other)
+	cli_close(&other)
 
 	obs, _, _ := cli_observe(id)
 	testing.expect(t, obs.row.request.serving == 1 && obs.row.request.serving_id == res.id, "row shows the served request")
@@ -54,7 +54,7 @@ test_tell_rejects_and_cancel :: proc(t: ^testing.T) {
 	res, _ = tell_next(&conn, 3000)
 	testing.expect(t, res.phase == .Finished && res.status == .Cancelled, "cancelled result")
 	testing.expect(t, !tell_cancel(res.id), "cancel twice: no such request")
-	ipc.stream_conn_destroy(&conn)
+	cli_close(&conn)
 	view_close(v)
 	testing.expect(t, tiers_stop(tiers), "tiers end and remove the dir")
 }
@@ -64,20 +64,20 @@ test_tell_target_dies_and_no_integration :: proc(t: ^testing.T) {
 	tiers := tiers_start()
 	v := view_open()
 	id := view_attached(v, view_sh(v, TELL_REPL))
-	conn: ipc.Stream_Conn
+	conn: Cli
 	res, _ := tell_send(&conn, {to = id, body = "sleep 30"})
 	testing.expect(t, res.phase == .Accepted, "accepted")
 	testing.expect(t, cli_kill(id), "kill target")
 	res, _ = tell_next(&conn, 3000)
 	testing.expect(t, res.phase == .Finished && res.status == .Error, "error: target gone")
-	ipc.stream_conn_destroy(&conn)
+	cli_close(&conn)
 
 	plain := view_attached(v, view_sh(v, "/bin/sleep 30")) // never shows a prompt
 	res, _ = tell_send(&conn, {to = plain, body = "ls", timeout_ms = 300})
 	testing.expect(t, res.phase == .Accepted, "a young session may still start its shell")
 	res, _ = tell_next(&conn, 3000)
 	testing.expect(t, res.status == .Error && strings.contains(res.text, "OSC 133"), "no prompt came: error")
-	ipc.stream_conn_destroy(&conn)
+	cli_close(&conn)
 	view_close(v)
 	testing.expect(t, tiers_stop(tiers), "tiers end and remove the dir")
 }

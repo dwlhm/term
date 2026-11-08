@@ -7,10 +7,8 @@ package term
 import "core:encoding/json"
 import "core:fmt"
 import "core:os"
-import "core:slice"
 import "core:strings"
-import "core:sys/posix"
-import client_feat "../../features/session_client"
+import "core:time"
 import proto "../../features/session_proto"
 import plat_ipc "../../platform/ipc"
 
@@ -18,7 +16,7 @@ import plat_ipc "../../platform/ipc"
 CLI_COLUMNS :: 9
 
 @(private = "file")
-CLI_WAIT_MS :: 3000
+CLI_WAIT :: 3 * time.Second
 
 app_cli_session_ls :: proc(args: []string) -> int {
 	as_json := len(args) == 1 && args[0] == "--json"
@@ -26,46 +24,19 @@ app_cli_session_ls :: proc(args: []string) -> int {
 		fmt.eprintln(APP_CLI_USAGE)
 		return 1
 	}
-	fd, ok := client_feat.client_dial(.Cli, false)
-	if !ok {
+	c: plat_ipc.Client
+	if err := proto.session_open(&c, .Cli, false); err.kind == .No_Server {
 		if !as_json do fmt.println("No sessions")
 		return 0
+	} else if err.kind != .None {
+		return app_fail(err)
 	}
-	f, code := _cli_list(fd)
-	if code != 0 do return code
-	if as_json {
-		_cli_print_json(f.payload)
-	} else {
-		_cli_print_sessions(f.payload)
-	}
+	defer plat_ipc.client_close(&c)
+	a, err := plat_ipc.client_call(&c, proto.MSG_LIST, nil, {timeout = CLI_WAIT})
+	if err.kind != .None do return app_fail(err)
+	if as_json do _cli_print_json(a.body)
+	else do _cli_print_sessions(a.body)
 	return 0
-}
-
-// _cli_list sends LIST and returns the SESSIONS answer
-// (the payload is copied to the temp allocator: the connection closes here).
-@(private = "file")
-_cli_list :: proc(fd: posix.FD) -> (frame: plat_ipc.Stream_Frame, code: int) {
-	conn: plat_ipc.Stream_Conn
-	if !plat_ipc.stream_conn_init(&conn, fd, 0) do return {}, 1
-	defer plat_ipc.stream_conn_destroy(&conn)
-	plat_ipc.stream_send(&conn, proto.MSG_LIST, 0)
-	for {
-		f, got := client_feat.client_wait_frame(&conn, CLI_WAIT_MS)
-		if !got {
-			fmt.eprintln("term: the session core did not answer")
-			return {}, 1
-		}
-		switch f.kind {
-		case proto.MSG_SESSIONS:
-			f.payload = slice.clone(f.payload, context.temp_allocator)
-			return f, 0
-		case proto.MSG_FAIL:
-			r := plat_ipc.wire_reader(f.payload)
-			_, _ = plat_ipc.wr_u32(&r), plat_ipc.wr_u8(&r)
-			fmt.eprintf("term: %s\n", plat_ipc.wr_str(&r))
-			return {}, 1
-		}
-	}
 }
 
 @(private = "file")

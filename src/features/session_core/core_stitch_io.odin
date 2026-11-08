@@ -8,7 +8,6 @@ import terminal "../../core/terminal"
 import grid "../../core/terminal/grid"
 import ie "../../core/terminal/input_encode"
 import proto "../session_proto"
-import ipc "../../platform/ipc"
 
 // _stitch_reply answers the read with the stitched history and the screen the
 // read started on (the view has scrolled away and comes back to it).
@@ -21,11 +20,7 @@ _stitch_reply :: proc(c: ^Core, s: ^Core_Session) {
 	_stitch_write_page(&b, &st.pages[2])
 	if st.restore_failed do strings.write_string(&b, CORE_READ_RESTORE_NOTE)
 	c.text = b.buf
-	n := min(len(c.text), ipc.STREAM_MAX_PAYLOAD)
-	if core_viewer_current(c, st.viewer, st.seq) {
-		v := &c.viewers[st.viewer]
-		ipc.stream_send(&v.conn, proto.MSG_TEXT, 0, c.text[len(c.text) - n:])
-	}
+	core_reply_text(c, &st.req)
 }
 
 // _stitch_write_history writes the newest `keep` lines of a newest-first

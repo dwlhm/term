@@ -1,215 +1,90 @@
 package feature_session_core
 
-// Viewer and CLI connections: handshake, control requests on channel 0,
-// attach-channel frames, and cleanup when a viewer goes away.
+// Viewer and CLI peers of the session Server: they join after HELLO (the
+// package checks version, role, uid and slots), send requests on channel 0
+// and attach-channel input, and leave. Requests: core_viewer_req.odin.
 
-import "core:strings"
-import "core:sys/posix"
-import terminal "../../core/terminal"
 import proto "../session_proto"
 import ipc "../../platform/ipc"
 
-core_viewer_service :: proc(c: ^Core, vi: int, rev: posix.Poll_Event) {
-	v := &c.viewers[vi]
-	if .OUT in rev do ipc.stream_flush(&v.conn)
-	gone := ipc.stream_fill(&v.conn) != .None
-	for f in ipc.stream_next(&v.conn) {
-		if !_viewer_frame(c, vi, f) {
-			gone = true
-			break
+// core_viewer_events serves what the Server has after a wait.
+core_viewer_events :: proc(c: ^Core) {
+	for ev in ipc.server_next(&c.srv) {
+		switch e in ev {
+		case ipc.Peer_Joined:  _viewer_join(c, e.peer, proto.Stream_Role(e.role))
+		case ipc.Peer_Left:    _viewer_drop(c, e.peer)
+		case ipc.Request:
+			req := e
+			core_viewer_request(c, &req)
+		case ipc.Stream_Input: core_attach_input(c, e)
+		case ipc.Server_Down:  core_request_stop() // nobody can reach this core any more: hand over
 		}
 	}
-	if gone || v.conn.err != .None do _viewer_drop(c, vi)
 }
 
-// _viewer_drop: its attachments end; its sessions keep running (background),
-// unless the session dir is owned and this was the owner's last viewer link:
-// the kernel closes it however the owner ended, and nobody else can show them.
+core_viewer_of :: proc(c: ^Core, peer: ipc.Peer) -> ^Core_Viewer {
+	for &v in c.viewers do if v.used && v.peer == peer do return &v
+	return nil
+}
+
+// _viewer_join: the Server admits at most CORE_MAX_VIEWERS peers, and Left
+// comes before the Joined that reuses a place.
 @(private = "file")
-_viewer_drop :: proc(c: ^Core, vi: int) {
+_viewer_join :: proc(c: ^Core, peer: ipc.Peer, role: proto.Stream_Role) {
+	for &v in c.viewers {
+		if v.used do continue
+		v = {used = true, peer = peer, role = role}
+		return
+	}
+}
+
+// _viewer_drop: its attachments and waits end; its sessions keep running
+// (background), unless the session dir is owned and this was the owner's
+// last window: the kernel closes it however the owner ended, and nobody else
+// can show them.
+@(private = "file")
+_viewer_drop :: proc(c: ^Core, peer: ipc.Peer) {
+	v := core_viewer_of(c, peer)
+	if v == nil do return
+	was_viewer := v.role == .Viewer
+	v^ = {}
 	for &s in c.sessions {
 		if !s.used do continue
-		for &a in s.attaches do if a.used && a.viewer == vi do core_detach(c, &s, &a, false)
+		for &a in s.attaches do if a.used && a.peer == peer do core_detach(c, &s, &a, false)
 	}
-	was_viewer := c.viewers[vi].hello && c.viewers[vi].role == .Viewer
-	core_watchers_cancel_viewer(c, vi)
-	core_settles_cancel_viewer(c, vi)
-	core_leases_viewer_gone(c, vi)
-	broker_viewer_gone(&c.broker, vi)
+	for &l in c.lists do if l.used && l.req.peer == peer do l = {}
+	core_watchers_cancel_viewer(c, peer)
+	core_settles_cancel_viewer(c, peer)
+	core_leases_viewer_gone(c, peer)
+	for &w, key in c.waits {
+		if !w.used || w.req.peer != peer do continue
+		broker_viewer_gone(&c.broker, key)
+		w = {}
+	}
 	core_broker_apply(c)
-	core_endpoints_owner_gone(c, vi)
-	ipc.poll_set_unwatch(&c.set, c.viewers[vi].watch)
-	ipc.stream_conn_destroy(&c.viewers[vi].conn)
-	c.viewers[vi] = {}
+	core_endpoints_owner_gone(c, peer)
 	if c.owned && was_viewer && !_any_viewer(c) do for &s in c.sessions do if s.used do core_session_kill(c, &s)
 }
 
 @(private = "file")
 _any_viewer :: proc(c: ^Core) -> bool {
-	for &v in c.viewers do if v.used && v.hello && v.role == .Viewer do return true
+	for &v in c.viewers do if v.used && v.role == .Viewer do return true
 	return false
 }
 
-// _viewer_frame: false = protocol violation (the connection is dropped).
-@(private = "file")
-_viewer_frame :: proc(c: ^Core, vi: int, f: ipc.Stream_Frame) -> bool {
-	v := &c.viewers[vi]
-	if !v.hello {
-		if f.kind != proto.MSG_HELLO do return false
-		m, code, ok := proto.stream_hello_check(f.payload, {.Viewer, .Cli})
-		if !ok {
-			core_viewer_fail(c, vi, 0, code, "unsupported protocol version or role")
-			ipc.stream_flush(&v.conn)
-			return false
-		}
-		v.hello, v.role = true, m.role
-		w := ipc.wire_writer(c.msg)
-		proto.enc_hello(&w, {version = proto.STREAM_PROTO_VERSION, role = .Core, build = c.build})
-		ipc.stream_send(&v.conn, proto.MSG_HELLO, 0, ipc.wire_bytes_written(&w))
-		return true
-	}
-	if f.channel != 0 {
-		core_attach_frame(c, vi, f)
-		return true
-	}
-	r := ipc.wire_reader(f.payload)
-	switch f.kind {
-	case proto.MSG_LIST:   core_list_request(c, vi)
-	case proto.MSG_CREATE: _create(c, vi, &r)
-	case proto.MSG_ATTACH: _attach(c, vi, &r)
-	case proto.MSG_KILL:   core_viewer_kill(c, vi, &r)
-	case proto.MSG_OBSERVE: core_viewer_observe(c, vi, &r)
-	case proto.MSG_READ:   _read(c, vi, &r)
-	case proto.MSG_SEND:   core_viewer_send(c, vi, &r)
-	case proto.MSG_TELL:   core_viewer_tell(c, vi, &r)
-	case proto.MSG_CANCEL: core_viewer_cancel(c, vi, &r)
-	case proto.MSG_NEXT:     core_viewer_next(c, vi, &r)
-	case proto.MSG_ANSWER:   core_viewer_answer(c, vi, &r, true)
-	case proto.MSG_PROGRESS: core_viewer_answer(c, vi, &r, false)
-	case proto.MSG_RESULT:   core_viewer_result(c, vi, &r)
-	case proto.MSG_ENDPOINT: core_viewer_endpoint(c, vi, &r)
-	case proto.MSG_WATCH:      core_viewer_watch(c, vi, &r)
-	case proto.MSG_SNAPSHOT:   core_viewer_snapshot(c, vi, &r)
-	case proto.MSG_SETTLE:     core_viewer_settle(c, vi, &r)
-	case proto.MSG_ACT:        core_viewer_act(c, vi, &r)
-	case proto.MSG_LEASE:         core_viewer_lease(c, vi, &r)
-	case proto.MSG_LEASE_RELEASE: core_viewer_lease_release(c, vi, &r)
-	case proto.MSG_LEASE_MODE:    core_viewer_lease_mode(c, vi, &r)
-	case proto.MSG_SESSION_SIGNAL: core_viewer_signal(c, vi, &r)
-	case proto.MSG_SESSION_SIZE:   core_viewer_resize(c, vi, &r)
-	case proto.MSG_DETACH:
-		if s, a := core_attach_find(c, vi, ipc.wr_u32(&r)); s != nil do core_detach(c, s, a, true)
-	case:
-		return false
-	}
-	return true
+// core_viewer_fail answers req with FAIL.
+core_viewer_fail :: proc(c: ^Core, req: ^ipc.Request, code: proto.Fail_Code, reason: string) {
+	ipc.fail(&c.srv, req^, u8(code), reason)
 }
 
-@(private = "file")
-_create :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
-	token := ipc.wr_u32(r)
-	spec_payload := r.buf[r.off:]
-	spec: proto.Spawn_Msg
-	proto.dec_spawn(r, &spec)
-	if !ipc.wr_done(r) {
-		core_viewer_fail(c, vi, token, .Bad_Request, "malformed spawn request")
-		return
+// core_wait_new keeps req for the broker to answer later; its key, or -1
+// (answered Busy) when too many requests wait.
+core_wait_new :: proc(c: ^Core, req: ^ipc.Request) -> int {
+	for &w, key in c.waits {
+		if w.used do continue
+		w = {used = true, req = req^}
+		return key
 	}
-	s := core_session_create(c, spec_payload, spec.size)
-	if s == nil {
-		core_viewer_fail(c, vi, token, .Spawn_Failed, "no holder or no free session slot")
-		return
-	}
-	channel, ok := core_attach(c, s, vi, {id = s.id, size = spec.size})
-	if !ok {
-		core_viewer_fail(c, vi, token, .Busy, "no free attach slot")
-		return
-	}
-	_attached(c, vi, token, s.id, channel)
-}
-
-@(private = "file")
-_attach :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
-	token := ipc.wr_u32(r)
-	req := proto.dec_attach(r)
-	if !ipc.wr_done(r) {
-		core_viewer_fail(c, vi, token, .Bad_Request, "malformed attach request")
-		return
-	}
-	s := core_session_find(c, req.id)
-	switch {
-	case s == nil:  core_viewer_fail(c, vi, token, .Not_Found, "no such session")
-	case s.exited:  core_viewer_fail(c, vi, token, .Exited, "session has exited")
-	case:
-		channel, ok := core_attach(c, s, vi, req)
-		if !ok do core_viewer_fail(c, vi, token, .Busy, "too many viewers on this session")
-		else {
-			_attached(c, vi, token, s.id, channel)
-			core_broadcast_row(c, s)
-		}
-	}
-}
-
-// _read answers the plain text of a session's screen (agents: `term session
-// read`). A full-screen program keeps its history itself: asking for history
-// starts a stitch, and MSG_TEXT follows when the core has scrolled it.
-@(private = "file")
-_read :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
-	id, history := ipc.wr_u32(r), ipc.wr_u32(r)
-	s := core_session_find(c, id)
-	if !ipc.wr_done(r) || s == nil {
-		core_viewer_fail(c, vi, 0, .Not_Found, "no such session")
-		return
-	}
-	if history > 0 && terminal.terminal_in_alt_screen(&s.sess.term) && core_lease_fail(c, s, vi) do return
-	start := core_stitch_begin(c, s, vi, int(history))
-	switch start {
-	case .Started:
-		return // MSG_TEXT comes from the stitch
-	case .Busy:
-		core_viewer_fail(c, vi, 0, .Busy, "this session's history is already being read")
-		return
-	case .Screen, .Screen_Marked:
-	}
-	clear(&c.text)
-	b := strings.Builder{buf = c.text}
-	terminal.terminal_text(&s.sess.term, &b, int(min(history, CORE_PAINT_HISTORY_MAX)))
-	// A full-screen program that does not report the mouse cannot be scrolled:
-	// say so instead of pretending the screen is its history.
-	if start == .Screen_Marked do strings.write_string(&b, CORE_READ_ALT_NOTE)
-	c.text = b.buf
-	n := min(len(c.text), ipc.STREAM_MAX_PAYLOAD)
-	ipc.stream_send(&c.viewers[vi].conn, proto.MSG_TEXT, 0, c.text[len(c.text) - n:])
-}
-
-@(private = "file")
-_attached :: proc(c: ^Core, vi: int, token, id, channel: u32) {
-	b: [12]u8
-	w := ipc.wire_writer(b[:])
-	ipc.ww_u32(&w, token); ipc.ww_u32(&w, id); ipc.ww_u32(&w, channel)
-	// Control frames go out before stream data: ATTACHED precedes the first paint.
-	ipc.stream_send(&c.viewers[vi].conn, proto.MSG_ATTACHED, 0, b[:])
-}
-
-// core_viewer_fail answers a request with MSG_FAIL.
-core_viewer_fail :: proc(c: ^Core, vi: int, token: u32, code: proto.Fail_Code, reason: string) {
-	w := ipc.wire_writer(c.msg)
-	ipc.ww_u32(&w, token)
-	ipc.ww_u8(&w, u8(code))
-	ipc.ww_str(&w, reason)
-	ipc.stream_send(&c.viewers[vi].conn, proto.MSG_FAIL, 0, ipc.wire_bytes_written(&w))
-}
-
-// core_viewer_current: the connection in that slot is still the one with seq
-// (a long request, a stitch, may outlive its connection).
-core_viewer_current :: proc(c: ^Core, vi: int, seq: u32) -> bool {
-	if vi < 0 || vi >= CORE_MAX_VIEWERS do return false
-	v := &c.viewers[vi]
-	return v.used && v.hello && v.seq == seq
-}
-
-// core_viewer_fail_seq answers a request that was accepted earlier.
-core_viewer_fail_seq :: proc(c: ^Core, vi: int, seq: u32, code: proto.Fail_Code, reason: string) {
-	if !core_viewer_current(c, vi, seq) do return
-	core_viewer_fail(c, vi, 0, code, reason)
+	core_viewer_fail(c, req, .Busy, "too many requests wait in the session core")
+	return -1
 }

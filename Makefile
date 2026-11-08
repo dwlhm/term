@@ -271,7 +271,10 @@ IPC_GREEN_LIST := \
 	test_P32_oldest_pending_hello_yields \
 	test_P32_slow_hello_is_closed_at_hello_ms \
 	test_P36_no_allocation_after_open \
-	test_P37_echo_example_runs
+	test_P37_echo_example_runs \
+	test_P39_poll_returns_when_its_watch_fd_is_readable \
+	test_P39_poll_without_a_watch_still_times_out \
+	test_P40_credit_releases_waiting_data_on_an_idle_server
 IPC_GREEN_TESTS := $(subst $(eval) ,$(COMMA),$(strip $(IPC_GREEN_LIST)))
 
 test-ipc: ipc-example
@@ -282,20 +285,16 @@ test-ipc: ipc-example
 
 # Contract tests of the IPC package that are still red (IPC spec, section 10).
 # Not part of `test`: once every test of an ID passes, its tests join
-# IPC_GREEN_TESTS (or leave the IPC_CONTRACT block in session_core/tests).
-# The tier test P34 needs the session_core test build (about 4.5 min).
+# IPC_GREEN_TESTS. Since M3 none is red (the tier test P34 runs in
+# test-session-core); the target goes in M5.
 # Prints each failure summary and the red IDs (a list that must never grow).
-IPC_TIER_TESTS := test_P34_next_timing_out_during_answer_is_a_late_answer
-
 test-ipc-contract: ipc-example $(LUA_LIB)
 	@$(ODIN) test src/platform/ipc/contract $(CHECK_FLAGS) $(TEST_FLAGS) -define:ODIN_TEST_FANCY=false -out:build/ipc-contract \
 		-define:IPC_EXAMPLE=$(CURDIR)/$(IPC_EXAMPLE) > build/ipc-contract.log 2>&1; lib=$$?; \
-	$(ODIN) test src/features/session_core/tests $(CHECK_FLAGS) $(TEST_FLAGS) -define:ODIN_TEST_FANCY=false -out:build/ipc-contract-tiers \
-		-define:IPC_CONTRACT=true -define:ODIN_TEST_NAMES=$(IPC_TIER_TESTS) >> build/ipc-contract.log 2>&1; tiers=$$?; \
 	if grep -q '^Finished' build/ipc-contract.log; then sed -n '/^Finished/,/^$$/p' build/ipc-contract.log; \
 	else tail -n 40 build/ipc-contract.log; fi; \
 	echo "red: $$(sed -n 's/^ - [a-z_]*\.test_\(P[0-9]*\)_.*/\1/p' build/ipc-contract.log | sort -u | sort -k1.2n | tr '\n' ' ')"; \
-	test $$lib -eq 0 -a $$tiers -eq 0
+	test $$lib -eq 0
 
 test-session-proto:
 	$(ODIN) test src/features/session_proto/tests $(CHECK_FLAGS) $(TEST_FLAGS)

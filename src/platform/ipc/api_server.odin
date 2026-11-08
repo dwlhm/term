@@ -212,11 +212,13 @@ server_stream_open :: proc(s: ^Server, peer: Peer, credited: bool) -> (channel: 
 }
 
 // server_stream_data: false = the reader is too far behind; send a repaint.
+// The bytes go out on the next poll_set_wait, so what a round queues leaves
+// in whole frames and a reader that is behind costs no write per call.
 server_stream_data :: proc(s: ^Server, peer: Peer, channel: u32, bytes: []u8) -> bool {
 	slot := _peer_of(_server(s), peer)
 	if slot == nil do return true
 	ok := stream_data(&slot.conn, channel, bytes)
-	_peer_flush(slot)
+	_peer_arm(slot)
 	return ok
 }
 

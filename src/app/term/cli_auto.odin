@@ -94,17 +94,13 @@ _auto_snapshot :: proc(args: []string) -> int {
 		fmt.eprintln("usage: term auto snapshot <id> [-n lines] [--json] [--save file] [--adapter name]")
 		return 1
 	}
-	conn: plat_ipc.Stream_Conn
-	if !app_agent_conn(&conn, false) do return 2
-	defer plat_ipc.stream_conn_destroy(&conn)
 	b: [16]u8
 	w := plat_ipc.wire_writer(b[:])
 	proto.enc_snapshot_req(&w, {id = id, history = history, since = -1})
-	plat_ipc.stream_send(&conn, proto.MSG_SNAPSHOT, 0, plat_ipc.wire_bytes_written(&w))
-	f, code := app_agent_answer(&conn, proto.MSG_SNAPSHOT_RESULT)
+	answer, code := app_agent_call(proto.MSG_SNAPSHOT, plat_ipc.wire_bytes_written(&w))
 	if code != 0 do return code
-	if len(adapter) > 0 do return _print_adapted(f.payload, adapter)
-	r := plat_ipc.wire_reader(f.payload)
+	if len(adapter) > 0 do return _print_adapted(answer, adapter)
+	r := plat_ipc.wire_reader(answer)
 	snap := proto.dec_snapshot(&r, context.temp_allocator)
 	if !plat_ipc.wr_done(&r) {
 		fmt.eprintln("term: malformed snapshot from core")

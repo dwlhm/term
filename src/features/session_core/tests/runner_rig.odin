@@ -36,41 +36,39 @@ echo_screen_has :: proc(id: u32, text: string) -> bool {
 
 // session_type types like a person in a window: an attach channel's input.
 session_type :: proc(id: u32, bytes: string) {
-	conn: ipc.Stream_Conn
+	conn: Cli
 	if !cli_conn(&conn) do return
-	defer ipc.stream_conn_destroy(&conn)
+	defer cli_close(&conn)
 	ch, ok := cli_attach_channel(&conn, id)
 	if !ok do return
-	ipc.stream_send(&conn, proto.MSG_V_INPUT, ch, transmute([]u8)bytes)
-	ipc.stream_flush(&conn)
+	cli_stream(&conn, ch, proto.MSG_V_INPUT, transmute([]u8)bytes)
 	time.sleep(100 * time.Millisecond)
 }
 
 // session_takeover: a window takes the session back (after its confirmation).
 session_takeover :: proc(id: u32) {
-	conn: ipc.Stream_Conn
+	conn: Cli
 	if !cli_conn(&conn) do return
-	defer ipc.stream_conn_destroy(&conn)
+	defer cli_close(&conn)
 	ch, ok := cli_attach_channel(&conn, id)
 	if !ok do return
-	ipc.stream_send(&conn, proto.MSG_V_TAKEOVER, ch)
-	ipc.stream_flush(&conn)
+	cli_stream(&conn, ch, proto.MSG_V_TAKEOVER)
 	time.sleep(100 * time.Millisecond)
 }
 
 // tell_body sends a waiting tell and returns when it finished.
 tell_body :: proc(to: u32, body: string) {
-	conn: ipc.Stream_Conn
+	conn: Cli
 	if !cli_conn(&conn) do return
-	defer ipc.stream_conn_destroy(&conn)
+	defer cli_close(&conn)
 	b: [256]u8
 	w := ipc.wire_writer(b[:])
 	proto.enc_tell_req(&w, {to = to, body = body, wait = true})
-	ipc.stream_send(&conn, proto.MSG_TELL, 0, ipc.wire_bytes_written(&w))
+	cli_send(&conn, proto.MSG_TELL, ipc.wire_bytes_written(&w))
 	for _ in 0 ..< 100 {
-		f, got := client.client_wait_frame(&conn, 200)
+		f, got := cli_frame(&conn, 200)
 		if !got do continue
-		if f.kind != proto.MSG_TELL_RESULT do continue
+		if f.kind != proto.MSG_TELL_RESULT && f.kind != proto.MSG_TELL_PROGRESS do continue
 		r := ipc.wire_reader(f.payload)
 		res := proto.dec_tell_result(&r)
 		if res.phase == .Finished || res.phase == .Rejected do return
@@ -89,15 +87,15 @@ rig_wait_listening :: proc(id: u32) {
 // rig_answer_as answers request id as worker session by (what the agent does
 // with `term session answer` from inside its session).
 rig_answer_as :: proc(by: u32, id: u64, text: string) -> bool {
-	conn: ipc.Stream_Conn
+	conn: Cli
 	if !cli_conn(&conn) do return false
-	defer ipc.stream_conn_destroy(&conn)
+	defer cli_close(&conn)
 	b: [256]u8
 	w := ipc.wire_writer(b[:])
 	proto.enc_answer(&w, {by = by, id = id, text = text})
-	ipc.stream_send(&conn, proto.MSG_ANSWER, 0, ipc.wire_bytes_written(&w))
+	cli_send(&conn, proto.MSG_ANSWER, ipc.wire_bytes_written(&w))
 	for _ in 0 ..< 50 {
-		f, got := client.client_wait_frame(&conn, 100)
+		f, got := cli_frame(&conn, 100)
 		if got && (f.kind == proto.MSG_OK || f.kind == proto.MSG_FAIL) do return f.kind == proto.MSG_OK
 	}
 	return false

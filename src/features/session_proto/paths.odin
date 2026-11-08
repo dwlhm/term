@@ -20,8 +20,6 @@ SESSION_OWNED_ENV :: "TERM_SESSION_OWNED"
 
 CTL_SOCK_ENV :: "TERM_CTL_SOCK" // the control socket, used as is
 
-STREAM_PROTO_VERSION :: 2 // the session link wire until M3; the holder link stays 0.0.2
-
 // ctl_socket_path writes the control socket path into buf.
 // $TERM_CTL_SOCK, if set and non-empty, is returned as-is (no dir handling).
 // Otherwise "<$TMPDIR or /tmp, trailing '/' trimmed>/term-<uid>/ctl.sock":

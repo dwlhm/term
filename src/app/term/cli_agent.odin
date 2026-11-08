@@ -19,9 +19,8 @@ package term
 
 import "core:fmt"
 import "core:os"
+import "core:slice"
 import "core:strconv"
-import "core:time"
-import client_feat "../../features/session_client"
 import proto "../../features/session_proto"
 import plat_ipc "../../platform/ipc"
 
@@ -119,54 +118,45 @@ _parse_id :: proc(s: string) -> (u32, bool) {
 	return u32(v), ok && v > 0 && v <= uint(max(u32))
 }
 
-// app_agent_conn dials the core; start = new sessions may start one.
-app_agent_conn :: proc(conn: ^plat_ipc.Stream_Conn, start: bool) -> bool {
-	fd, ok := client_feat.client_dial(.Cli, start)
-	if !ok {
-		fmt.eprintln("term: no session is running")
-		return false
-	}
-	return plat_ipc.stream_conn_init(conn, fd, 0)
+// app_agent_open connects c to the session core (start: a new session may
+// start one). 0, or the exit code with the reason printed.
+app_agent_open :: proc(c: ^plat_ipc.Client, start: bool) -> int {
+	return app_fail(proto.session_open(c, .Cli, start))
 }
 
-// app_agent_request_ok sends one channel-0 request that is answered OK/FAIL.
+// app_agent_call opens a connection, sends one request and closes; the
+// answer body is copied to the temp allocator. code is the exit code.
+app_agent_call :: proc(kind: u8, body: []u8, opts := plat_ipc.Call_Opts{}, start := false) -> (answer: []u8, code: int) {
+	c: plat_ipc.Client
+	if code = app_agent_open(&c, start); code != 0 do return
+	defer plat_ipc.client_close(&c)
+	a, err := plat_ipc.client_call(&c, kind, body, opts)
+	if err.kind != .None do return nil, app_fail(err)
+	return slice.clone(a.body, context.temp_allocator), 0
+}
+
+// app_agent_request_ok sends one request answered OK or FAIL.
 app_agent_request_ok :: proc(kind: u8, payload: []u8) -> int {
-	conn: plat_ipc.Stream_Conn
-	if !app_agent_conn(&conn, false) do return 2
-	defer plat_ipc.stream_conn_destroy(&conn)
-	plat_ipc.stream_send(&conn, kind, 0, payload)
-	_, code := app_agent_answer(&conn, proto.MSG_OK)
+	_, code := app_agent_call(kind, payload)
 	return code
 }
 
-AGENT_ANSWER_MS :: 5000
-AGENT_WAIT_CHUNK_MS :: 60_000 // an unbounded wait checks its connection this often
 AGENT_EXIT_TIMEOUT :: 3
 
-// app_agent_answer waits up to timeout_ms for the reply kind. Frames meant for
-// someone else (row EVENTs the core broadcasts) are skipped. code is the CLI
-// exit code: 0 answered, 1 FAIL or no answer, 3 FAIL Timeout (reason printed).
-// timeout_ms <= 0 waits until the answer comes or the connection ends.
-app_agent_answer :: proc(conn: ^plat_ipc.Stream_Conn, want: u8, timeout_ms := AGENT_ANSWER_MS) -> (f: plat_ipc.Stream_Frame, code: int) {
-	forever := timeout_ms <= 0
-	deadline := time.tick_now()._nsec + i64(max(timeout_ms, 0)) * 1_000_000
-	for {
-		left := AGENT_WAIT_CHUNK_MS if forever else int((deadline - time.tick_now()._nsec) / 1_000_000)
-		got: bool
-		if left > 0 do f, got = client_feat.client_wait_frame(conn, left)
-		if !got && forever && conn.err == .None do continue
-		if !got {
-			fmt.eprintln("term: the session core did not answer")
-			return {}, 1
-		}
-		if f.kind == want do return f, 0
-		if f.kind != proto.MSG_FAIL do continue
-		r := plat_ipc.wire_reader(f.payload)
-		_ = plat_ipc.wr_u32(&r)
-		fail := proto.Fail_Code(plat_ipc.wr_u8(&r))
-		fmt.eprintf("term: %s\n", plat_ipc.wr_str(&r))
-		return {}, AGENT_EXIT_TIMEOUT if fail == .Timeout else 1
+// app_fail prints why a session link call failed and returns the CLI exit
+// code: 0 none, 2 no session core, 3 the core answered Timeout (a wait ran
+// out), 130 interrupted, 1 anything else.
+app_fail :: proc(err: plat_ipc.Error) -> int {
+	#partial switch err.kind {
+	case .None:        return 0
+	case .Interrupted: return 130
 	}
+	fmt.eprintfln("term: %s", proto.error_text(err))
+	#partial switch err.kind {
+	case .No_Server: return 2
+	case .Failed:    if err.code == plat_ipc.FAIL_TIMEOUT do return AGENT_EXIT_TIMEOUT
+	}
+	return 1
 }
 
 @(private = "file")
@@ -183,18 +173,12 @@ _agent_read :: proc(id: u32, args: []string) -> int {
 		fmt.eprintln(APP_CLI_USAGE)
 		return 1
 	}
-	conn: plat_ipc.Stream_Conn
-	if !app_agent_conn(&conn, false) do return 2
-	defer plat_ipc.stream_conn_destroy(&conn)
 	b: [8]u8
 	w := plat_ipc.wire_writer(b[:])
-	plat_ipc.ww_u32(&w, id)
-	plat_ipc.ww_u32(&w, lines)
-	plat_ipc.stream_send(&conn, proto.MSG_READ, 0, b[:])
-	f, code := app_agent_answer(&conn, proto.MSG_TEXT)
-	if code != 0 do return code
-	os.write(os.stdout, f.payload)
-	return 0
+	proto.enc_read_req(&w, {id, lines})
+	text, code := app_agent_call(proto.MSG_READ, b[:])
+	if code == 0 do os.write(os.stdout, text)
+	return code
 }
 
 @(private = "file")
@@ -209,7 +193,8 @@ _agent_send :: proc(id: u32, args: []string) -> int {
 	return app_agent_request_ok(proto.MSG_SEND, payload)
 }
 
-// app_agent_send_payload encodes a SEND of text (escapes decoded) + suffix.
+// app_agent_send_payload encodes a SEND (Send_Request) of text (escapes
+// decoded) + suffix.
 app_agent_send_payload :: proc(buf: []u8, id: u32, text, suffix: string) -> ([]u8, bool) {
 	w := plat_ipc.wire_writer(buf)
 	plat_ipc.ww_u32(&w, id)

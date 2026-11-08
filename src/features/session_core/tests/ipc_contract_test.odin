@@ -3,18 +3,12 @@ package feature_session_core_tests
 // P34: a worker whose NEXT times out just as it sends ANSWER (the runner
 // serve race of IPC spec G2). Over one ipc.Client on the session link 0.1.0,
 // ANSWER gets its own OK and NEXT's FAIL Timeout arrives as a Late_Answer
-// for NEXT's ticket. Red until M3, so it only builds with
-// -define:IPC_CONTRACT=true, which `make test-ipc-contract` passes; `make
-// test` never runs it.
+// for NEXT's ticket.
 
 import "core:testing"
 import "core:time"
 import proto "../../session_proto"
 import ipc "../../../platform/ipc"
-
-IPC_CONTRACT :: #config(IPC_CONTRACT, false)
-
-when IPC_CONTRACT {
 
 @(private = "file")
 _Late :: struct {
@@ -39,10 +33,14 @@ _next :: proc(c: ^ipc.Client, sid: u32, timeout_ms: u32) -> (ipc.Ticket, ipc.Err
 	return ipc.client_start(c, proto.MSG_NEXT, ipc.wire_bytes_written(&w))
 }
 
-// _take waits for the request that the NEXT with ticket tk took.
+// _take waits for the request that the NEXT with ticket tk took (row
+// EVENT notices the core sends every peer meanwhile are skipped).
 @(private = "file")
 _take :: proc(c: ^ipc.Client, tk: ipc.Ticket) -> (req: proto.Next_Result, ok: bool) {
 	ev, err := ipc.client_poll(c, 3 * time.Second)
+	for _, is_notice := ev.(ipc.Notice); is_notice && err.kind == .None; _, is_notice = ev.(ipc.Notice) {
+		ev, err = ipc.client_poll(c, 3 * time.Second)
+	}
 	la, is_late := ev.(ipc.Late_Answer)
 	if err.kind != .None || !is_late || la.ticket != tk || la.answer.kind != proto.MSG_REQUEST do return
 	r := ipc.wire_reader(la.answer.body)
@@ -73,8 +71,8 @@ _answer_as_next_times_out :: proc(t: ^testing.T, c: ^ipc.Client, v: ^View, w: u3
 		if obs.row.request.listening > 0 do break
 		view_pump(v, 5)
 	}
-	sc: ipc.Stream_Conn
-	defer ipc.stream_conn_destroy(&sc)
+	sc: Cli
+	defer cli_close(&sc)
 	res, _ := tell_send(&sc, {to = w, body = "job"})
 	if !testing.expect(t, res.phase == .Accepted, "the waiting worker did not accept the request") do return
 	req, took := _take(c, first)
@@ -97,5 +95,3 @@ _answer_as_next_times_out :: proc(t: ^testing.T, c: ^ipc.Client, v: ^View, w: u3
 	testing.expect(t, late.seen, "NEXT's FAIL Timeout never came as its Late_Answer")
 	testing.expectf(t, late.err.kind == .Failed && late.err.code == ipc.FAIL_TIMEOUT, "NEXT ended with %v code %d", late.err.kind, late.err.code)
 }
-
-} // when IPC_CONTRACT

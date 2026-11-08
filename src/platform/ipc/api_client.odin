@@ -146,10 +146,13 @@ client_start :: proc(c: ^Client, kind: u8, body: []u8) -> (Ticket, Error) {
 	return 0, {kind = .Busy, reason = "too many requests started"}
 }
 
-client_poll :: proc(c: ^Client, timeout: time.Duration) -> (Client_Event, Error) {
+// client_poll waits for the next event. watch (0 = none) is one non-IPC fd
+// to wait on as well: once it is readable, on_watch(data) runs and
+// client_poll returns (nil, no error).
+client_poll :: proc(c: ^Client, timeout: time.Duration, watch: posix.FD = 0, on_watch: proc(data: rawptr) = nil, data: rawptr = nil) -> (Client_Event, Error) {
 	k := _client(c)
 	if k == nil do return nil, {kind = .Closed, reason = "the client is not open"}
-	return _client_next_event(k, timeout)
+	return _client_next_event(k, timeout, watch, on_watch, data)
 }
 
 // client_interrupt ends the current wait with .Interrupted; safe from a

@@ -9,72 +9,74 @@ import ipc "../../platform/ipc"
 import session "../session"
 import terminal "../../core/terminal"
 
-core_viewer_kill :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
-	s := _target(c, vi, r, false)
+core_viewer_kill :: proc(c: ^Core, req: ^ipc.Request) {
+	id: u32
+	if !ipc.request_decode(req, &id, proto.dec_id) do return
+	s := _target(c, req, id, false)
 	if s == nil do return
 	core_session_kill(c, s)
-	_ok(c, vi)
+	_ok(c, req)
 }
 
 // core_viewer_send types bytes into a session: like a person typing.
-core_viewer_send :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
-	s := _target(c, vi, r, true, false)
-	if s == nil || _no_program(c, vi, s) || core_lease_fail(c, s, vi) do return
-	core_broker_human_input(c, s, r.buf[r.off:])
-	core_holder_send(c, s.holder, proto.MSG_INPUT, s.id, r.buf[r.off:])
-	_ok(c, vi)
+core_viewer_send :: proc(c: ^Core, req: ^ipc.Request) {
+	m: proto.Send_Request
+	if !ipc.request_decode(req, &m, proto.dec_send_req) do return
+	s := _target(c, req, m.id, true)
+	if s == nil || _no_program(c, req, s) || core_lease_fail(c, s, req) do return
+	core_broker_human_input(c, s, m.bytes)
+	core_holder_send(c, s.holder, proto.MSG_INPUT, s.id, m.bytes)
+	_ok(c, req)
 }
 
 // core_viewer_signal: the holder delivers it like ^C, to the foreground group.
-core_viewer_signal :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
-	s := _target(c, vi, r, true, false)
-	if s == nil || _no_program(c, vi, s) || core_lease_fail(c, s, vi) do return
-	sig := ipc.wr_i32(r)
-	if !ipc.wr_done(r) || sig < 1 || sig > 64 {
-		core_viewer_fail(c, vi, 0, .Bad_Request, "bad signal number")
+core_viewer_signal :: proc(c: ^Core, req: ^ipc.Request) {
+	m: proto.Signal_Request
+	if !ipc.request_decode(req, &m, proto.dec_signal_req) do return
+	s := _target(c, req, m.id, true)
+	if s == nil || _no_program(c, req, s) || core_lease_fail(c, s, req) do return
+	if m.signal < 1 || m.signal > 64 {
+		core_viewer_fail(c, req, .Bad_Request, "bad signal number")
 		return
 	}
-	b := _i32_bytes(sig)
+	b := _i32_bytes(m.signal)
 	core_holder_send(c, s.holder, proto.MSG_SIGNAL, s.id, b[:])
-	_ok(c, vi)
+	_ok(c, req)
 }
 
 // core_viewer_resize sizes a session nobody shows: a window that shows it
 // leads its size (core_apply_leader), so that request fails as Busy.
-core_viewer_resize :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
-	s := _target(c, vi, r, true, false)
-	if s == nil || core_lease_fail(c, s, vi) do return
-	size := proto.dec_size(r)
+core_viewer_resize :: proc(c: ^Core, req: ^ipc.Request) {
+	m: proto.Size_Request
+	if !ipc.request_decode(req, &m, proto.dec_size_req) do return
+	s := _target(c, req, m.id, true)
+	if s == nil || core_lease_fail(c, s, req) do return
+	size := m.size
 	switch {
-	case !ipc.wr_done(r) || size.cols == 0 || size.rows == 0:
-		core_viewer_fail(c, vi, 0, .Bad_Request, "bad size")
+	case size.cols == 0 || size.rows == 0:
+		core_viewer_fail(c, req, .Bad_Request, "bad size")
 		return
 	case s.stitch != nil && s.stitch.active:
-		core_viewer_fail(c, vi, 0, .Busy, "this session's history is being read")
+		core_viewer_fail(c, req, .Busy, "this session's history is being read")
 		return
 	}
 	for &a in s.attaches do if a.used && !a.observe {
-		core_viewer_fail(c, vi, 0, .Busy, "shown in a window: its size follows that window")
+		core_viewer_fail(c, req, .Busy, "shown in a window: its size follows that window")
 		return
 	}
 	session.session_resize(s.sess, size.cols, size.rows, size.xpixel, size.ypixel)
 	s.gen += 1 // the screen reflowed
 	_ = terminal.terminal_consume_damage(&s.sess.term)
-	_ok(c, vi)
+	_ok(c, req)
 }
 
 // core_viewer_observe pulls an atomic, zero-side-effect snapshot of another session.
-core_viewer_observe :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
-	id, lines := ipc.wr_u32(r), ipc.wr_u32(r)
-	if !ipc.wr_done(r) {
-		core_viewer_fail(c, vi, 0, .Bad_Request, "malformed observe request")
-		return
-	}
-	s := core_session_find(c, id)
-	if s == nil {
-		core_viewer_fail(c, vi, 0, .Not_Found, "no such session")
-		return
-	}
+core_viewer_observe :: proc(c: ^Core, req: ^ipc.Request) {
+	m: proto.Observe_Request
+	if !ipc.request_decode(req, &m, proto.dec_observe_req) do return
+	s := _target(c, req, m.id, false)
+	if s == nil do return
+	lines := m.lines
 
 	clear(&c.text)
 	b := strings.Builder{buf = c.text}
@@ -95,7 +97,7 @@ core_viewer_observe :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 
 	title_buf: [256]u8
 	row := core_row_get(c, s, title_buf[:])
-	max_text_len := max(0, ipc.STREAM_MAX_PAYLOAD - 4096)
+	max_text_len := max(0, CORE_ANSWER_MAX - 4096)
 	text_len := min(len(c.text), max_text_len)
 	text_slice := c.text[len(c.text) - text_len:]
 
@@ -113,34 +115,26 @@ core_viewer_observe :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 
 	w := ipc.wire_writer(c.msg)
 	proto.enc_observe_result(&w, res)
-	payload := ipc.wire_bytes_written(&w)
-	ipc.stream_send(&c.viewers[vi].conn, proto.MSG_OBSERVE_RESULT, 0, payload)
+	ipc.reply(&c.srv, req^, ipc.wire_bytes_written(&w))
 }
 
-// _target reads the session id and answers FAIL when the session is unknown,
-// or (live) has exited.
+// _target finds session id and answers FAIL when it is unknown, or (live)
+// has exited.
 @(private)
-_target :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader, live: bool, exact := true) -> ^Core_Session {
-	id := ipc.wr_u32(r)
+_target :: proc(c: ^Core, req: ^ipc.Request, id: u32, live: bool) -> ^Core_Session {
 	s := core_session_find(c, id)
 	switch {
-	case !r.ok || (exact && !ipc.wr_done(r)): core_viewer_fail(c, vi, 0, .Bad_Request, "malformed request")
-	case s == nil:                            core_viewer_fail(c, vi, 0, .Not_Found, "no such session")
-	case live && s.exited:                    core_viewer_fail(c, vi, 0, .Exited, "session has exited")
-	case:                                     return s
+	case s == nil:            core_viewer_fail(c, req, .Not_Found, "no such session")
+	case live && s.exited:    core_viewer_fail(c, req, .Exited, "session has exited")
+	case:                     return s
 	}
 	return nil
 }
 
 // _no_program fails a request that needs a program when s is an endpoint.
 @(private)
-_no_program :: proc(c: ^Core, vi: int, s: ^Core_Session) -> bool {
+_no_program :: proc(c: ^Core, req: ^ipc.Request, s: ^Core_Session) -> bool {
 	if !s.endpoint.used do return false
-	core_viewer_fail(c, vi, 0, .Bad_Request, "an endpoint runs no program: talk to it with tell")
+	core_viewer_fail(c, req, .Bad_Request, "an endpoint runs no program: talk to it with tell")
 	return true
-}
-
-@(private)
-_ok :: proc(c: ^Core, vi: int) {
-	ipc.stream_send(&c.viewers[vi].conn, proto.MSG_OK, 0)
 }

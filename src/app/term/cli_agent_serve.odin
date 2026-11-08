@@ -30,17 +30,13 @@ app_cli_agent_next :: proc(args: []string) -> int {
 		fmt.eprintln("usage: term session next [-t seconds] [--as session] [--json]")
 		return 1
 	}
-	conn: plat_ipc.Stream_Conn
-	if !app_agent_conn(&conn, false) do return 2
-	defer plat_ipc.stream_conn_destroy(&conn)
 	b: [8]u8
 	w := plat_ipc.wire_writer(b[:])
-	plat_ipc.ww_u32(&w, sid); plat_ipc.ww_u32(&w, u32(timeout_s * 1000))
-	plat_ipc.stream_send(&conn, proto.MSG_NEXT, 0, plat_ipc.wire_bytes_written(&w))
-	wait_ms := int(timeout_s * 1000) + WATCH_GRACE_MS if timeout_s > 0 else 0 // 0: until a request comes
-	f, code := app_agent_answer(&conn, proto.MSG_REQUEST, wait_ms)
+	proto.enc_next_req(&w, {sid, u32(timeout_s * 1000)})
+	timeout := app_wait_timeout(timeout_s) if timeout_s > 0 else plat_ipc.WAIT_FOREVER // until a request comes
+	answer, code := app_agent_call(proto.MSG_NEXT, plat_ipc.wire_bytes_written(&w), {timeout = timeout})
 	if code != 0 do return code
-	r := plat_ipc.wire_reader(f.payload)
+	r := plat_ipc.wire_reader(answer)
 	req := proto.dec_next_result(&r)
 	if !plat_ipc.wr_done(&r) {
 		fmt.eprintln("term: malformed request from core")

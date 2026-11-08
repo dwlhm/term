@@ -27,3 +27,17 @@ _dial :: proc(path: string) -> (fd: posix.FD, err: Error) {
 	}
 	return fd, {}
 }
+
+// _STREAM_SOCKET_BUF: send and receive buffer of a Server peer and a Client.
+// A unix socket starts with 8 KiB on macOS, so one DATA frame (≤ 64 KiB)
+// took several write/read rounds; with a credit window of room, a reader
+// that drained its socket always gets at least one whole frame per write.
+@(private)
+_STREAM_SOCKET_BUF :: STREAM_WINDOW
+
+@(private)
+_socket_buffers :: proc(fd: posix.FD) {
+	size := i32(_STREAM_SOCKET_BUF)
+	posix.setsockopt(fd, posix.SOL_SOCKET, .SNDBUF, &size, size_of(size))
+	posix.setsockopt(fd, posix.SOL_SOCKET, .RCVBUF, &size, size_of(size))
+}

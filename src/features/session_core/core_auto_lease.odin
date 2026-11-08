@@ -13,8 +13,7 @@ import ipc "../../platform/ipc"
 Core_Lease :: struct {
 	used:       bool,
 	pass:       bool, // a person's input goes through (a handoff)
-	viewer_idx: int,
-	viewer_seq: u32,
+	owner:      ipc.Peer, // the connection that holds it
 	owner_buf:  [proto.LEASE_OWNER_MAX]u8,
 	owner_len:  int,
 	held:       [dynamic]u8, // allocated while the lease lasts
@@ -24,63 +23,65 @@ core_lease_owner :: proc(s: ^Core_Session) -> string {
 	return string(s.lease.owner_buf[:s.lease.owner_len]) if s.lease.used else ""
 }
 
-// core_lease_blocks: s is leased by a connection other than vi.
-core_lease_blocks :: proc(c: ^Core, s: ^Core_Session, vi: int) -> bool {
-	return s.lease.used && !_lease_is_owner(c, s, vi)
+// core_lease_blocks: s is leased by a connection other than peer.
+core_lease_blocks :: proc(s: ^Core_Session, peer: ipc.Peer) -> bool {
+	return s.lease.used && s.lease.owner != peer
 }
 
 // core_lease_fail answers FAIL Busy when s is leased by someone else.
-core_lease_fail :: proc(c: ^Core, s: ^Core_Session, vi: int) -> bool {
-	if !core_lease_blocks(c, s, vi) do return false
-	core_viewer_fail(c, vi, 0, .Busy, "an automation holds this session")
+core_lease_fail :: proc(c: ^Core, s: ^Core_Session, req: ^ipc.Request) -> bool {
+	if !core_lease_blocks(s, req.peer) do return false
+	core_viewer_fail(c, req, .Busy, "an automation holds this session")
 	return true
 }
 
-core_viewer_lease :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
-	s := _target(c, vi, r, true, false)
-	if s == nil || _no_program(c, vi, s) do return
-	owner := ipc.wr_str(r)
+core_viewer_lease :: proc(c: ^Core, req: ^ipc.Request) {
+	m: proto.Lease_Request
+	if !ipc.request_decode(req, &m, proto.dec_lease_req) do return
+	s := _target(c, req, m.id, true)
+	if s == nil || _no_program(c, req, s) do return
 	switch {
-	case !ipc.wr_done(r) || len(owner) == 0 || len(owner) > proto.LEASE_OWNER_MAX:
-		core_viewer_fail(c, vi, 0, .Bad_Request, "malformed lease request (owner: 1 to 64 bytes)")
+	case len(m.owner) == 0 || len(m.owner) > proto.LEASE_OWNER_MAX:
+		core_viewer_fail(c, req, .Bad_Request, "a lease owner is 1 to 64 bytes")
 	case s.lease.used:
-		core_viewer_fail(c, vi, 0, .Busy, "an automation holds this session")
+		core_viewer_fail(c, req, .Busy, "an automation holds this session")
 	case broker_types_into(&c.broker, s.id):
-		core_viewer_fail(c, vi, 0, .Busy, "a shell request runs in this session")
+		core_viewer_fail(c, req, .Busy, "a shell request runs in this session")
 	case:
-		s.lease = {used = true, viewer_idx = vi, viewer_seq = c.viewers[vi].seq, owner_len = len(owner)}
-		copy(s.lease.owner_buf[:], owner)
+		s.lease = {used = true, owner = req.peer, owner_len = len(m.owner)}
+		copy(s.lease.owner_buf[:], m.owner)
 		reserve(&s.lease.held, 4096)
 		core_broadcast_row(c, s)
-		_ok(c, vi)
+		_ok(c, req)
 	}
 }
 
-core_viewer_lease_release :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
-	s := _target(c, vi, r, false, false)
+core_viewer_lease_release :: proc(c: ^Core, req: ^ipc.Request) {
+	s, m := _owned_lease(c, req)
 	if s == nil do return
-	flush := ipc.wr_bool(r)
-	switch {
-	case !ipc.wr_done(r): core_viewer_fail(c, vi, 0, .Bad_Request, "malformed lease release")
-	case !s.lease.used || !_lease_is_owner(c, s, vi): core_viewer_fail(c, vi, 0, .Not_Found, "this connection holds no lease on the session")
-	case:
-		_lease_end(c, s, flush)
-		_ok(c, vi)
-	}
+	_lease_end(c, s, m.on)
+	_ok(c, req)
 }
 
-core_viewer_lease_mode :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
-	s := _target(c, vi, r, false, false)
+core_viewer_lease_mode :: proc(c: ^Core, req: ^ipc.Request) {
+	s, m := _owned_lease(c, req)
 	if s == nil do return
-	pass := ipc.wr_bool(r)
-	switch {
-	case !ipc.wr_done(r): core_viewer_fail(c, vi, 0, .Bad_Request, "malformed lease mode")
-	case !s.lease.used || !_lease_is_owner(c, s, vi): core_viewer_fail(c, vi, 0, .Not_Found, "this connection holds no lease on the session")
-	case:
-		s.lease.pass = pass
-		core_broadcast_row(c, s) // windows show that it waits for a person
-		_ok(c, vi)
+	s.lease.pass = m.on
+	core_broadcast_row(c, s) // windows show that it waits for a person
+	_ok(c, req)
+}
+
+// _owned_lease reads a LEASE_RELEASE/LEASE_MODE body; the session whose
+// lease req's connection holds, or nil (answered).
+@(private = "file")
+_owned_lease :: proc(c: ^Core, req: ^ipc.Request) -> (s: ^Core_Session, m: proto.Lease_Flag_Request) {
+	if !ipc.request_decode(req, &m, proto.dec_lease_flag) do return
+	if s = _target(c, req, m.id, false); s == nil do return
+	if !s.lease.used || s.lease.owner != req.peer {
+		core_viewer_fail(c, req, .Not_Found, "this connection holds no lease on the session")
+		return nil, m
 	}
+	return
 }
 
 // core_lease_human_input takes what a person typed into a leased session:
@@ -110,15 +111,10 @@ core_lease_session_ended :: proc(c: ^Core, s: ^Core_Session, removed: bool) {
 }
 
 // core_leases_viewer_gone ends the leases of a closed connection.
-core_leases_viewer_gone :: proc(c: ^Core, vi: int) {
+core_leases_viewer_gone :: proc(c: ^Core, peer: ipc.Peer) {
 	for &s in c.sessions {
-		if s.used && s.lease.used && s.lease.viewer_idx == vi do _lease_end(c, &s, false)
+		if s.used && s.lease.used && s.lease.owner == peer do _lease_end(c, &s, false)
 	}
-}
-
-@(private = "file")
-_lease_is_owner :: proc(c: ^Core, s: ^Core_Session, vi: int) -> bool {
-	return s.lease.viewer_idx == vi && core_viewer_current(c, vi, s.lease.viewer_seq)
 }
 
 @(private = "file")
@@ -132,13 +128,10 @@ _lease_end :: proc(c: ^Core, s: ^Core_Session, flush: bool) {
 
 @(private = "file")
 _lease_event :: proc(c: ^Core, s: ^Core_Session, ev: proto.Lease_Event) {
-	if !core_viewer_current(c, s.lease.viewer_idx, s.lease.viewer_seq) do return
 	e := ev
 	e.id = s.id
-	e.bytes = e.bytes[:min(len(e.bytes), ipc.STREAM_MAX_PAYLOAD - 64)]
+	e.bytes = e.bytes[:min(len(e.bytes), CORE_ANSWER_MAX - 64)]
 	w := ipc.wire_writer(c.msg)
 	proto.enc_lease_event(&w, e)
-	conn := &c.viewers[s.lease.viewer_idx].conn
-	ipc.stream_send(conn, proto.MSG_LEASE_EVENT, 0, ipc.wire_bytes_written(&w))
-	ipc.stream_flush(conn)
+	ipc.notify(&c.srv, s.lease.owner, proto.MSG_LEASE_EVENT, ipc.wire_bytes_written(&w))
 }

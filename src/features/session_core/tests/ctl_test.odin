@@ -10,16 +10,16 @@ import ipc "../../../platform/ipc"
 
 // cli_ctl sends one channel-0 request: id + extra bytes; OK → ok, FAIL → its code.
 cli_ctl :: proc(kind: u8, id: u32, extra: []u8 = nil) -> (ok: bool, code: proto.Fail_Code) {
-	conn: ipc.Stream_Conn
+	conn: Cli
 	if !cli_conn(&conn) do return
-	defer ipc.stream_conn_destroy(&conn)
+	defer cli_close(&conn)
 	b: [64]u8
 	w := ipc.wire_writer(b[:])
 	ipc.ww_u32(&w, id)
 	n := w.n + copy(b[w.n:], extra) // raw, no length prefix
-	ipc.stream_send(&conn, kind, 0, b[:n])
+	cli_send(&conn, kind, b[:n])
 	for {
-		f, got := client.client_wait_frame(&conn, 3000)
+		f, got := cli_frame(&conn, 3000)
 		if !got do return
 		if f.kind == proto.MSG_OK do return true, {}
 		if f.kind == proto.MSG_FAIL {
@@ -48,16 +48,16 @@ size_bytes :: proc(cols, rows: u16) -> [8]u8 {
 
 // cli_screen reads a session's visible screen without attaching.
 cli_screen :: proc(id: u32) -> string {
-	conn: ipc.Stream_Conn
+	conn: Cli
 	if !cli_conn(&conn) do return ""
-	defer ipc.stream_conn_destroy(&conn)
+	defer cli_close(&conn)
 	b: [8]u8
 	w := ipc.wire_writer(b[:])
 	ipc.ww_u32(&w, id)
 	ipc.ww_u32(&w, 0)
-	ipc.stream_send(&conn, proto.MSG_READ, 0, b[:])
+	cli_send(&conn, proto.MSG_READ, b[:])
 	for {
-		f, got := client.client_wait_frame(&conn, 3000)
+		f, got := cli_frame(&conn, 3000)
 		if !got || f.kind == proto.MSG_FAIL do return ""
 		if f.kind == proto.MSG_TEXT do return string(f.payload) // temp: caller checks before the next read
 	}

@@ -122,7 +122,7 @@ test_list_waits_for_proc_info :: proc(t: ^testing.T) {
 		i = view_wait(v, .Row, id, 3000, i)
 		if i < 0 || v.log[i].pid != 0 do break
 	}
-	conn: ipc.Stream_Conn
+	conn: Cli
 	testing.expect(t, cli_conn(&conn), "CLI link")
 	// The name can lag one PROC_INFO round trip on a loaded machine (before the
 	// child owns the tty the holder has only its own name to report): ask LIST
@@ -143,7 +143,7 @@ test_list_waits_for_proc_info :: proc(t: ^testing.T) {
 	testing.expect(t, found, "LIST reports the foreground program")
 	testing.expect(t, row.active, "a non-shell foreground program is active")
 	testing.expect_value(t, row.state, proto.Session_State.Busy)
-	ipc.stream_conn_destroy(&conn)
+	cli_close(&conn)
 	view_close(v)
 	testing.expect(t, tiers_stop(tiers), "tiers end")
 }

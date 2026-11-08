@@ -5,7 +5,6 @@ package feature_automation
 
 import "core:fmt"
 import "core:strings"
-import "core:time"
 import lua "../../platform/lua"
 import proto "../session_proto"
 import ipc "../../platform/ipc"
@@ -72,9 +71,9 @@ _detects :: proc(r: ^Runner, id: u32) -> (is, ok: bool) {
 // _live_sessions: the ids of sessions that run a program.
 @(private = "file")
 _live_sessions :: proc(r: ^Runner) -> []u32 {
-	f, ok := run_request(r, proto.MSG_LIST, nil, proto.MSG_SESSIONS, 5 * time.Second)
-	if !ok || f.kind != proto.MSG_SESSIONS do return nil
-	rd := ipc.wire_reader(f.payload)
+	a, err := run_call(r, proto.MSG_LIST, nil, ipc.CALL_DEFAULT)
+	if err.kind != .None do return nil
+	rd := ipc.wire_reader(a.body)
 	n := int(ipc.wr_u32(&rd))
 	ids := make([dynamic]u32, 0, n, context.temp_allocator)
 	for _ in 0 ..< n {

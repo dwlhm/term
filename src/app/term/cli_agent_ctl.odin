@@ -20,8 +20,7 @@ app_cli_agent_signal :: proc(id: u32, args: []string) -> int {
 	}
 	b: [8]u8
 	w := plat_ipc.wire_writer(b[:])
-	plat_ipc.ww_u32(&w, id)
-	plat_ipc.ww_i32(&w, sig)
+	proto.enc_signal_req(&w, {id, sig})
 	return app_agent_request_ok(proto.MSG_SESSION_SIGNAL, b[:])
 }
 
@@ -33,8 +32,7 @@ app_cli_agent_resize :: proc(id: u32, args: []string) -> int {
 	}
 	b: [12]u8
 	w := plat_ipc.wire_writer(b[:])
-	plat_ipc.ww_u32(&w, id)
-	proto.enc_size(&w, size)
+	proto.enc_size_req(&w, {id, size})
 	return app_agent_request_ok(proto.MSG_SESSION_SIZE, plat_ipc.wire_bytes_written(&w))
 }
 

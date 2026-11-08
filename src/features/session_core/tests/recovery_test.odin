@@ -63,32 +63,74 @@ test_core_restart_preserves_elapsed :: proc(t: ^testing.T) {
 	testing.expect(t, tiers_stop(tiers), "tiers end")
 }
 
-// hostile_dropped sends bytes on a fresh link (after HELLO when hello is set)
-// and reports whether the core closed it.
+// hostile_link connects by hand; with hello it says HELLO (0.1.0, Viewer) first.
 @(private = "file")
-hostile_dropped :: proc(hello: bool, bytes: []u8) -> bool {
-	fd: posix.FD
-	if hello {
-		ok: bool
-		if fd, ok = client.client_dial(.Viewer, false); !ok do return false
-	} else {
-		buf, sbuf: [128]u8
-		dir, _ := proto.session_dir(buf[:])
-		sock, _ := proto.session_path(sbuf[:], dir, "core.sock")
-		err: ipc.Ipc_Error
-		if fd, err = ipc.ipc_connect(sock, 500); err != .None do return false
-	}
-	defer posix.close(fd)
-	posix.send(fd, raw_data(bytes), uint(len(bytes)), {.NOSIGNAL})
+hostile_link :: proc(hello: bool) -> (fd: posix.FD, ok: bool) {
+	buf, sbuf: [128]u8
+	dir, _ := proto.session_dir(buf[:])
+	sock, _ := proto.session_path(sbuf[:], dir, proto.CORE_SOCKET)
+	err: ipc.Ipc_Error
+	if fd, err = ipc.ipc_connect(sock, 500); err != .None do return -1, false
+	if !hello do return fd, true
+	hb: [ipc.STREAM_HEADER + 64]u8
+	w := ipc.wire_writer(hb[ipc.STREAM_HEADER:])
+	proto.enc_hello(&w, {version = 0x000100, role = .Viewer, build = "hostile"})
+	ipc.stream_put_header(hb[:], proto.MSG_HELLO, 0, w.n)
+	posix.send(fd, raw_data(hb[:]), uint(ipc.STREAM_HEADER + w.n), {.NOSIGNAL})
+	return fd, true
+}
+
+// hostile_read collects what the core sends for up to 5 s; closed = it hung up.
+@(private = "file")
+hostile_read :: proc(fd: posix.FD, out: []u8, until_closed: bool) -> (n: int, closed: bool) {
 	// A drop under load may take the core a while to notice; the assertion is
 	// that it closes the socket, not that it is fast.
 	deadline := time.tick_now()._nsec + 5_000_000_000
 	for time.tick_now()._nsec < deadline {
 		pfd := posix.pollfd{fd = fd, events = {.IN}}
-		if posix.poll(&pfd, 1, 50) <= 0 do continue
-		junk: [4096]u8
-		n := posix.recv(fd, &junk[0], len(junk), {})
-		if n == 0 || (n < 0 && posix.errno() != .EAGAIN) do return true
+		if posix.poll(&pfd, 1, 50) <= 0 {
+			if !until_closed && n > 0 do return n, false
+			continue
+		}
+		room := len(out) - n
+		got := posix.recv(fd, raw_data(out[n:]), uint(room), {})
+		if got == 0 || (got < 0 && posix.errno() != .EAGAIN) do return n, true
+		if got > 0 do n += int(got)
+	}
+	return n, false
+}
+
+// hostile_dropped sends bytes on a fresh link and reports whether the core closed it.
+@(private = "file")
+hostile_dropped :: proc(hello: bool, bytes: []u8) -> bool {
+	fd, ok := hostile_link(hello)
+	if !ok do return false
+	defer posix.close(fd)
+	posix.send(fd, raw_data(bytes), uint(len(bytes)), {.NOSIGNAL})
+	junk: [8192]u8
+	_, closed := hostile_read(fd, junk[:], true)
+	return closed
+}
+
+// hostile_refused: an unknown request kind (req 9) is answered FAIL
+// Bad_Request with its req, and the link stays (IPC spec P17).
+@(private = "file")
+hostile_refused :: proc() -> bool {
+	fd, ok := hostile_link(true)
+	if !ok do return false
+	defer posix.close(fd)
+	frame: [ipc.STREAM_HEADER + 4]u8
+	ipc.stream_put_header(frame[:], 200, 0, 4)
+	frame[ipc.STREAM_HEADER] = 9
+	posix.send(fd, raw_data(frame[:]), len(frame), {.NOSIGNAL})
+	in_buf: [8192]u8
+	n, closed := hostile_read(fd, in_buf[:], false)
+	for off := 0; off + ipc.STREAM_HEADER <= n; {
+		kind, _, length, valid := ipc.stream_parse_header(in_buf[off:n])
+		if !valid || off + ipc.STREAM_HEADER + length > n do break
+		r := ipc.wire_reader(in_buf[off + ipc.STREAM_HEADER:][:length])
+		if kind == proto.MSG_FAIL do return !closed && ipc.wr_u32(&r) == 9 && proto.Fail_Code(ipc.wr_u8(&r)) == .Bad_Request
+		off += ipc.STREAM_HEADER + length
 	}
 	return false
 }
@@ -102,13 +144,11 @@ test_hostile_viewers_dropped :: proc(t: ^testing.T) {
 	oversize: [ipc.STREAM_HEADER]u8
 	ipc.stream_put_header(oversize[:], proto.MSG_LIST, 0, 0)
 	oversize[5], oversize[6], oversize[7], oversize[8] = 0xff, 0xff, 0xff, 0x7f
-	unknown: [ipc.STREAM_HEADER]u8
-	ipc.stream_put_header(unknown[:], 200, 0, 0)
 	bad_credit: [ipc.STREAM_HEADER + 1]u8
 	ipc.stream_put_header(bad_credit[:], ipc.STREAM_CREDIT, 1, 1)
 	testing.expect(t, hostile_dropped(false, transmute([]u8)string("GET / HTTP/1.1\r\n\r\n")), "garbage before HELLO")
 	testing.expect(t, hostile_dropped(true, oversize[:]), "oversize frame")
-	testing.expect(t, hostile_dropped(true, unknown[:]), "unknown control kind")
+	testing.expect(t, hostile_refused(), "an unknown request kind is answered Bad_Request, not dropped")
 	testing.expect(t, hostile_dropped(true, bad_credit[:]), "malformed CREDIT")
 	session.session_write_string(s, "still-here\n")
 	testing.expect(t, view_wait_screen(v, s, "echo:still-here"), "the good viewer is unaffected")

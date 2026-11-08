@@ -187,15 +187,9 @@ _holder_drop :: proc(c: ^Core, hi: int) {
 core_shutdown_holders :: proc(c: ^Core) { core_holders_goodbye(c, .Shutdown) }
 
 // core_holders_goodbye tells every holder how this core leaves and gives the
-// links up to 1 s to write it. Only the holder links move from here on: the
-// listener and the viewers are no longer waited on.
+// links up to 1 s to write it. Only the holder links move from here on:
+// nothing the session Server takes in is served any more.
 core_holders_goodbye :: proc(c: ^Core, mode: proto.Goodbye) {
-	ipc.poll_set_unwatch(&c.set, c.listen_watch)
-	c.listen_watch = 0
-	for &v in c.viewers {
-		ipc.poll_set_unwatch(&c.set, v.watch)
-		v.watch = 0
-	}
 	b := [1]u8{u8(mode)}
 	for &h, i in c.holders do if h.used do core_holder_send(c, i, proto.MSG_GOODBYE, 0, b[:])
 	deadline := _now() + 1_000_000_000

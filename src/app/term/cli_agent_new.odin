@@ -67,21 +67,15 @@ app_cli_agent_new :: proc(args: []string) -> int {
 	}
 	msg := make([]u8, NEW_MSG_BYTES, context.temp_allocator)
 	w := plat_ipc.wire_writer(msg)
-	plat_ipc.ww_u32(&w, 1)
 	proto.enc_spawn(&w, &spec)
 	if !w.ok {
 		fmt.eprintln("term: command line and environment too long")
 		return 1
 	}
-	conn: plat_ipc.Stream_Conn
-	if !app_agent_conn(&conn, true) do return 2
-	defer plat_ipc.stream_conn_destroy(&conn)
-	plat_ipc.stream_send(&conn, proto.MSG_CREATE, 0, plat_ipc.wire_bytes_written(&w))
-	f, code := app_agent_answer(&conn, proto.MSG_ATTACHED)
+	answer, code := app_agent_call(proto.MSG_CREATE, plat_ipc.wire_bytes_written(&w), start = true)
 	if code != 0 do return code
-	r := plat_ipc.wire_reader(f.payload)
-	_, id := plat_ipc.wr_u32(&r), plat_ipc.wr_u32(&r)
-	fmt.println(id) // closing the connection detaches: the program keeps running
+	r := plat_ipc.wire_reader(answer)
+	fmt.println(plat_ipc.wr_u32(&r)) // closing the connection detaches: the program keeps running
 	return 0
 }
 
@@ -91,16 +85,12 @@ _new_endpoint :: proc(args: []string) -> int {
 		fmt.eprintln("usage: term session new --endpoint <name (1..64 bytes)>")
 		return 1
 	}
-	conn: plat_ipc.Stream_Conn
-	if !app_agent_conn(&conn, true) do return 2
-	defer plat_ipc.stream_conn_destroy(&conn)
 	b: [96]u8
 	w := plat_ipc.wire_writer(b[:])
-	plat_ipc.ww_str(&w, args[0]); plat_ipc.ww_bool(&w, false) // outlives this CLI: until killed
-	plat_ipc.stream_send(&conn, proto.MSG_ENDPOINT, 0, plat_ipc.wire_bytes_written(&w))
-	f, code := app_agent_answer(&conn, proto.MSG_OK)
+	proto.enc_endpoint_req(&w, {name = args[0], owned = false}) // outlives this CLI: until killed
+	answer, code := app_agent_call(proto.MSG_ENDPOINT, plat_ipc.wire_bytes_written(&w), start = true)
 	if code != 0 do return code
-	r := plat_ipc.wire_reader(f.payload)
+	r := plat_ipc.wire_reader(answer)
 	fmt.println(plat_ipc.wr_i32(&r))
 	return 0
 }

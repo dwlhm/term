@@ -54,16 +54,11 @@ run_serve :: proc(opts: Run_Options) -> Run_Code {
 _next_request :: proc(r: ^Runner) -> (req: proto.Next_Result, ok: bool) {
 	b: [8]u8
 	w := ipc.wire_writer(b[:])
-	ipc.ww_u32(&w, r.sid); ipc.ww_u32(&w, 0)
-	r.awaiting_request = true
-	defer r.awaiting_request = false
-	f := run_request(r, proto.MSG_NEXT, ipc.wire_bytes_written(&w), proto.MSG_REQUEST, 365 * 24 * time.Hour) or_return // until one comes
-	if f.kind == proto.MSG_FAIL {
-		_, reason := run_fail_code(f)
-		run_stop(r, .Rejected, fmt.tprintf("cannot take session %d's requests: %s", r.sid, reason))
-		return {}, false
-	}
-	rd := ipc.wire_reader(f.payload)
+	proto.enc_next_req(&w, {r.sid, 0})
+	a, err := run_call(r, proto.MSG_NEXT, ipc.wire_bytes_written(&w), ipc.WAIT_FOREVER) // until one comes
+	if err.kind == .Failed do run_stop(r, .Rejected, fmt.tprintf("cannot take session %d's requests: %s", r.sid, err.reason))
+	if err.kind != .None do return {}, false
+	rd := ipc.wire_reader(a.body)
 	req = proto.dec_next_result(&rd)
 	req.body = strings.clone(req.body, context.temp_allocator)
 	return req, rd.ok
@@ -133,13 +128,15 @@ run_cancel_steps :: proc(r: ^Runner) {
 }
 
 // _watch_request asks the core to say when the request ends (an answer from
-// the agent, a cancel from its sender): a TELL_RESULT the pump takes.
+// the agent, a cancel from its sender): its TELL_RESULT comes as a late answer.
 @(private = "file")
 _watch_request :: proc(r: ^Runner, id: u64) {
 	b: [128]u8
 	w := ipc.wire_writer(b[:])
 	proto.enc_result_req(&w, {wait = true, ids = {0 = id}, n_ids = 1})
-	ipc.stream_send(&r.conn, proto.MSG_RESULT, 0, ipc.wire_bytes_written(&w))
+	tk, err := ipc.client_start(&r.client, proto.MSG_RESULT, ipc.wire_bytes_written(&w))
+	if err.kind != .None do run_stop(r, .No_Core, "the session core went away")
+	r.watch = tk
 }
 
 @(private = "file")
@@ -158,7 +155,7 @@ _answer :: proc(r: ^Runner, id: u64, failed: bool, text: string) {
 	proto.enc_answer(&w, {by = r.sid, id = id, failed = failed, text = text})
 	keep := r.stop
 	r.stop = .Ok // a failed request is still answered
-	_, _ = run_request(r, proto.MSG_ANSWER, ipc.wire_bytes_written(&w), proto.MSG_OK, 5 * time.Second)
+	_, _ = run_call(r, proto.MSG_ANSWER, ipc.wire_bytes_written(&w), ipc.CALL_DEFAULT)
 	if r.stop == .Ok do r.stop = keep
 }
 
@@ -185,6 +182,6 @@ _reset :: proc(r: ^Runner) {
 	delete(r.result)
 	delete(r.evidence)
 	r.stop, r.stop_msg, r.done, r.result, r.evidence = .Ok, "", false, "", ""
-	r.step, r.held, r.ended, r.serving_id = 0, 0, false, 0
+	r.step, r.held, r.ended, r.serving_id, r.watch = 0, 0, false, 0, 0
 }
 

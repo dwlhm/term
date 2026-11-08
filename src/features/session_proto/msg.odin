@@ -27,25 +27,25 @@ MSG_EXITED       :: u8(45) // Exit_Msg
 MSG_BYE          :: u8(46) // channel 0: last frame before the holder lets go
 MSG_PROC_INFO    :: u8(47) // Proc_Info_Msg
 
-// viewer/cli → core, channel 0
+// viewer/cli → core, channel 0. On the wire every channel 0 frame starts
+// with u32 req (platform/ipc adds and strips it); the layouts below follow it.
 MSG_LIST   :: u8(60) // → MSG_SESSIONS
-MSG_CREATE :: u8(61) // u32 token + Spawn_Msg → MSG_ATTACHED (the creator is attached) | MSG_FAIL
+MSG_CREATE :: u8(61) // Spawn_Msg → MSG_ATTACHED (the creator is attached) | MSG_FAIL
 MSG_KILL   :: u8(62) // u32 id → MSG_OK | MSG_FAIL
-MSG_ATTACH :: u8(63) // u32 token + Attach_Msg → MSG_ATTACHED | MSG_FAIL
-MSG_DETACH :: u8(64) // u32 channel
-MSG_OBSERVE :: u8(65) // u32 id + u32 lines → MSG_OBSERVE_RESULT | MSG_FAIL
-MSG_READ   :: u8(66) // u32 id + u32 history lines → MSG_TEXT (plain screen text) | MSG_FAIL
-MSG_SEND   :: u8(67) // u32 id + raw bytes for the program → MSG_OK | MSG_FAIL
-MSG_SESSION_SIGNAL :: u8(68) // u32 id + i32 signal (foreground group) → MSG_OK | MSG_FAIL
-MSG_SESSION_SIZE   :: u8(69) // u32 id + Size_Msg (only while no window shows it) → MSG_OK | MSG_FAIL
-MSG_TELL           :: u8(74) // Tell_Request → MSG_TELL_RESULT Accepted | Rejected (wait: Progress…, Finished later) | MSG_FAIL
+MSG_ATTACH :: u8(63) // Attach_Msg → MSG_ATTACHED | MSG_FAIL; detach = CLOSE on the attach channel
+MSG_OBSERVE :: u8(65) // Observe_Request → MSG_OBSERVE_RESULT | MSG_FAIL
+MSG_READ   :: u8(66) // Read_Request → MSG_TEXT (plain screen text) | MSG_FAIL
+MSG_SEND   :: u8(67) // Send_Request → MSG_OK | MSG_FAIL
+MSG_SESSION_SIGNAL :: u8(68) // Signal_Request (foreground group) → MSG_OK | MSG_FAIL
+MSG_SESSION_SIZE   :: u8(69) // Size_Request (only while no window shows it) → MSG_OK | MSG_FAIL
+MSG_TELL           :: u8(74) // Tell_Request → MSG_TELL_RESULT Accepted | Rejected (wait: MSG_TELL_PROGRESS Accepted, Progress…, then MSG_TELL_RESULT Finished) | MSG_FAIL
 MSG_CANCEL         :: u8(75) // u64 request id → MSG_OK | MSG_FAIL
-MSG_NEXT           :: u8(76) // u32 worker session + u32 timeout_ms → MSG_REQUEST (when one comes) | MSG_FAIL
+MSG_NEXT           :: u8(76) // Next_Request → MSG_REQUEST (when one comes) | MSG_FAIL
 MSG_ANSWER         :: u8(79) // Answer_Msg → MSG_OK | MSG_FAIL
 MSG_PROGRESS       :: u8(100) // Answer_Msg → MSG_OK | MSG_FAIL
-MSG_RESULT         :: u8(101) // Result_Request → MSG_TELL_RESULT Running | Finished (follow: Progress… first) | MSG_FAIL
-MSG_ENDPOINT       :: u8(102) // str name + bool owned → MSG_OK + u32 session id | MSG_FAIL
-MSG_WATCH          :: u8(77) // Watch_Request → MSG_WATCH_RESULT | MSG_OK | MSG_FAIL
+MSG_RESULT         :: u8(101) // Result_Request → MSG_TELL_RESULT Running | Finished (wait: MSG_TELL_PROGRESS Progress… first with follow) | MSG_FAIL
+MSG_ENDPOINT       :: u8(102) // Endpoint_Request → MSG_OK + u32 session id | MSG_FAIL
+MSG_WATCH          :: u8(77) // Watch_Request → MSG_WATCH_RESULT | MSG_FAIL
 
 // viewer → core, on an attach channel
 MSG_V_INPUT  :: u8(70) // raw bytes typed into the session
@@ -56,9 +56,9 @@ MSG_V_REPLY  :: u8(78) // raw bytes the viewer's Terminal answered a query with 
 
 // core → viewer/cli
 MSG_SESSIONS :: u8(80) // u32 count + Session_Row each
-MSG_ATTACHED :: u8(82) // u32 token, u32 id, u32 channel; the first paint follows as DATA
+MSG_ATTACHED :: u8(82) // u32 id, u32 channel; the first paint follows as DATA
 MSG_EVENT    :: u8(83) // Session_Row of a session that changed (added, state, title, exited)
-MSG_FAIL     :: u8(84) // u32 token + u8 Fail_Code + reason text
+MSG_FAIL     :: u8(84) // u32 req + u8 Fail_Code + reason text
 MSG_OK       :: u8(85)
 MSG_REMOVED  :: u8(86) // u32 id: the session is gone
 MSG_TEXT     :: u8(87) // UTF-8 text (MSG_READ)
@@ -66,13 +66,16 @@ MSG_OBSERVE_RESULT :: u8(88) // Observe_Result
 MSG_TELL_RESULT    :: u8(89) // Tell_Result
 MSG_WATCH_RESULT   :: u8(90) // Watch_Result
 MSG_REQUEST        :: u8(91) // Next_Result
+MSG_TELL_PROGRESS  :: u8(96) // Tell_Result: a progress answer of a waiting TELL or RESULT
 
 Stream_Role :: enum u8 { Core = 1, Holder, Viewer, Cli }
 
 Goodbye :: enum u8 { Handover = 1, Shutdown }
 
+// Fail_Code: term's FAIL codes. Bad_Request, Busy and Timeout are the IPC
+// package's shared codes (ipc.FAIL_*); 6 is its handshake's alone.
 // Unsupported: the program did not ask for that input (mouse reports, a key it has no encoding for).
-Fail_Code :: enum u8 { Not_Found = 1, Exited, Bad_Request, Spawn_Failed, Busy, Version, Timeout, Unsupported }
+Fail_Code :: enum u8 { Not_Found = 1, Exited = 2, Bad_Request = 3, Spawn_Failed = 4, Busy = 5, Timeout = 7, Unsupported = 8 }
 
 Hello_Msg :: struct {
 	version: u32,

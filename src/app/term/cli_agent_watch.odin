@@ -23,10 +23,10 @@ app_cli_agent_watch :: proc(id: u32, args: []string) -> int {
 		return 1
 	}
 	cfg.req.id = id
-	conn: plat_ipc.Stream_Conn
-	if !app_agent_conn(&conn, false) do return 2
-	defer plat_ipc.stream_conn_destroy(&conn)
-	res, code := app_agent_watch(&conn, cfg.req)
+	c: plat_ipc.Client
+	if code := app_agent_open(&c, false); code != 0 do return code
+	defer plat_ipc.client_close(&c)
+	res, code := app_agent_watch(&c, cfg.req)
 	if code != 0 do return code
 	app_print_watch_result(res, cfg.as_json)
 	return 0
@@ -34,15 +34,13 @@ app_cli_agent_watch :: proc(id: u32, args: []string) -> int {
 
 // app_agent_watch sends one watch and waits for its answer. code: 0
 // answered, 1 error, 3 timed out.
-app_agent_watch :: proc(conn: ^plat_ipc.Stream_Conn, req: proto.Watch_Request) -> (res: proto.Watch_Result, code: int) {
+app_agent_watch :: proc(c: ^plat_ipc.Client, req: proto.Watch_Request) -> (res: proto.Watch_Result, code: int) {
 	buf: [64]u8
 	w := plat_ipc.wire_writer(buf[:])
 	proto.enc_watch_req(&w, req)
-	plat_ipc.stream_send(conn, proto.MSG_WATCH, 0, plat_ipc.wire_bytes_written(&w))
-	f: plat_ipc.Stream_Frame
-	f, code = app_agent_answer(conn, proto.MSG_WATCH_RESULT, int(req.timeout_ms) + WATCH_GRACE_MS)
-	if code != 0 do return
-	r := plat_ipc.wire_reader(f.payload)
+	a, err := plat_ipc.client_call(c, proto.MSG_WATCH, plat_ipc.wire_bytes_written(&w), {timeout = app_wait_timeout(f64(req.timeout_ms) / 1000)})
+	if err.kind != .None do return {}, app_fail(err)
+	r := plat_ipc.wire_reader(a.body)
 	res = proto.dec_watch_result(&r)
 	if !r.ok {
 		fmt.eprintln("term: malformed watch result from core")

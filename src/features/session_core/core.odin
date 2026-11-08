@@ -17,7 +17,6 @@ package feature_session_core
 
 import "core:os"
 import "core:strconv"
-import "core:sys/posix"
 import "core:time"
 import terminal "../../core/terminal"
 import proto "../session_proto"
@@ -32,8 +31,10 @@ CORE_GRACE_MS     :: 3000
 CORE_PROC_WAIT_MS :: 300 // LIST waits this long for fresh foreground info
 CORE_SETTLE_MS :: 250 // output quiet this long → refresh the foreground process (titles, active), resync stale viewers
 CORE_HOLDER_CTL   :: 2 << 20
-CORE_VIEWER_CTL   :: 2 << 20
-CORE_SOCKET_NAME  :: "core.sock"
+CORE_ANSWER_MAX   :: ipc.STREAM_MAX_PAYLOAD - 4 // a channel 0 answer also carries its u32 req
+CORE_MAX_LISTS    :: 32  // LISTs waiting for foreground info at once
+CORE_MAX_WAITS    :: 256 // requests the broker answers later, across all viewers
+CORE_BUSY_REASON  :: "the session core already serves its maximum of windows and commands"
 CORE_POISON_CRASHES :: 3 // recent core crashes after which tails are not replayed
 
 Core_Holder :: struct {
@@ -55,7 +56,7 @@ Core_Attach :: struct {
 	recovering: bool, // missed output: gets a paint at the next parser ground
 	stale:      bool, // painted without history after missing output: gets its history once output settles
 	history:    int,  // scrollback lines this viewer asked for (first paint and resync)
-	viewer:     int,
+	peer:       ipc.Peer,
 	channel:    u32,
 	size:       proto.Size_Msg,
 	active_ns:  i64,
@@ -89,39 +90,44 @@ Core_Session :: struct {
 	endpoint:          Core_Endpoint, // a virtual session (core_endpoint.odin)
 }
 
+// Core_Viewer: one peer of the session Server (a window or a CLI), from
+// Peer_Joined to Peer_Left. Requests it left open answer nobody.
 Core_Viewer :: struct {
-	used:          bool,
-	core:          ^Core,
-	index:         int,
-	watch:         ipc.Fd_Watch, // its fd in the Poll_Set
-	hello:         bool,
-	role:          proto.Stream_Role,
-	seq:           u32, // per accepted connection: a stitch answers only its own reader
-	list_waiting:  bool,
-	list_due_ns:   i64,
-	next_channel:  u32,
-	conn:          ipc.Stream_Conn,
+	used: bool,
+	peer: ipc.Peer,
+	role: proto.Stream_Role,
+}
+
+// Core_List: a LIST waiting (≤ CORE_PROC_WAIT_MS) for fresh foreground info.
+Core_List :: struct {
+	used:   bool,
+	req:    ipc.Request,
+	due_ns: i64,
+}
+
+// Core_Wait: a request the broker answers later (`next`, a waiting tell,
+// `result --wait`). Its index is the broker's waiter key.
+Core_Wait :: struct {
+	used: bool,
+	req:  ipc.Request,
 }
 
 Core :: struct {
 	dir_buf:     [256]u8,
 	dir:         string,
-	sock_buf:    [256]u8,
-	sock:        string,
 	build_buf:   [64]u8,
 	build:       string,
-	listen_fd:   posix.FD,
-	listen_ino:  u64,
+	srv:         ipc.Server, // the session link: core.sock
 	next_id:     u32,
-	viewer_seq:  u32,
 	empty_since: i64,
 	grace_ns:    i64,
 	owned:       bool, // SESSION_OWNED_ENV: sessions end with the owner's last viewer
 	set:         ipc.Poll_Set, // core_request_stop / SIGTERM poke it
-	listen_watch: ipc.Fd_Watch,
 	holders:     [CORE_MAX_HOLDERS]Core_Holder,
 	sessions:    [CORE_MAX_SESSIONS]Core_Session,
 	viewers:     [CORE_MAX_VIEWERS]Core_Viewer,
+	lists:       [CORE_MAX_LISTS]Core_List,
+	waits:       [CORE_MAX_WAITS]Core_Wait,
 	watchers:    [CORE_MAX_WATCHERS]Core_Watcher,
 	settles:     [CORE_MAX_SETTLES]Core_Settle,
 	broker:      Broker,
@@ -147,13 +153,12 @@ _now_unix :: proc() -> i64 { return time.to_unix_seconds(time.now()) }
 // core_new allocates a core and every buffer its loop uses (no sockets yet).
 core_new :: proc() -> ^Core {
 	c := new(Core)
-	c.listen_fd = -1
 	c.build = ipc.ipc_build_id(c.build_buf[:])
 	c.next_id = 1
 	c.grace_ns = _grace_ms() * 1_000_000
 	owned_buf: [64]u8 // lookup_env also stores the key here
 	c.owned = os.get_env(owned_buf[:], proto.SESSION_OWNED_ENV) == "1"
-	c.msg = make([]u8, ipc.STREAM_MAX_PAYLOAD)
+	c.msg = make([]u8, CORE_ANSWER_MAX)
 	reserve(&c.viewer_out, 256 * 1024)
 	reserve(&c.replies, 4096)
 	reserve(&c.paint, 1 << 20)
@@ -168,7 +173,7 @@ core_run :: proc() -> int {
 	c := core_new()
 	defer core_destroy(c)
 	if err := ipc.poll_set_init(&c.set, CORE_MAX_POLL); err.kind != .None do return 1
-	if !_core_listen(c) do return 0 if c.listen_fd == -2 else 1
+	if err := core_listen(c); err.kind != .None do return 0 if err.kind == .Already_Running else 1
 	_stop_open(c)
 	_install_stop_signals()
 	core_adopt_holders(c)
@@ -193,17 +198,8 @@ _grace_ms :: proc() -> i64 {
 
 core_destroy :: proc(c: ^Core) {
 	_stop_close(c)
-	if c.listen_fd >= 0 {
-		ipc.poll_set_unwatch(&c.set, c.listen_watch)
-		posix.close(c.listen_fd)
-		ipc.ipc_unlink_if_ours(c.sock, c.listen_ino)
-	}
+	ipc.server_close(&c.srv)
 	for &h in c.holders do if h.used do ipc.link_close(&h.link)
-	for &v in c.viewers {
-		if !v.used do continue
-		ipc.poll_set_unwatch(&c.set, v.watch)
-		ipc.stream_conn_destroy(&v.conn)
-	}
 	for &s in c.sessions do if s.used do core_session_free(c, &s)
 	delete(c.viewer_out)
 	delete(c.replies)

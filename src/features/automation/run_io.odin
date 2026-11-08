@@ -1,16 +1,17 @@
 package feature_automation
 
-// The runner's link to the session core: one connection for the whole run,
-// so the lease lives exactly as long as the runner. Lease events (a person
-// typing, a takeover, the program ending) and SIGINT are handled while it
-// waits for any answer; they stop the run by setting runner.stop.
+// The runner's link to the session core: one ipc.Client for the whole run,
+// so the lease lives exactly as long as the runner. Every request is one
+// correlated call; while it waits, lease events (a person typing, a takeover,
+// the program ending), late answers (a reply on the run's endpoint, the end
+// of a served request) and SIGINT are handled, and they stop the run by
+// setting runner.stop.
 
 import "base:intrinsics"
 import "core:c/libc"
 import "core:fmt"
-import "core:sys/posix"
+import "core:sync"
 import "core:time"
-import client "../session_client"
 import proto "../session_proto"
 import ipc "../../platform/ipc"
 
@@ -18,81 +19,98 @@ import ipc "../../platform/ipc"
 _sigint: libc.sig_atomic_t
 
 @(private = "file")
-_on_sigint :: proc "c" (sig: libc.int) { intrinsics.atomic_store(&_sigint, 1) }
+_sig_client: ^ipc.Client // the running runner's client: SIGINT interrupts its wait
 
-RUN_WAIT_CHUNK :: 200 * time.Millisecond // how often a wait looks at SIGINT
+@(private = "file")
+_on_sigint :: proc "c" (sig: libc.int) {
+	intrinsics.atomic_store(&_sigint, 1)
+	if c := sync.atomic_load(&_sig_client); c != nil do ipc.client_interrupt(c)
+}
 
 run_connect :: proc(r: ^Runner) -> bool {
-	fd, ok := client.client_dial(.Cli, false)
-	if !ok do return false
+	if proto.session_open(&r.client, .Cli, false).kind != .None do return false
+	sync.atomic_store(&_sig_client, &r.client)
 	libc.signal(libc.SIGINT, _on_sigint)
-	return ipc.stream_conn_init(&r.conn, fd, 0)
-}
-
-// run_request sends one request and returns its answer frame (want or FAIL).
-// ok = false: no answer came in time, or the run was stopped meanwhile.
-run_request :: proc(r: ^Runner, kind: u8, payload: []u8, want: u8, timeout: time.Duration) -> (f: ipc.Stream_Frame, ok: bool) {
-	ipc.stream_send(&r.conn, kind, 0, payload)
-	return run_pump(r, want, timeout)
-}
-
-// run_pump reads frames until want (or FAIL) arrives — want 0: until a reply
-// (t.ask, t.handoff) arrives — handling lease events, replies on the run's
-// endpoint and lines typed on a terminal stdin meanwhile.
-run_pump :: proc(r: ^Runner, want: u8, timeout: time.Duration) -> (f: ipc.Stream_Frame, ok: bool) {
-	deadline := time.tick_add(time.tick_now(), timeout)
-	for {
-		if intrinsics.atomic_load(&_sigint) != 0 do run_stop(r, .Cancelled, "interrupted (SIGINT)")
-		if !run_running(r) || (want == 0 && r.replied) do return {}, false
-		ipc.stream_flush(&r.conn)
-		if frame, got := ipc.stream_next(&r.conn); got {
-			if _dispatch(r, frame) do continue
-			if frame.kind == want || frame.kind == proto.MSG_FAIL do return frame, true
-			continue
-		}
-		if r.conn.err != .None {
-			run_stop(r, .No_Core, "the session core went away")
-			return {}, false
-		}
-		left := time.tick_diff(time.tick_now(), deadline)
-		if left <= 0 do return {}, false
-		_poll(r, min(left, RUN_WAIT_CHUNK))
-	}
-}
-
-// _dispatch handles frames that are not answers; true = it was one of those.
-@(private = "file")
-_dispatch :: proc(r: ^Runner, f: ipc.Stream_Frame) -> bool {
-	rd := ipc.wire_reader(f.payload)
-	switch f.kind {
-	case proto.MSG_LEASE_EVENT: _lease_event(r, proto.dec_lease_event(&rd))
-	case proto.MSG_REQUEST:
-		if r.awaiting_request do return false // serve: a request for the agent, the answer it waits for
-		run_reply_request(r, proto.dec_next_result(&rd))
-	case proto.MSG_TELL_RESULT:
-		res := proto.dec_tell_result(&rd)
-		if r.serving_id == 0 || res.id != r.serving_id || res.phase != .Finished do return false
-		r.ended, r.end_status = true, res.status // answered or cancelled elsewhere
-	case proto.MSG_EVENT:       // a session row changed: not for the runner
-	case:                     return false
-	}
 	return true
 }
 
-@(private = "file")
-_poll :: proc(r: ^Runner, wait: time.Duration) {
-	fds := [2]posix.pollfd{{fd = r.conn.fd, events = {.IN, .OUT} if ipc.stream_wants_write(&r.conn) else {.IN}}, {fd = 0, events = {.IN}}}
-	n := 2 if r.stdin_tty && r.asking else 1
-	if posix.poll(raw_data(fds[:]), posix.nfds_t(n), i32(wait / time.Millisecond) + 1) <= 0 do return
-	if fds[0].revents != {} do ipc.stream_fill(&r.conn)
-	if n == 2 && fds[1].revents != {} do run_reply_stdin(r)
+// run_disconnect: SIGINT no longer reaches the client, then it closes.
+run_disconnect :: proc(r: ^Runner) {
+	sync.atomic_compare_exchange_strong(&_sig_client, &r.client, nil)
+	ipc.client_close(&r.client)
 }
 
-// run_fail_code reads a FAIL frame's code and reason.
-run_fail_code :: proc(f: ipc.Stream_Frame) -> (code: proto.Fail_Code, reason: string) {
-	rd := ipc.wire_reader(f.payload)
-	_ = ipc.wr_u32(&rd)
-	return proto.Fail_Code(ipc.wr_u8(&rd)), ipc.wr_str(&rd)
+// run_call sends one request and waits for its answer (body valid until the
+// next run_call). err.kind: .Failed = the core's FAIL (code, reason); any
+// other error has stopped the run.
+run_call :: proc(r: ^Runner, kind: u8, body: []u8, timeout: time.Duration) -> (a: ipc.Answer, err: ipc.Error) {
+	opts := ipc.Call_Opts{timeout = timeout, on_event = _on_event, data = r}
+	if r.asking && r.stdin > 0 do opts.watch, opts.on_watch = r.stdin, _on_stdin
+	a, err = ipc.client_call(&r.client, kind, body, opts)
+	_stopped_by(r, err)
+	return
+}
+
+// run_wait_events handles events until done(r), the run stops or timeout.
+run_wait_events :: proc(r: ^Runner, timeout: time.Duration, done: proc(r: ^Runner) -> bool) {
+	deadline := time.tick_add(time.tick_now(), timeout)
+	for run_running(r) && !done(r) {
+		left := time.tick_diff(time.tick_now(), deadline)
+		if left <= 0 do return
+		watch := r.stdin if r.asking else 0
+		ev, err := ipc.client_poll(&r.client, left, watch, _on_stdin, r)
+		if err.kind == .Timeout do return
+		if err.kind != .None {
+			_stopped_by(r, err)
+			return
+		}
+		_on_event(r, ev)
+	}
+}
+
+@(private = "file")
+_on_stdin :: proc(data: rawptr) { run_reply_stdin((^Runner)(data)) }
+
+// _stopped_by stops the run for a call that ended without an answer.
+@(private = "file")
+_stopped_by :: proc(r: ^Runner, err: ipc.Error) {
+	#partial switch err.kind {
+	case .None, .Failed, .Timeout:
+	case .Interrupted:
+		if intrinsics.atomic_load(&_sigint) != 0 do run_stop(r, .Cancelled, "interrupted (SIGINT)")
+	case:
+		run_stop(r, .No_Core, "the session core went away")
+	}
+}
+
+// _on_event handles what is not the call's own answer; .Stop once the run stopped.
+@(private = "file")
+_on_event :: proc(data: rawptr, ev: ipc.Client_Event) -> ipc.Event_Action {
+	r := (^Runner)(data)
+	#partial switch e in ev {
+	case ipc.Notice:
+		rd := ipc.wire_reader(e.body)
+		if e.kind == proto.MSG_LEASE_EVENT do _lease_event(r, proto.dec_lease_event(&rd))
+	case ipc.Late_Answer:
+		_late_answer(r, e)
+	}
+	return .Continue if run_running(r) else .Stop
+}
+
+// _late_answer: a reply that reached the run's endpoint (its `next`), or the
+// end of the request being served (answered by the agent, cancelled by its sender).
+@(private = "file")
+_late_answer :: proc(r: ^Runner, e: ipc.Late_Answer) {
+	rd := ipc.wire_reader(e.answer.body)
+	switch {
+	case e.ticket == r.listen && r.listen != 0:
+		r.listen = 0
+		if e.err.kind == .None do run_reply_request(r, proto.dec_next_result(&rd))
+	case e.ticket == r.watch && r.watch != 0:
+		r.watch = 0
+		res := proto.dec_tell_result(&rd)
+		if e.err.kind == .None && res.id == r.serving_id && res.phase == .Finished do r.ended, r.end_status = true, res.status
+	}
 }
 
 @(private = "file")
@@ -118,40 +136,33 @@ _lease_event :: proc(r: ^Runner, ev: proto.Lease_Event) {
 run_lease :: proc(r: ^Runner, owner: string) -> bool {
 	b: [128]u8
 	w := ipc.wire_writer(b[:])
-	ipc.ww_u32(&w, r.sid); ipc.ww_str(&w, owner[:min(len(owner), proto.LEASE_OWNER_MAX)])
-	f, ok := run_request(r, proto.MSG_LEASE, ipc.wire_bytes_written(&w), proto.MSG_OK, 5 * time.Second)
-	if !ok do return false
-	if f.kind == proto.MSG_FAIL {
-		code, reason := run_fail_code(f)
-		run_stop(r, .Rejected if code == .Busy else .Contract, fmt.tprintf("cannot take session %d: %s", r.sid, reason))
-		return false
+	proto.enc_lease_req(&w, {r.sid, owner[:min(len(owner), proto.LEASE_OWNER_MAX)]})
+	_, err := run_call(r, proto.MSG_LEASE, ipc.wire_bytes_written(&w), ipc.CALL_DEFAULT)
+	if err.kind == .Failed {
+		run_stop(r, .Rejected if err.code == u8(proto.Fail_Code.Busy) else .Contract, fmt.tprintf("cannot take session %d: %s", r.sid, err.reason))
 	}
-	r.leased = true
-	return true
+	r.leased = err.kind == .None
+	return r.leased
 }
 
+// run_release gives the lease back; flush = held input reaches the program.
 run_release :: proc(r: ^Runner, flush: bool) {
 	if !r.leased do return
 	b: [8]u8
 	w := ipc.wire_writer(b[:])
-	ipc.ww_u32(&w, r.sid); ipc.ww_bool(&w, flush)
-	ipc.stream_send(&r.conn, proto.MSG_LEASE_RELEASE, 0, ipc.wire_bytes_written(&w))
-	ipc.stream_flush(&r.conn)
+	proto.enc_lease_flag(&w, {r.sid, flush})
+	_, _ = ipc.client_call(&r.client, proto.MSG_LEASE_RELEASE, ipc.wire_bytes_written(&w))
 	r.leased = false
 }
 
-// run_snapshot returns the session's current snapshot payload.
+// run_snapshot returns the session's current snapshot payload (valid until the next call).
 run_snapshot :: proc(r: ^Runner) -> (payload: []u8, ok: bool) {
 	b: [16]u8
 	w := ipc.wire_writer(b[:])
 	proto.enc_snapshot_req(&w, {id = r.sid, history = 0, since = -1})
-	f := run_request(r, proto.MSG_SNAPSHOT, ipc.wire_bytes_written(&w), proto.MSG_SNAPSHOT_RESULT, 5 * time.Second) or_return
-	if f.kind == proto.MSG_FAIL {
-		_, reason := run_fail_code(f)
-		run_stop(r, .Exited, fmt.tprintf("cannot read the screen: %s", reason))
-		return nil, false
-	}
-	return f.payload, true
+	a, err := run_call(r, proto.MSG_SNAPSHOT, ipc.wire_bytes_written(&w), ipc.CALL_DEFAULT)
+	if err.kind == .Failed do run_stop(r, .Exited, fmt.tprintf("cannot read the screen: %s", err.reason))
+	return a.body, err.kind == .None
 }
 
 // run_settle waits until the screen moved past since and went quiet. false is
@@ -161,27 +172,26 @@ run_settle :: proc(r: ^Runner, since: u64, timeout: time.Duration) -> (gen: u64,
 	w := ipc.wire_writer(b[:])
 	ms := u32(max(timeout, 1 * time.Millisecond) / time.Millisecond)
 	proto.enc_settle_req(&w, {id = r.sid, since = since, quiet_ms = u32(r.quiet / time.Millisecond), timeout_ms = ms})
-	f := run_request(r, proto.MSG_SETTLE, ipc.wire_bytes_written(&w), proto.MSG_SETTLE_RESULT, timeout + 2 * time.Second) or_return
-	if f.kind == proto.MSG_FAIL do return since, false
-	rd := ipc.wire_reader(f.payload)
+	a, err := run_call(r, proto.MSG_SETTLE, ipc.wire_bytes_written(&w), timeout + 2 * time.Second)
+	if err.kind != .None do return since, false
+	rd := ipc.wire_reader(a.body)
 	res := proto.dec_settle_result(&rd)
 	return res.gen, !res.exited
 }
 
 // run_act sends one encoded MSG_ACT body; gen is the generation it went in at.
 run_act :: proc(r: ^Runner, body: []u8) -> (gen: u64, ok: bool) {
-	f := run_request(r, proto.MSG_ACT, body, proto.MSG_ACT_RESULT, 5 * time.Second) or_return
-	if f.kind == proto.MSG_FAIL {
-		code, reason := run_fail_code(f)
-		#partial switch code {
-		case .Unsupported: run_stop(r, .Unsupported, reason)
-		case .Exited:      run_stop(r, .Exited, reason)
-		case .Busy:        run_stop(r, .Rejected, reason)
-		case:              run_stop(r, .Contract, reason)
+	a, err := run_call(r, proto.MSG_ACT, body, ipc.CALL_DEFAULT)
+	if err.kind == .Failed {
+		#partial switch proto.Fail_Code(err.code) {
+		case .Unsupported: run_stop(r, .Unsupported, err.reason)
+		case .Exited:      run_stop(r, .Exited, err.reason)
+		case .Busy:        run_stop(r, .Rejected, err.reason)
+		case:              run_stop(r, .Contract, err.reason)
 		}
-		return 0, false
 	}
-	rd := ipc.wire_reader(f.payload)
+	if err.kind != .None do return 0, false
+	rd := ipc.wire_reader(a.body)
 	_ = ipc.wr_u32(&rd)
 	return ipc.wr_u64(&rd), true
 }

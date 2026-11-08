@@ -74,21 +74,14 @@ core_broker_apply :: proc(c: ^Core) {
 		case .Assign:   core_reply_request(c, e.viewer, r)
 		case .Result:   core_reply_result(c, e.viewer, r, .Finished)
 		case .Progress: core_reply_result(c, e.viewer, r, .Progress)
-		case .Expired:
-			if _viewer_ok(c, e.viewer) do core_viewer_fail(c, e.viewer, 0, .Timeout, "timed out")
-		case .Gone:
-			if _viewer_ok(c, e.viewer) do core_viewer_fail(c, e.viewer, 0, .Not_Found, "the session ended")
+		case .Expired:  core_fail_wait(c, e.viewer, .Timeout, "timed out")
+		case .Gone:     core_fail_wait(c, e.viewer, .Not_Found, "the session ended")
 		case .Row:
 			if s != nil do core_row_changed(c, s)
 		}
 	}
 	b.n_effects = 0
 	c.broker_due_ns = broker_next_due(b)
-}
-
-@(private)
-_viewer_ok :: proc(c: ^Core, vi: int) -> bool {
-	return vi >= 0 && vi < CORE_MAX_VIEWERS && c.viewers[vi].used
 }
 
 // _type writes a command (the broker dropped its control bytes) and Enter.

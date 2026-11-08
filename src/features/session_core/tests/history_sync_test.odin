@@ -69,7 +69,9 @@ test_overflowed_viewer_gets_its_history_once_output_settles :: proc(t: ^testing.
 	rig_deliver(&r, 0, view)
 	// The viewer reads nothing until it overflows; output stops soon after the repaint.
 	n := 1000
-	for ; !r.s.attaches[0].stale && n < FLOOD_LINES; n += 10_000 do _output_lines(&r, n, n + 10_000)
+	// Small batches: under 2048 lines (the viewer's scrollback) follow the
+	// overflow, so the gap stays visible whatever the socket buffers hold.
+	for ; !r.s.attaches[0].stale && n < FLOOD_LINES; n += 1_000 do _output_lines(&r, n, n + 1_000)
 	_output_lines(&r, n, n + 100)
 	rig_deliver(&r, 0, view)
 	core_t := &r.s.sess.term

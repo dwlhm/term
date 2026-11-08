@@ -1,6 +1,7 @@
 package feature_session_client
 
-// UI-thread API: create/attach/detach/kill/list and draining core events.
+// UI-thread API: create/attach/release/kill/list, queued for the IO thread,
+// and draining the events it queued.
 
 import "core:sync"
 import proto "../session_proto"
@@ -27,11 +28,10 @@ Client_Event :: struct {
 client_create :: proc(c: ^Client, spec: ^proto.Spawn_Msg) -> ^session.Terminal_Session {
 	msg: [16 * 1024]u8
 	w := ipc.wire_writer(msg[:])
-	l := _new_link(c, spec.size)
-	if l == nil do return nil
-	ipc.ww_u32(&w, l.token)
 	proto.enc_spawn(&w, spec)
-	if !w.ok || !_send(c, proto.MSG_CREATE, 0, ipc.wire_bytes_written(&w)) {
+	l := _new_link(c, spec.size) if w.ok else nil
+	if l == nil do return nil
+	if !_enqueue(c, .Create, _link_key(c, l), ipc.wire_bytes_written(&w)) {
 		_free_link(l)
 		return nil
 	}
@@ -43,15 +43,19 @@ client_attach :: proc(c: ^Client, req: proto.Attach_Msg) -> ^session.Terminal_Se
 	l := _new_link(c, req.size)
 	if l == nil do return nil
 	l.observe = req.observe
-	msg: [64]u8
-	w := ipc.wire_writer(msg[:])
-	ipc.ww_u32(&w, l.token)
-	proto.enc_attach(&w, req)
-	if !_send(c, proto.MSG_ATTACH, 0, ipc.wire_bytes_written(&w)) {
+	if !_send_attach(c, l, req) {
 		_free_link(l)
 		return nil
 	}
 	return l.sess
+}
+
+@(private)
+_send_attach :: proc(c: ^Client, l: ^Client_Link, req: proto.Attach_Msg) -> bool {
+	msg: [64]u8
+	w := ipc.wire_writer(msg[:])
+	proto.enc_attach(&w, req)
+	return _enqueue(c, .Attach, _link_key(c, l), ipc.wire_bytes_written(&w))
 }
 
 // client_release stops showing sess. kill = end its program too; otherwise it
@@ -63,26 +67,28 @@ client_release :: proc(c: ^Client, sess: ^session.Terminal_Session, kill: bool) 
 	id, channel, state := l.id, l.channel, l.state
 	if state == .Pending {
 		// The core has not answered yet: the IO thread undoes it on ATTACHED.
-		l.cancelled, l.cancel_kill, l.state = true, kill, .Closed
-		sess := l.sess
-		l.sess = nil
+		l.cancelled, l.cancel_kill, l.state, l.sess = true, kill, .Closed, nil
 		sync.mutex_unlock(&c.mutex)
 		session.session_destroy(sess)
 		return
 	}
 	l.state = .Closed // DATA still in flight for the channel is dropped
 	sync.mutex_unlock(&c.mutex)
-	ch := _u32(channel)
-	if kill && state == .Attached do client_kill(c, id)
-	else if state == .Attached do _send(c, proto.MSG_DETACH, 0, ch[:])
+	if state == .Attached {
+		b: [9]u8
+		w := ipc.wire_writer(b[:])
+		ipc.ww_bool(&w, kill); ipc.ww_u32(&w, id); ipc.ww_u32(&w, channel)
+		_enqueue(c, .Release, _NO_LINK, b[:])
+	}
 	_free_link(l)
 }
 
 client_kill :: proc(c: ^Client, id: u32) -> bool {
 	b := _u32(id)
-	return _send(c, proto.MSG_KILL, 0, b[:])
+	return _enqueue(c, .Kill, _NO_LINK, b[:])
 }
-client_list :: proc(c: ^Client) -> bool { return _send(c, proto.MSG_LIST, 0) }
+
+client_list :: proc(c: ^Client) -> bool { return _enqueue(c, .List, _NO_LINK) }
 
 client_link_of :: proc(c: ^Client, sess: ^session.Terminal_Session) -> ^Client_Link {
 	for &l in c.links do if l.state != .Free && l.sess == sess do return &l
@@ -98,21 +104,18 @@ client_session_id :: proc(c: ^Client, sess: ^session.Terminal_Session) -> u32 {
 // next call). false = none left. A Failed/Closed link's session is marked not
 // alive here, so whoever shows it reaps it like an exited program.
 client_poll :: proc(c: ^Client, ev: ^Client_Event) -> bool {
-	scratch := c.scratch
 	ev^ = {}
-	if sync.atomic_load(&c.broken) {
+	if sync.atomic_load(&c.broken) || sync.atomic_load(&c.overflow) {
 		sync.atomic_store(&c.broken, false)
 		ev.kind = .Core_Lost
 		return true
 	}
 	sync.mutex_lock(&c.mutex)
-	hdr: [ipc.STREAM_HEADER]u8
-	got := c.ctl_inbox.len >= ipc.STREAM_HEADER && ipc.ring_pop(&c.ctl_inbox, hdr[:]) == ipc.STREAM_HEADER
-	kind, channel, length, _ := ipc.stream_parse_header(hdr[:])
-	n := ipc.ring_pop(&c.ctl_inbox, scratch[:min(length, len(scratch))]) if got else 0
+	kind, key, body, got := _rec_pop(&c.events, c.scratch)
+	if got do ev.link = _link_of_key(c, key)
 	sync.mutex_unlock(&c.mutex)
 	if !got do return false
-	_decode_event(c, ev, kind, channel, scratch[:n])
+	_decode_event(ev, Client_Event_Kind(kind), body)
 	if (ev.kind == .Failed || ev.kind == .Closed) && ev.link != nil && ev.link.sess != nil {
 		ev.link.sess.info.alive = false
 	}
@@ -142,7 +145,6 @@ client_spawn :: proc(c: ^Client, config: session.Session_Config) -> ^session.Ter
 	spec.size = session.session_config_size(config)
 	return client_create(c, &spec)
 }
-
 // client_provider runs panes' programs as core sessions.
 client_provider :: proc(c: ^Client) -> session.Session_Provider {
 	return {
@@ -157,70 +159,40 @@ client_provider :: proc(c: ^Client) -> session.Session_Provider {
 }
 
 @(private = "file")
-_decode_event :: proc(c: ^Client, ev: ^Client_Event, kind: u8, channel: u32, p: []u8) {
+_decode_event :: proc(ev: ^Client_Event, kind: Client_Event_Kind, p: []u8) {
+	ev.kind = kind
 	r := ipc.wire_reader(p)
-	switch kind {
-	case proto.MSG_ATTACHED:
-		token := ipc.wr_u32(&r)
-		ev.kind, ev.link = .Attached, _link_by_token(c, token)
-	case proto.MSG_FAIL:
-		token := ipc.wr_u32(&r)
-		ev.kind, ev.link, ev.code, ev.reason = .Failed, _link_by_token(c, token), proto.Fail_Code(ipc.wr_u8(&r)), ipc.wr_str(&r)
-	case ipc.STREAM_CLOSE:
-		ev.kind, ev.link, ev.reason = .Closed, _link_by_channel(c, channel), string(p)
-	case proto.MSG_EVENT:
-		ev.kind, ev.row = .Row, proto.dec_row(&r)
-	case proto.MSG_REMOVED:
-		ev.kind, ev.id = .Removed, ipc.wr_u32(&r)
-	case proto.MSG_SESSIONS:
-		ev.kind, ev.count = .Sessions, int(ipc.wr_u32(&r))
+	#partial switch kind {
+	case .Failed:
+		ev.code = proto.Fail_Code(ipc.wr_u8(&r))
+		ev.reason = string(p[1:]) if len(p) > 0 else ""
+	case .Closed:   ev.reason = string(p)
+	case .Row:      ev.row = proto.dec_row(&r)
+	case .Removed:  ev.id = ipc.wr_u32(&r)
+	case .Sessions:
+		ev.count = int(ipc.wr_u32(&r))
 		ev.sessions = r
-	case proto.MSG_OK:
-		ev.kind = .Ok
 	}
 }
 
 @(private = "file")
-_link_by_token :: proc(c: ^Client, token: u32) -> ^Client_Link {
-	if token == 0 do return nil
-	for &l in c.links do if l.state != .Free && l.token == token do return &l
-	return nil
-}
-
-@(private = "file")
 _new_link :: proc(c: ^Client, size: proto.Size_Msg) -> ^Client_Link {
+	sync.mutex_lock(&c.mutex)
+	defer sync.mutex_unlock(&c.mutex)
 	for &l in c.links {
 		if l.state != .Free do continue
-		c.next_token += 1
-		l = {state = .Pending, token = c.next_token, client = c}
+		l = {state = .Pending, client = c, gen = (l.gen + 1) & 0xFF_FFFF}
 		l.sess = session.session_create(size, {write = _link_write, reply = _link_reply, resize = _link_resize, consumed = _link_consumed, user = &l})
 		return &l
 	}
 	return nil
 }
 
-@(private = "file")
+@(private)
 _free_link :: proc(l: ^Client_Link) {
 	if l.sess != nil do session.session_destroy(l.sess)
 	c := l.client // l^ = {} clears it
 	sync.mutex_lock(&c.mutex)
-	l^ = {}
+	l^ = {gen = l.gen} // the slot remembers its use: a stale record finds no link
 	sync.mutex_unlock(&c.mutex)
-}
-
-@(private)
-_send :: proc(c: ^Client, kind: u8, channel: u32, parts: ..[]u8) -> bool {
-	sync.mutex_lock(&c.mutex)
-	ok := ipc.stream_send(&c.conn, kind, channel, ..parts)
-	sync.mutex_unlock(&c.mutex)
-	_poke(c)
-	return ok
-}
-
-@(private = "file")
-_u32 :: proc(v: u32) -> [4]u8 {
-	b: [4]u8
-	w := ipc.wire_writer(b[:])
-	ipc.ww_u32(&w, v)
-	return b
 }

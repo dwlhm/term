@@ -146,9 +146,9 @@ run_handoff :: proc(r: ^Runner) {
 run_lease_pass :: proc(r: ^Runner, pass: bool) -> bool {
 	b: [8]u8
 	w := ipc.wire_writer(b[:])
-	ipc.ww_u32(&w, r.sid); ipc.ww_bool(&w, pass)
-	f, ok := run_request(r, proto.MSG_LEASE_MODE, ipc.wire_bytes_written(&w), proto.MSG_OK, 5 * time.Second)
-	return ok && f.kind == proto.MSG_OK
+	proto.enc_lease_flag(&w, {r.sid, pass})
+	_, err := run_call(r, proto.MSG_LEASE_MODE, ipc.wire_bytes_written(&w), ipc.CALL_DEFAULT)
+	return err.kind == .None
 }
 
 // lua_render: a Lua value as text — strings as they are, tables as JSON.

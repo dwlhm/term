@@ -75,13 +75,16 @@ _server_free :: proc(k: ^_Server) {
 }
 
 // _peer_next hands out the peer's next request or stream input; a peer that
-// sent a malformed frame, or left and has nothing more, is dropped.
+// sent a malformed frame, or left and has nothing more, is dropped. Its input
+// read to the end may have granted credit (stream_next applies CREDIT), so
+// what waited for it is written then.
 @(private)
 _peer_next :: proc(k: ^_Server, slot: ^_Peer_Slot) -> (Server_Event, bool) {
 	for slot.state == .Joined {
 		f, ok := stream_next(&slot.conn)
 		if !ok {
 			if slot.conn.err == .Bad_Frame || slot.closing do _peer_drop(slot)
+			else do _peer_flush(slot)
 			break
 		}
 		if ev, yield := _peer_frame(k, slot, f); yield do return ev, true

@@ -18,10 +18,10 @@ app_cli_agent_observe :: proc(id: u32, args: []string) -> int {
 		fmt.eprintln("usage: term session observe [id] [-n lines] [--json]")
 		return 1
 	}
-	conn: plat_ipc.Stream_Conn
-	if !app_agent_conn(&conn, false) do return 2
-	defer plat_ipc.stream_conn_destroy(&conn)
-	res, code := app_agent_observe(&conn, id, lines)
+	c: plat_ipc.Client
+	if code := app_agent_open(&c, false); code != 0 do return code
+	defer plat_ipc.client_close(&c)
+	res, code := app_agent_observe(&c, id, lines)
 	if code != 0 do return code
 	if as_json do _print_observe_json(res)
 	else do _print_observe_human(res)
@@ -29,16 +29,14 @@ app_cli_agent_observe :: proc(id: u32, args: []string) -> int {
 }
 
 // app_agent_observe asks for one snapshot. code: 0 answered, else the exit code.
-app_agent_observe :: proc(conn: ^plat_ipc.Stream_Conn, id: u32, lines: u32) -> (res: proto.Observe_Result, code: int) {
+// app_agent_observe: res's strings are views valid until c's next call.
+app_agent_observe :: proc(c: ^plat_ipc.Client, id: u32, lines: u32) -> (res: proto.Observe_Result, code: int) {
 	b: [8]u8
 	w := plat_ipc.wire_writer(b[:])
-	plat_ipc.ww_u32(&w, id)
-	plat_ipc.ww_u32(&w, lines)
-	plat_ipc.stream_send(conn, proto.MSG_OBSERVE, 0, b[:])
-	f: plat_ipc.Stream_Frame
-	f, code = app_agent_answer(conn, proto.MSG_OBSERVE_RESULT)
-	if code != 0 do return
-	r := plat_ipc.wire_reader(f.payload)
+	proto.enc_observe_req(&w, {id, lines})
+	a, err := plat_ipc.client_call(c, proto.MSG_OBSERVE, b[:])
+	if err.kind != .None do return {}, app_fail(err)
+	r := plat_ipc.wire_reader(a.body)
 	res = proto.dec_observe_result(&r)
 	if !r.ok {
 		fmt.eprintln("term: malformed observe result from core")

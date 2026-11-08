@@ -14,7 +14,7 @@ import ipc "../../../platform/ipc"
 // Driver: one connection that keeps its lease and collects lease events.
 @(private = "file")
 Driver :: struct {
-	conn:   ipc.Stream_Conn,
+	conn:   Cli,
 	events: [dynamic]proto.Lease_Event,
 }
 
@@ -23,7 +23,7 @@ _driver :: proc(d: ^Driver) -> bool { return cli_conn(&d.conn) }
 
 @(private = "file")
 _drop :: proc(d: ^Driver) {
-	ipc.stream_conn_destroy(&d.conn)
+	cli_close(&d.conn)
 	delete(d.events)
 }
 
@@ -31,15 +31,15 @@ _drop :: proc(d: ^Driver) {
 // / MSG_TELL_RESULT / MSG_FAIL) and, for FAIL, its code; events are kept.
 @(private = "file")
 _call :: proc(d: ^Driver, kind: u8, payload: []u8) -> (answer: u8, code: proto.Fail_Code, tell: proto.Tell_Result) {
-	ipc.stream_send(&d.conn, kind, 0, payload)
+	cli_send(&d.conn, kind, payload)
 	for {
-		f, got := client.client_wait_frame(&d.conn, 4000)
+		f, got := cli_frame(&d.conn, 4000)
 		if !got do return
 		r := ipc.wire_reader(f.payload)
 		switch f.kind {
 		case proto.MSG_LEASE_EVENT: append(&d.events, proto.dec_lease_event(&r))
 		case proto.MSG_OK, proto.MSG_ACT_RESULT: return f.kind, {}, {}
-		case proto.MSG_TELL_RESULT: return f.kind, {}, proto.dec_tell_result(&r)
+		case proto.MSG_TELL_RESULT, proto.MSG_TELL_PROGRESS: return f.kind, {}, proto.dec_tell_result(&r)
 		case proto.MSG_FAIL:
 			_ = ipc.wr_u32(&r)
 			return f.kind, proto.Fail_Code(ipc.wr_u8(&r)), {}
@@ -56,7 +56,7 @@ _event :: proc(d: ^Driver, kind: proto.Lease_Event_Kind) -> (ev: proto.Lease_Eve
 			ordered_remove(&d.events, i)
 			return e, true
 		}
-		f := client.client_wait_frame(&d.conn, 4000) or_return
+		f := cli_frame(&d.conn, 4000) or_return
 		r := ipc.wire_reader(f.payload)
 		if f.kind == proto.MSG_LEASE_EVENT do append(&d.events, proto.dec_lease_event(&r))
 	}
@@ -108,7 +108,7 @@ _controller :: proc(id: u32) -> string {
 // Person: a window attached to the session, typing on its channel.
 @(private = "file")
 Person :: struct {
-	conn:    ipc.Stream_Conn,
+	conn:    Cli,
 	channel: u32,
 }
 
@@ -122,8 +122,7 @@ _person :: proc(p: ^Person, id: u32) -> bool {
 
 @(private = "file")
 _type :: proc(p: ^Person, bytes: string) {
-	ipc.stream_send(&p.conn, proto.MSG_V_INPUT, p.channel, transmute([]u8)bytes)
-	ipc.stream_flush(&p.conn)
+	cli_stream(&p.conn, p.channel, proto.MSG_V_INPUT, transmute([]u8)bytes)
 }
 
 @(test)
@@ -178,7 +177,7 @@ test_lease_holds_and_reports_human_input :: proc(t: ^testing.T) {
 	owner: Driver
 	person: Person
 	testing.expect(t, _driver(&owner) && _person(&person, id))
-	defer { _drop(&owner); ipc.stream_conn_destroy(&person.conn) }
+	defer { _drop(&owner); cli_close(&person.conn) }
 
 	_lease(&owner, id)
 	_type(&person, "abc")
@@ -212,7 +211,7 @@ test_lease_ends_on_disconnect_takeover_exit_and_kill :: proc(t: ^testing.T) {
 	_lease(&gone, id)
 	person: Person
 	testing.expect(t, _person(&person, id))
-	defer ipc.stream_conn_destroy(&person.conn)
+	defer cli_close(&person.conn)
 	_type(&person, "lost")
 	_event(&gone, .Human)
 	_drop(&gone)
@@ -226,8 +225,7 @@ test_lease_ends_on_disconnect_takeover_exit_and_kill :: proc(t: ^testing.T) {
 	_driver(&owner)
 	defer _drop(&owner)
 	_lease(&owner, id)
-	ipc.stream_send(&person.conn, proto.MSG_V_TAKEOVER, person.channel)
-	ipc.stream_flush(&person.conn)
+	cli_stream(&person.conn, person.channel, proto.MSG_V_TAKEOVER)
 	_, took := _event(&owner, .Takeover)
 	testing.expect(t, took && _controller(id) == "", "a takeover ends the lease")
 

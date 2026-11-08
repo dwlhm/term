@@ -199,13 +199,3 @@ dec_watch_result :: proc(r: ^ipc.Wire_Reader) -> (m: Watch_Result) {
 	m.cmd_seq = ipc.wr_u32(r)
 	return
 }
-
-// stream_hello_check validates a peer HELLO against what this side speaks.
-stream_hello_check :: proc(payload: []u8, allowed: bit_set[Stream_Role]) -> (m: Hello_Msg, err: Fail_Code, ok: bool) {
-	r := ipc.wire_reader(payload)
-	m = dec_hello(&r)
-	if !ipc.wr_done(&r) do return m, .Bad_Request, false
-	if m.version != STREAM_PROTO_VERSION do return m, .Version, false
-	if m.role not_in allowed do return m, .Bad_Request, false
-	return m, {}, true
-}

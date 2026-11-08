@@ -67,37 +67,44 @@ core_broadcast_row :: proc(c: ^Core, s: ^Core_Session) {
 
 @(private = "file")
 _broadcast :: proc(c: ^Core, kind: u8, payload: []u8) {
-	for &v in c.viewers do if v.used && v.hello do ipc.stream_send(&v.conn, kind, 0, payload)
+	ipc.notify(&c.srv, ipc.Notify_All{}, kind, payload)
 }
 
 // core_list_request asks every live session's holder for its foreground
 // process; the SESSIONS reply goes out when all answered or CORE_PROC_WAIT_MS passed.
-core_list_request :: proc(c: ^Core, vi: int) {
+core_list_request :: proc(c: ^Core, req: ^ipc.Request) {
+	m: proto.Empty_Request
+	if !ipc.request_decode(req, &m, proto.dec_empty) do return
+	slot: ^Core_List
+	for &l in c.lists do if !l.used { slot = &l; break }
+	if slot == nil {
+		core_viewer_fail(c, req, .Busy, "too many session lists are being gathered")
+		return
+	}
 	for &s in c.sessions {
 		if !s.used || s.exited || s.proc_pending do continue
 		s.proc_pending = true
 		core_holder_send(c, s.holder, proto.MSG_PROC_QUERY, s.id)
 	}
-	v := &c.viewers[vi]
-	v.list_waiting, v.list_due_ns = true, _now() + CORE_PROC_WAIT_MS * 1_000_000
+	slot^ = {used = true, req = req^, due_ns = _now() + CORE_PROC_WAIT_MS * 1_000_000}
 	core_lists_due(c)
 }
 
 core_lists_due :: proc(c: ^Core) {
 	pending := false
 	for &s in c.sessions do pending ||= s.used && s.proc_pending && s.holder >= 0
-	for &v, vi in c.viewers {
-		if !v.used || !v.list_waiting || (pending && _now() < v.list_due_ns) do continue
-		v.list_waiting = false
-		_send_sessions(c, vi)
+	for &l in c.lists {
+		if !l.used || (pending && _now() < l.due_ns) do continue
+		_send_sessions(c, &l.req)
+		l = {}
 	}
 }
 
 @(private = "file")
-_send_sessions :: proc(c: ^Core, vi: int) {
+_send_sessions :: proc(c: ^Core, req: ^ipc.Request) {
 	w := ipc.wire_writer(c.msg)
 	ipc.ww_u32(&w, u32(core_session_count(c)))
 	for &s in c.sessions do if s.used do core_row_write(&w, c, &s)
-	if w.ok do ipc.stream_send(&c.viewers[vi].conn, proto.MSG_SESSIONS, 0, ipc.wire_bytes_written(&w))
+	if w.ok do ipc.reply(&c.srv, req^, ipc.wire_bytes_written(&w))
+	else do core_viewer_fail(c, req, .Busy, "the session rows do not fit in one answer")
 }
-

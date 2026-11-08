@@ -18,18 +18,11 @@ app_cli_agent_run :: proc(id: u32, args: []string) -> int {
 		fmt.eprintln("usage: term session run <id> <command> [-t seconds] [-n lines] [--json]")
 		return 1
 	}
-	conn: plat_ipc.Stream_Conn
-	if !app_agent_conn(&conn, false) do return 2
-	defer plat_ipc.stream_conn_destroy(&conn)
 	from, _ := app_agent_self_id()
 	msg := make([]u8, len(command) + 64, context.temp_allocator)
 	w := plat_ipc.wire_writer(msg)
 	proto.enc_tell_req(&w, {to = id, from = from, timeout_ms = u32(timeout_s * 1000), wait = true, shell = true, body = command})
-	plat_ipc.stream_send(&conn, proto.MSG_TELL, 0, plat_ipc.wire_bytes_written(&w))
-	res, code := app_tell_answer(&conn, AGENT_ANSWER_MS)
-	for code == 0 && (res.phase == .Accepted || res.phase == .Progress) {
-		res, code = app_tell_answer(&conn, int(timeout_s * 1000) + WATCH_GRACE_MS)
-	}
+	res, code := app_tell_call(proto.MSG_TELL, plat_ipc.wire_bytes_written(&w), app_wait_timeout(timeout_s), as_json, follow = false)
 	if code != 0 do return code
 	if lines > 0 do res.text = _tail_lines(res.text, int(lines))
 	return app_print_tell(res, as_json)

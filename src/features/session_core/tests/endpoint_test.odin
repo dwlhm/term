@@ -10,14 +10,14 @@ import proto "../../session_proto"
 import ipc "../../../platform/ipc"
 
 @(private = "file")
-endpoint_new :: proc(conn: ^ipc.Stream_Conn, name: string, owned: bool) -> u32 {
+endpoint_new :: proc(conn: ^Cli, name: string, owned: bool) -> u32 {
 	if !cli_conn(conn) do return 0
 	b: [96]u8
 	w := ipc.wire_writer(b[:])
 	ipc.ww_str(&w, name); ipc.ww_bool(&w, owned)
-	ipc.stream_send(conn, proto.MSG_ENDPOINT, 0, ipc.wire_bytes_written(&w))
+	cli_send(conn, proto.MSG_ENDPOINT, ipc.wire_bytes_written(&w))
 	for {
-		f, got := client.client_wait_frame(conn, 3000)
+		f, got := cli_frame(conn, 3000)
 		if !got || f.kind == proto.MSG_FAIL do return 0
 		if f.kind != proto.MSG_OK do continue
 		r := ipc.wire_reader(f.payload)
@@ -28,34 +28,33 @@ endpoint_new :: proc(conn: ^ipc.Stream_Conn, name: string, owned: bool) -> u32 {
 @(test)
 test_endpoint_takes_requests_through_a_worker :: proc(t: ^testing.T) {
 	tiers := tiers_start()
-	ec, sc: ipc.Stream_Conn
+	ec, sc: Cli
 	id := endpoint_new(&ec, "indexer", false)
-	ipc.stream_conn_destroy(&ec) // not owned: stays
+	cli_close(&ec) // not owned: stays
 	testing.expect(t, id > 0, "made")
 	obs, ok, _ := cli_observe(id)
 	testing.expect(t, ok && obs.row.endpoint && obs.row.process == "indexer" && obs.row.state == .Idle, "its row")
 
 	r0, _ := tell_send(&sc, {to = id, body = "x"})
-	ipc.stream_conn_destroy(&sc)
+	cli_close(&sc)
 	testing.expect_value(t, r0.reject, proto.Tell_Reject.Not_Listening) // never a starting shell
 	ok2, code := cli_ctl(proto.MSG_SEND, id, transmute([]u8)string("ls\r"))
 	testing.expect(t, !ok2 && code == .Bad_Request, "no program to type into")
 
-	wc: ipc.Stream_Conn
+	wc: Cli
 	cli_conn(&wc)
 	b: [8]u8
 	w := ipc.wire_writer(b[:])
 	ipc.ww_u32(&w, id); ipc.ww_u32(&w, 0)
-	ipc.stream_send(&wc, proto.MSG_NEXT, 0, ipc.wire_bytes_written(&w))
-	ipc.stream_flush(&wc)
+	cli_send(&wc, proto.MSG_NEXT, ipc.wire_bytes_written(&w))
 	for i := 0; i < 200; i += 1 {
 		o, _, _ := cli_observe(id)
 		if o.row.request.listening > 0 do break
 	}
 	res, _ := tell_send(&sc, {to = id, body = "index src/"})
 	testing.expect(t, res.phase == .Accepted, "the app's worker took it")
-	ipc.stream_conn_destroy(&sc)
-	ipc.stream_conn_destroy(&wc)
+	cli_close(&sc)
+	cli_close(&wc)
 	testing.expect(t, cli_kill(id), "killed")
 	_, ok, _ = cli_observe(id)
 	testing.expect(t, !ok, "gone")
@@ -65,11 +64,11 @@ test_endpoint_takes_requests_through_a_worker :: proc(t: ^testing.T) {
 @(test)
 test_endpoint_owned_ends_with_its_connection :: proc(t: ^testing.T) {
 	tiers := tiers_start()
-	ec: ipc.Stream_Conn
+	ec: Cli
 	id := endpoint_new(&ec, "app", true)
 	_, ok, _ := cli_observe(id)
 	testing.expect(t, ok, "alive while its owner is connected")
-	ipc.stream_conn_destroy(&ec)
+	cli_close(&ec)
 	gone := false
 	for i := 0; i < 200 && !gone; i += 1 {
 		_, still, _ := cli_observe(id)
@@ -84,16 +83,15 @@ test_endpoint_owned_ends_with_its_connection :: proc(t: ^testing.T) {
 @(test)
 test_endpoint_survives_planned_restart :: proc(t: ^testing.T) {
 	tiers := tiers_start()
-	ec, oc, wc, sc: ipc.Stream_Conn
+	ec, oc, wc, sc: Cli
 	kept := endpoint_new(&ec, "kept", false)
-	ipc.stream_conn_destroy(&ec)
+	cli_close(&ec)
 	temp := endpoint_new(&oc, "temp", true)
 	cli_conn(&wc)
 	b: [8]u8
 	w := ipc.wire_writer(b[:])
 	ipc.ww_u32(&w, kept); ipc.ww_u32(&w, 0)
-	ipc.stream_send(&wc, proto.MSG_NEXT, 0, ipc.wire_bytes_written(&w))
-	ipc.stream_flush(&wc)
+	cli_send(&wc, proto.MSG_NEXT, ipc.wire_bytes_written(&w))
 	for i := 0; i < 200; i += 1 {
 		o, _, _ := cli_observe(kept)
 		if o.row.request.listening > 0 do break
@@ -102,14 +100,14 @@ test_endpoint_survives_planned_restart :: proc(t: ^testing.T) {
 	bb: [64]u8
 	ww := ipc.wire_writer(bb[:])
 	proto.enc_tell_req(&ww, {to = kept, body = "long job"}) // async
-	ipc.stream_send(&sc, proto.MSG_TELL, 0, ipc.wire_bytes_written(&ww))
+	cli_send(&sc, proto.MSG_TELL, ipc.wire_bytes_written(&ww))
 	acc, _ := tell_next(&sc, 3000)
-	ipc.stream_conn_destroy(&sc)
+	cli_close(&sc)
 	testing.expect(t, acc.phase == .Accepted, "taken before the restart")
 
 	tiers_core_restart_stop(tiers)
-	ipc.stream_conn_destroy(&wc)
-	ipc.stream_conn_destroy(&oc)
+	cli_close(&wc)
+	cli_close(&oc)
 	tiers_core_start(tiers)
 	obs, ok, _ := cli_observe(kept)
 	testing.expect(t, ok && obs.row.endpoint && obs.row.process == "kept", "kept under its id")

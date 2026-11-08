@@ -47,20 +47,21 @@ test_msg_decoders_reject_truncated_and_hostile :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_msg_hello_check :: proc(t: ^testing.T) {
+test_msg_hello_roundtrip :: proc(t: ^testing.T) {
 	buf: [128]u8
 	encode :: proc(buf: []u8, m: proto.Hello_Msg) -> []u8 {
 		w := ipc.wire_writer(buf)
 		proto.enc_hello(&w, m)
 		return ipc.wire_bytes_written(&w)
 	}
-	ok_msg := encode(buf[:], {version = proto.STREAM_PROTO_VERSION, role = .Viewer, build = "b1"})
-	m, _, ok := proto.stream_hello_check(ok_msg, {.Viewer, .Cli})
-	testing.expect(t, ok && m.build == "b1")
-	_, code, ok2 := proto.stream_hello_check(encode(buf[:], {version = 99, role = .Viewer}), {.Viewer})
-	testing.expect(t, !ok2 && code == .Version)
-	_, code, ok2 = proto.stream_hello_check(encode(buf[:], {version = proto.STREAM_PROTO_VERSION, role = .Holder}), {.Viewer})
-	testing.expect(t, !ok2 && code == .Bad_Request)
+	r := ipc.wire_reader(encode(buf[:], {version = proto.STREAM_PROTO_VERSION, role = .Viewer, build = "b1"}))
+	m := proto.dec_hello(&r)
+	testing.expect(t, ipc.wr_done(&r) && m.role == .Viewer && m.build == "b1")
+	bad := encode(buf[:], {version = proto.STREAM_PROTO_VERSION, role = .Viewer})
+	bad[4] = 0 // no such role
+	r = ipc.wire_reader(bad)
+	_ = proto.dec_hello(&r)
+	testing.expect(t, !r.ok)
 }
 
 @(test)

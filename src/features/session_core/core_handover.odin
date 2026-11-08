@@ -130,8 +130,8 @@ core_restore_broker :: proc(c: ^Core) {
 	for &p in c.broker.parties {
 		if p.sid != 0 && core_session_find(c, p.sid) == nil do core_broker_session_gone(c, p.sid, 0)
 	}
-	for vi in 0..<CORE_MAX_VIEWERS {
-		broker_viewer_gone(&c.broker, vi)
+	for key in 0..<CORE_MAX_WAITS { // the waiters of the last core went with it
+		broker_viewer_gone(&c.broker, key)
 		core_broker_apply(c)
 	}
 }

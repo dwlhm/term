@@ -100,6 +100,8 @@ Broker_Effect_Kind :: enum u8 {
 	Row,       // sid's request columns changed
 }
 
+// Broker_Effect: viewer (like Broker_Listener.viewer, Broker_Watch.viewer and
+// Broker_Request.waiter) is the core's waiter key, an index into Core.waits.
 Broker_Effect :: struct {
 	kind:   Broker_Effect_Kind,
 	sid:    u32,

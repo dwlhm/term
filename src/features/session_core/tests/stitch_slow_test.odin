@@ -27,7 +27,7 @@ test_read_restores_a_slow_program :: proc(t: ^testing.T) {
 	testing.expect(t, id != 0, "attached")
 	testing.expect(t, view_wait_screen(v, s, "L300", 8000), "the fixture drew its bottom page")
 
-	conn: ipc.Stream_Conn
+	conn: Cli
 	testing.expect(t, cli_conn(&conn), "cli link")
 	ch, ok := cli_attach_channel(&conn, id)
 	testing.expect(t, ok, "attached on a channel")
@@ -40,8 +40,8 @@ test_read_restores_a_slow_program :: proc(t: ^testing.T) {
 	w := ipc.wire_writer(b[:])
 	ipc.ww_u32(&w, id)
 	ipc.ww_u32(&w, 30)
-	ipc.stream_send(&conn, proto.MSG_READ, 0, b[:])
-	ipc.stream_send(&conn, proto.MSG_V_INPUT, ch, transmute([]u8)string("k"))
+	cli_send(&conn, proto.MSG_READ, b[:])
+	cli_stream(&conn, ch, proto.MSG_V_INPUT, transmute([]u8)string("k"))
 
 	text, _, _, answered := wait_text(&conn, ch)
 	if answered do defer delete(text)
@@ -68,7 +68,7 @@ test_read_restores_a_slow_program :: proc(t: ^testing.T) {
 		testing.expect(t, false, "the held input reached the slow program")
 	}
 
-	ipc.stream_conn_destroy(&conn)
+	cli_close(&conn)
 	view_close(v)
 	os.remove(script)
 	testing.expect(t, tiers_stop(tiers), "tiers end")

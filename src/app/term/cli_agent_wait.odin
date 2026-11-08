@@ -17,7 +17,6 @@ import "core:fmt"
 import "core:strconv"
 import "core:strings"
 import "core:time"
-import client_feat "../../features/session_client"
 import proto "../../features/session_proto"
 import plat_ipc "../../platform/ipc"
 
@@ -57,15 +56,18 @@ app_cli_agent_wait :: proc(id: u32, args: []string) -> int {
 			return _wait_usage()
 		}
 	}
-	conn: plat_ipc.Stream_Conn
-	if !app_agent_conn(&conn, false) do return 2
-	defer plat_ipc.stream_conn_destroy(&conn)
+	c: plat_ipc.Client
+	if code := app_agent_open(&c, false); code != 0 do return code
+	defer plat_ipc.client_close(&c)
 	deadline := time.tick_now()._nsec + i64(limit * 1e9)
 	if quiet > 0 && mode != .Listening do return _wait_usage()
-	if mode == .Text do return _wait_text(&conn, id, text, deadline)
-	if mode == .Listening do return app_wait_listening(&conn, id, deadline, quiet)
-	plat_ipc.stream_send(&conn, proto.MSG_LIST, 0)
-	return _wait_rows(&conn, id, deadline, mode == .Exit)
+	t := Row_Track{id = id}
+	switch mode {
+	case .Text:      return _wait_text(&c, &t, text, deadline)
+	case .Listening: return app_wait_listening(&c, &t, deadline, quiet)
+	case .Idle, .Exit:
+	}
+	return _wait_rows(&c, &t, deadline, mode == .Exit)
 }
 
 @(private = "file")
@@ -77,27 +79,20 @@ _wait_usage :: proc() -> int {
 // _wait_rows returns once session id runs no CLI/TUI (0, prints "idle"; never
 // with until_exit), has exited (0, prints "exited <code>") or is gone; 3 when
 // the deadline passes.
+// _wait_rows asks for the rows every WAIT_POLL_MS (each LIST refreshes the
+// foreground process in the core) and watches for REMOVED in between.
 @(private = "file")
-_wait_rows :: proc(conn: ^plat_ipc.Stream_Conn, id: u32, deadline_ns: i64, until_exit: bool) -> int {
+_wait_rows :: proc(c: ^plat_ipc.Client, t: ^Row_Track, deadline_ns: i64, until_exit: bool) -> int {
 	started := time.tick_now()._nsec
 	seen_active := false
 	for time.tick_now()._nsec < deadline_ns {
-		f, got := client_feat.client_wait_frame(conn, WAIT_POLL_MS)
-		if !got {
-			if conn.err != .None do return 1
-			plat_ipc.stream_send(conn, proto.MSG_LIST, 0)
-			continue
-		}
-		if f.kind == proto.MSG_REMOVED && _removed_id(f.payload) == id {
+		row, code := app_track_list(c, t)
+		switch {
+		case t.removed:
 			fmt.println("removed")
 			return 0
-		}
-		if f.kind != proto.MSG_SESSIONS do continue
-		row, found := _find_row(f.payload, id)
-		switch {
-		case !found:
-			fmt.eprintln("term: no such session")
-			return 1
+		case code != 0:
+			return code
 		case row.state == .Exited:
 			fmt.printfln("exited %d", row.exit_code)
 			return 0
@@ -108,86 +103,39 @@ _wait_rows :: proc(conn: ^plat_ipc.Stream_Conn, id: u32, deadline_ns: i64, until
 			fmt.println("idle")
 			return 0
 		}
+		if !app_track_for(c, t, time.tick_now()._nsec + WAIT_POLL_MS * 1_000_000) do return app_fail({kind = .Closed})
 	}
 	fmt.eprintln("term: wait timed out")
 	return 3
 }
 
-// _wait_text reads the screen every WAIT_TEXT_POLL_MS until it holds text.
 @(private = "file")
-_wait_text :: proc(conn: ^plat_ipc.Stream_Conn, id: u32, text: string, deadline_ns: i64) -> int {
-	plat_ipc.stream_send(conn, proto.MSG_LIST, 0)
-	row, ok := _first_row(conn, id)
-	if !ok do return 1
-	exited, exit_code := row.state == .Exited, row.exit_code
+_wait_text :: proc(c: ^plat_ipc.Client, t: ^Row_Track, text: string, deadline_ns: i64) -> int {
+	row, code := app_track_list(c, t)
+	if code != 0 do return code
+	t.row = row
 	req: [8]u8
 	w := plat_ipc.wire_writer(req[:])
-	plat_ipc.ww_u32(&w, id)
-	plat_ipc.ww_u32(&w, 0)
+	proto.enc_read_req(&w, {t.id, 0})
 	for time.tick_now()._nsec < deadline_ns {
-		plat_ipc.stream_send(conn, proto.MSG_READ, 0, req[:])
-		screen, answer := _screen_answer(conn, id, &exited, &exit_code)
-		switch answer {
-		case .Lost:
-			fmt.eprintln("term: the session core did not answer")
-			return 1
-		case .Removed:
+		a, err := plat_ipc.client_call(c, proto.MSG_READ, req[:], {on_event = app_track, data = t})
+		switch {
+		case t.removed || err.kind == .Failed:
 			fmt.println("removed")
 			return 4
-		case .Text:
-			if strings.contains(screen, text) {
-				fmt.println("found")
-				return 0
-			}
-		}
-		if exited {
-			fmt.printfln("exited %d", exit_code)
+		case err.kind != .None:
+			return app_fail(err)
+		case strings.contains(string(a.body), text):
+			fmt.println("found")
+			return 0
+		case t.row.state == .Exited:
+			fmt.printfln("exited %d", t.row.exit_code)
 			return 4
 		}
-		time.sleep(WAIT_TEXT_POLL_MS * time.Millisecond)
+		if !app_track_for(c, t, time.tick_now()._nsec + WAIT_TEXT_POLL_MS * 1_000_000) do return app_fail({kind = .Closed})
 	}
 	fmt.eprintln("term: wait timed out")
 	return 3
-}
-
-@(private = "file")
-Screen_Answer :: enum {Text, Removed, Lost}
-
-// _screen_answer waits for the TEXT answer of one READ. An exit seen (EVENT)
-// before it means that screen is the program's last one.
-@(private = "file")
-_screen_answer :: proc(conn: ^plat_ipc.Stream_Conn, id: u32, exited: ^bool, exit_code: ^i32) -> (string, Screen_Answer) {
-	for {
-		f, got := client_feat.client_wait_frame(conn, 5000)
-		if !got do return "", .Lost
-		switch f.kind {
-		case proto.MSG_TEXT:
-			return string(f.payload), .Text
-		case proto.MSG_FAIL:
-			return "", .Removed
-		case proto.MSG_REMOVED:
-			if _removed_id(f.payload) == id do return "", .Removed
-		case proto.MSG_EVENT:
-			r := plat_ipc.wire_reader(f.payload)
-			if ev := proto.dec_row(&r); r.ok && ev.id == id && ev.state == .Exited do exited^, exit_code^ = true, ev.exit_code
-		}
-	}
-}
-
-// _first_row waits for the SESSIONS answer and finds id in it.
-@(private = "file")
-_first_row :: proc(conn: ^plat_ipc.Stream_Conn, id: u32) -> (proto.Session_Row, bool) {
-	f, code := app_agent_answer(conn, proto.MSG_SESSIONS)
-	if code != 0 do return {}, false
-	row, found := _find_row(f.payload, id)
-	if !found do fmt.eprintln("term: no such session")
-	return row, found
-}
-
-@(private)
-_removed_id :: proc(payload: []u8) -> u32 {
-	r := plat_ipc.wire_reader(payload)
-	return plat_ipc.wr_u32(&r)
 }
 
 @(private)

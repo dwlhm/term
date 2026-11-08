@@ -33,7 +33,7 @@ test_human_typing_and_send_take_over :: proc(t: ^testing.T) {
 	tell_view_sess = view_sh(v, TELL_REPL)
 	id := view_attached(v, tell_view_sess)
 	res := tell_run(v, id, "sleep 1", proc(v: ^View) {
-		session.session_write_string(tell_view_sess, "x")
+		session.session_write_string(tell_view_sess, "x\r") // a person types a command and Enter
 		view_pump(v, 20)
 	})
 	testing.expect_value(t, res.status, proto.Tell_Status.Interrupted)

@@ -5,16 +5,16 @@ package feature_session_proto
 //
 // Both links keep term's HELLO = 10 and FAIL = 84. The holder link stays
 // 0.0.2 byte for byte, since a holder lives through upgrades. The session
-// link is 0.1.0: every channel 0 frame starts with u32 req.
-//
-// Not in the session catalog yet: WATCH (answered WATCH_RESULT or OK),
-// DETACH (no answer), TELL and RESULT (events after the answer). They are an
-// open question in the IPC spec, decided with the term session spec before M3.
+// link is 0.1.0: every channel 0 frame starts with u32 req. A waiting TELL or
+// RESULT gets MSG_TELL_PROGRESS answers before its MSG_TELL_RESULT; detaching
+// is a CLOSE on the attach channel, not a request.
 
 import ipc "../../platform/ipc"
 
 HOLDER_VERSION  :: ipc.Version{0, 0, 2}
 SESSION_VERSION :: ipc.Version{0, 1, 0}
+
+STREAM_PROTO_VERSION :: 2 // WELCOME's version on the holder link (HOLDER_VERSION packed)
 
 @(rodata)
 session_catalog := [?]ipc.Msg_Spec{
@@ -27,6 +27,9 @@ session_catalog := [?]ipc.Msg_Spec{
 	{request = MSG_SEND, answer = MSG_OK},
 	{request = MSG_SESSION_SIGNAL, answer = MSG_OK},
 	{request = MSG_SESSION_SIZE, answer = MSG_OK},
+	{request = MSG_TELL, answer = MSG_TELL_RESULT, progress = MSG_TELL_PROGRESS},
+	{request = MSG_RESULT, answer = MSG_TELL_RESULT, progress = MSG_TELL_PROGRESS},
+	{request = MSG_WATCH, answer = MSG_WATCH_RESULT},
 	{request = MSG_CANCEL, answer = MSG_OK},
 	{request = MSG_NEXT, answer = MSG_REQUEST},
 	{request = MSG_ANSWER, answer = MSG_OK},

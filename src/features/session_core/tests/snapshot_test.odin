@@ -14,13 +14,13 @@ import proto "../../session_proto"
 import ipc "../../../platform/ipc"
 
 cli_snapshot :: proc(id: u32, history: u32 = 0, since: i64 = -1) -> (snap: proto.Snapshot, code: proto.Fail_Code, ok: bool) {
-	conn: ipc.Stream_Conn
+	conn: Cli
 	if !cli_conn(&conn) do return
-	defer ipc.stream_conn_destroy(&conn)
+	defer cli_close(&conn)
 	b: [16]u8
 	w := ipc.wire_writer(b[:])
 	proto.enc_snapshot_req(&w, {id = id, history = history, since = since})
-	ipc.stream_send(&conn, proto.MSG_SNAPSHOT, 0, ipc.wire_bytes_written(&w))
+	cli_send(&conn, proto.MSG_SNAPSHOT, ipc.wire_bytes_written(&w))
 	f, got := _answer(&conn, proto.MSG_SNAPSHOT_RESULT, 4000)
 	if !got do return
 	r := ipc.wire_reader(f.payload)
@@ -32,13 +32,13 @@ cli_snapshot :: proc(id: u32, history: u32 = 0, since: i64 = -1) -> (snap: proto
 }
 
 cli_settle :: proc(req: proto.Settle_Request) -> (res: proto.Settle_Result, code: proto.Fail_Code, ok: bool) {
-	conn: ipc.Stream_Conn
+	conn: Cli
 	if !cli_conn(&conn) do return
-	defer ipc.stream_conn_destroy(&conn)
+	defer cli_close(&conn)
 	b: [24]u8
 	w := ipc.wire_writer(b[:])
 	proto.enc_settle_req(&w, req)
-	ipc.stream_send(&conn, proto.MSG_SETTLE, 0, ipc.wire_bytes_written(&w))
+	cli_send(&conn, proto.MSG_SETTLE, ipc.wire_bytes_written(&w))
 	f, got := _answer(&conn, proto.MSG_SETTLE_RESULT, int(req.timeout_ms) + 4000)
 	if !got do return
 	r := ipc.wire_reader(f.payload)
@@ -48,9 +48,9 @@ cli_settle :: proc(req: proto.Settle_Request) -> (res: proto.Settle_Result, code
 }
 
 @(private = "file")
-_answer :: proc(conn: ^ipc.Stream_Conn, want: u8, ms: int) -> (f: ipc.Stream_Frame, ok: bool) {
+_answer :: proc(conn: ^Cli, want: u8, ms: int) -> (f: Cli_Frame, ok: bool) {
 	for {
-		f = client.client_wait_frame(conn, ms) or_return
+		f = cli_frame(conn, ms) or_return
 		if f.kind == want || f.kind == proto.MSG_FAIL do return f, true
 	}
 }
@@ -214,10 +214,10 @@ test_settle_ends_on_exit_timeout_and_removal :: proc(t: ^testing.T) {
 test_snapshot_rejects_malformed_requests :: proc(t: ^testing.T) {
 	tiers := tiers_start()
 	defer tiers_stop(tiers)
-	conn: ipc.Stream_Conn
+	conn: Cli
 	testing.expect(t, cli_conn(&conn))
-	defer ipc.stream_conn_destroy(&conn)
-	ipc.stream_send(&conn, proto.MSG_SNAPSHOT, 0, []u8{1, 2, 3})
+	defer cli_close(&conn)
+	cli_send(&conn, proto.MSG_SNAPSHOT, []u8{1, 2, 3})
 	f, got := _answer(&conn, proto.MSG_SNAPSHOT_RESULT, 3000)
 	testing.expect(t, got && f.kind == proto.MSG_FAIL)
 	r := ipc.wire_reader(f.payload)

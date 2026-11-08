@@ -9,6 +9,7 @@ import "core:encoding/json"
 import "core:fmt"
 import "core:os"
 import "core:strconv"
+import "core:time"
 import proto "../../features/session_proto"
 import plat_ipc "../../platform/ipc"
 
@@ -29,18 +30,14 @@ app_cli_agent_tell :: proc(to_id: u32, args: []string) -> int {
 		fmt.eprintln("usage: term session tell <id> <text|-> [--async] [-t seconds] [--parent request] [--json]")
 		return 1
 	}
-	conn: plat_ipc.Stream_Conn
-	if !app_agent_conn(&conn, false) do return 2
-	defer plat_ipc.stream_conn_destroy(&conn)
 	from, _ := app_agent_self_id()
 	msg := make([]u8, len(a.body) + 64, context.temp_allocator)
 	w := plat_ipc.wire_writer(msg)
 	proto.enc_tell_req(&w, {to = to_id, from = from, timeout_ms = u32(a.timeout_s * 1000), parent = a.parent, wait = !a.async, body = a.body})
-	plat_ipc.stream_send(&conn, proto.MSG_TELL, 0, plat_ipc.wire_bytes_written(&w))
-	res, code := app_tell_answer(&conn, AGENT_ANSWER_MS)
+	timeout := plat_ipc.CALL_DEFAULT if a.async else app_wait_timeout(a.timeout_s)
+	res, code := app_tell_call(proto.MSG_TELL, plat_ipc.wire_bytes_written(&w), timeout, a.as_json, follow = true)
 	if code != 0 do return code
-	if res.phase == .Rejected || a.async do return app_print_tell(res, a.as_json)
-	return app_follow_result(&conn, int(a.timeout_s * 1000) + WATCH_GRACE_MS, a.as_json)
+	return app_print_tell(res, a.as_json)
 }
 
 // app_cli_agent_result: `term session result <request>… [--wait] [--follow] [-t s] [--json]`.
@@ -67,15 +64,11 @@ app_cli_agent_result :: proc(first: u32, args: []string) -> int {
 	if (req.n_ids > 1 && !req.wait) || (req.follow && req.n_ids > 1) do return _result_usage()
 	req.caller, _ = app_agent_self_id()
 	req.timeout_ms = u32(timeout_s * 1000) if req.wait else 0
-	conn: plat_ipc.Stream_Conn
-	if !app_agent_conn(&conn, false) do return 2
-	defer plat_ipc.stream_conn_destroy(&conn)
 	b: [128]u8
 	w := plat_ipc.wire_writer(b[:])
 	proto.enc_result_req(&w, req)
-	plat_ipc.stream_send(&conn, proto.MSG_RESULT, 0, plat_ipc.wire_bytes_written(&w))
-	if req.wait do return app_follow_result(&conn, int(req.timeout_ms) + WATCH_GRACE_MS, as_json)
-	res, code := app_tell_answer(&conn, AGENT_ANSWER_MS)
+	timeout := app_wait_timeout(timeout_s) if req.wait else plat_ipc.CALL_DEFAULT
+	res, code := app_tell_call(proto.MSG_RESULT, plat_ipc.wire_bytes_written(&w), timeout, as_json, follow = true)
 	if code != 0 do return code
 	return app_print_tell(res, as_json)
 }
@@ -91,28 +84,39 @@ app_cli_agent_cancel :: proc(req_id: u32, args: []string) -> int {
 	return app_agent_request_ok(proto.MSG_CANCEL, plat_ipc.wire_bytes_written(&w))
 }
 
-// app_follow_result prints progress frames as they come, then the result.
-app_follow_result :: proc(conn: ^plat_ipc.Stream_Conn, timeout_ms: int, as_json: bool) -> int {
-	for {
-		res, code := app_tell_answer(conn, timeout_ms)
-		if code != 0 do return code
-		if res.phase != .Progress do return app_print_tell(res, as_json)
-		if as_json do _print_json(res)
-		else do fmt.eprintfln("[#%d progress] %s", res.id, res.progress)
-	}
+// app_wait_timeout: how long the CLI waits for a core-side wait of
+// timeout_s (the core answers Timeout itself; the grace covers the trip).
+app_wait_timeout :: proc(timeout_s: f64) -> time.Duration {
+	return time.Duration(timeout_s * f64(time.Second)) + WATCH_GRACE_MS * time.Millisecond
 }
 
-app_tell_answer :: proc(conn: ^plat_ipc.Stream_Conn, timeout_ms: int) -> (res: proto.Tell_Result, code: int) {
-	f: plat_ipc.Stream_Frame
-	f, code = app_agent_answer(conn, proto.MSG_TELL_RESULT, timeout_ms)
-	if code != 0 do return
-	r := plat_ipc.wire_reader(f.payload)
+// app_tell_call sends a TELL or RESULT and waits for its final
+// TELL_RESULT (strings in temp_allocator); follow prints the progress
+// answers that come before it.
+app_tell_call :: proc(kind: u8, body: []u8, timeout: time.Duration, as_json: bool, follow: bool) -> (res: proto.Tell_Result, code: int) {
+	as_json := as_json
+	opts := plat_ipc.Call_Opts{timeout = timeout, on_event = _tell_progress if follow else nil, data = &as_json}
+	answer: []u8
+	if answer, code = app_agent_call(kind, body, opts); code != 0 do return
+	r := plat_ipc.wire_reader(answer)
 	res = proto.dec_tell_result(&r)
 	if !plat_ipc.wr_done(&r) {
 		fmt.eprintln("term: malformed result from core")
 		return {}, 1
 	}
 	return res, 0
+}
+
+@(private = "file")
+_tell_progress :: proc(data: rawptr, ev: plat_ipc.Client_Event) -> plat_ipc.Event_Action {
+	p, is_progress := ev.(plat_ipc.Progress)
+	if !is_progress do return .Continue
+	r := plat_ipc.wire_reader(p.body)
+	res := proto.dec_tell_result(&r)
+	if !plat_ipc.wr_done(&r) || res.phase != .Progress do return .Continue // Accepted: the wait goes on
+	if (^bool)(data)^ do _print_json(res)
+	else do fmt.eprintfln("[#%d progress] %s", res.id, res.progress)
+	return .Continue
 }
 
 // app_print_tell: exit 0 accepted, running or finished (the target's own exit

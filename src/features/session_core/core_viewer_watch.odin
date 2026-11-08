@@ -11,39 +11,35 @@ CORE_MAX_WATCHERS :: 32
 Core_Watcher :: struct {
 	used:           bool,
 	target_sess_id: u32,
-	viewer_idx:     int,
-	viewer_seq:     u32,
+	req:            ipc.Request,
 	events:         proto.Watch_Event_Flags,
 	due_ns:         i64,
 }
 
 // core_viewer_watch answers at once when the event already happened (exit,
 // or a command finished after `since`), otherwise registers a watcher.
-core_viewer_watch :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
-	req := proto.dec_watch_req(r)
-	if !ipc.wr_done(r) || req.events == {} {
-		core_viewer_fail(c, vi, 0, .Bad_Request, "malformed watch request")
+core_viewer_watch :: proc(c: ^Core, req: ^ipc.Request) {
+	m: proto.Watch_Request
+	if !ipc.request_decode(req, &m, proto.dec_watch_req) do return
+	if m.events == {} {
+		core_viewer_fail(c, req, .Bad_Request, "a watch needs an event")
 		return
 	}
-	s := core_session_find(c, req.id)
-	if s == nil {
-		core_viewer_fail(c, vi, 0, .Not_Found, "no such session")
-		return
-	}
+	s := _target(c, req, m.id, false)
+	if s == nil do return
 	w := Core_Watcher{
 		used           = true,
-		target_sess_id = req.id,
-		viewer_idx     = vi,
-		viewer_seq     = c.viewers[vi].seq,
-		events         = req.events,
-		due_ns         = (_now() + i64(req.timeout_ms) * 1_000_000) if req.timeout_ms > 0 else 0,
+		target_sess_id = m.id,
+		req            = req^,
+		events         = m.events,
+		due_ns         = (_now() + i64(m.timeout_ms) * 1_000_000) if m.timeout_ms > 0 else 0,
 	}
 	// An exited target never changes again: every watch ends now.
 	if s.exited {
 		_watch_fire(c, &w, s, .Exit)
 		return
 	}
-	if .Prompt in req.events && req.has_since && s.sess.term.parser.cmd_seq > req.since {
+	if .Prompt in m.events && m.has_since && s.sess.term.parser.cmd_seq > m.since {
 		_watch_fire(c, &w, s, .Prompt)
 		return
 	}
@@ -52,7 +48,7 @@ core_viewer_watch :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 		slot = w
 		return
 	}
-	core_viewer_fail(c, vi, 0, .Busy, "too many active watchers")
+	core_viewer_fail(c, req, .Busy, "too many active watchers")
 }
 
 Shell_Edges :: struct {
@@ -99,10 +95,7 @@ core_watch_trigger :: proc(c: ^Core, s: ^Core_Session, event: proto.Watch_Event)
 core_watch_target_gone :: proc(c: ^Core, s: ^Core_Session) {
 	for &w in c.watchers {
 		if !w.used || w.target_sess_id != s.id do continue
-		if core_viewer_current(c, w.viewer_idx, w.viewer_seq) {
-			core_viewer_fail(c, w.viewer_idx, 0, .Not_Found, "session was removed")
-			ipc.stream_flush(&c.viewers[w.viewer_idx].conn)
-		}
+		core_viewer_fail(c, &w.req, .Not_Found, "session was removed")
 		w = {}
 	}
 }
@@ -111,17 +104,14 @@ core_watch_target_gone :: proc(c: ^Core, s: ^Core_Session) {
 core_watchers_due :: proc(c: ^Core, now: i64) {
 	for &w in c.watchers {
 		if !w.used || w.due_ns == 0 || now < w.due_ns do continue
-		if core_viewer_current(c, w.viewer_idx, w.viewer_seq) {
-			core_viewer_fail(c, w.viewer_idx, 0, .Timeout, "watch timed out")
-			ipc.stream_flush(&c.viewers[w.viewer_idx].conn)
-		}
+		core_viewer_fail(c, &w.req, .Timeout, "watch timed out")
 		w = {}
 	}
 }
 
 // core_watchers_cancel_viewer drops a disconnected viewer's watches.
-core_watchers_cancel_viewer :: proc(c: ^Core, vi: int) {
-	for &w in c.watchers do if w.used && w.viewer_idx == vi do w = {}
+core_watchers_cancel_viewer :: proc(c: ^Core, peer: ipc.Peer) {
+	for &w in c.watchers do if w.used && w.req.peer == peer do w = {}
 }
 
 @(private = "file")
@@ -134,9 +124,7 @@ _watch_fire :: proc(c: ^Core, w: ^Core_Watcher, s: ^Core_Session, event: proto.W
 		prompt_state = proto.Prompt_State(p.prompt_state),
 		cmd_seq      = p.cmd_seq,
 	}
-	if !core_viewer_current(c, w.viewer_idx, w.viewer_seq) do return
 	msg := ipc.wire_writer(c.msg)
 	proto.enc_watch_result(&msg, res)
-	ipc.stream_send(&c.viewers[w.viewer_idx].conn, proto.MSG_WATCH_RESULT, 0, ipc.wire_bytes_written(&msg))
-	ipc.stream_flush(&c.viewers[w.viewer_idx].conn)
+	ipc.reply(&c.srv, w.req, ipc.wire_bytes_written(&msg))
 }

@@ -1,6 +1,7 @@
 package feature_session_core
 
 import terminal "../../core/terminal"
+import ipc "../../platform/ipc"
 
 // Stitch: the history of a full-screen program, read by scrolling it. A
 // program in the alternate screen keeps its history itself, so a `term session
@@ -48,8 +49,7 @@ Stitch_Page :: struct {
 Stitch_State :: struct {
 	active:         bool,
 	phase:          Stitch_Phase,
-	viewer:         int, // who asked (with seq, in case the slot was reused)
-	seq:            u32,
+	req:            ipc.Request, // the read it answers (nobody, once its peer left)
 	want:           int, // history lines asked for
 	got:            int, // history lines already glued
 	pages:          [3]Stitch_Page, // 0/1 alternate, 2 = the screen the read saw
@@ -78,7 +78,7 @@ Stitch_Start :: enum u8 { Started, Screen, Screen_Marked, Busy }
 
 // core_stitch_begin starts reading the history of an alternate-screen session,
 // or says that the visible screen alone is the answer.
-core_stitch_begin :: proc(c: ^Core, s: ^Core_Session, vi: int, history: int) -> (start: Stitch_Start) {
+core_stitch_begin :: proc(c: ^Core, s: ^Core_Session, req: ^ipc.Request, history: int) -> (start: Stitch_Start) {
 	t := &s.sess.term
 	if history <= 0 || !t.parser.in_alt_screen do return .Screen
 	if t.parser.mouse_mode == .None do return .Screen_Marked
@@ -95,7 +95,7 @@ core_stitch_begin :: proc(c: ^Core, s: ^Core_Session, vi: int, history: int) -> 
 	st.cur, st.prev, st.got, st.was_scrolled = 0, 2, 0, false
 	st.above, st.above_sent, st.notches, st.per_notch = 0, 0, 0, 1
 	st.quiet_steps, st.sent_ns, st.restore_tries, st.restore_failed = 0, 0, 0, false
-	st.viewer, st.seq = vi, c.viewers[vi].seq
+	st.req = req^
 	st.want = min(history, CORE_PAINT_HISTORY_MAX)
 	st.last_out_ns, st.begin_ns = _now(), _now()
 	st.deadline_ns = st.last_out_ns + STITCH_DEADLINE_MS * 1_000_000
@@ -154,7 +154,7 @@ core_stitch_abort :: proc(c: ^Core, s: ^Core_Session) {
 	st := s.stitch
 	if st == nil || !st.active do return
 	st.active, st.phase = false, .Idle
-	core_viewer_fail_seq(c, st.viewer, st.seq, .Exited, "the session ended while its history was read")
+	core_viewer_fail(c, &st.req, .Exited, "the session ended while its history was read")
 }
 
 @(private)

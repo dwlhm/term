@@ -11,29 +11,25 @@ import ie "../../core/terminal/input_encode"
 import proto "../session_proto"
 import ipc "../../platform/ipc"
 
-core_viewer_act :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
-	s := _target(c, vi, r, true, false)
-	if s == nil || _no_program(c, vi, s) || core_lease_fail(c, s, vi) do return
-	k := ipc.wr_u8(r)
-	if k < u8(proto.Act_Kind.Keys) || k > u8(proto.Act_Kind.Mouse) {
-		core_viewer_fail(c, vi, 0, .Bad_Request, "malformed act request")
-		return
-	}
+core_viewer_act :: proc(c: ^Core, req: ^ipc.Request) {
+	m: proto.Act_Request
+	if !ipc.request_decode(req, &m, proto.dec_act) do return
+	s := _target(c, req, m.id, true)
+	if s == nil || _no_program(c, req, s) || core_lease_fail(c, s, req) do return
 	if s.stitch != nil && s.stitch.active {
-		core_viewer_fail(c, vi, 0, .Busy, "a read is scrolling this session")
+		core_viewer_fail(c, req, .Busy, "a read is scrolling this session")
 		return
 	}
 	clear(&c.act)
 	code: proto.Fail_Code
 	reason: string
-	switch proto.Act_Kind(k) {
-	case .Keys:  code, reason = _act_keys(c, s, r)
-	case .Text:  code, reason = _act_text(c, s, r)
-	case .Mouse: code, reason = _act_mouse(c, s, r)
+	switch m.kind {
+	case .Keys:  code, reason = _act_keys(c, s, m.keys[:m.n_keys])
+	case .Text:  code, reason = _act_text(c, s, m.text, m.paste)
+	case .Mouse: code, reason = _act_mouse(c, s, m.mouse)
 	}
-	if code == {} && !ipc.wr_done(r) do code, reason = .Bad_Request, "malformed act request"
 	if code != {} {
-		core_viewer_fail(c, vi, 0, code, reason)
+		core_viewer_fail(c, req, code, reason)
 		return
 	}
 	gen := s.gen
@@ -42,18 +38,16 @@ core_viewer_act :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 	w := ipc.wire_writer(c.msg)
 	ipc.ww_u32(&w, s.id)
 	ipc.ww_u64(&w, gen)
-	ipc.stream_send(&c.viewers[vi].conn, proto.MSG_ACT_RESULT, 0, ipc.wire_bytes_written(&w))
+	ipc.reply(&c.srv, req^, ipc.wire_bytes_written(&w))
 }
 
 @(private = "file")
-_act_keys :: proc(c: ^Core, s: ^Core_Session, r: ^ipc.Wire_Reader) -> (proto.Fail_Code, string) {
-	n := ipc.wr_u32(r)
-	if !r.ok || n == 0 || n > proto.ACT_KEYS_MAX do return .Bad_Request, "1 to 64 keys per act"
+_act_keys :: proc(c: ^Core, s: ^Core_Session, keys: []proto.Act_Key) -> (proto.Fail_Code, string) {
 	t := &s.sess.term
 	modes := ie.Key_Modes{app_cursor = t.parser.cursor_key_mode, kitty_flags = terminal.terminal_kitty_keyboard_flags(t)}
-	for _ in 0 ..< n {
-		ev, ok := _act_key_event(proto.dec_act_key(r))
-		if !ok || !r.ok do return .Bad_Request, "malformed key"
+	for k in keys {
+		ev, ok := _act_key_event(k)
+		if !ok do return .Bad_Request, "malformed key"
 		if !_act_tap(c, ev, modes) do return .Unsupported, "the program has no encoding for that key"
 	}
 	return {}, ""
@@ -99,10 +93,8 @@ _act_tap :: proc(c: ^Core, key: ie.Key_Event, modes: ie.Key_Modes) -> bool {
 // \r\n are Enter. A paste cannot end itself early: an embedded end marker is
 // dropped.
 @(private = "file")
-_act_text :: proc(c: ^Core, s: ^Core_Session, r: ^ipc.Wire_Reader) -> (proto.Fail_Code, string) {
-	want_paste := ipc.wr_bool(r)
-	text := ipc.wr_str(r)
-	if !r.ok || len(text) == 0 || len(text) > proto.ACT_TEXT_MAX do return .Bad_Request, "text must be 1 byte to 64 KiB"
+_act_text :: proc(c: ^Core, s: ^Core_Session, text: string, want_paste: bool) -> (proto.Fail_Code, string) {
+	if len(text) == 0 || len(text) > proto.ACT_TEXT_MAX do return .Bad_Request, "text must be 1 byte to 64 KiB"
 	t := &s.sess.term
 	if want_paste && t.parser.bracketed_paste {
 		append(&c.act, "\x1b[200~")
@@ -139,10 +131,9 @@ _act_rune :: proc(c: ^Core, ch: rune) {
 }
 
 @(private = "file")
-_act_mouse :: proc(c: ^Core, s: ^Core_Session, r: ^ipc.Wire_Reader) -> (proto.Fail_Code, string) {
-	m := proto.dec_act_mouse(r)
+_act_mouse :: proc(c: ^Core, s: ^Core_Session, m: proto.Act_Mouse) -> (proto.Fail_Code, string) {
 	t := &s.sess.term
-	if !r.ok || m.kind > u8(max(ie.Mouse_Kind)) || m.button > u8(max(ie.Mouse_Button)) || m.mods > 0xF ||
+	if m.kind > u8(max(ie.Mouse_Kind)) || m.button > u8(max(ie.Mouse_Button)) || m.mods > 0xF ||
 	   m.col == 0 || int(m.col) > t.cols || m.row == 0 || int(m.row) > t.rows {
 		return .Bad_Request, "malformed mouse event"
 	}

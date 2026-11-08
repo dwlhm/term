@@ -15,36 +15,36 @@ CORE_ENDPOINT_SNAPSHOT :: "snap.endpoints"
 
 Core_Endpoint :: struct {
 	used:      bool,
-	owner:     int, // viewer that owns it (-1 = none)
-	owner_seq: u32,
+	owned:     bool,     // it ends with its owner's connection
+	owner:     ipc.Peer, // that connection (owned only)
 	name_len:  int,
 	name_buf:  [CORE_ENDPOINT_NAME_MAX]u8,
 }
 
 core_endpoint_name :: proc(s: ^Core_Session) -> string { return string(s.endpoint.name_buf[:s.endpoint.name_len]) }
 
-core_viewer_endpoint :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
-	name, owned := ipc.wr_str(r), ipc.wr_bool(r)
-	if !ipc.wr_done(r) || len(name) == 0 || len(name) > CORE_ENDPOINT_NAME_MAX {
-		core_viewer_fail(c, vi, 0, .Bad_Request, "an endpoint needs a name of 1..64 bytes")
+core_viewer_endpoint :: proc(c: ^Core, req: ^ipc.Request) {
+	m: proto.Endpoint_Request
+	if !ipc.request_decode(req, &m, proto.dec_endpoint_req) do return
+	if len(m.name) == 0 || len(m.name) > CORE_ENDPOINT_NAME_MAX {
+		core_viewer_fail(c, req, .Bad_Request, "an endpoint needs a name of 1..64 bytes")
 		return
 	}
-	s := _endpoint_new(c, c.next_id, name)
+	s := _endpoint_new(c, c.next_id, m.name)
 	if s == nil {
-		core_viewer_fail(c, vi, 0, .Busy, "no free session slot")
+		core_viewer_fail(c, req, .Busy, "no free session slot")
 		return
 	}
-	if owned do s.endpoint.owner, s.endpoint.owner_seq = vi, c.viewers[vi].seq
+	if m.owned do s.endpoint.owned, s.endpoint.owner = true, req.peer
 	b := _i32_bytes(i32(s.id))
-	ipc.stream_send(&c.viewers[vi].conn, proto.MSG_OK, 0, b[:])
+	ipc.reply(&c.srv, req^, b[:])
 	core_broadcast_row(c, s)
 }
 
 // core_endpoints_owner_gone removes the endpoints a closed connection owned.
-core_endpoints_owner_gone :: proc(c: ^Core, vi: int) {
-	seq := c.viewers[vi].seq
+core_endpoints_owner_gone :: proc(c: ^Core, peer: ipc.Peer) {
 	for &s in c.sessions {
-		if s.used && s.endpoint.used && s.endpoint.owner == vi && s.endpoint.owner_seq == seq do core_session_kill(c, &s)
+		if s.used && s.endpoint.used && s.endpoint.owned && s.endpoint.owner == peer do core_session_kill(c, &s)
 	}
 }
 
@@ -52,10 +52,10 @@ core_endpoints_owner_gone :: proc(c: ^Core, vi: int) {
 core_endpoints_save :: proc(c: ^Core) {
 	w := ipc.wire_writer(c.msg)
 	n := 0
-	for &s in c.sessions do if s.used && s.endpoint.used && s.endpoint.owner < 0 do n += 1
+	for &s in c.sessions do if s.used && s.endpoint.used && !s.endpoint.owned do n += 1
 	ipc.ww_u32(&w, u32(n))
 	for &s in c.sessions {
-		if !s.used || !s.endpoint.used || s.endpoint.owner >= 0 do continue
+		if !s.used || !s.endpoint.used || s.endpoint.owned do continue
 		ipc.ww_u32(&w, s.id); ipc.ww_str(&w, core_endpoint_name(&s))
 	}
 	path_buf: [256]u8
@@ -86,7 +86,7 @@ core_endpoints_restore :: proc(c: ^Core) {
 _endpoint_new :: proc(c: ^Core, id: u32, name: string) -> ^Core_Session {
 	s := _session_new(c, id, -1, {cols = 80, rows = 24})
 	if s == nil do return nil
-	s.endpoint = {used = true, owner = -1}
+	s.endpoint = {used = true}
 	s.endpoint.name_len = copy(s.endpoint.name_buf[:], name)
 	return s
 }

@@ -62,7 +62,7 @@ Served :: struct {
 }
 
 @(private = "file")
-_tell :: proc(to: u32, body: string, wait := true) -> (res: proto.Tell_Result, conn: ipc.Stream_Conn) {
+_tell :: proc(to: u32, body: string, wait := true) -> (res: proto.Tell_Result, conn: Cli) {
 	res, _ = tell_send(&conn, {to = to, body = body}) // it opens the connection
 	if !wait || res.phase == .Rejected do return
 	for res.phase != .Finished {
@@ -91,12 +91,12 @@ test_serve_answers_requests_to_an_agent :: proc(t: ^testing.T) {
 	rig_wait_listening(id)
 
 	res, c := _tell(id, "self")
-	ipc.stream_conn_destroy(&c)
+	cli_close(&c)
 	testing.expect(t, res.status == .Done && res.text == fmt.tprintf("contract answered #%d", res.id), "the contract answers")
 	testing.expect(t, rig_wait_screen(id, "REPLY:hello"), "the agent got the prompt")
 
 	res, c = _tell(id, "plain")
-	ipc.stream_conn_destroy(&c)
+	cli_close(&c)
 	testing.expect(t, res.status == .Failed, "a turn that ends without an answer fails the request")
 
 	// the agent answers itself while it is still working
@@ -105,12 +105,12 @@ test_serve_answers_requests_to_an_agent :: proc(t: ^testing.T) {
 	testing.expect(t, rig_wait_screen(id, "PROMPT:slow one"), "serve typed the prompt")
 	testing.expect(t, rig_answer_as(id, pending.id, "agent says hi"), "the agent's own answer is accepted")
 	final, _ := tell_next(&pc, 10_000)
-	ipc.stream_conn_destroy(&pc)
+	cli_close(&pc)
 	testing.expect(t, final.status == .Done && final.text == "agent says hi")
 
 	rig_wait_listening(id)
 	res, c = _tell(id, "while busy")
-	ipc.stream_conn_destroy(&c)
+	cli_close(&c)
 	testing.expect(t, res.status == .Failed && res.text == "the agent is busy (working or blocked): ask again when it is idle", "refused while it works")
 
 	session_type(id, "\x1b") // a person stops the slow turn: between requests input goes through
@@ -120,7 +120,7 @@ test_serve_answers_requests_to_an_agent :: proc(t: ^testing.T) {
 	testing.expect(t, rig_wait_screen(id, "PROMPT:slow two"), "serve typed the prompt")
 	testing.expect(t, tell_cancel(pending.id), "its sender cancels it")
 	final, _ = tell_next(&pc, 10_000)
-	ipc.stream_conn_destroy(&pc)
+	cli_close(&pc)
 	testing.expect_value(t, final.status, proto.Tell_Status.Cancelled)
 	for _ in 0 ..< 100 {
 		if _count(id, "CANCELLED") >= 2 do break
@@ -160,7 +160,7 @@ test_serve_with_a_bundled_adapter_and_no_contract :: proc(t: ^testing.T) {
 	testing.expect(t, rig_wait_screen(id, "term session answer"), "with how to answer it")
 	testing.expect(t, rig_answer_as(id, pending.id, "done by agy"))
 	final, _ := tell_next(&pc, 10_000)
-	ipc.stream_conn_destroy(&pc)
+	cli_close(&pc)
 	testing.expect(t, final.status == .Done && final.text == "done by agy")
 	cli_kill(id)
 	thread.join(served.thread)

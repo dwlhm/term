@@ -156,9 +156,8 @@ core_session_exited :: proc(c: ^Core, s: ^Core_Session, exit: proto.Exit_Msg, re
 	core_holder_send(c, s.holder, proto.MSG_RELEASE, s.id)
 	for &a in s.attaches {
 		if !a.used do continue
-		v := &c.viewers[a.viewer]
-		if len(reason) > 0 do ipc.stream_channel_close(&v.conn, a.channel, reason)
-		else do ipc.stream_channel_finish(&v.conn, a.channel)
+		if len(reason) > 0 do ipc.server_stream_close(&c.srv, a.peer, a.channel, reason)
+		else do ipc.server_stream_finish(&c.srv, a.peer, a.channel)
 		a = {}
 	}
 	core_watch_trigger(c, s, .Exit)
@@ -180,14 +179,14 @@ core_session_kill :: proc(c: ^Core, s: ^Core_Session) {
 	if !s.exited do core_holder_send(c, s.holder, proto.MSG_SIGNAL, s.id, hup[:])
 	core_holder_send(c, s.holder, proto.MSG_RELEASE, s.id)
 	core_stitch_abort(c, s)
-	for &a in s.attaches do if a.used do ipc.stream_channel_close(&c.viewers[a.viewer].conn, a.channel, "killed")
+	for &a in s.attaches do if a.used do ipc.server_stream_close(&c.srv, a.peer, a.channel, "killed")
 	id := s.id
 	core_watch_target_gone(c, s)
 	core_broker_session_gone(c, id, s.exit.code)
 	core_lease_session_ended(c, s, true)
 	core_session_free(c, s)
 	b := _i32_bytes(i32(id))
-	for &v in c.viewers do if v.used && v.hello do ipc.stream_send(&v.conn, proto.MSG_REMOVED, 0, b[:])
+	ipc.notify(&c.srv, ipc.Notify_All{}, proto.MSG_REMOVED, b[:])
 }
 
 core_session_free :: proc(c: ^Core, s: ^Core_Session) {

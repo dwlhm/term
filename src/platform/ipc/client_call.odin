@@ -8,6 +8,7 @@ package platform_ipc
 // client_* call.
 
 import "core:sync"
+import "core:sys/posix"
 import "core:time"
 
 @(private)
@@ -113,7 +114,7 @@ _client_await :: proc(k: ^_Client, req: u32, kind: u8, opts: Call_Opts) -> (Answ
 
 // _client_next_event: the next event for client_poll.
 @(private)
-_client_next_event :: proc(k: ^_Client, timeout: time.Duration) -> (Client_Event, Error) {
+_client_next_event :: proc(k: ^_Client, timeout: time.Duration, watch: posix.FD, on_watch: proc(data: rawptr), data: rawptr) -> (Client_Event, Error) {
 	due := _call_due(timeout)
 	for {
 		for f in stream_next(&k.conn) {
@@ -121,6 +122,12 @@ _client_next_event :: proc(k: ^_Client, timeout: time.Duration) -> (Client_Event
 		}
 		if k.conn.err != .None do return nil, {kind = .Closed, reason = "the connection closed"}
 		if sync.atomic_exchange(&k.interrupted, false) do return nil, {kind = .Interrupted, reason = "interrupted"}
-		if _client_wait(k, due) == .Timeout do return nil, {kind = .Timeout, reason = "nothing in time"}
+		switch _client_wait(k, due, watch) {
+		case .Timeout:      return nil, {kind = .Timeout, reason = "nothing in time"}
+		case .Watch:
+			if on_watch != nil do on_watch(data)
+			return nil, {}
+		case .Ready, .Woken:
+		}
 	}
 }

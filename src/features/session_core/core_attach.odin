@@ -12,33 +12,37 @@ import session "../session"
 
 CORE_PAINT_HISTORY_MAX :: 10_000
 
-core_attach :: proc(c: ^Core, s: ^Core_Session, vi: int, req: proto.Attach_Msg) -> (channel: u32, ok: bool) {
+// core_attach opens an attach channel to req's peer and answers ATTACHED
+// before the first paint goes out on it. false = no free attach slot.
+core_attach :: proc(c: ^Core, s: ^Core_Session, req: ^ipc.Request, m: proto.Attach_Msg) -> bool {
 	slot := -1
 	for &a, i in s.attaches do if !a.used { slot = i; break }
-	v := &c.viewers[vi]
-	if slot < 0 do return 0, false
-	v.next_channel += 1
-	channel = v.next_channel
-	if !ipc.stream_channel_open(&v.conn, channel, true) do return 0, false
+	if slot < 0 do return false
+	channel, ok := ipc.server_stream_open(&c.srv, req.peer, true)
+	if !ok do return false
+	b: [8]u8
+	w := ipc.wire_writer(b[:])
+	ipc.ww_u32(&w, s.id); ipc.ww_u32(&w, channel)
+	ipc.reply(&c.srv, req^, b[:])
 	a := &s.attaches[slot]
-	history := int(min(req.history, CORE_PAINT_HISTORY_MAX))
-	a^ = {used = true, observe = req.observe, viewer = vi, channel = channel, size = req.size, active_ns = _now(), history = history}
+	history := int(min(m.history, CORE_PAINT_HISTORY_MAX))
+	a^ = {used = true, observe = m.observe, peer = req.peer, channel = channel, size = m.size, active_ns = _now(), history = history}
 	core_apply_leader(c, s)
 	_attach_paint(c, s, a, history)
 	if a.recovering do _attach_stale(s, a) // the paint waits for ground and goes out without history
-	return channel, true
+	return true
 }
 
-core_attach_find :: proc(c: ^Core, vi: int, channel: u32) -> (^Core_Session, ^Core_Attach) {
+core_attach_find :: proc(c: ^Core, peer: ipc.Peer, channel: u32) -> (^Core_Session, ^Core_Attach) {
 	for &s in c.sessions {
 		if !s.used do continue
-		for &a in s.attaches do if a.used && a.viewer == vi && a.channel == channel do return &s, &a
+		for &a in s.attaches do if a.used && a.peer == peer && a.channel == channel do return &s, &a
 	}
 	return nil, nil
 }
 
 core_detach :: proc(c: ^Core, s: ^Core_Session, a: ^Core_Attach, notify: bool) {
-	if notify do ipc.stream_channel_close(&c.viewers[a.viewer].conn, a.channel)
+	if notify do ipc.server_stream_close(&c.srv, a.peer, a.channel)
 	a^ = {}
 	core_apply_leader(c, s)
 	core_broadcast_row(c, s)
@@ -47,9 +51,8 @@ core_detach :: proc(c: ^Core, s: ^Core_Session, a: ^Core_Attach, notify: bool) {
 // core_attach_push sends live output, or a repaint once a viewer that fell
 // behind can take one (the parser is at ground: no half sequence in flight).
 core_attach_push :: proc(c: ^Core, s: ^Core_Session, a: ^Core_Attach, bytes: []u8) {
-	v := &c.viewers[a.viewer]
 	if !a.recovering {
-		if ipc.stream_data(&v.conn, a.channel, bytes) do return
+		if ipc.server_stream_data(&c.srv, a.peer, a.channel, bytes) do return
 		a.recovering = true
 		_attach_stale(s, a)
 	}
@@ -58,11 +61,6 @@ core_attach_push :: proc(c: ^Core, s: ^Core_Session, a: ^Core_Attach, bytes: []u
 
 @(private = "file")
 _attach_paint :: proc(c: ^Core, s: ^Core_Session, a: ^Core_Attach, history: int) {
-	v := &c.viewers[a.viewer]
-	if ch := ipc.stream_channel(&v.conn, a.channel); ch != nil {
-		ipc.ring_clear(&ch.pending)
-		ch.needs_repaint = false
-	}
 	if !terminal.terminal_parser_at_ground(&s.sess.term) {
 		a.recovering = true
 		return
@@ -75,7 +73,11 @@ _attach_paint :: proc(c: ^Core, s: ^Core_Session, a: ^Core_Attach, history: int)
 	}
 	// The screen does not keep OSC 7501; the session does. A new viewer needs the latest report too.
 	extension.osc_7501_encode(&s.sess.program_status, &c.paint)
-	a.recovering = !ipc.stream_data(&v.conn, a.channel, c.paint[:])
+	// A paint that does not fit behind the backlog has the backlog dropped
+	// (server_stream_data false): it then goes alone, replacing it.
+	ok := ipc.server_stream_data(&c.srv, a.peer, a.channel, c.paint[:])
+	if !ok do ok = ipc.server_stream_data(&c.srv, a.peer, a.channel, c.paint[:])
+	a.recovering = !ok
 }
 
 // core_attach_touch: typing, resizing or focusing makes an attachment the size owner.
@@ -131,24 +133,24 @@ _attach_stale :: proc(s: ^Core_Session, a: ^Core_Attach) {
 	if s.settle_due_ns == 0 do s.settle_due_ns = _now() + CORE_SETTLE_MS * 1_000_000
 }
 
-// core_attach_frame handles a viewer frame on an attach channel.
-core_attach_frame :: proc(c: ^Core, vi: int, f: ipc.Stream_Frame) {
-	s, a := core_attach_find(c, vi, f.channel)
+// core_attach_input handles a viewer frame on an attach channel (CLOSE = detach).
+core_attach_input :: proc(c: ^Core, f: ipc.Stream_Input) {
+	s, a := core_attach_find(c, f.peer, f.channel)
 	if s == nil do return
-	r := ipc.wire_reader(f.payload)
+	r := ipc.wire_reader(f.body)
 	switch f.kind {
 	case proto.MSG_V_INPUT:
 		// The typist owns the size first: its input is read at its size.
 		core_attach_touch(c, s, a)
-		if core_lease_human_input(c, s, f.payload) do return // held for the automation
-		core_broker_human_input(c, s, f.payload)
-		if core_stitch_hold(s, f.payload) do return // delivered when the stitch ends
-		if !s.exited do core_holder_send(c, s.holder, proto.MSG_INPUT, s.id, f.payload)
+		if core_lease_human_input(c, s, f.body) do return // held for the automation
+		core_broker_human_input(c, s, f.body)
+		if core_stitch_hold(s, f.body) do return // delivered when the stitch ends
+		if !s.exited do core_holder_send(c, s.holder, proto.MSG_INPUT, s.id, f.body)
 	case proto.MSG_V_TAKEOVER:
 		core_lease_takeover(c, s)
 	case proto.MSG_V_REPLY:
-		if core_stitch_hold(s, f.payload) do return
-		if !s.exited do core_holder_send(c, s.holder, proto.MSG_INPUT, s.id, f.payload)
+		if core_stitch_hold(s, f.body) do return
+		if !s.exited do core_holder_send(c, s.holder, proto.MSG_INPUT, s.id, f.body)
 	case proto.MSG_V_RESIZE:
 		size := proto.dec_size(&r)
 		if !ipc.wr_done(&r) || size.cols == 0 || size.rows == 0 do return

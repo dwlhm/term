@@ -14,32 +14,26 @@ import proto "../session_proto"
 import ipc "../../platform/ipc"
 import session "../session"
 
-core_viewer_snapshot :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
-	req := proto.dec_snapshot_req(r)
-	if !ipc.wr_done(r) {
-		core_viewer_fail(c, vi, 0, .Bad_Request, "malformed snapshot request")
-		return
-	}
-	s := core_session_find(c, req.id)
-	if s == nil {
-		core_viewer_fail(c, vi, 0, .Not_Found, "no such session")
-		return
-	}
+core_viewer_snapshot :: proc(c: ^Core, req: ^ipc.Request) {
+	m: proto.Snapshot_Request
+	if !ipc.request_decode(req, &m, proto.dec_snapshot_req) do return
+	s := _target(c, req, m.id, false)
+	if s == nil do return
 	if s.stitch != nil && s.stitch.active {
-		core_viewer_fail(c, vi, 0, .Busy, "a read is scrolling this session")
+		core_viewer_fail(c, req, .Busy, "a read is scrolling this session")
 		return
 	}
 	// A screen that does not fit with its history is sent with less of it.
-	history := min(int(req.history), proto.SNAPSHOT_HISTORY_MAX)
+	history := min(int(m.history), proto.SNAPSHOT_HISTORY_MAX)
 	for {
 		w := ipc.wire_writer(c.msg)
-		_snap_write(c, s, &w, req.since, history)
+		_snap_write(c, s, &w, m.since, history)
 		if w.ok {
-			ipc.stream_send(&c.viewers[vi].conn, proto.MSG_SNAPSHOT_RESULT, 0, ipc.wire_bytes_written(&w))
+			ipc.reply(&c.srv, req^, ipc.wire_bytes_written(&w))
 			return
 		}
 		if history == 0 {
-			core_viewer_fail(c, vi, 0, .Bad_Request, "the screen does not fit in one snapshot")
+			core_viewer_fail(c, req, .Bad_Request, "the screen does not fit in one snapshot")
 			return
 		}
 		history /= 2

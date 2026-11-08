@@ -17,9 +17,9 @@ import ipc "../../../platform/ipc"
 import core ".."
 
 @(private)
-wait_data :: proc(conn: ^ipc.Stream_Conn, ch: u32) -> ([]u8, bool) {
+wait_data :: proc(conn: ^Cli, ch: u32) -> ([]u8, bool) {
 	for {
-		f, got := client.client_wait_frame(conn, 4000)
+		f, got := cli_frame(conn, 4000)
 		if !got do return nil, false
 		if f.kind != ipc.STREAM_DATA || f.channel != ch do continue
 		out := make([]u8, len(f.payload))
@@ -30,9 +30,9 @@ wait_data :: proc(conn: ^ipc.Stream_Conn, ch: u32) -> ([]u8, bool) {
 
 // wait_text waits for MSG_TEXT and counts the live frames and FAILs before it.
 @(private)
-wait_text :: proc(conn: ^ipc.Stream_Conn, ch: u32) -> (text: []u8, live: int, fails: int, ok: bool) {
+wait_text :: proc(conn: ^Cli, ch: u32) -> (text: []u8, live: int, fails: int, ok: bool) {
 	for {
-		f, got := client.client_wait_frame(conn, 8000)
+		f, got := cli_frame(conn, 8000)
 		if !got do return
 		if f.kind == proto.MSG_TEXT {
 			text = make([]u8, len(f.payload))
@@ -45,29 +45,28 @@ wait_text :: proc(conn: ^ipc.Stream_Conn, ch: u32) -> (text: []u8, live: int, fa
 }
 
 @(private)
-cli_attach_channel :: proc(conn: ^ipc.Stream_Conn, id: u32) -> (u32, bool) {
+cli_attach_channel :: proc(conn: ^Cli, id: u32) -> (u32, bool) {
 	b: [64]u8
 	w := ipc.wire_writer(b[:])
-	ipc.ww_u32(&w, 7)
 	proto.enc_attach(&w, {id = id, size = {cols = 80, rows = 24}})
-	ipc.stream_send(conn, proto.MSG_ATTACH, 0, ipc.wire_bytes_written(&w))
+	cli_send(conn, proto.MSG_ATTACH, ipc.wire_bytes_written(&w))
 	for {
-		f, got := client.client_wait_frame(conn, 3000)
+		f, got := cli_frame(conn, 3000)
 		if !got do return 0, false
 		if f.kind != proto.MSG_ATTACHED do continue
 		r := ipc.wire_reader(f.payload)
-		_, got_id, ch := ipc.wr_u32(&r), ipc.wr_u32(&r), ipc.wr_u32(&r)
+		got_id, ch := ipc.wr_u32(&r), ipc.wr_u32(&r)
 		return ch, got_id == id
 	}
 }
 
 @(private = "file")
-cli_read :: proc(conn: ^ipc.Stream_Conn, id: u32, history: u32) -> ([]u8, bool) {
+cli_read :: proc(conn: ^Cli, id: u32, history: u32) -> ([]u8, bool) {
 	b: [8]u8
 	w := ipc.wire_writer(b[:])
 	ipc.ww_u32(&w, id)
 	ipc.ww_u32(&w, history)
-	ipc.stream_send(conn, proto.MSG_READ, 0, b[:])
+	cli_send(conn, proto.MSG_READ, b[:])
 	text, _, _, ok := wait_text(conn, 0)
 	return text, ok
 }
@@ -86,11 +85,11 @@ l_numbers :: proc(text: string) -> []int {
 // wait_screen waits for a data frame that shows `needle`: the viewer state
 // proves the step, so the test never sleeps on a guess.
 @(private)
-wait_screen :: proc(conn: ^ipc.Stream_Conn, ch: u32, needle: string, ms := 4000) -> (frame: []u8, ok: bool) {
+wait_screen :: proc(conn: ^Cli, ch: u32, needle: string, ms := 4000) -> (frame: []u8, ok: bool) {
 	deadline := time.tick_now()._nsec + i64(ms) * 1_000_000
 	for time.tick_now()._nsec < deadline {
 		left := int((deadline - time.tick_now()._nsec) / 1_000_000) + 1
-		f, got := client.client_wait_frame(conn, left)
+		f, got := cli_frame(conn, left)
 		if !got do return nil, false
 		if f.kind != ipc.STREAM_DATA || f.channel != ch do continue
 		if !contains(string(f.payload), needle) do continue
@@ -115,7 +114,7 @@ test_read_stitches_full_screen_history :: proc(t: ^testing.T) {
 	testing.expect(t, id != 0, "attached")
 	testing.expect(t, view_wait_screen(v, s, "L300", 8000), "the fixture drew its bottom page")
 
-	conn: ipc.Stream_Conn
+	conn: Cli
 	testing.expect(t, cli_conn(&conn), "cli link")
 	ch, ok := cli_attach_channel(&conn, id)
 	testing.expect(t, ok, "attached on a channel")
@@ -131,9 +130,9 @@ test_read_stitches_full_screen_history :: proc(t: ^testing.T) {
 	w := ipc.wire_writer(b[:])
 	ipc.ww_u32(&w, id)
 	ipc.ww_u32(&w, 200)
-	ipc.stream_send(&conn, proto.MSG_READ, 0, b[:])
-	ipc.stream_send(&conn, proto.MSG_READ, 0, b[:]) // a second read is refused, not queued
-	ipc.stream_send(&conn, proto.MSG_V_INPUT, ch, transmute([]u8)string("k"))
+	cli_send(&conn, proto.MSG_READ, b[:])
+	cli_send(&conn, proto.MSG_READ, b[:]) // a second read is refused, not queued
+	cli_stream(&conn, ch, proto.MSG_V_INPUT, transmute([]u8)string("k"))
 
 	text, live, fails, answered := wait_text(&conn, ch)
 	if answered do defer delete(text)
@@ -168,7 +167,7 @@ test_read_stitches_full_screen_history :: proc(t: ^testing.T) {
 		testing.expect(t, false, "the held input reached the program")
 	}
 
-	ipc.stream_conn_destroy(&conn)
+	cli_close(&conn)
 	view_close(v)
 	os.remove(script)
 	testing.expect(t, tiers_stop(tiers), "tiers end")
@@ -183,14 +182,14 @@ test_read_alt_screen_without_mouse_is_marked :: proc(t: ^testing.T) {
 	testing.expect(t, id != 0, "attached")
 	testing.expect(t, view_wait_screen(v, s, "ALT-B", 4000), "alt screen drawn")
 
-	conn: ipc.Stream_Conn
+	conn: Cli
 	testing.expect(t, cli_conn(&conn), "cli link")
 	text, ok := cli_read(&conn, id, 10)
 	if ok do defer delete(text)
 	testing.expect(t, ok, "the core answered")
 	testing.expect(t, contains(string(text), "ALT-B"), "the visible screen is the answer")
 	testing.expect(t, contains(string(text), "does not report mouse input"), "and it says why")
-	ipc.stream_conn_destroy(&conn)
+	cli_close(&conn)
 	view_close(v)
 	testing.expect(t, tiers_stop(tiers), "tiers end")
 }

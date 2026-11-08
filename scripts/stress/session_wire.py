@@ -1,7 +1,8 @@
-"""Minimal viewer for the core's stream socket (platform/ipc/stream*.odin).
+"""Minimal viewer for the core's session link 0.1.0 (docs/PROTOCOL.md).
 
-Frame: [kind u8][channel u32 LE][len u32 LE][payload]. Only what the stress
-check needs: HELLO, CREATE, ATTACH, DATA with CREDIT.
+Frame: [kind u8][channel u32 LE][len u32 LE][payload]. Every channel 0 frame
+after HELLO starts with u32 req (0 = a notice). Only what the stress check
+needs: HELLO, CREATE, ATTACH, DATA with CREDIT.
 """
 import collections
 import socket
@@ -14,7 +15,7 @@ HELLO, CREATE, ATTACH = 10, 61, 63
 V_INPUT = 70
 ATTACHED, FAIL = 82, 84
 ROLE_VIEWER = 3
-PROTO_VERSION = 2  # STREAM_PROTO_VERSION (platform/ipc/stream.odin)
+PROTO_VERSION = 0x000100  # session link 0.1.0 (major<<16 | minor<<8 | patch)
 PAINT = b"\x18\x1b[!p"  # every first paint / repaint starts with CAN + soft reset
 
 
@@ -41,7 +42,7 @@ class Link:
                 time.sleep(0.05)
         self.buf = bytearray()
         self.held = collections.deque()  # frames that arrived while waiting for an answer
-        self.token = 0
+        self.req = 0
         self.send(HELLO, 0, struct.pack("<IBQ", PROTO_VERSION, ROLE_VIEWER, 0) + _str(b"stress"))
         f = self.next(5)
         if f is None or f[0] != HELLO:
@@ -77,8 +78,8 @@ class Link:
                 raise EOFError("core closed the link")
             self.buf += chunk
 
-    def _attached(self, token):
-        """Waits for the answer to `token`; other frames stay queued for next()."""
+    def _attached(self, req):
+        """Waits for the answer to `req`; other frames stay queued for next()."""
         early = []
         try:
             while True:
@@ -86,27 +87,29 @@ class Link:
                 if f is None:
                     raise RuntimeError("no answer to CREATE/ATTACH")
                 kind, _, p = f
-                if kind == FAIL and struct.unpack_from("<I", p)[0] == token:
+                if kind == FAIL and struct.unpack_from("<I", p)[0] == req:
                     raise RuntimeError("core refused: %r" % p[5:])
-                if kind == ATTACHED and struct.unpack_from("<I", p)[0] == token:
+                if kind == ATTACHED and struct.unpack_from("<I", p)[0] == req:
                     _, sid, channel = struct.unpack("<III", p)
                     return sid, channel
                 early.append(f)
         finally:
             self.held.extend(early)
 
+    def request(self, kind, body):
+        """Sends one channel 0 request; its req."""
+        self.req += 1
+        self.send(kind, 0, struct.pack("<I", self.req) + body)
+        return self.req
+
     def create(self, argv, cols=80, rows=24):
-        self.token += 1
         spec = struct.pack("<I", len(argv)) + b"".join(_str(a.encode()) for a in argv)
         spec += struct.pack("<I", 0) + _str(b"/tmp") + _size(cols, rows)
-        self.send(CREATE, 0, struct.pack("<I", self.token) + spec)
-        return self._attached(self.token)
+        return self._attached(self.request(CREATE, spec))
 
     def attach(self, sid, cols=80, rows=24):
-        self.token += 1
-        req = struct.pack("<II", self.token, sid) + _size(cols, rows) + struct.pack("<IB", 0, 0)
-        self.send(ATTACH, 0, req)
-        return self._attached(self.token)[1]
+        body = struct.pack("<I", sid) + _size(cols, rows) + struct.pack("<IB", 0, 0)
+        return self._attached(self.request(ATTACH, body))[1]
 
 
 class Stream:

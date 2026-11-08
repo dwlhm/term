@@ -10,16 +10,16 @@ import proto "../../session_proto"
 import ipc "../../../platform/ipc"
 
 cli_observe :: proc(id: u32, lines: u32 = 0) -> (res: proto.Observe_Result, ok: bool, code: proto.Fail_Code) {
-	conn: ipc.Stream_Conn
+	conn: Cli
 	if !cli_conn(&conn) do return
-	defer ipc.stream_conn_destroy(&conn)
+	defer cli_close(&conn)
 	b: [8]u8
 	w := ipc.wire_writer(b[:])
 	ipc.ww_u32(&w, id)
 	ipc.ww_u32(&w, lines)
-	ipc.stream_send(&conn, proto.MSG_OBSERVE, 0, b[:])
+	cli_send(&conn, proto.MSG_OBSERVE, b[:])
 	for {
-		f, got := client.client_wait_frame(&conn, 4000)
+		f, got := cli_frame(&conn, 4000)
 		if !got do return
 		if f.kind == proto.MSG_OBSERVE_RESULT {
 			r := ipc.wire_reader(f.payload)
