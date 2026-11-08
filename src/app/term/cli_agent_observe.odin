@@ -9,6 +9,7 @@ import "core:encoding/json"
 import "core:fmt"
 import "core:os"
 import "core:strconv"
+import proto "../../features/session_proto"
 import plat_ipc "../../platform/ipc"
 
 app_cli_agent_observe :: proc(id: u32, args: []string) -> int {
@@ -28,17 +29,17 @@ app_cli_agent_observe :: proc(id: u32, args: []string) -> int {
 }
 
 // app_agent_observe asks for one snapshot. code: 0 answered, else the exit code.
-app_agent_observe :: proc(conn: ^plat_ipc.Stream_Conn, id: u32, lines: u32) -> (res: plat_ipc.Observe_Result, code: int) {
+app_agent_observe :: proc(conn: ^plat_ipc.Stream_Conn, id: u32, lines: u32) -> (res: proto.Observe_Result, code: int) {
 	b: [8]u8
 	w := plat_ipc.wire_writer(b[:])
 	plat_ipc.ww_u32(&w, id)
 	plat_ipc.ww_u32(&w, lines)
-	plat_ipc.stream_send(conn, plat_ipc.MSG_OBSERVE, 0, b[:])
+	plat_ipc.stream_send(conn, proto.MSG_OBSERVE, 0, b[:])
 	f: plat_ipc.Stream_Frame
-	f, code = app_agent_answer(conn, plat_ipc.MSG_OBSERVE_RESULT)
+	f, code = app_agent_answer(conn, proto.MSG_OBSERVE_RESULT)
 	if code != 0 do return
 	r := plat_ipc.wire_reader(f.payload)
-	res = plat_ipc.dec_observe_result(&r)
+	res = proto.dec_observe_result(&r)
 	if !r.ok {
 		fmt.eprintln("term: malformed observe result from core")
 		return {}, 1
@@ -68,7 +69,7 @@ _parse_observe_args :: proc(args: []string) -> (as_json: bool, lines: u32, ok: b
 }
 
 @(private = "file")
-_print_observe_json :: proc(res: plat_ipc.Observe_Result) {
+_print_observe_json :: proc(res: proto.Observe_Result) {
 	line, err := json.marshal(res, {use_enum_names = true}, context.temp_allocator)
 	if err == nil {
 		fmt.println(string(line))
@@ -78,7 +79,7 @@ _print_observe_json :: proc(res: plat_ipc.Observe_Result) {
 }
 
 @(private = "file")
-_print_observe_human :: proc(res: plat_ipc.Observe_Result) {
+_print_observe_human :: proc(res: proto.Observe_Result) {
 	alt_tag := " [alt]" if res.is_alt else ""
 	fmt.printfln(
 		"[%d] %s (pid %d, %dx%d%s) state=%v prompt=%v cmd_seq=%d title=%q",

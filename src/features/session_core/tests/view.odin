@@ -7,13 +7,13 @@ import "core:strings"
 import "core:time"
 import client "../../session_client"
 import session "../../session"
-import ipc "../../../platform/ipc"
+import proto "../../session_proto"
 
 Logged :: struct {
 	kind:      client.Client_Event_Kind,
 	id:        u32,
 	link_sess: ^session.Terminal_Session,
-	state:     ipc.Session_State,
+	state:     proto.Session_State,
 	attached:  bool,
 	active:    bool,
 	pid:       u32,
@@ -44,7 +44,7 @@ view_close :: proc(v: ^View) {
 }
 
 view_spawn :: proc(v: ^View, argv: []string, cols: u16 = 80, rows: u16 = 24) -> ^session.Terminal_Session {
-	spec: ipc.Spawn_Msg
+	spec: proto.Spawn_Msg
 	for a, i in argv do spec.argv[i] = a
 	spec.argc = len(argv)
 	spec.cols, spec.rows = cols, rows
@@ -100,7 +100,7 @@ view_wait :: proc(v: ^View, kind: client.Client_Event_Kind, id: u32 = 0, ms := 3
 }
 
 // view_wait_row waits for a Row event of id matching state (and attached when given).
-view_wait_row :: proc(v: ^View, id: u32, state: ipc.Session_State, attached: Maybe(bool) = nil, ms := 3000) -> int {
+view_wait_row :: proc(v: ^View, id: u32, state: proto.Session_State, attached: Maybe(bool) = nil, ms := 3000) -> int {
 	deadline := time.tick_now()._nsec + i64(ms) * 1_000_000
 	for {
 		for e, i in v.log {

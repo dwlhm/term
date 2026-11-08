@@ -9,6 +9,7 @@ package term
 import "core:fmt"
 import "core:strconv"
 import "core:strings"
+import proto "../../features/session_proto"
 import plat_ipc "../../platform/ipc"
 
 app_cli_agent_run :: proc(id: u32, args: []string) -> int {
@@ -23,8 +24,8 @@ app_cli_agent_run :: proc(id: u32, args: []string) -> int {
 	from, _ := app_agent_self_id()
 	msg := make([]u8, len(command) + 64, context.temp_allocator)
 	w := plat_ipc.wire_writer(msg)
-	plat_ipc.enc_tell_req(&w, {to = id, from = from, timeout_ms = u32(timeout_s * 1000), wait = true, shell = true, body = command})
-	plat_ipc.stream_send(&conn, plat_ipc.MSG_TELL, 0, plat_ipc.wire_bytes_written(&w))
+	proto.enc_tell_req(&w, {to = id, from = from, timeout_ms = u32(timeout_s * 1000), wait = true, shell = true, body = command})
+	plat_ipc.stream_send(&conn, proto.MSG_TELL, 0, plat_ipc.wire_bytes_written(&w))
 	res, code := app_tell_answer(&conn, AGENT_ANSWER_MS)
 	for code == 0 && (res.phase == .Accepted || res.phase == .Progress) {
 		res, code = app_tell_answer(&conn, int(timeout_s * 1000) + WATCH_GRACE_MS)

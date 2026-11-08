@@ -5,6 +5,7 @@ package feature_holder
 import "core:c"
 import "core:fmt"
 import "core:sys/posix"
+import proto "../session_proto"
 import ipc "../../platform/ipc"
 import pty "../../platform/pty"
 
@@ -15,7 +16,7 @@ _session_find :: proc(h: ^Holder, id: u32) -> ^Session {
 
 // _session_spawn starts m on a new PTY as session id. The two rings are the
 // only allocations a session makes.
-_session_spawn :: proc(h: ^Holder, id: u32, m: ^ipc.Spawn_Msg) -> (s: ^Session, reason: string) {
+_session_spawn :: proc(h: ^Holder, id: u32, m: ^proto.Spawn_Msg) -> (s: ^Session, reason: string) {
 	index := -1
 	for slot, i in h.sessions {
 		if !slot.used {
@@ -35,7 +36,7 @@ _session_spawn :: proc(h: ^Holder, id: u32, m: ^ipc.Spawn_Msg) -> (s: ^Session, 
 	}
 	env := make([]string, m.envc + 1, context.temp_allocator)
 	copy(env, m.env[:m.envc])
-	env[m.envc] = fmt.tprintf("%s=%d", ipc.SESSION_ID_ENV, id)
+	env[m.envc] = fmt.tprintf("%s=%d", proto.SESSION_ID_ENV, id)
 	master, pid, err := pty.pty_spawn_raw(cfg, env)
 	free_all(context.temp_allocator)
 	if err != .None do return nil, fmt.bprintf(h.msg_buf[:], "spawn failed: %v", err)
@@ -115,7 +116,7 @@ _session_drain :: proc(h: ^Holder, s: ^Session, now: i64) {
 	}
 	if got > 0 {
 		_tail_push(&s.tail, h.read_buf[:got])
-		if send do _core_send(h, ipc.MSG_OUTPUT, s.id, h.read_buf[:got])
+		if send do _core_send(h, proto.MSG_OUTPUT, s.id, h.read_buf[:got])
 	}
 	if !ended do return
 	s.eof = true // EOF / EIO: the reader is done
@@ -168,8 +169,8 @@ _session_check_exit :: proc(h: ^Holder, s: ^Session, now: i64) {
 _session_report_exit :: proc(h: ^Holder, s: ^Session) {
 	if !s.exit_final || s.exit_sent || !s.tailed || h.core_state != .Linked do return
 	w := ipc.wire_writer(h.msg_buf[:])
-	ipc.enc_exit(&w, s.exit)
-	if _core_send(h, ipc.MSG_EXITED, s.id, ipc.wire_bytes_written(&w)) do s.exit_sent = true
+	proto.enc_exit(&w, s.exit)
+	if _core_send(h, proto.MSG_EXITED, s.id, ipc.wire_bytes_written(&w)) do s.exit_sent = true
 }
 
 // _reap_all collects every exited child (sessions and orphans).
@@ -193,7 +194,7 @@ _reap_all :: proc(h: ^Holder, now: i64) {
 }
 
 @(private = "file")
-_exit_from_status :: proc(status: c.int) -> (e: ipc.Exit_Msg) {
+_exit_from_status :: proc(status: c.int) -> (e: proto.Exit_Msg) {
 	if posix.WIFEXITED(status) do e.code = i32(posix.WEXITSTATUS(status))
 	if posix.WIFSIGNALED(status) {
 		e.signaled = true

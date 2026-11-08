@@ -4,10 +4,11 @@ package feature_session_core
 // progress, result. Each answers at once (OK, FAIL or a result); `next`,
 // `result --wait` and a waiting tell are answered later by broker effects.
 
+import proto "../session_proto"
 import ipc "../../platform/ipc"
 
 core_viewer_tell :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
-	req := ipc.dec_tell_req(r)
+	req := proto.dec_tell_req(r)
 	if !ipc.wr_done(r) {
 		core_viewer_fail(c, vi, 0, .Bad_Request, "malformed tell request")
 		return
@@ -62,7 +63,7 @@ core_viewer_next :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 
 // core_viewer_answer handles MSG_ANSWER and MSG_PROGRESS.
 core_viewer_answer :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader, final: bool) {
-	m := ipc.dec_answer(r)
+	m := proto.dec_answer(r)
 	if !ipc.wr_done(r) {
 		core_viewer_fail(c, vi, 0, .Bad_Request, "malformed answer")
 		return
@@ -79,7 +80,7 @@ core_viewer_answer :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader, final: bool) 
 
 // core_viewer_result reads a request now, or waits until one of several ends.
 core_viewer_result :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
-	m := ipc.dec_result_req(r)
+	m := proto.dec_result_req(r)
 	if !ipc.wr_done(r) {
 		core_viewer_fail(c, vi, 0, .Bad_Request, "malformed result request")
 		return
@@ -108,11 +109,11 @@ core_viewer_result :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 core_reply_request :: proc(c: ^Core, vi: int, r: ^Broker_Request) {
 	if !_viewer_ok(c, vi) do return
 	w := ipc.wire_writer(c.msg)
-	ipc.enc_next_result(&w, {id = r.id, from = r.from, parent = r.parent, body = broker_body(r)})
-	ipc.stream_send(&c.viewers[vi].conn, ipc.MSG_REQUEST, 0, ipc.wire_bytes_written(&w))
+	proto.enc_next_result(&w, {id = r.id, from = r.from, parent = r.parent, body = broker_body(r)})
+	ipc.stream_send(&c.viewers[vi].conn, proto.MSG_REQUEST, 0, ipc.wire_bytes_written(&w))
 }
 
-core_reply_result :: proc(c: ^Core, vi: int, r: ^Broker_Request, phase: ipc.Tell_Phase) {
+core_reply_result :: proc(c: ^Core, vi: int, r: ^Broker_Request, phase: proto.Tell_Phase) {
 	_send_result(c, vi, {
 		id = r.id, phase = phase, status = r.status, exit_code = r.exit_code, from = r.from, to = r.to,
 		progress = broker_progress_text(r), text = broker_text(r) if phase == .Finished else "",
@@ -120,9 +121,9 @@ core_reply_result :: proc(c: ^Core, vi: int, r: ^Broker_Request, phase: ipc.Tell
 }
 
 @(private = "file")
-_send_result :: proc(c: ^Core, vi: int, res: ipc.Tell_Result) {
+_send_result :: proc(c: ^Core, vi: int, res: proto.Tell_Result) {
 	if !_viewer_ok(c, vi) do return
 	w := ipc.wire_writer(c.msg)
-	ipc.enc_tell_result(&w, res)
-	ipc.stream_send(&c.viewers[vi].conn, ipc.MSG_TELL_RESULT, 0, ipc.wire_bytes_written(&w))
+	proto.enc_tell_result(&w, res)
+	ipc.stream_send(&c.viewers[vi].conn, proto.MSG_TELL_RESULT, 0, ipc.wire_bytes_written(&w))
 }

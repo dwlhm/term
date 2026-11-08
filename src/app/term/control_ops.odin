@@ -10,18 +10,19 @@ package term
 import "core:fmt"
 import "core:strings"
 
+import proto "../../features/session_proto"
 import plat_ipc "../../platform/ipc"
 import ctrl_feat "../../features/control"
 import sess_feat "../../features/session"
 
 // app_control_start (Primary only, called from main() BEFORE app_init):
-// resolve ipc_default_socket_path, allocate app.control with new(), and
+// resolve proto.ctl_socket_path, allocate app.control with new(), and
 // ipc_server_start(app.control, path, app_wakeup_callback, app).
 // On any error app.control is freed and set to nil; the error is returned.
 app_control_start :: proc(app: ^Term_App) -> plat_ipc.Ipc_Error {
 	if app == nil do return .Socket_Failed
 	buf: [256]u8
-	path, perr := plat_ipc.ipc_default_socket_path(buf[:])
+	path, perr := proto.ctl_socket_path(buf[:])
 	if perr != .None do return perr
 	app.control = new(plat_ipc.Ipc_Server)
 	serr := plat_ipc.ipc_server_start(app.control, path, app_wakeup_callback, app)

@@ -78,7 +78,7 @@ _hello_0_0_2 :: proc(buf: []u8) -> []u8 {
 
 @(private = "file")
 _listed :: proc(id: u32) -> bool {
-	rows: [16]ipc.Session_Row
+	rows: [16]proto.Session_Row
 	for r in cli_wait_rows(rows[:]) do if r.id == id do return true
 	return false
 }
@@ -136,7 +136,7 @@ _dial_holder :: proc(t: ^testing.T, tiers: ^Tiers) -> (up: bool) {
 	l: ipc.Link
 	defer ipc.link_close(&l)
 	at := ipc.Endpoint{tiers.dir, tiers.hsock[len(tiers.dir) + 1:]}
-	if err := ipc.link_dial(&l, at, proto.holder(), u8(ipc.Stream_Role.Core), &set); err.kind != .None {
+	if err := ipc.link_dial(&l, at, proto.holder(), u8(proto.Stream_Role.Core), &set); err.kind != .None {
 		testing.expectf(t, false, "link_dial: %v %q", err.kind, err.reason)
 		return
 	}

@@ -10,7 +10,7 @@ package term
 import "core:time"
 import sess_feat "../../features/session"
 import client_feat "../../features/session_client"
-import plat_ipc "../../platform/ipc"
+import proto "../../features/session_proto"
 
 APP_QUIT_MAX     :: 64
 APP_QUIT_WAIT_MS :: 500 // how long quit waits for the core's fresh foreground info
@@ -45,7 +45,7 @@ app_request_quit_flow :: proc(app: ^Term_App) {
 }
 
 // app_quit_note_row records a shown session's row while quit waits for them.
-app_quit_note_row :: proc(app: ^Term_App, row: plat_ipc.Session_Row) {
+app_quit_note_row :: proc(app: ^Term_App, row: proto.Session_Row) {
 	if app.quit.phase != .Waiting || !row.active do return
 	for i in 0..<app.quit.count do if app.quit.candidates[i].id == row.id do return
 	if app.quit.count >= APP_QUIT_MAX do return

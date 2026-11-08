@@ -6,10 +6,11 @@ package feature_session_core_tests
 import "core:strings"
 import "core:time"
 import client "../../session_client"
+import proto "../../session_proto"
 import ipc "../../../platform/ipc"
 
 rig_wait_controller :: proc(id: u32, held: bool) {
-	rows: [16]ipc.Session_Row
+	rows: [16]proto.Session_Row
 	for _ in 0 ..< 200 {
 		for row in cli_list_rows(rows[:]) do if row.id == id && (len(row.controller) > 0) == held do return
 		time.sleep(20 * time.Millisecond)
@@ -17,7 +18,7 @@ rig_wait_controller :: proc(id: u32, held: bool) {
 }
 
 rig_wait_endpoint :: proc() -> u32 {
-	rows: [16]ipc.Session_Row
+	rows: [16]proto.Session_Row
 	for _ in 0 ..< 200 {
 		for row in cli_list_rows(rows[:]) do if row.endpoint && row.request.listening > 0 do return row.id
 		time.sleep(20 * time.Millisecond)
@@ -40,7 +41,7 @@ session_type :: proc(id: u32, bytes: string) {
 	defer ipc.stream_conn_destroy(&conn)
 	ch, ok := cli_attach_channel(&conn, id)
 	if !ok do return
-	ipc.stream_send(&conn, ipc.MSG_V_INPUT, ch, transmute([]u8)bytes)
+	ipc.stream_send(&conn, proto.MSG_V_INPUT, ch, transmute([]u8)bytes)
 	ipc.stream_flush(&conn)
 	time.sleep(100 * time.Millisecond)
 }
@@ -52,7 +53,7 @@ session_takeover :: proc(id: u32) {
 	defer ipc.stream_conn_destroy(&conn)
 	ch, ok := cli_attach_channel(&conn, id)
 	if !ok do return
-	ipc.stream_send(&conn, ipc.MSG_V_TAKEOVER, ch)
+	ipc.stream_send(&conn, proto.MSG_V_TAKEOVER, ch)
 	ipc.stream_flush(&conn)
 	time.sleep(100 * time.Millisecond)
 }
@@ -64,21 +65,21 @@ tell_body :: proc(to: u32, body: string) {
 	defer ipc.stream_conn_destroy(&conn)
 	b: [256]u8
 	w := ipc.wire_writer(b[:])
-	ipc.enc_tell_req(&w, {to = to, body = body, wait = true})
-	ipc.stream_send(&conn, ipc.MSG_TELL, 0, ipc.wire_bytes_written(&w))
+	proto.enc_tell_req(&w, {to = to, body = body, wait = true})
+	ipc.stream_send(&conn, proto.MSG_TELL, 0, ipc.wire_bytes_written(&w))
 	for _ in 0 ..< 100 {
 		f, got := client.client_wait_frame(&conn, 200)
 		if !got do continue
-		if f.kind != ipc.MSG_TELL_RESULT do continue
+		if f.kind != proto.MSG_TELL_RESULT do continue
 		r := ipc.wire_reader(f.payload)
-		res := ipc.dec_tell_result(&r)
+		res := proto.dec_tell_result(&r)
 		if res.phase == .Finished || res.phase == .Rejected do return
 	}
 }
 
 // rig_wait_listening: a worker waits in `next` for session id.
 rig_wait_listening :: proc(id: u32) {
-	rows: [16]ipc.Session_Row
+	rows: [16]proto.Session_Row
 	for _ in 0 ..< 250 {
 		for row in cli_list_rows(rows[:]) do if row.id == id && row.request.listening > 0 do return
 		time.sleep(20 * time.Millisecond)
@@ -93,11 +94,11 @@ rig_answer_as :: proc(by: u32, id: u64, text: string) -> bool {
 	defer ipc.stream_conn_destroy(&conn)
 	b: [256]u8
 	w := ipc.wire_writer(b[:])
-	ipc.enc_answer(&w, {by = by, id = id, text = text})
-	ipc.stream_send(&conn, ipc.MSG_ANSWER, 0, ipc.wire_bytes_written(&w))
+	proto.enc_answer(&w, {by = by, id = id, text = text})
+	ipc.stream_send(&conn, proto.MSG_ANSWER, 0, ipc.wire_bytes_written(&w))
 	for _ in 0 ..< 50 {
 		f, got := client.client_wait_frame(&conn, 100)
-		if got && (f.kind == ipc.MSG_OK || f.kind == ipc.MSG_FAIL) do return f.kind == ipc.MSG_OK
+		if got && (f.kind == proto.MSG_OK || f.kind == proto.MSG_FAIL) do return f.kind == proto.MSG_OK
 	}
 	return false
 }

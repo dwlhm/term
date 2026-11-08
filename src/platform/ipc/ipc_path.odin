@@ -4,8 +4,6 @@ package platform_ipc
 // Contract: see ipc.odin invariants 4.
 
 import "core:c"
-import "core:fmt"
-import "core:os"
 import "core:sys/posix"
 import "core:time"
 
@@ -71,48 +69,6 @@ unlink_bound :: proc(fd: posix.FD, cpath: cstring) -> Ipc_Error {
 	posix.close(fd)
 	posix.unlink(cpath)
 	return .Socket_Failed
-}
-// ipc_default_socket_path writes the control socket path into buf.
-// $TERM_CTL_SOCK, if set and non-empty, is returned as-is (no dir handling).
-// Otherwise "<$TMPDIR or /tmp, trailing '/' trimmed>/term-<uid>/ctl.sock":
-// the dir is created with mode 0700 if missing, then validated with lstat
-// (S_ISDIR, not a symlink, st_uid == getuid(), (st_mode & 0o077) == 0) →
-// Unsafe_Path otherwise. Path_Too_Long if the result (+NUL) does not fit
-// sockaddr_un.sun_path or buf.
-ipc_default_socket_path :: proc(buf: []u8) -> (path: string, err: Ipc_Error) {
-	env: [256]u8
-	override, _ := os.lookup_env(env[:], IPC_SOCKET_PATH_ENV)
-	if len(override) > 0 {
-		if len(override) + 1 > sun_path_len() || len(override) + 1 > len(buf) {
-			return "", .Path_Too_Long
-		}
-		copy(buf, override)
-		return string(buf[:len(override)]), .None
-	}
-	tmp, _ := os.lookup_env(env[:], "TMPDIR")
-	if len(tmp) == 0 do tmp = "/tmp"
-	base_len := len(tmp)
-	for base_len > 1 && tmp[base_len - 1] == '/' do base_len -= 1
-	work: [256]u8
-	dir := fmt.bprintf(work[:], "%s/term-%d", tmp[:base_len], int(posix.getuid()))
-	full_len := len(dir) + len("/ctl.sock")
-	if full_len + 1 > sun_path_len() || full_len + 1 > len(buf) {
-		return "", .Path_Too_Long
-	}
-	dir_c: [256]u8
-	cpath, ok := cstring_from(dir_c[:], dir)
-	if !ok do return "", .Path_Too_Long
-	if posix.mkdir(cpath, posix.S_IRWXU) != .OK && posix.errno() != .EEXIST {
-		return "", .Unsafe_Path
-	}
-	st: posix.stat_t
-	if posix.lstat(cpath, &st) != .OK do return "", .Unsafe_Path
-	if !posix.S_ISDIR(st.st_mode) || st.st_uid != posix.getuid() || group_other_access(st.st_mode) {
-		return "", .Unsafe_Path
-	}
-	copy(buf[:len(dir)], dir)
-	copy(buf[len(dir):], "/ctl.sock")
-	return string(buf[:full_len]), .None
 }
 
 // ipc_probe connects to path once (non-blocking connect, ≤ 200 ms poll).

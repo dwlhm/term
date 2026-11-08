@@ -14,6 +14,7 @@ import "core:time"
 import holder "../../holder"
 import core ".."
 import client "../../session_client"
+import proto "../../session_proto"
 import ipc "../../../platform/ipc"
 
 Tiers :: struct {
@@ -34,12 +35,12 @@ tiers_start :: proc() -> ^Tiers {
 	t := new(Tiers)
 	_seq += 1
 	t.dir = fmt.bprintf(t.dir_buf[:], "/tmp/tsc-%d-%d", posix.getpid(), _seq)
-	os.set_env(ipc.SESSION_DIR_ENV, t.dir)
+	os.set_env(proto.SESSION_DIR_ENV, t.dir)
 	os.set_env("TERM_HOLDER_NO_CORE", "1")
 	os.set_env("TERM_HOLDER_GRACE_MS", "100")
 	os.set_env("TERM_CORE_GRACE_MS", "100")
 	buf: [64]u8
-	_, _ = ipc.ipc_session_dir(buf[:]) // creates the dir 0700
+	_, _ = proto.session_dir(buf[:]) // creates the dir 0700
 	t.hsock = fmt.bprintf(t.hsock_buf[:], "%s/h.%08x.sock", t.dir, u32(posix.getpid()) * 31 + u32(_seq))
 	t.holder_th = thread.create_and_start_with_poly_data(t, proc(t: ^Tiers) {
 		holder.holder_run(t.hsock)
@@ -119,11 +120,11 @@ cli_conn :: proc(conn: ^ipc.Stream_Conn) -> bool {
 
 // cli_list returns the SESSIONS payload reader (positioned after the count).
 cli_list :: proc(conn: ^ipc.Stream_Conn) -> (r: ipc.Wire_Reader, count: int, ok: bool) {
-	ipc.stream_send(conn, ipc.MSG_LIST, 0)
+	ipc.stream_send(conn, proto.MSG_LIST, 0)
 	for {
 		f, got := client.client_wait_frame(conn, 3000)
 		if !got do return
-		if f.kind != ipc.MSG_SESSIONS do continue
+		if f.kind != proto.MSG_SESSIONS do continue
 		r = ipc.wire_reader(f.payload)
 		count = int(ipc.wr_u32(&r))
 		return r, count, r.ok
@@ -138,13 +139,13 @@ cli_list_ids :: proc(out: []u32) -> []u32 {
 	n := 0
 	for _ in 0..<count {
 		if !ok || n == len(out) do break
-		out[n] = ipc.dec_row(&r).id
+		out[n] = proto.dec_row(&r).id
 		n += 1
 	}
 	return out[:n]
 }
 
-cli_list_rows :: proc(out: []ipc.Session_Row) -> []ipc.Session_Row {
+cli_list_rows :: proc(out: []proto.Session_Row) -> []proto.Session_Row {
 	conn: ipc.Stream_Conn
 	if !cli_conn(&conn) do return nil
 	defer ipc.stream_conn_destroy(&conn)
@@ -152,7 +153,7 @@ cli_list_rows :: proc(out: []ipc.Session_Row) -> []ipc.Session_Row {
 	n := 0
 	for _ in 0..<count {
 		if !ok || n == len(out) do break
-		out[n] = ipc.dec_row(&r)
+		out[n] = proto.dec_row(&r)
 		n += 1
 	}
 	return out[:n]
@@ -160,7 +161,7 @@ cli_list_rows :: proc(out: []ipc.Session_Row) -> []ipc.Session_Row {
 
 // cli_wait_rows waits until a core lists a row: a fresh core has to adopt the
 // holder's sessions first, so a single LIST right after it starts can be empty.
-cli_wait_rows :: proc(out: []ipc.Session_Row, ms := 3000) -> []ipc.Session_Row {
+cli_wait_rows :: proc(out: []proto.Session_Row, ms := 3000) -> []proto.Session_Row {
 	for _ in 0..<ms / 10 {
 		if n := cli_list_rows(out); len(n) > 0 do return n
 		time.sleep(10 * time.Millisecond)
@@ -176,11 +177,11 @@ cli_kill :: proc(id: u32) -> bool {
 	b: [4]u8
 	w := ipc.wire_writer(b[:])
 	ipc.ww_u32(&w, id)
-	ipc.stream_send(&conn, ipc.MSG_KILL, 0, b[:])
+	ipc.stream_send(&conn, proto.MSG_KILL, 0, b[:])
 	for {
 		f, got := client.client_wait_frame(&conn, 3000)
-		if !got || f.kind == ipc.MSG_FAIL do return false
-		if f.kind == ipc.MSG_OK do return true
+		if !got || f.kind == proto.MSG_FAIL do return false
+		if f.kind == proto.MSG_OK do return true
 	}
 }
 

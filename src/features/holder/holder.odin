@@ -24,6 +24,7 @@ package feature_holder
 
 import "core:fmt"
 import "core:sys/posix"
+import proto "../session_proto"
 import ipc "../../platform/ipc"
 import poller "../../platform/poller"
 
@@ -49,7 +50,7 @@ Session :: struct {
 	pid:           i32,
 	started_unix:  i64,
 	master:        i32,
-	size:          ipc.Size_Msg,
+	size:          proto.Size_Msg,
 	tail:          ipc.Byte_Ring, // last HOLDER_TAIL_BYTES of output, overwrite-oldest
 	input:         ipc.Byte_Ring, // bytes for the program, written on POLLOUT
 	eof:           bool, // reader done (0/EIO): the master is no longer polled
@@ -57,7 +58,7 @@ Session :: struct {
 	exit_final:    bool, // EXITED may be reported
 	exit_sent:     bool, // the current core knows the exit (EXITED or WELCOME)
 	tailed:        bool, // the current core has this session's TAIL: OUTPUT may flow
-	exit:          ipc.Exit_Msg,
+	exit:          proto.Exit_Msg,
 	exit_deadline: i64, // reap + HOLDER_EXIT_FLOW_MS, shifted by paused time
 }
 

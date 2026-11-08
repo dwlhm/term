@@ -12,6 +12,7 @@ import "core:c"
 import "core:mem/virtual"
 import "core:strings"
 import lua "../../platform/lua"
+import proto "../session_proto"
 import ipc "../../platform/ipc"
 
 @(private = "file")
@@ -38,14 +39,14 @@ lua_push_screen :: proc(L: ^lua.State, payload: []u8, json := false) -> bool {
 	a := virtual.arena_allocator(&ref.arena)
 	data := make([]u8, len(payload), a)
 	copy(data, payload)
-	snap: ipc.Snapshot
+	snap: proto.Snapshot
 	if json {
 		ok: bool
 		snap, ok = snapshot_parse(data, a)
 		if !ok do return false
 	} else {
 		r := ipc.wire_reader(data)
-		snap = ipc.dec_snapshot(&r, a)
+		snap = proto.dec_snapshot(&r, a)
 		if !ipc.wr_done(&r) do return false
 	}
 	ref.screen = screen_build(snap, a)

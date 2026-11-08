@@ -9,6 +9,7 @@ import "core:reflect"
 import "core:strconv"
 import "core:strings"
 import "core:sys/posix"
+import proto "../../features/session_proto"
 import plat_ipc "../../platform/ipc"
 
 app_cli_agent_signal :: proc(id: u32, args: []string) -> int {
@@ -21,7 +22,7 @@ app_cli_agent_signal :: proc(id: u32, args: []string) -> int {
 	w := plat_ipc.wire_writer(b[:])
 	plat_ipc.ww_u32(&w, id)
 	plat_ipc.ww_i32(&w, sig)
-	return app_agent_request_ok(plat_ipc.MSG_SESSION_SIGNAL, b[:])
+	return app_agent_request_ok(proto.MSG_SESSION_SIGNAL, b[:])
 }
 
 app_cli_agent_resize :: proc(id: u32, args: []string) -> int {
@@ -33,8 +34,8 @@ app_cli_agent_resize :: proc(id: u32, args: []string) -> int {
 	b: [12]u8
 	w := plat_ipc.wire_writer(b[:])
 	plat_ipc.ww_u32(&w, id)
-	plat_ipc.enc_size(&w, size)
-	return app_agent_request_ok(plat_ipc.MSG_SESSION_SIZE, plat_ipc.wire_bytes_written(&w))
+	proto.enc_size(&w, size)
+	return app_agent_request_ok(proto.MSG_SESSION_SIZE, plat_ipc.wire_bytes_written(&w))
 }
 
 // app_cli_parse_signal accepts a number (1..64) or a name with or without

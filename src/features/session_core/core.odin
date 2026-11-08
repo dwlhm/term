@@ -20,6 +20,7 @@ import "core:strconv"
 import "core:sys/posix"
 import "core:time"
 import terminal "../../core/terminal"
+import proto "../session_proto"
 import ipc "../../platform/ipc"
 import poller "../../platform/poller"
 import session "../session"
@@ -56,7 +57,7 @@ Core_Attach :: struct {
 	history:    int,  // scrollback lines this viewer asked for (first paint and resync)
 	viewer:     int,
 	channel:    u32,
-	size:       ipc.Size_Msg,
+	size:       proto.Size_Msg,
 	active_ns:  i64,
 }
 
@@ -74,13 +75,13 @@ Core_Session :: struct {
 	holder:            int,
 	started_unix:      i64,
 	row_hash:          u64,
-	exit:              ipc.Exit_Msg,
+	exit:              proto.Exit_Msg,
 	sess:              ^session.Terminal_Session,
 	relay:             terminal.Relay,
 	link:              Core_Link,
 	stitch:            ^Stitch_State, // nil until a read asks for alt-screen history
 	attaches:          [CORE_MAX_ATTACH]Core_Attach,
-	last_prompt_state: ipc.Prompt_State,
+	last_prompt_state: proto.Prompt_State,
 	last_cmd_seq:      u32,
 	output_ns:         i64, // when its program last printed (or the session began)
 	lease:             Core_Lease, // an automation holding its input (core_auto_lease.odin)
@@ -91,7 +92,7 @@ Core_Session :: struct {
 Core_Viewer :: struct {
 	used:          bool,
 	hello:         bool,
-	role:          ipc.Stream_Role,
+	role:          proto.Stream_Role,
 	seq:           u32, // per accepted connection: a stitch answers only its own reader
 	list_waiting:  bool,
 	list_due_ns:   i64,
@@ -127,7 +128,7 @@ Core :: struct {
 	replies:     [dynamic]u8,
 	paint:       [dynamic]u8,
 	text:        [dynamic]u8, // MSG_READ answer, MSG_SNAPSHOT row text
-	snap_runs:   [dynamic]ipc.Snap_Run, // one snapshot row
+	snap_runs:   [dynamic]proto.Snap_Run, // one snapshot row
 	snap_spans:  [dynamic][2]int, // its runs' text in c.text
 	snap_links:  [dynamic]u16, // OSC 8 ids one snapshot refers to
 	act:         [dynamic]u8, // one MSG_ACT's encoded input
@@ -148,7 +149,7 @@ core_new :: proc() -> ^Core {
 	c.next_id = 1
 	c.grace_ns = _grace_ms() * 1_000_000
 	owned_buf: [64]u8 // lookup_env also stores the key here
-	c.owned = os.get_env(owned_buf[:], ipc.SESSION_OWNED_ENV) == "1"
+	c.owned = os.get_env(owned_buf[:], proto.SESSION_OWNED_ENV) == "1"
 	c.msg = make([]u8, ipc.STREAM_MAX_PAYLOAD)
 	reserve(&c.viewer_out, 256 * 1024)
 	reserve(&c.replies, 4096)
@@ -185,7 +186,7 @@ core_run :: proc() -> int {
 @(private = "file")
 _remove_private_dir :: proc(c: ^Core) {
 	env: [256]u8
-	if v, _ := os.lookup_env(env[:], ipc.SESSION_DIR_ENV); len(v) == 0 do return
+	if v, _ := os.lookup_env(env[:], proto.SESSION_DIR_ENV); len(v) == 0 do return
 	posix.close(c.listen_fd)
 	ipc.ipc_unlink_if_ours(c.sock, c.listen_ino)
 	c.listen_fd = -1
@@ -201,9 +202,9 @@ _remove_private_dir :: proc(c: ^Core) {
 _core_listen :: proc(c: ^Core) -> bool {
 	c.listen_fd = -1
 	err: ipc.Ipc_Error
-	if c.dir, err = ipc.ipc_session_dir(c.dir_buf[:]); err != .None do return false
+	if c.dir, err = proto.session_dir(c.dir_buf[:]); err != .None do return false
 	ok: bool
-	if c.sock, ok = ipc.ipc_session_path(c.sock_buf[:], c.dir, CORE_SOCKET_NAME); !ok do return false
+	if c.sock, ok = proto.session_path(c.sock_buf[:], c.dir, CORE_SOCKET_NAME); !ok do return false
 	c.listen_fd, c.listen_ino, err = ipc.ipc_bind_listener(c.sock)
 	if err == .Already_Running do c.listen_fd = -2
 	return err == .None

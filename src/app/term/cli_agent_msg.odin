@@ -9,6 +9,7 @@ import "core:encoding/json"
 import "core:fmt"
 import "core:os"
 import "core:strconv"
+import proto "../../features/session_proto"
 import plat_ipc "../../platform/ipc"
 
 AGENT_EXIT_REJECTED :: 5
@@ -34,8 +35,8 @@ app_cli_agent_tell :: proc(to_id: u32, args: []string) -> int {
 	from, _ := app_agent_self_id()
 	msg := make([]u8, len(a.body) + 64, context.temp_allocator)
 	w := plat_ipc.wire_writer(msg)
-	plat_ipc.enc_tell_req(&w, {to = to_id, from = from, timeout_ms = u32(a.timeout_s * 1000), parent = a.parent, wait = !a.async, body = a.body})
-	plat_ipc.stream_send(&conn, plat_ipc.MSG_TELL, 0, plat_ipc.wire_bytes_written(&w))
+	proto.enc_tell_req(&w, {to = to_id, from = from, timeout_ms = u32(a.timeout_s * 1000), parent = a.parent, wait = !a.async, body = a.body})
+	plat_ipc.stream_send(&conn, proto.MSG_TELL, 0, plat_ipc.wire_bytes_written(&w))
 	res, code := app_tell_answer(&conn, AGENT_ANSWER_MS)
 	if code != 0 do return code
 	if res.phase == .Rejected || a.async do return app_print_tell(res, a.as_json)
@@ -44,7 +45,7 @@ app_cli_agent_tell :: proc(to_id: u32, args: []string) -> int {
 
 // app_cli_agent_result: `term session result <request>… [--wait] [--follow] [-t s] [--json]`.
 app_cli_agent_result :: proc(first: u32, args: []string) -> int {
-	req := plat_ipc.Result_Request{ids = {0 = u64(first)}, n_ids = 1}
+	req := proto.Result_Request{ids = {0 = u64(first)}, n_ids = 1}
 	timeout_s, as_json := WATCH_DEFAULT_S, false
 	for i := 0; i < len(args); i += 1 {
 		switch args[i] {
@@ -58,7 +59,7 @@ app_cli_agent_result :: proc(first: u32, args: []string) -> int {
 			timeout_s = v
 		case:
 			id, is_id := strconv.parse_u64(args[i])
-			if !is_id || req.n_ids == plat_ipc.RESULT_MAX_IDS do return _result_usage()
+			if !is_id || req.n_ids == proto.RESULT_MAX_IDS do return _result_usage()
 			req.ids[req.n_ids] = id
 			req.n_ids += 1
 		}
@@ -71,8 +72,8 @@ app_cli_agent_result :: proc(first: u32, args: []string) -> int {
 	defer plat_ipc.stream_conn_destroy(&conn)
 	b: [128]u8
 	w := plat_ipc.wire_writer(b[:])
-	plat_ipc.enc_result_req(&w, req)
-	plat_ipc.stream_send(&conn, plat_ipc.MSG_RESULT, 0, plat_ipc.wire_bytes_written(&w))
+	proto.enc_result_req(&w, req)
+	plat_ipc.stream_send(&conn, proto.MSG_RESULT, 0, plat_ipc.wire_bytes_written(&w))
 	if req.wait do return app_follow_result(&conn, int(req.timeout_ms) + WATCH_GRACE_MS, as_json)
 	res, code := app_tell_answer(&conn, AGENT_ANSWER_MS)
 	if code != 0 do return code
@@ -87,7 +88,7 @@ app_cli_agent_cancel :: proc(req_id: u32, args: []string) -> int {
 	b: [8]u8
 	w := plat_ipc.wire_writer(b[:])
 	plat_ipc.ww_u64(&w, u64(req_id))
-	return app_agent_request_ok(plat_ipc.MSG_CANCEL, plat_ipc.wire_bytes_written(&w))
+	return app_agent_request_ok(proto.MSG_CANCEL, plat_ipc.wire_bytes_written(&w))
 }
 
 // app_follow_result prints progress frames as they come, then the result.
@@ -101,12 +102,12 @@ app_follow_result :: proc(conn: ^plat_ipc.Stream_Conn, timeout_ms: int, as_json:
 	}
 }
 
-app_tell_answer :: proc(conn: ^plat_ipc.Stream_Conn, timeout_ms: int) -> (res: plat_ipc.Tell_Result, code: int) {
+app_tell_answer :: proc(conn: ^plat_ipc.Stream_Conn, timeout_ms: int) -> (res: proto.Tell_Result, code: int) {
 	f: plat_ipc.Stream_Frame
-	f, code = app_agent_answer(conn, plat_ipc.MSG_TELL_RESULT, timeout_ms)
+	f, code = app_agent_answer(conn, proto.MSG_TELL_RESULT, timeout_ms)
 	if code != 0 do return
 	r := plat_ipc.wire_reader(f.payload)
-	res = plat_ipc.dec_tell_result(&r)
+	res = proto.dec_tell_result(&r)
 	if !plat_ipc.wr_done(&r) {
 		fmt.eprintln("term: malformed result from core")
 		return {}, 1
@@ -116,7 +117,7 @@ app_tell_answer :: proc(conn: ^plat_ipc.Stream_Conn, timeout_ms: int) -> (res: p
 
 // app_print_tell: exit 0 accepted, running or finished (the target's own exit
 // is in the output), 5 rejected, 3 timed out, 1 cancelled, interrupted or error.
-app_print_tell :: proc(res: plat_ipc.Tell_Result, as_json: bool) -> int {
+app_print_tell :: proc(res: proto.Tell_Result, as_json: bool) -> int {
 	if as_json do _print_json(res)
 	switch res.phase {
 	case .Rejected:
@@ -146,18 +147,18 @@ app_print_tell :: proc(res: plat_ipc.Tell_Result, as_json: bool) -> int {
 }
 
 @(private = "file")
-_print_json :: proc(res: plat_ipc.Tell_Result) {
+_print_json :: proc(res: proto.Tell_Result) {
 	data, err := json.marshal(res, {use_enum_names = true}, context.temp_allocator)
 	fmt.println(string(data) if err == nil else "{}")
 }
 
 @(private = "file")
-_reject_reason :: proc(res: plat_ipc.Tell_Result) -> string {
+_reject_reason :: proc(res: proto.Tell_Result) -> string {
 	switch res.reject {
 	case .None, .Busy:     return fmt.tprintf("session %d is busy: its workers are all taken, or its shell runs something", res.to)
 	case .Not_Listening:   return fmt.tprintf("session %d takes no requests: no worker waits in `next` and no shell prompt (OSC 133)", res.to)
 	case .Empty:           return "empty request"
-	case .Too_Large:       return fmt.tprintf("request over %d bytes", plat_ipc.TELL_BODY_MAX)
+	case .Too_Large:       return fmt.tprintf("request over %d bytes", proto.TELL_BODY_MAX)
 	case .Multi_Line:      return fmt.tprintf("session %d is a shell: one single-line command per request", res.to)
 	case .Full:            return "too many requests in flight"
 	case .Leased:          return fmt.tprintf("session %d is held by an automation (term auto); a person can take it back in its window", res.to)

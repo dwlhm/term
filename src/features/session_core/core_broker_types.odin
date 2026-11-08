@@ -4,12 +4,12 @@ package feature_session_core
 // waiting workers and watches, and the effects a call asks the core for
 // (core_broker.odin explains the model).
 
-import ipc "../../platform/ipc"
+import proto "../session_proto"
 
 CORE_MAX_REQUESTS          :: 32
 BROKER_MAX_LISTENERS       :: 64
 BROKER_MAX_WATCHES         :: 64
-BROKER_BODY_CAP            :: ipc.TELL_BODY_MAX
+BROKER_BODY_CAP            :: proto.TELL_BODY_MAX
 BROKER_TEXT_CAP            :: 64 * 1024
 BROKER_PROGRESS_CAP        :: 4 * 1024
 BROKER_MAX_EFFECTS         :: 8 * CORE_MAX_REQUESTS + BROKER_MAX_WATCHES + BROKER_MAX_LISTENERS
@@ -19,8 +19,8 @@ BROKER_START_MS            :: 10_000 // a starting shell gets this long to show 
 BROKER_DRAIN_MS            :: 5_000  // a cancelled shell command holds its target at most this long
 BROKER_INT_RETRY_MS        :: 200    // SIGINT again until the command ends: 133;C precedes its fork
 
-Broker_Status :: ipc.Tell_Status
-Broker_Reject :: ipc.Tell_Reject
+Broker_Status :: proto.Tell_Status
+Broker_Reject :: proto.Tell_Reject
 
 // Shell_Readiness is what the parser says about a target's shell.
 Shell_Readiness :: enum u8 {
@@ -78,14 +78,14 @@ Broker_Listener :: struct {
 	due_ns: i64, // 0 = no deadline
 }
 
-// Broker_Watch: a `result --wait` on up to ipc.RESULT_MAX_IDS requests.
+// Broker_Watch: a `result --wait` on up to proto.RESULT_MAX_IDS requests.
 Broker_Watch :: struct {
 	used:   bool,
 	follow: bool, // progress frames too
 	viewer: int,
 	caller: u32,
 	n_ids:  int,
-	ids:    [ipc.RESULT_MAX_IDS]u64,
+	ids:    [proto.RESULT_MAX_IDS]u64,
 	due_ns: i64,
 }
 

@@ -1,8 +1,9 @@
-package platform_ipc
+package feature_session_proto
 
 // Payloads of broker requests (MSG_TELL … MSG_ENDPOINT, docs/PROTOCOL.md).
 
 // Row_Request: a session's part in broker requests.
+
 Row_Request :: struct {
 	serving:    u32, // requests it runs now (its shell adapter or its workers)
 	serving_id: u64, // one of them (0 = none)

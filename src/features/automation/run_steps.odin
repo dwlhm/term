@@ -9,6 +9,7 @@ import "core:fmt"
 import "core:strings"
 import "core:time"
 import lua "../../platform/lua"
+import proto "../session_proto"
 import ipc "../../platform/ipc"
 
 // run_exec carries out the steps at idx (a step or nested lists of them).
@@ -72,8 +73,8 @@ _step_press :: proc(r: ^Runner) {
 	L := r.vm.L
 	lua.getfield(L, -1, "keys")
 	defer lua.pop(L, 1)
-	keys: [ipc.ACT_KEYS_MAX]ipc.Act_Key
-	n := min(int(lua.rawlen(L, -1)), ipc.ACT_KEYS_MAX)
+	keys: [proto.ACT_KEYS_MAX]proto.Act_Key
+	n := min(int(lua.rawlen(L, -1)), proto.ACT_KEYS_MAX)
 	for i in 0 ..< n {
 		lua.rawgeti(L, -1, lua.Integer(i + 1))
 		name := strings.clone(lua.tostring(L, -1), context.temp_allocator)
@@ -85,9 +86,9 @@ _step_press :: proc(r: ^Runner) {
 		}
 		keys[i] = k
 	}
-	b: [ipc.ACT_KEYS_MAX * 6 + 16]u8
+	b: [proto.ACT_KEYS_MAX * 6 + 16]u8
 	w := ipc.wire_writer(b[:])
-	ipc.enc_act_keys(&w, r.sid, keys[:n])
+	proto.enc_act_keys(&w, r.sid, keys[:n])
 	_act_and_settle(r, ipc.wire_bytes_written(&w))
 }
 
@@ -95,10 +96,10 @@ _step_press :: proc(r: ^Runner) {
 _step_text :: proc(r: ^Runner, paste: bool) {
 	text := strings.clone(_str_field(r.vm.L, "text"), context.temp_allocator)
 	for len(text) > 0 {
-		n := min(len(text), ipc.ACT_TEXT_MAX)
+		n := min(len(text), proto.ACT_TEXT_MAX)
 		buf := make([]u8, n + 16, context.temp_allocator)
 		w := ipc.wire_writer(buf)
-		ipc.enc_act_text(&w, r.sid, text[:n], paste)
+		proto.enc_act_text(&w, r.sid, text[:n], paste)
 		if !_act_and_settle(r, ipc.wire_bytes_written(&w)) do return
 		text = text[n:]
 	}
@@ -118,7 +119,7 @@ _step_pointer :: proc(r: ^Runner, scroll: bool) {
 	}
 	row := _int_field(L, "row") + _int_field(L, "height") / 2
 	col := _int_field(L, "col") + max(_int_field(L, "width") - 1, 0) / 2
-	m := ipc.Act_Mouse{col = u16(max(col, 1)), row = u16(max(row, 1))}
+	m := proto.Act_Mouse{col = u16(max(col, 1)), row = u16(max(row, 1))}
 	if scroll {
 		n := _int_field(L, "n", -3)
 		m.kind = 4 if n >= 0 else 3
@@ -136,10 +137,10 @@ _step_pointer :: proc(r: ^Runner, scroll: bool) {
 }
 
 @(private = "file")
-_mouse :: proc(r: ^Runner, m: ipc.Act_Mouse) -> bool {
+_mouse :: proc(r: ^Runner, m: proto.Act_Mouse) -> bool {
 	b: [32]u8
 	w := ipc.wire_writer(b[:])
-	ipc.enc_act_mouse(&w, r.sid, m)
+	proto.enc_act_mouse(&w, r.sid, m)
 	return _act_and_settle(r, ipc.wire_bytes_written(&w))
 }
 

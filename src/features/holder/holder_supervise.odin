@@ -8,6 +8,7 @@ import "core:fmt"
 import "core:os"
 import "core:strconv"
 import "core:sys/posix"
+import proto "../session_proto"
 import ipc "../../platform/ipc"
 
 HOLDER_BACKOFF_MAX_N   :: 6
@@ -137,11 +138,11 @@ _signals_drain :: proc(st: ^Signal_State) {
 }
 
 // _start_core launches `<own executable> --core` detached (new session,
-// reparented to init) with stdout/stderr appended to core.log (ipc_log_path).
+// reparented to init) with stdout/stderr appended to core.log (proto.log_path).
 @(private = "file")
 _start_core :: proc() {
 	log_buf: [256]u8
-	log_path := ipc.ipc_log_path(log_buf[:], "core.log")
+	log_path := proto.log_path(log_buf[:], "core.log")
 	if !ipc.ipc_spawn_self_detached({"--core"}, log_path) {
 		fmt.eprintfln("holder: cannot start a core: %v", posix.errno())
 	}

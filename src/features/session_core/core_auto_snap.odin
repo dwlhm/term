@@ -10,11 +10,12 @@ import cell "../../core/terminal/cell"
 import extension "../../core/terminal/extension"
 import grid "../../core/terminal/grid"
 import parser "../../core/terminal/parser"
+import proto "../session_proto"
 import ipc "../../platform/ipc"
 import session "../session"
 
 core_viewer_snapshot :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
-	req := ipc.dec_snapshot_req(r)
+	req := proto.dec_snapshot_req(r)
 	if !ipc.wr_done(r) {
 		core_viewer_fail(c, vi, 0, .Bad_Request, "malformed snapshot request")
 		return
@@ -29,12 +30,12 @@ core_viewer_snapshot :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 		return
 	}
 	// A screen that does not fit with its history is sent with less of it.
-	history := min(int(req.history), ipc.SNAPSHOT_HISTORY_MAX)
+	history := min(int(req.history), proto.SNAPSHOT_HISTORY_MAX)
 	for {
 		w := ipc.wire_writer(c.msg)
 		_snap_write(c, s, &w, req.since, history)
 		if w.ok {
-			ipc.stream_send(&c.viewers[vi].conn, ipc.MSG_SNAPSHOT_RESULT, 0, ipc.wire_bytes_written(&w))
+			ipc.stream_send(&c.viewers[vi].conn, proto.MSG_SNAPSHOT_RESULT, 0, ipc.wire_bytes_written(&w))
 			return
 		}
 		if history == 0 {
@@ -55,7 +56,7 @@ _snap_write :: proc(c: ^Core, s: ^Core_Session, w: ^ipc.Wire_Writer, since: i64,
 
 	head := _snap_head(s)
 	head.history_truncated = from > first
-	ipc.enc_snapshot_head(w, head)
+	proto.enc_snapshot_head(w, head)
 	clear(&c.snap_links)
 	ipc.ww_u32(w, u32(max(0, -from)))
 	for row in from ..< 0 do _snap_row(c, t, w, row)
@@ -63,12 +64,12 @@ _snap_write :: proc(c: ^Core, s: ^Core_Session, w: ^ipc.Wire_Writer, since: i64,
 	for row in 0 ..< g.row_count do _snap_row(c, t, w, row)
 	ipc.ww_u32(w, u32(len(c.snap_links)))
 	for id in c.snap_links {
-		ipc.enc_snap_link(w, {id, extension.hyperlinks_uri(&t.hyperlinks, id)})
+		proto.enc_snap_link(w, {id, extension.hyperlinks_uri(&t.hyperlinks, id)})
 	}
 }
 
 @(private = "file")
-_snap_head :: proc(s: ^Core_Session) -> ipc.Snapshot {
+_snap_head :: proc(s: ^Core_Session) -> proto.Snapshot {
 	sess := s.sess
 	t := &sess.term
 	p := &t.parser
@@ -86,7 +87,7 @@ _snap_head :: proc(s: ^Core_Session) -> ipc.Snapshot {
 		bracketed_paste = p.bracketed_paste, report_focus = p.report_focus, sync_output = p.sync_output,
 		kitty_flags = terminal.terminal_kitty_keyboard_flags(t),
 		mouse_mode = u8(p.mouse_mode), mouse_format = u8(p.mouse_format),
-		prompt_state = ipc.Prompt_State(p.prompt_state),
+		prompt_state = proto.Prompt_State(p.prompt_state),
 		has_cmd_exit = p.has_cmd_exit, cmd_exit_code = p.last_cmd_exit, cmd_seq = p.cmd_seq,
 		output_start = out_start, output_end = out_end,
 		exited = s.exited, exit_code = s.exit.code,
@@ -113,7 +114,7 @@ _snap_row :: proc(c: ^Core, t: ^terminal.Terminal, w: ^ipc.Wire_Writer, row: int
 		style := _snap_style(ch, gr.direct_colors[col] if col < len(gr.direct_colors) else {})
 		n := len(c.snap_runs)
 		if n == 0 || c.snap_runs[n - 1].style != style {
-			append(&c.snap_runs, ipc.Snap_Run{style = style})
+			append(&c.snap_runs, proto.Snap_Run{style = style})
 			append(&c.snap_spans, [2]int{len(b.buf), len(b.buf)})
 			n += 1
 			if style.link != 0 do _snap_note_link(c, style.link)
@@ -124,7 +125,7 @@ _snap_row :: proc(c: ^Core, t: ^terminal.Terminal, w: ^ipc.Wire_Writer, row: int
 	}
 	c.text = b.buf
 	for &run, i in c.snap_runs do run.text = string(c.text[c.snap_spans[i][0]:c.snap_spans[i][1]])
-	ipc.enc_snap_row(w, g.scrolled + i64(row), gr.wrap, gr.is_prompt, c.snap_runs[:])
+	proto.enc_snap_row(w, g.scrolled + i64(row), gr.wrap, gr.is_prompt, c.snap_runs[:])
 }
 
 // _snap_row_end: one past the last cell that is not a default blank.
@@ -140,7 +141,7 @@ _snap_row_end :: proc(gr: ^grid.Row) -> int {
 }
 
 @(private = "file")
-_snap_style :: proc(ch: cell.Semantic_Cell, dc: cell.Direct_Color) -> ipc.Snap_Style {
+_snap_style :: proc(ch: cell.Semantic_Cell, dc: cell.Direct_Color) -> proto.Snap_Style {
 	return {
 		fg = ch.fg, bg = ch.bg,
 		has_fg_rgb = dc.has_fg, has_bg_rgb = dc.has_bg,

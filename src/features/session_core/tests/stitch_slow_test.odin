@@ -10,6 +10,7 @@ import "core:os"
 import "core:sys/posix"
 import "core:testing"
 import core ".."
+import proto "../../session_proto"
 import ipc "../../../platform/ipc"
 
 @(test)
@@ -39,8 +40,8 @@ test_read_restores_a_slow_program :: proc(t: ^testing.T) {
 	w := ipc.wire_writer(b[:])
 	ipc.ww_u32(&w, id)
 	ipc.ww_u32(&w, 30)
-	ipc.stream_send(&conn, ipc.MSG_READ, 0, b[:])
-	ipc.stream_send(&conn, ipc.MSG_V_INPUT, ch, transmute([]u8)string("k"))
+	ipc.stream_send(&conn, proto.MSG_READ, 0, b[:])
+	ipc.stream_send(&conn, proto.MSG_V_INPUT, ch, transmute([]u8)string("k"))
 
 	text, _, _, answered := wait_text(&conn, ch)
 	if answered do defer delete(text)

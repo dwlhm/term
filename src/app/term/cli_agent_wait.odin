@@ -18,6 +18,7 @@ import "core:strconv"
 import "core:strings"
 import "core:time"
 import client_feat "../../features/session_client"
+import proto "../../features/session_proto"
 import plat_ipc "../../platform/ipc"
 
 @(private = "file")
@@ -63,7 +64,7 @@ app_cli_agent_wait :: proc(id: u32, args: []string) -> int {
 	if quiet > 0 && mode != .Listening do return _wait_usage()
 	if mode == .Text do return _wait_text(&conn, id, text, deadline)
 	if mode == .Listening do return app_wait_listening(&conn, id, deadline, quiet)
-	plat_ipc.stream_send(&conn, plat_ipc.MSG_LIST, 0)
+	plat_ipc.stream_send(&conn, proto.MSG_LIST, 0)
 	return _wait_rows(&conn, id, deadline, mode == .Exit)
 }
 
@@ -84,14 +85,14 @@ _wait_rows :: proc(conn: ^plat_ipc.Stream_Conn, id: u32, deadline_ns: i64, until
 		f, got := client_feat.client_wait_frame(conn, WAIT_POLL_MS)
 		if !got {
 			if conn.err != .None do return 1
-			plat_ipc.stream_send(conn, plat_ipc.MSG_LIST, 0)
+			plat_ipc.stream_send(conn, proto.MSG_LIST, 0)
 			continue
 		}
-		if f.kind == plat_ipc.MSG_REMOVED && _removed_id(f.payload) == id {
+		if f.kind == proto.MSG_REMOVED && _removed_id(f.payload) == id {
 			fmt.println("removed")
 			return 0
 		}
-		if f.kind != plat_ipc.MSG_SESSIONS do continue
+		if f.kind != proto.MSG_SESSIONS do continue
 		row, found := _find_row(f.payload, id)
 		switch {
 		case !found:
@@ -115,7 +116,7 @@ _wait_rows :: proc(conn: ^plat_ipc.Stream_Conn, id: u32, deadline_ns: i64, until
 // _wait_text reads the screen every WAIT_TEXT_POLL_MS until it holds text.
 @(private = "file")
 _wait_text :: proc(conn: ^plat_ipc.Stream_Conn, id: u32, text: string, deadline_ns: i64) -> int {
-	plat_ipc.stream_send(conn, plat_ipc.MSG_LIST, 0)
+	plat_ipc.stream_send(conn, proto.MSG_LIST, 0)
 	row, ok := _first_row(conn, id)
 	if !ok do return 1
 	exited, exit_code := row.state == .Exited, row.exit_code
@@ -124,7 +125,7 @@ _wait_text :: proc(conn: ^plat_ipc.Stream_Conn, id: u32, text: string, deadline_
 	plat_ipc.ww_u32(&w, id)
 	plat_ipc.ww_u32(&w, 0)
 	for time.tick_now()._nsec < deadline_ns {
-		plat_ipc.stream_send(conn, plat_ipc.MSG_READ, 0, req[:])
+		plat_ipc.stream_send(conn, proto.MSG_READ, 0, req[:])
 		screen, answer := _screen_answer(conn, id, &exited, &exit_code)
 		switch answer {
 		case .Lost:
@@ -160,23 +161,23 @@ _screen_answer :: proc(conn: ^plat_ipc.Stream_Conn, id: u32, exited: ^bool, exit
 		f, got := client_feat.client_wait_frame(conn, 5000)
 		if !got do return "", .Lost
 		switch f.kind {
-		case plat_ipc.MSG_TEXT:
+		case proto.MSG_TEXT:
 			return string(f.payload), .Text
-		case plat_ipc.MSG_FAIL:
+		case proto.MSG_FAIL:
 			return "", .Removed
-		case plat_ipc.MSG_REMOVED:
+		case proto.MSG_REMOVED:
 			if _removed_id(f.payload) == id do return "", .Removed
-		case plat_ipc.MSG_EVENT:
+		case proto.MSG_EVENT:
 			r := plat_ipc.wire_reader(f.payload)
-			if ev := plat_ipc.dec_row(&r); r.ok && ev.id == id && ev.state == .Exited do exited^, exit_code^ = true, ev.exit_code
+			if ev := proto.dec_row(&r); r.ok && ev.id == id && ev.state == .Exited do exited^, exit_code^ = true, ev.exit_code
 		}
 	}
 }
 
 // _first_row waits for the SESSIONS answer and finds id in it.
 @(private = "file")
-_first_row :: proc(conn: ^plat_ipc.Stream_Conn, id: u32) -> (plat_ipc.Session_Row, bool) {
-	f, code := app_agent_answer(conn, plat_ipc.MSG_SESSIONS)
+_first_row :: proc(conn: ^plat_ipc.Stream_Conn, id: u32) -> (proto.Session_Row, bool) {
+	f, code := app_agent_answer(conn, proto.MSG_SESSIONS)
 	if code != 0 do return {}, false
 	row, found := _find_row(f.payload, id)
 	if !found do fmt.eprintln("term: no such session")
@@ -190,11 +191,11 @@ _removed_id :: proc(payload: []u8) -> u32 {
 }
 
 @(private)
-_find_row :: proc(payload: []u8, id: u32) -> (row: plat_ipc.Session_Row, found: bool) {
+_find_row :: proc(payload: []u8, id: u32) -> (row: proto.Session_Row, found: bool) {
 	r := plat_ipc.wire_reader(payload)
 	count := plat_ipc.wr_u32(&r)
 	for _ in 0..<count {
-		row = plat_ipc.dec_row(&r)
+		row = proto.dec_row(&r)
 		if !r.ok do break
 		if row.id == id do return row, true
 	}

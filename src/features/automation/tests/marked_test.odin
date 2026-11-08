@@ -5,18 +5,18 @@ package feature_automation_tests
 
 import "core:testing"
 import auto ".."
-import ipc "../../../platform/ipc"
+import proto "../../session_proto"
 
 @(private = "file")
-_row :: proc(text: string, prompt := false, link: u16 = 0) -> ipc.Snap_Row {
-	runs := make([]ipc.Snap_Run, 1, context.temp_allocator)
+_row :: proc(text: string, prompt := false, link: u16 = 0) -> proto.Snap_Row {
+	runs := make([]proto.Snap_Run, 1, context.temp_allocator)
 	runs[0] = {cells = u16(len(text)), text = text, style = {fg = 7, link = link}}
 	return {prompt = prompt, runs = runs}
 }
 
 @test
 test_marked_prompt_output_and_links :: proc(t: ^testing.T) {
-	rows := []ipc.Snap_Row{
+	rows := []proto.Snap_Row{
 		_row("~/repo main", prompt = true),
 		_row("❯ ls", prompt = true),
 		_row("a.txt  b.txt"),
@@ -24,7 +24,7 @@ test_marked_prompt_output_and_links :: proc(t: ^testing.T) {
 		_row("~/repo main", prompt = true),
 		_row("❯ git st", prompt = true),
 	}
-	snap := ipc.Snapshot{cols = 20, rows = 6, top_line = 100, screen = rows, cursor_row = 5, cursor_col = 8, cursor_visible = true,
+	snap := proto.Snapshot{cols = 20, rows = 6, top_line = 100, screen = rows, cursor_row = 5, cursor_col = 8, cursor_visible = true,
 		prompt_state = .Input, output_start = 102, output_end = 104, links = {{3, "https://docs.test"}}}
 	s := auto.screen_build(snap, context.temp_allocator)
 	es := auto.screen_elements(&s, context.temp_allocator)

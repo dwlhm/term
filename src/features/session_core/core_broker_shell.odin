@@ -8,7 +8,7 @@ import "core:fmt"
 import "core:strings"
 import "core:sys/posix"
 import terminal "../../core/terminal"
-import ipc "../../platform/ipc"
+import proto "../session_proto"
 
 // core_broker_shell_edges feeds a session's OSC 133 edges to the broker.
 core_broker_shell_edges :: proc(c: ^Core, s: ^Core_Session, e: Shell_Edges) {
@@ -70,7 +70,7 @@ core_broker_apply :: proc(c: ^Core) {
 		case .Interrupt:
 			if s == nil || s.exited do continue
 			sig := _i32_bytes(i32(posix.Signal.SIGINT))
-			core_holder_send(c, s.holder, ipc.MSG_SIGNAL, s.id, sig[:])
+			core_holder_send(c, s.holder, proto.MSG_SIGNAL, s.id, sig[:])
 		case .Assign:   core_reply_request(c, e.viewer, r)
 		case .Result:   core_reply_result(c, e.viewer, r, .Finished)
 		case .Progress: core_reply_result(c, e.viewer, r, .Progress)
@@ -98,7 +98,7 @@ _type :: proc(c: ^Core, s: ^Core_Session, text: string) {
 	clear(&c.typed)
 	append(&c.typed, text)
 	append(&c.typed, '\r')
-	core_holder_send(c, s.holder, ipc.MSG_INPUT, s.id, c.typed[:])
+	core_holder_send(c, s.holder, proto.MSG_INPUT, s.id, c.typed[:])
 }
 
 // _shell_output is the text of the command s's shell adapter runs ("" when it

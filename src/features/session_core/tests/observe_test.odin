@@ -6,9 +6,10 @@ import "core:strings"
 import "core:testing"
 import "core:time"
 import client "../../session_client"
+import proto "../../session_proto"
 import ipc "../../../platform/ipc"
 
-cli_observe :: proc(id: u32, lines: u32 = 0) -> (res: ipc.Observe_Result, ok: bool, code: ipc.Fail_Code) {
+cli_observe :: proc(id: u32, lines: u32 = 0) -> (res: proto.Observe_Result, ok: bool, code: proto.Fail_Code) {
 	conn: ipc.Stream_Conn
 	if !cli_conn(&conn) do return
 	defer ipc.stream_conn_destroy(&conn)
@@ -16,19 +17,19 @@ cli_observe :: proc(id: u32, lines: u32 = 0) -> (res: ipc.Observe_Result, ok: bo
 	w := ipc.wire_writer(b[:])
 	ipc.ww_u32(&w, id)
 	ipc.ww_u32(&w, lines)
-	ipc.stream_send(&conn, ipc.MSG_OBSERVE, 0, b[:])
+	ipc.stream_send(&conn, proto.MSG_OBSERVE, 0, b[:])
 	for {
 		f, got := client.client_wait_frame(&conn, 4000)
 		if !got do return
-		if f.kind == ipc.MSG_OBSERVE_RESULT {
+		if f.kind == proto.MSG_OBSERVE_RESULT {
 			r := ipc.wire_reader(f.payload)
-			res = ipc.dec_observe_result(&r)
+			res = proto.dec_observe_result(&r)
 			return res, r.ok, {}
 		}
-		if f.kind == ipc.MSG_FAIL {
+		if f.kind == proto.MSG_FAIL {
 			r := ipc.wire_reader(f.payload)
 			_ = ipc.wr_u32(&r)
-			return {}, false, ipc.Fail_Code(ipc.wr_u8(&r))
+			return {}, false, proto.Fail_Code(ipc.wr_u8(&r))
 		}
 	}
 }

@@ -6,7 +6,7 @@ package feature_session
 // dropped when the core removes the session or this viewer attaches it.
 
 import "base:runtime"
-import ipc "../../platform/ipc"
+import proto "../session_proto"
 
 Detached_Session_State :: enum u8 {
 	Idle,   // shell at prompt, nothing running
@@ -55,7 +55,7 @@ session_registry_destroy :: proc(reg: ^Session_Registry) {
 
 // session_registry_apply_row mirrors one core row. shown_here = a pane of this
 // viewer shows it (not a background session). Returns true if anything changed.
-session_registry_apply_row :: proc(reg: ^Session_Registry, row: ipc.Session_Row, shown_here: bool) -> bool {
+session_registry_apply_row :: proc(reg: ^Session_Registry, row: proto.Session_Row, shown_here: bool) -> bool {
 	if reg == nil do return false
 	if shown_here do return session_registry_remove(reg, row.id)
 	state: Detached_Session_State

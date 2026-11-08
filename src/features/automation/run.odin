@@ -12,6 +12,7 @@ import "core:path/filepath"
 import "core:strings"
 import "core:time"
 import lua "../../platform/lua"
+import proto "../session_proto"
 import ipc "../../platform/ipc"
 
 RUN_EXPECT_DEFAULT :: 10 * time.Second
@@ -60,7 +61,7 @@ Runner :: struct {
 	serving_id: u64,
 	awaiting_request: bool,
 	ended:      bool,
-	end_status: ipc.Tell_Status,
+	end_status: proto.Tell_Status,
 	// t.ask / t.handoff replies: the run's endpoint and a terminal stdin
 	endpoint:  u32,
 	listening: bool, // a `next` waits on the endpoint

@@ -7,16 +7,16 @@ package feature_automation
 import "core:strings"
 import "core:unicode/utf8"
 import uw "../../core/unicode_width"
-import ipc "../../platform/ipc"
+import proto "../session_proto"
 
 Screen_Cell :: struct {
 	ch:    rune, // first rune of the cell's cluster; ' ' for an empty cell
 	cont:  bool, // the right half of a wide character
-	style: ipc.Snap_Style,
+	style: proto.Snap_Style,
 }
 
 Screen :: struct {
-	snap:  ipc.Snapshot,
+	snap:  proto.Snapshot,
 	cols:  int,
 	rows:  int,
 	cells: []Screen_Cell,  // rows × cols
@@ -42,7 +42,7 @@ screen_text :: proc(s: ^Screen, row, c0, c1: int) -> string {
 	return s.text[row][s.off[row][a]:s.off[row][b]]
 }
 
-screen_build :: proc(snap: ipc.Snapshot, allocator := context.allocator) -> (s: Screen) {
+screen_build :: proc(snap: proto.Snapshot, allocator := context.allocator) -> (s: Screen) {
 	context.allocator = allocator
 	s.snap = snap
 	s.cols, s.rows = int(snap.cols), int(snap.rows)
@@ -60,7 +60,7 @@ screen_build :: proc(snap: ipc.Snapshot, allocator := context.allocator) -> (s: 
 // _layout_row places a row's runs on cells, cluster by cluster, and builds its
 // padded text.
 @(private = "file")
-_layout_row :: proc(s: ^Screen, r: int, row: ipc.Snap_Row) -> (text: string, off: []int) {
+_layout_row :: proc(s: ^Screen, r: int, row: proto.Snap_Row) -> (text: string, off: []int) {
 	b := strings.builder_make()
 	off = make([]int, s.cols + 1)
 	col := 0

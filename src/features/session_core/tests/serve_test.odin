@@ -10,6 +10,7 @@ import "core:testing"
 import "core:thread"
 import "core:time"
 import auto "../../automation"
+import proto "../../session_proto"
 import ipc "../../../platform/ipc"
 
 // FAKE_AGENT: idle until a line comes, then working; "slow" stays working
@@ -61,7 +62,7 @@ Served :: struct {
 }
 
 @(private = "file")
-_tell :: proc(to: u32, body: string, wait := true) -> (res: ipc.Tell_Result, conn: ipc.Stream_Conn) {
+_tell :: proc(to: u32, body: string, wait := true) -> (res: proto.Tell_Result, conn: ipc.Stream_Conn) {
 	res, _ = tell_send(&conn, {to = to, body = body}) // it opens the connection
 	if !wait || res.phase == .Rejected do return
 	for res.phase != .Finished {
@@ -120,7 +121,7 @@ test_serve_answers_requests_to_an_agent :: proc(t: ^testing.T) {
 	testing.expect(t, tell_cancel(pending.id), "its sender cancels it")
 	final, _ = tell_next(&pc, 10_000)
 	ipc.stream_conn_destroy(&pc)
-	testing.expect_value(t, final.status, ipc.Tell_Status.Cancelled)
+	testing.expect_value(t, final.status, proto.Tell_Status.Cancelled)
 	for _ in 0 ..< 100 {
 		if _count(id, "CANCELLED") >= 2 do break
 		time.sleep(50 * time.Millisecond)

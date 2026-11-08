@@ -4,17 +4,18 @@ package feature_session_core
 // the holders) and EVENT whenever a row's visible facts change.
 
 import "core:hash"
+import proto "../session_proto"
 import ipc "../../platform/ipc"
 import session "../session"
 import extension "../../core/terminal/extension"
 
 // core_row_get: the row's title may be written into title_buf, which must
 // outlive the row.
-core_row_get :: proc(c: ^Core, s: ^Core_Session, title_buf: []u8) -> ipc.Session_Row {
+core_row_get :: proc(c: ^Core, s: ^Core_Session, title_buf: []u8) -> proto.Session_Row {
 	sess := s.sess
 	title := session.session_resolve_title(sess, title_buf, "Shell")
 	active := !s.exited && session.session_is_running_job(sess)
-	state: ipc.Session_State = .Exited if s.exited else (.Busy if active else .Idle)
+	state: proto.Session_State = .Exited if s.exited else (.Busy if active else .Idle)
 	attached := false
 	for &a in s.attaches do attached ||= a.used && !a.observe
 	process := session.session_process_name(sess)
@@ -42,7 +43,7 @@ core_row_get :: proc(c: ^Core, s: ^Core_Session, title_buf: []u8) -> ipc.Session
 
 core_row_write :: proc(w: ^ipc.Wire_Writer, c: ^Core, s: ^Core_Session) {
 	title_buf: [256]u8
-	ipc.enc_row(w, core_row_get(c, s, title_buf[:]))
+	proto.enc_row(w, core_row_get(c, s, title_buf[:]))
 }
 
 // core_row_changed broadcasts an EVENT when what a row shows changed
@@ -56,7 +57,7 @@ core_row_changed :: proc(c: ^Core, s: ^Core_Session) {
 	h := hash.fnv64a(row[:11]) ~ hash.fnv64a(row[19:])
 	if h == s.row_hash do return
 	s.row_hash = h
-	_broadcast(c, ipc.MSG_EVENT, row)
+	_broadcast(c, proto.MSG_EVENT, row)
 }
 
 core_broadcast_row :: proc(c: ^Core, s: ^Core_Session) {
@@ -75,7 +76,7 @@ core_list_request :: proc(c: ^Core, vi: int) {
 	for &s in c.sessions {
 		if !s.used || s.exited || s.proc_pending do continue
 		s.proc_pending = true
-		core_holder_send(c, s.holder, ipc.MSG_PROC_QUERY, s.id)
+		core_holder_send(c, s.holder, proto.MSG_PROC_QUERY, s.id)
 	}
 	v := &c.viewers[vi]
 	v.list_waiting, v.list_due_ns = true, _now() + CORE_PROC_WAIT_MS * 1_000_000
@@ -97,6 +98,6 @@ _send_sessions :: proc(c: ^Core, vi: int) {
 	w := ipc.wire_writer(c.msg)
 	ipc.ww_u32(&w, u32(core_session_count(c)))
 	for &s in c.sessions do if s.used do core_row_write(&w, c, &s)
-	if w.ok do ipc.stream_send(&c.viewers[vi].conn, ipc.MSG_SESSIONS, 0, ipc.wire_bytes_written(&w))
+	if w.ok do ipc.stream_send(&c.viewers[vi].conn, proto.MSG_SESSIONS, 0, ipc.wire_bytes_written(&w))
 }
 

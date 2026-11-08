@@ -6,12 +6,13 @@ package feature_session_core
 
 import terminal "../../core/terminal"
 import extension "../../core/terminal/extension"
+import proto "../session_proto"
 import ipc "../../platform/ipc"
 import session "../session"
 
 CORE_PAINT_HISTORY_MAX :: 10_000
 
-core_attach :: proc(c: ^Core, s: ^Core_Session, vi: int, req: ipc.Attach_Msg) -> (channel: u32, ok: bool) {
+core_attach :: proc(c: ^Core, s: ^Core_Session, vi: int, req: proto.Attach_Msg) -> (channel: u32, ok: bool) {
 	slot := -1
 	for &a, i in s.attaches do if !a.used { slot = i; break }
 	v := &c.viewers[vi]
@@ -136,31 +137,31 @@ core_attach_frame :: proc(c: ^Core, vi: int, f: ipc.Stream_Frame) {
 	if s == nil do return
 	r := ipc.wire_reader(f.payload)
 	switch f.kind {
-	case ipc.MSG_V_INPUT:
+	case proto.MSG_V_INPUT:
 		// The typist owns the size first: its input is read at its size.
 		core_attach_touch(c, s, a)
 		if core_lease_human_input(c, s, f.payload) do return // held for the automation
 		core_broker_human_input(c, s, f.payload)
 		if core_stitch_hold(s, f.payload) do return // delivered when the stitch ends
-		if !s.exited do core_holder_send(c, s.holder, ipc.MSG_INPUT, s.id, f.payload)
-	case ipc.MSG_V_TAKEOVER:
+		if !s.exited do core_holder_send(c, s.holder, proto.MSG_INPUT, s.id, f.payload)
+	case proto.MSG_V_TAKEOVER:
 		core_lease_takeover(c, s)
-	case ipc.MSG_V_REPLY:
+	case proto.MSG_V_REPLY:
 		if core_stitch_hold(s, f.payload) do return
-		if !s.exited do core_holder_send(c, s.holder, ipc.MSG_INPUT, s.id, f.payload)
-	case ipc.MSG_V_RESIZE:
-		size := ipc.dec_size(&r)
+		if !s.exited do core_holder_send(c, s.holder, proto.MSG_INPUT, s.id, f.payload)
+	case proto.MSG_V_RESIZE:
+		size := proto.dec_size(&r)
 		if !ipc.wr_done(&r) || size.cols == 0 || size.rows == 0 do return
 		a.size = size
 		core_attach_touch(c, s, a)
-	case ipc.MSG_V_FOCUS:
+	case proto.MSG_V_FOCUS:
 		focused := ipc.wr_bool(&r)
 		core_attach_touch(c, s, a)
 		if r.ok && s.sess.term.parser.report_focus && !a.observe {
-			core_holder_send(c, s.holder, ipc.MSG_INPUT, s.id, transmute([]u8)string("\x1b[I" if focused else "\x1b[O"))
+			core_holder_send(c, s.holder, proto.MSG_INPUT, s.id, transmute([]u8)string("\x1b[I" if focused else "\x1b[O"))
 		}
-	case ipc.MSG_V_FACTS:
-		facts := ipc.dec_facts(&r)
+	case proto.MSG_V_FACTS:
+		facts := proto.dec_facts(&r)
 		if ipc.wr_done(&r) && facts.cell_w > 0 && facts.cell_h > 0 {
 			terminal.terminal_set_cell_size(&s.sess.term, int(facts.cell_w), int(facts.cell_h))
 		}

@@ -6,6 +6,7 @@ package feature_session_core_tests
 
 import "core:testing"
 import client "../../session_client"
+import proto "../../session_proto"
 import ipc "../../../platform/ipc"
 
 @(private = "file")
@@ -14,11 +15,11 @@ endpoint_new :: proc(conn: ^ipc.Stream_Conn, name: string, owned: bool) -> u32 {
 	b: [96]u8
 	w := ipc.wire_writer(b[:])
 	ipc.ww_str(&w, name); ipc.ww_bool(&w, owned)
-	ipc.stream_send(conn, ipc.MSG_ENDPOINT, 0, ipc.wire_bytes_written(&w))
+	ipc.stream_send(conn, proto.MSG_ENDPOINT, 0, ipc.wire_bytes_written(&w))
 	for {
 		f, got := client.client_wait_frame(conn, 3000)
-		if !got || f.kind == ipc.MSG_FAIL do return 0
-		if f.kind != ipc.MSG_OK do continue
+		if !got || f.kind == proto.MSG_FAIL do return 0
+		if f.kind != proto.MSG_OK do continue
 		r := ipc.wire_reader(f.payload)
 		return u32(ipc.wr_i32(&r))
 	}
@@ -36,8 +37,8 @@ test_endpoint_takes_requests_through_a_worker :: proc(t: ^testing.T) {
 
 	r0, _ := tell_send(&sc, {to = id, body = "x"})
 	ipc.stream_conn_destroy(&sc)
-	testing.expect_value(t, r0.reject, ipc.Tell_Reject.Not_Listening) // never a starting shell
-	ok2, code := cli_ctl(ipc.MSG_SEND, id, transmute([]u8)string("ls\r"))
+	testing.expect_value(t, r0.reject, proto.Tell_Reject.Not_Listening) // never a starting shell
+	ok2, code := cli_ctl(proto.MSG_SEND, id, transmute([]u8)string("ls\r"))
 	testing.expect(t, !ok2 && code == .Bad_Request, "no program to type into")
 
 	wc: ipc.Stream_Conn
@@ -45,7 +46,7 @@ test_endpoint_takes_requests_through_a_worker :: proc(t: ^testing.T) {
 	b: [8]u8
 	w := ipc.wire_writer(b[:])
 	ipc.ww_u32(&w, id); ipc.ww_u32(&w, 0)
-	ipc.stream_send(&wc, ipc.MSG_NEXT, 0, ipc.wire_bytes_written(&w))
+	ipc.stream_send(&wc, proto.MSG_NEXT, 0, ipc.wire_bytes_written(&w))
 	ipc.stream_flush(&wc)
 	for i := 0; i < 200; i += 1 {
 		o, _, _ := cli_observe(id)
@@ -91,7 +92,7 @@ test_endpoint_survives_planned_restart :: proc(t: ^testing.T) {
 	b: [8]u8
 	w := ipc.wire_writer(b[:])
 	ipc.ww_u32(&w, kept); ipc.ww_u32(&w, 0)
-	ipc.stream_send(&wc, ipc.MSG_NEXT, 0, ipc.wire_bytes_written(&w))
+	ipc.stream_send(&wc, proto.MSG_NEXT, 0, ipc.wire_bytes_written(&w))
 	ipc.stream_flush(&wc)
 	for i := 0; i < 200; i += 1 {
 		o, _, _ := cli_observe(kept)
@@ -100,8 +101,8 @@ test_endpoint_survives_planned_restart :: proc(t: ^testing.T) {
 	cli_conn(&sc)
 	bb: [64]u8
 	ww := ipc.wire_writer(bb[:])
-	ipc.enc_tell_req(&ww, {to = kept, body = "long job"}) // async
-	ipc.stream_send(&sc, ipc.MSG_TELL, 0, ipc.wire_bytes_written(&ww))
+	proto.enc_tell_req(&ww, {to = kept, body = "long job"}) // async
+	ipc.stream_send(&sc, proto.MSG_TELL, 0, ipc.wire_bytes_written(&ww))
 	acc, _ := tell_next(&sc, 3000)
 	ipc.stream_conn_destroy(&sc)
 	testing.expect(t, acc.phase == .Accepted, "taken before the restart")

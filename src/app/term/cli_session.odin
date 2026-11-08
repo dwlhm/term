@@ -11,6 +11,7 @@ import "core:slice"
 import "core:strings"
 import "core:sys/posix"
 import client_feat "../../features/session_client"
+import proto "../../features/session_proto"
 import plat_ipc "../../platform/ipc"
 
 @(private = "file")
@@ -47,7 +48,7 @@ _cli_list :: proc(fd: posix.FD) -> (frame: plat_ipc.Stream_Frame, code: int) {
 	conn: plat_ipc.Stream_Conn
 	if !plat_ipc.stream_conn_init(&conn, fd, 0) do return {}, 1
 	defer plat_ipc.stream_conn_destroy(&conn)
-	plat_ipc.stream_send(&conn, plat_ipc.MSG_LIST, 0)
+	plat_ipc.stream_send(&conn, proto.MSG_LIST, 0)
 	for {
 		f, got := client_feat.client_wait_frame(&conn, CLI_WAIT_MS)
 		if !got {
@@ -55,10 +56,10 @@ _cli_list :: proc(fd: posix.FD) -> (frame: plat_ipc.Stream_Frame, code: int) {
 			return {}, 1
 		}
 		switch f.kind {
-		case plat_ipc.MSG_SESSIONS:
+		case proto.MSG_SESSIONS:
 			f.payload = slice.clone(f.payload, context.temp_allocator)
 			return f, 0
-		case plat_ipc.MSG_FAIL:
+		case proto.MSG_FAIL:
 			r := plat_ipc.wire_reader(f.payload)
 			_, _ = plat_ipc.wr_u32(&r), plat_ipc.wr_u8(&r)
 			fmt.eprintf("term: %s\n", plat_ipc.wr_str(&r))
@@ -72,7 +73,7 @@ _cli_print_json :: proc(payload: []u8) {
 	r := plat_ipc.wire_reader(payload)
 	count := int(plat_ipc.wr_u32(&r))
 	for _ in 0..<count {
-		row := plat_ipc.dec_row(&r)
+		row := proto.dec_row(&r)
 		if !r.ok do break
 		line, err := json.marshal(row, {use_enum_names = true}, context.temp_allocator)
 		if err == nil do fmt.println(string(line))
@@ -86,7 +87,7 @@ _cli_print_sessions :: proc(payload: []u8) {
 	table := make([dynamic][CLI_COLUMNS]string, context.temp_allocator)
 	append(&table, [CLI_COLUMNS]string{"ID", "STATE", "SHOWN", "PID", "ELAPSED", "PROCESS", "CWD", "REQUEST", "STATUS"})
 	for _ in 0..<count {
-		row := plat_ipc.dec_row(&r)
+		row := proto.dec_row(&r)
 		if !r.ok do break
 		append(&table, _cli_cells(row))
 	}
@@ -107,8 +108,8 @@ _cli_print_sessions :: proc(payload: []u8) {
 }
 
 @(private = "file")
-_cli_cells :: proc(r: plat_ipc.Session_Row) -> [CLI_COLUMNS]string {
-	state := [plat_ipc.Session_State]string{.Idle = "idle", .Busy = "busy", .Exited = "exited"}
+_cli_cells :: proc(r: proto.Session_Row) -> [CLI_COLUMNS]string {
+	state := [proto.Session_State]string{.Idle = "idle", .Busy = "busy", .Exited = "exited"}
 	return {
 		fmt.tprintf("%d", r.id), state[r.state], "yes" if r.attached else "-", fmt.tprintf("%d", r.pid),
 		_cli_elapsed(int(r.elapsed_s)), fmt.tprintf("%s (endpoint)", _cli_clean(r.process)) if r.endpoint else _cli_clean(r.process), _cli_home_relative(_cli_clean(r.cwd)), _cli_request(r.request), _cli_clean(r.status),
@@ -117,7 +118,7 @@ _cli_cells :: proc(r: plat_ipc.Session_Row) -> [CLI_COLUMNS]string {
 
 // _cli_request: "serves #7" (+N more), "awaits 2", "listens 1" (free worker slots).
 @(private = "file")
-_cli_request :: proc(m: plat_ipc.Row_Request) -> string {
+_cli_request :: proc(m: proto.Row_Request) -> string {
 	b := strings.builder_make(context.temp_allocator)
 	if m.serving > 0 do fmt.sbprintf(&b, "serves #%d%s ", m.serving_id, fmt.tprintf("+%d", m.serving - 1) if m.serving > 1 else "")
 	if m.awaiting > 0 do fmt.sbprintf(&b, "awaits %d ", m.awaiting)

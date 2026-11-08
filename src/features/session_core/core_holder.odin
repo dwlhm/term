@@ -8,6 +8,7 @@ import "core:os"
 import "core:strings"
 import "core:sys/posix"
 import "core:time"
+import proto "../session_proto"
 import ipc "../../platform/ipc"
 
 HOLDER_PREFIX :: "h."
@@ -22,7 +23,7 @@ core_adopt_holders :: proc(c: ^Core) {
 	for e in entries {
 		if !strings.has_prefix(e.name, HOLDER_PREFIX) || !strings.has_suffix(e.name, ".sock") do continue
 		buf: [256]u8
-		path, ok := ipc.ipc_session_path(buf[:], c.dir, e.name)
+		path, ok := proto.session_path(buf[:], c.dir, e.name)
 		if !ok do continue
 		if !_holder_connect(c, path) && ipc.ipc_probe(path) == .Not_Running {
 			_unlink_socket(path)
@@ -46,8 +47,8 @@ core_current_holder :: proc(c: ^Core) -> int {
 core_start_holder :: proc(c: ^Core) -> bool {
 	name_buf, path_buf, log_buf: [256]u8
 	name := fmt.bprintf(name_buf[:], "%s%08x.sock", HOLDER_PREFIX, u32(_now()) ~ u32(posix.getpid()))
-	path, ok := ipc.ipc_session_path(path_buf[:], c.dir, name)
-	log_path := ipc.ipc_log_path(log_buf[:], "holder.log")
+	path, ok := proto.session_path(path_buf[:], c.dir, name)
+	log_path := proto.log_path(log_buf[:], "holder.log")
 	if !ok || !ipc.ipc_spawn_self_detached({"--holder", path}, log_path) do return false
 	deadline := _now() + 3 * 1_000_000_000
 	for _now() < deadline {
@@ -79,8 +80,8 @@ _holder_connect :: proc(c: ^Core, path: string) -> bool {
 		return false
 	}
 	w := ipc.wire_writer(c.msg)
-	ipc.enc_hello(&w, {version = ipc.STREAM_PROTO_VERSION, role = .Core, build = c.build})
-	ipc.stream_send(&h.conn, ipc.MSG_HELLO, 0, ipc.wire_bytes_written(&w))
+	proto.enc_hello(&w, {version = proto.STREAM_PROTO_VERSION, role = .Core, build = c.build})
+	ipc.stream_send(&h.conn, proto.MSG_HELLO, 0, ipc.wire_bytes_written(&w))
 	return true
 }
 
@@ -115,30 +116,30 @@ core_holder_service :: proc(c: ^Core, i: int, rev: posix.Poll_Event) {
 _holder_frame :: proc(c: ^Core, hi: int, f: ipc.Stream_Frame) -> bool {
 	r := ipc.wire_reader(f.payload)
 	switch f.kind {
-	case ipc.MSG_HELLO:
-		_, _, ok := ipc.stream_hello_check(f.payload, {.Holder})
+	case proto.MSG_HELLO:
+		_, _, ok := proto.stream_hello_check(f.payload, {.Holder})
 		return ok
-	case ipc.MSG_WELCOME:
+	case proto.MSG_WELCOME:
 		return _holder_welcome(c, hi, &r)
-	case ipc.MSG_TAIL:
+	case proto.MSG_TAIL:
 		if s := core_session_find(c, f.channel); s != nil do core_session_adopt_tail(c, s, f.payload)
-	case ipc.MSG_OUTPUT:
+	case proto.MSG_OUTPUT:
 		if s := core_session_find(c, f.channel); s != nil do core_session_output(c, s, f.payload)
-	case ipc.MSG_SPAWNED:
+	case proto.MSG_SPAWNED:
 		pid := i32(ipc.wr_u32(&r))
 		started_unix := i64(ipc.wr_u64(&r))
 		if s := core_session_find(c, f.channel); s != nil && r.ok {
 			core_session_spawned(c, s, pid, started_unix)
 		}
-	case ipc.MSG_SPAWN_FAILED:
+	case proto.MSG_SPAWN_FAILED:
 		if s := core_session_find(c, f.channel); s != nil do core_session_exited(c, s, {code = 127}, string(f.payload))
-	case ipc.MSG_EXITED:
-		exit := ipc.dec_exit(&r)
+	case proto.MSG_EXITED:
+		exit := proto.dec_exit(&r)
 		if s := core_session_find(c, f.channel); s != nil && r.ok do core_session_exited(c, s, exit, "")
-	case ipc.MSG_PROC_INFO:
-		info := ipc.dec_proc_info(&r)
+	case proto.MSG_PROC_INFO:
+		info := proto.dec_proc_info(&r)
 		if s := core_session_find(c, f.channel); s != nil && r.ok do core_session_proc_info(c, s, info)
-	case ipc.MSG_BYE:
+	case proto.MSG_BYE:
 		return false
 	}
 	return true
@@ -147,16 +148,16 @@ _holder_frame :: proc(c: ^Core, hi: int, f: ipc.Stream_Frame) -> bool {
 @(private = "file")
 _holder_welcome :: proc(c: ^Core, hi: int, r: ^ipc.Wire_Reader) -> bool {
 	h := &c.holders[hi]
-	wel := ipc.dec_welcome(r)
-	if !r.ok || wel.version != ipc.STREAM_PROTO_VERSION do return false
+	wel := proto.dec_welcome(r)
+	if !r.ok || wel.version != proto.STREAM_PROTO_VERSION do return false
 	h.welcomed, h.instance, h.current = true, wel.instance, wel.build == c.build
 	h.poisoned = wel.previous == 2 && wel.crashes >= CORE_POISON_CRASHES
 	h.handover = wel.previous == 1
 	if h.poisoned do fmt.eprintfln("core: %d core crashes in 5 min: screens start empty (tails not replayed)", wel.crashes)
 	// Another build keeps what it runs, takes nothing new and exits when empty.
-	if !h.current do ipc.stream_send(&h.conn, ipc.MSG_DRAIN, 0)
+	if !h.current do ipc.stream_send(&h.conn, proto.MSG_DRAIN, 0)
 	for _ in 0..<wel.count {
-		held := ipc.dec_held(r)
+		held := proto.dec_held(r)
 		if !r.ok do return false
 		core_session_adopt(c, hi, held)
 	}
@@ -182,10 +183,10 @@ _holder_drop :: proc(c: ^Core, hi: int) {
 
 // core_shutdown_holders: the last session and viewer are gone; holders exit too.
 core_shutdown_holders :: proc(c: ^Core) {
-	mode := [1]u8{u8(ipc.Goodbye.Shutdown)}
+	mode := [1]u8{u8(proto.Goodbye.Shutdown)}
 	for &h in c.holders {
 		if !h.used do continue
-		ipc.stream_send(&h.conn, ipc.MSG_GOODBYE, 0, mode[:])
+		ipc.stream_send(&h.conn, proto.MSG_GOODBYE, 0, mode[:])
 		deadline := _now() + 1_000_000_000
 		for ipc.stream_wants_write(&h.conn) && h.conn.err == .None && _now() < deadline {
 			ipc.stream_flush(&h.conn)

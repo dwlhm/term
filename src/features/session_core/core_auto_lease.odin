@@ -7,6 +7,7 @@ package feature_session_core
 // connection closes (held input is dropped), on a takeover from a window, or
 // when the session ends.
 
+import proto "../session_proto"
 import ipc "../../platform/ipc"
 
 Core_Lease :: struct {
@@ -14,7 +15,7 @@ Core_Lease :: struct {
 	pass:       bool, // a person's input goes through (a handoff)
 	viewer_idx: int,
 	viewer_seq: u32,
-	owner_buf:  [ipc.LEASE_OWNER_MAX]u8,
+	owner_buf:  [proto.LEASE_OWNER_MAX]u8,
 	owner_len:  int,
 	held:       [dynamic]u8, // allocated while the lease lasts
 }
@@ -40,7 +41,7 @@ core_viewer_lease :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 	if s == nil || _no_program(c, vi, s) do return
 	owner := ipc.wr_str(r)
 	switch {
-	case !ipc.wr_done(r) || len(owner) == 0 || len(owner) > ipc.LEASE_OWNER_MAX:
+	case !ipc.wr_done(r) || len(owner) == 0 || len(owner) > proto.LEASE_OWNER_MAX:
 		core_viewer_fail(c, vi, 0, .Bad_Request, "malformed lease request (owner: 1 to 64 bytes)")
 	case s.lease.used:
 		core_viewer_fail(c, vi, 0, .Busy, "an automation holds this session")
@@ -88,7 +89,7 @@ core_viewer_lease_mode :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 core_lease_human_input :: proc(c: ^Core, s: ^Core_Session, typed: []u8) -> bool {
 	if !s.lease.used do return false
 	l := &s.lease
-	if !l.pass do append(&l.held, ..typed[:min(len(typed), max(0, ipc.LEASE_HELD_MAX - len(l.held)))])
+	if !l.pass do append(&l.held, ..typed[:min(len(typed), max(0, proto.LEASE_HELD_MAX - len(l.held)))])
 	_lease_event(c, s, {kind = .Human, interrupt = core_human_kind(typed) == .Interrupt, held = u32(len(l.held)), bytes = string(typed)})
 	return !l.pass
 }
@@ -123,21 +124,21 @@ _lease_is_owner :: proc(c: ^Core, s: ^Core_Session, vi: int) -> bool {
 @(private = "file")
 _lease_end :: proc(c: ^Core, s: ^Core_Session, flush: bool) {
 	l := &s.lease
-	if flush && len(l.held) > 0 && !s.exited do core_holder_send(c, s.holder, ipc.MSG_INPUT, s.id, l.held[:])
+	if flush && len(l.held) > 0 && !s.exited do core_holder_send(c, s.holder, proto.MSG_INPUT, s.id, l.held[:])
 	delete(l.held)
 	l^ = {}
 	core_broadcast_row(c, s)
 }
 
 @(private = "file")
-_lease_event :: proc(c: ^Core, s: ^Core_Session, ev: ipc.Lease_Event) {
+_lease_event :: proc(c: ^Core, s: ^Core_Session, ev: proto.Lease_Event) {
 	if !core_viewer_current(c, s.lease.viewer_idx, s.lease.viewer_seq) do return
 	e := ev
 	e.id = s.id
 	e.bytes = e.bytes[:min(len(e.bytes), ipc.STREAM_MAX_PAYLOAD - 64)]
 	w := ipc.wire_writer(c.msg)
-	ipc.enc_lease_event(&w, e)
+	proto.enc_lease_event(&w, e)
 	conn := &c.viewers[s.lease.viewer_idx].conn
-	ipc.stream_send(conn, ipc.MSG_LEASE_EVENT, 0, ipc.wire_bytes_written(&w))
+	ipc.stream_send(conn, proto.MSG_LEASE_EVENT, 0, ipc.wire_bytes_written(&w))
 	ipc.stream_flush(conn)
 }

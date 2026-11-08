@@ -12,6 +12,7 @@ import "core:sys/posix"
 import "core:testing"
 import "core:time"
 import client "../../session_client"
+import proto "../../session_proto"
 import ipc "../../../platform/ipc"
 import core ".."
 
@@ -33,13 +34,13 @@ wait_text :: proc(conn: ^ipc.Stream_Conn, ch: u32) -> (text: []u8, live: int, fa
 	for {
 		f, got := client.client_wait_frame(conn, 8000)
 		if !got do return
-		if f.kind == ipc.MSG_TEXT {
+		if f.kind == proto.MSG_TEXT {
 			text = make([]u8, len(f.payload))
 			copy(text, f.payload)
 			return text, live, fails, true
 		}
 		if f.kind == ipc.STREAM_DATA && f.channel == ch do live += 1
-		if f.kind == ipc.MSG_FAIL do fails += 1
+		if f.kind == proto.MSG_FAIL do fails += 1
 	}
 }
 
@@ -48,12 +49,12 @@ cli_attach_channel :: proc(conn: ^ipc.Stream_Conn, id: u32) -> (u32, bool) {
 	b: [64]u8
 	w := ipc.wire_writer(b[:])
 	ipc.ww_u32(&w, 7)
-	ipc.enc_attach(&w, {id = id, size = {cols = 80, rows = 24}})
-	ipc.stream_send(conn, ipc.MSG_ATTACH, 0, ipc.wire_bytes_written(&w))
+	proto.enc_attach(&w, {id = id, size = {cols = 80, rows = 24}})
+	ipc.stream_send(conn, proto.MSG_ATTACH, 0, ipc.wire_bytes_written(&w))
 	for {
 		f, got := client.client_wait_frame(conn, 3000)
 		if !got do return 0, false
-		if f.kind != ipc.MSG_ATTACHED do continue
+		if f.kind != proto.MSG_ATTACHED do continue
 		r := ipc.wire_reader(f.payload)
 		_, got_id, ch := ipc.wr_u32(&r), ipc.wr_u32(&r), ipc.wr_u32(&r)
 		return ch, got_id == id
@@ -66,7 +67,7 @@ cli_read :: proc(conn: ^ipc.Stream_Conn, id: u32, history: u32) -> ([]u8, bool) 
 	w := ipc.wire_writer(b[:])
 	ipc.ww_u32(&w, id)
 	ipc.ww_u32(&w, history)
-	ipc.stream_send(conn, ipc.MSG_READ, 0, b[:])
+	ipc.stream_send(conn, proto.MSG_READ, 0, b[:])
 	text, _, _, ok := wait_text(conn, 0)
 	return text, ok
 }
@@ -130,9 +131,9 @@ test_read_stitches_full_screen_history :: proc(t: ^testing.T) {
 	w := ipc.wire_writer(b[:])
 	ipc.ww_u32(&w, id)
 	ipc.ww_u32(&w, 200)
-	ipc.stream_send(&conn, ipc.MSG_READ, 0, b[:])
-	ipc.stream_send(&conn, ipc.MSG_READ, 0, b[:]) // a second read is refused, not queued
-	ipc.stream_send(&conn, ipc.MSG_V_INPUT, ch, transmute([]u8)string("k"))
+	ipc.stream_send(&conn, proto.MSG_READ, 0, b[:])
+	ipc.stream_send(&conn, proto.MSG_READ, 0, b[:]) // a second read is refused, not queued
+	ipc.stream_send(&conn, proto.MSG_V_INPUT, ch, transmute([]u8)string("k"))
 
 	text, live, fails, answered := wait_text(&conn, ch)
 	if answered do defer delete(text)

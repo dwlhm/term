@@ -4,6 +4,7 @@ import "core:sys/posix"
 import "core:testing"
 import "core:time"
 import holder ".."
+import proto "../../session_proto"
 import ipc "../../../platform/ipc"
 
 // A core that never reads: the holder's queue stays bounded and the program
@@ -36,9 +37,9 @@ test_stalled_core_throttles_program :: proc(t: ^testing.T) {
 test_oversize_frame_closes_conn :: proc(t: ^testing.T) {
 	f := fixture_start()
 	c := client_connect(f.path)
-	testing.expect(t, client_wait_kind(c, ipc.MSG_WELCOME, 0, 3000) >= 0, "WELCOME")
+	testing.expect(t, client_wait_kind(c, proto.MSG_WELCOME, 0, 3000) >= 0, "WELCOME")
 	hdr: [ipc.STREAM_HEADER]u8
-	ipc.stream_put_header(hdr[:], ipc.MSG_INPUT, 1, 0)
+	ipc.stream_put_header(hdr[:], proto.MSG_INPUT, 1, 0)
 	hdr[5], hdr[6], hdr[7], hdr[8] = 0xff, 0xff, 0xff, 0x7f // len > STREAM_MAX_PAYLOAD
 	posix.send(c.conn.fd, &hdr[0], len(hdr), {})
 	for _ in 0..<40 do if !c.closed do client_pump(c, 50)
@@ -61,8 +62,8 @@ test_garbage_and_bad_requests :: proc(t: ^testing.T) {
 
 	c := client_connect(f.path)
 	argc0: [8]u8 // SPAWN with argc = 0
-	client_send(c, ipc.MSG_SPAWN, 1, argc0[:])
-	testing.expect(t, client_wait_kind(c, ipc.MSG_SPAWN_FAILED, 1, 3000) >= 0, "bad SPAWN answered")
+	client_send(c, proto.MSG_SPAWN, 1, argc0[:])
+	testing.expect(t, client_wait_kind(c, proto.MSG_SPAWN_FAILED, 1, 3000) >= 0, "bad SPAWN answered")
 	client_send(c, 250, 0) // unknown kind
 	for _ in 0..<40 do if !c.closed do client_pump(c, 50)
 	testing.expect(t, c.closed, "unknown message closes the link")
@@ -76,12 +77,12 @@ test_drain_exits_when_empty :: proc(t: ^testing.T) {
 	f := fixture_start()
 	c := client_connect(f.path)
 	client_spawn(c, 1, {"/bin/sleep", "30"})
-	testing.expect(t, client_wait_kind(c, ipc.MSG_SPAWNED, 1, 3000) >= 0, "SPAWNED")
-	client_send(c, ipc.MSG_DRAIN, 0)
+	testing.expect(t, client_wait_kind(c, proto.MSG_SPAWNED, 1, 3000) >= 0, "SPAWNED")
+	client_send(c, proto.MSG_DRAIN, 0)
 	client_spawn(c, 2, {"/bin/sleep", "30"})
-	testing.expect(t, client_wait_kind(c, ipc.MSG_SPAWN_FAILED, 2, 3000) >= 0, "no new session while draining")
-	client_send(c, ipc.MSG_RELEASE, 1)
-	testing.expect(t, client_wait_kind(c, ipc.MSG_BYE, 0, 3000) >= 0, "BYE once empty")
+	testing.expect(t, client_wait_kind(c, proto.MSG_SPAWN_FAILED, 2, 3000) >= 0, "no new session while draining")
+	client_send(c, proto.MSG_RELEASE, 1)
+	testing.expect(t, client_wait_kind(c, proto.MSG_BYE, 0, 3000) >= 0, "BYE once empty")
 	for _ in 0..<100 do if fixture_running(f) do time.sleep(20 * time.Millisecond)
 	testing.expect(t, !fixture_running(f), "drained holder exits")
 	client_close(c)
@@ -90,7 +91,7 @@ test_drain_exits_when_empty :: proc(t: ^testing.T) {
 
 expect_new_core_works :: proc(t: ^testing.T, f: ^Fixture) {
 	c := client_connect(f.path)
-	testing.expect(t, c != nil && client_wait_kind(c, ipc.MSG_WELCOME, 0, 3000) >= 0, "a new core is welcomed")
+	testing.expect(t, c != nil && client_wait_kind(c, proto.MSG_WELCOME, 0, 3000) >= 0, "a new core is welcomed")
 	if c != nil do client_close(c)
 }
 

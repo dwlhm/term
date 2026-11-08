@@ -3,7 +3,7 @@ package feature_session_tests
 import "core:fmt"
 import "core:strings"
 import "core:testing"
-import ipc "../../../platform/ipc"
+import proto "../../session_proto"
 import extension "../../../core/terminal/extension"
 import terminal "../../../core/terminal"
 import session "../"
@@ -11,7 +11,7 @@ import session "../"
 // Loopback_Link records what a session sends to its program.
 Loopback_Link :: struct {
 	written:  [dynamic]u8,
-	size:     ipc.Size_Msg,
+	size:     proto.Size_Msg,
 	resized:  int,
 	consumed: int,
 }
@@ -20,7 +20,7 @@ loopback_session :: proc(l: ^Loopback_Link, cols: u16 = 80, rows: u16 = 24) -> ^
 	return session.session_create({cols = cols, rows = rows}, {
 		write    = proc(user: rawptr, data: []u8) { append(&(^Loopback_Link)(user).written, ..data) },
 		reply    = proc(user: rawptr, data: []u8) { append(&(^Loopback_Link)(user).written, ..data) },
-		resize   = proc(user: rawptr, size: ipc.Size_Msg) {
+		resize   = proc(user: rawptr, size: proto.Size_Msg) {
 			l := (^Loopback_Link)(user)
 			l.size, l.resized = size, l.resized + 1
 		},
@@ -118,7 +118,7 @@ test_session_resize_reaches_terminal_and_link :: proc(t: ^testing.T) {
 	testing.expect_value(t, sess.term.cols, 120)
 	testing.expect_value(t, sess.term.rows, 40)
 	testing.expect_value(t, l.resized, 1)
-	testing.expect_value(t, l.size, ipc.Size_Msg{cols = 120, rows = 40, xpixel = 1200, ypixel = 800})
+	testing.expect_value(t, l.size, proto.Size_Msg{cols = 120, rows = 40, xpixel = 1200, ypixel = 800})
 }
 
 @test

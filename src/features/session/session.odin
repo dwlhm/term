@@ -5,7 +5,7 @@ import "core:strconv"
 import "core:strings"
 import "core:time"
 import cursor "../../core/cursor"
-import ipc "../../platform/ipc"
+import proto "../session_proto"
 import terminal "../../core/terminal"
 import grid "../../core/terminal/grid"
 import extension "../../core/terminal/extension"
@@ -25,7 +25,7 @@ Session_Config :: struct {
 }
 
 // session_config_size clamps a config's geometry the way the Terminal uses it.
-session_config_size :: proc(config: Session_Config) -> ipc.Size_Msg {
+session_config_size :: proc(config: Session_Config) -> proto.Size_Msg {
 	rows := max(1, config.rows if config.rows > 0 else 24)
 	cols := max(1, config.cols if config.cols > 0 else 80)
 	xp := config.xpixel if config.xpixel > 0 else cols * 10
@@ -193,7 +193,7 @@ _osc_1337_handler :: proc(user_data: rawptr, osc_id: int, payload: string, term_
 
 // session_create builds the Terminal side of a session. The program runs
 // behind link (the caller already asked for it to be spawned).
-session_create :: proc(size: ipc.Size_Msg, link: Session_Link, allocator: runtime.Allocator = context.allocator) -> ^Terminal_Session {
+session_create :: proc(size: proto.Size_Msg, link: Session_Link, allocator: runtime.Allocator = context.allocator) -> ^Terminal_Session {
 	rows, cols := max(1, int(size.rows)), max(1, int(size.cols))
 	xp, yp := int(size.xpixel) if size.xpixel > 0 else cols * 10, int(size.ypixel) if size.ypixel > 0 else rows * 20
 

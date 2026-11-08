@@ -5,10 +5,11 @@ package feature_session_core_tests
 import "core:testing"
 import "core:time"
 import client "../../session_client"
+import proto "../../session_proto"
 import ipc "../../../platform/ipc"
 
 // cli_ctl sends one channel-0 request: id + extra bytes; OK → ok, FAIL → its code.
-cli_ctl :: proc(kind: u8, id: u32, extra: []u8 = nil) -> (ok: bool, code: ipc.Fail_Code) {
+cli_ctl :: proc(kind: u8, id: u32, extra: []u8 = nil) -> (ok: bool, code: proto.Fail_Code) {
 	conn: ipc.Stream_Conn
 	if !cli_conn(&conn) do return
 	defer ipc.stream_conn_destroy(&conn)
@@ -20,11 +21,11 @@ cli_ctl :: proc(kind: u8, id: u32, extra: []u8 = nil) -> (ok: bool, code: ipc.Fa
 	for {
 		f, got := client.client_wait_frame(&conn, 3000)
 		if !got do return
-		if f.kind == ipc.MSG_OK do return true, {}
-		if f.kind == ipc.MSG_FAIL {
+		if f.kind == proto.MSG_OK do return true, {}
+		if f.kind == proto.MSG_FAIL {
 			r := ipc.wire_reader(f.payload)
 			_ = ipc.wr_u32(&r)
-			return false, ipc.Fail_Code(ipc.wr_u8(&r))
+			return false, proto.Fail_Code(ipc.wr_u8(&r))
 		}
 	}
 }
@@ -41,7 +42,7 @@ sig_bytes :: proc(sig: i32) -> [4]u8 {
 size_bytes :: proc(cols, rows: u16) -> [8]u8 {
 	b: [8]u8
 	w := ipc.wire_writer(b[:])
-	ipc.enc_size(&w, {cols = cols, rows = rows})
+	proto.enc_size(&w, {cols = cols, rows = rows})
 	return b
 }
 
@@ -54,11 +55,11 @@ cli_screen :: proc(id: u32) -> string {
 	w := ipc.wire_writer(b[:])
 	ipc.ww_u32(&w, id)
 	ipc.ww_u32(&w, 0)
-	ipc.stream_send(&conn, ipc.MSG_READ, 0, b[:])
+	ipc.stream_send(&conn, proto.MSG_READ, 0, b[:])
 	for {
 		f, got := client.client_wait_frame(&conn, 3000)
-		if !got || f.kind == ipc.MSG_FAIL do return ""
-		if f.kind == ipc.MSG_TEXT do return string(f.payload) // temp: caller checks before the next read
+		if !got || f.kind == proto.MSG_FAIL do return ""
+		if f.kind == proto.MSG_TEXT do return string(f.payload) // temp: caller checks before the next read
 	}
 }
 
@@ -79,31 +80,31 @@ test_signal_reaches_the_foreground_job :: proc(t: ^testing.T) {
 	testing.expect(t, view_wait_screen(v, s, "READY"), "ready")
 	time.sleep(100 * time.Millisecond)
 	int_b := sig_bytes(2)
-	ok, _ := cli_ctl(ipc.MSG_SESSION_SIGNAL, id, int_b[:])
+	ok, _ := cli_ctl(proto.MSG_SESSION_SIGNAL, id, int_b[:])
 	testing.expect(t, ok, "signal answered OK")
 	testing.expect(t, view_wait_screen(v, s, "AFTER"), "sleep (the foreground job) got SIGINT")
 
 	bad := sig_bytes(0)
-	_, code := cli_ctl(ipc.MSG_SESSION_SIGNAL, id, bad[:])
-	testing.expect_value(t, code, ipc.Fail_Code.Bad_Request)
-	_, code = cli_ctl(ipc.MSG_SESSION_SIGNAL, id) // no signal number
-	testing.expect_value(t, code, ipc.Fail_Code.Bad_Request)
-	_, code = cli_ctl(ipc.MSG_SESSION_SIGNAL, 999, int_b[:])
-	testing.expect_value(t, code, ipc.Fail_Code.Not_Found)
+	_, code := cli_ctl(proto.MSG_SESSION_SIGNAL, id, bad[:])
+	testing.expect_value(t, code, proto.Fail_Code.Bad_Request)
+	_, code = cli_ctl(proto.MSG_SESSION_SIGNAL, id) // no signal number
+	testing.expect_value(t, code, proto.Fail_Code.Bad_Request)
+	_, code = cli_ctl(proto.MSG_SESSION_SIGNAL, 999, int_b[:])
+	testing.expect_value(t, code, proto.Fail_Code.Not_Found)
 
 	// A window shows it: its size leads, a resize request is refused.
 	size := size_bytes(100, 30)
-	_, code = cli_ctl(ipc.MSG_SESSION_SIZE, id, size[:])
-	testing.expect_value(t, code, ipc.Fail_Code.Busy)
+	_, code = cli_ctl(proto.MSG_SESSION_SIZE, id, size[:])
+	testing.expect_value(t, code, proto.Fail_Code.Busy)
 
 	term_b := sig_bytes(15)
-	ok, _ = cli_ctl(ipc.MSG_SESSION_SIGNAL, id, term_b[:])
+	ok, _ = cli_ctl(proto.MSG_SESSION_SIGNAL, id, term_b[:])
 	testing.expect(t, ok, "TERM answered OK")
 	testing.expect(t, view_wait_row(v, id, .Exited) >= 0, "TERM ends the program")
-	_, code = cli_ctl(ipc.MSG_SESSION_SIGNAL, id, term_b[:])
-	testing.expect_value(t, code, ipc.Fail_Code.Exited)
-	_, code = cli_ctl(ipc.MSG_SESSION_SIZE, id, size[:])
-	testing.expect_value(t, code, ipc.Fail_Code.Exited)
+	_, code = cli_ctl(proto.MSG_SESSION_SIGNAL, id, term_b[:])
+	testing.expect_value(t, code, proto.Fail_Code.Exited)
+	_, code = cli_ctl(proto.MSG_SESSION_SIZE, id, size[:])
+	testing.expect_value(t, code, proto.Fail_Code.Exited)
 	view_close(v)
 	testing.expect(t, tiers_stop(tiers), "tiers end")
 }
@@ -120,9 +121,9 @@ test_resize_a_background_session :: proc(t: ^testing.T) {
 	// The DETACH travels on the viewer's link: Busy until the core handled it.
 	size := size_bytes(100, 30)
 	ok: bool
-	code: ipc.Fail_Code
+	code: proto.Fail_Code
 	for _ in 0..<150 {
-		ok, code = cli_ctl(ipc.MSG_SESSION_SIZE, id, size[:])
+		ok, code = cli_ctl(proto.MSG_SESSION_SIZE, id, size[:])
 		if ok || code != .Busy do break
 		view_pump(v, 20)
 	}
@@ -130,10 +131,10 @@ test_resize_a_background_session :: proc(t: ^testing.T) {
 	testing.expect(t, wait_cli_screen(id, "30 100"), "the program sees 100x30")
 
 	zero := size_bytes(0, 30)
-	_, code = cli_ctl(ipc.MSG_SESSION_SIZE, id, zero[:])
-	testing.expect_value(t, code, ipc.Fail_Code.Bad_Request)
-	_, code = cli_ctl(ipc.MSG_SESSION_SIZE, id, size[:4]) // short payload
-	testing.expect_value(t, code, ipc.Fail_Code.Bad_Request)
+	_, code = cli_ctl(proto.MSG_SESSION_SIZE, id, zero[:])
+	testing.expect_value(t, code, proto.Fail_Code.Bad_Request)
+	_, code = cli_ctl(proto.MSG_SESSION_SIZE, id, size[:4]) // short payload
+	testing.expect_value(t, code, proto.Fail_Code.Bad_Request)
 	testing.expect(t, cli_kill(id), "kill")
 	view_close(v)
 	testing.expect(t, tiers_stop(tiers), "tiers end")

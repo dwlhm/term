@@ -5,6 +5,16 @@ import "core:sys/posix"
 import "core:testing"
 import ipc "../"
 
+// Sample frame kinds (any non-transport kind does).
+@(private = "file")
+_K_EVENT :: u8(83)
+@(private = "file")
+_K_INPUT :: u8(21)
+@(private = "file")
+_K_OUTPUT :: u8(42)
+@(private = "file")
+_K_RELEASE :: u8(24)
+
 @(private = "file")
 Pair :: struct {
 	a, b: ipc.Stream_Conn,
@@ -38,13 +48,13 @@ test_stream_frames_roundtrip_in_order :: proc(t: ^testing.T) {
 	p: Pair
 	testing.expect(t, pair_open(&p))
 	defer pair_close(&p)
-	ipc.stream_send(&p.a, ipc.MSG_INPUT, 7, transmute([]u8)string("he"), transmute([]u8)string("llo"))
-	ipc.stream_send(&p.a, ipc.MSG_RELEASE, 9)
+	ipc.stream_send(&p.a, _K_INPUT, 7, transmute([]u8)string("he"), transmute([]u8)string("llo"))
+	ipc.stream_send(&p.a, _K_RELEASE, 9)
 	pump(&p)
 	f, ok := ipc.stream_next(&p.b)
-	testing.expect(t, ok && f.kind == ipc.MSG_INPUT && f.channel == 7 && string(f.payload) == "hello")
+	testing.expect(t, ok && f.kind == _K_INPUT && f.channel == 7 && string(f.payload) == "hello")
 	f, ok = ipc.stream_next(&p.b)
-	testing.expect(t, ok && f.kind == ipc.MSG_RELEASE && f.channel == 9 && len(f.payload) == 0)
+	testing.expect(t, ok && f.kind == _K_RELEASE && f.channel == 9 && len(f.payload) == 0)
 	_, ok = ipc.stream_next(&p.b)
 	testing.expect(t, !ok)
 }
@@ -55,7 +65,7 @@ test_stream_reassembles_byte_by_byte :: proc(t: ^testing.T) {
 	testing.expect(t, pair_open(&p))
 	defer pair_close(&p)
 	frame: [ipc.STREAM_HEADER + 3]u8
-	ipc.stream_put_header(frame[:], ipc.MSG_OUTPUT, 3, 3)
+	ipc.stream_put_header(frame[:], _K_OUTPUT, 3, 3)
 	copy(frame[ipc.STREAM_HEADER:], "abc")
 	for i in 0..<len(frame) {
 		_, ok := ipc.stream_next(&p.b)
@@ -73,7 +83,7 @@ test_stream_rejects_oversize_header :: proc(t: ^testing.T) {
 	testing.expect(t, pair_open(&p))
 	defer pair_close(&p)
 	hdr: [ipc.STREAM_HEADER]u8
-	ipc.stream_put_header(hdr[:], ipc.MSG_OUTPUT, 1, ipc.STREAM_MAX_PAYLOAD + 1)
+	ipc.stream_put_header(hdr[:], _K_OUTPUT, 1, ipc.STREAM_MAX_PAYLOAD + 1)
 	posix.send(p.a.fd, &hdr[0], len(hdr), {})
 	ipc.stream_fill(&p.b)
 	_, ok := ipc.stream_next(&p.b)
@@ -89,12 +99,12 @@ test_stream_credit_limits_data_and_control_still_flows :: proc(t: ^testing.T) {
 	big := make([]u8, ipc.STREAM_WINDOW * 2)
 	defer delete(big)
 	testing.expect(t, ipc.stream_data(&p.a, 5, big))
-	ipc.stream_send(&p.a, ipc.MSG_EVENT, 0)
+	ipc.stream_send(&p.a, _K_EVENT, 0)
 	pump(&p)
 	got, saw_event := 0, false
 	for f in ipc.stream_next(&p.b) {
 		if f.kind == ipc.STREAM_DATA do got += len(f.payload)
-		if f.kind == ipc.MSG_EVENT do saw_event = true
+		if f.kind == _K_EVENT do saw_event = true
 	}
 	testing.expect(t, saw_event, "control is not held up by a stalled stream")
 	testing.expect_value(t, got, ipc.STREAM_WINDOW)
@@ -153,8 +163,8 @@ test_stream_control_overflow :: proc(t: ^testing.T) {
 	defer pair_close(&p)
 	big := make([]u8, ipc.STREAM_MAX_PAYLOAD)
 	defer delete(big)
-	testing.expect(t, ipc.stream_send(&p.a, ipc.MSG_OUTPUT, 1, big))
-	testing.expect(t, !ipc.stream_send(&p.a, ipc.MSG_OUTPUT, 1, big))
+	testing.expect(t, ipc.stream_send(&p.a, _K_OUTPUT, 1, big))
+	testing.expect(t, !ipc.stream_send(&p.a, _K_OUTPUT, 1, big))
 	testing.expect_value(t, p.a.err, ipc.Stream_Error.Overflow)
 }
 
@@ -170,7 +180,7 @@ test_stream_send_receive_do_not_allocate :: proc(t: ^testing.T) {
 	context.allocator = mem.tracking_allocator(&track)
 	payload := [64]u8{}
 	for _ in 0..<100 {
-		ipc.stream_send(&p.a, ipc.MSG_INPUT, 4, payload[:])
+		ipc.stream_send(&p.a, _K_INPUT, 4, payload[:])
 		ipc.stream_data(&p.a, 4, payload[:])
 		pump(&p)
 		for f in ipc.stream_next(&p.b) do if f.kind == ipc.STREAM_DATA do ipc.stream_ack(&p.b, 4, len(f.payload))

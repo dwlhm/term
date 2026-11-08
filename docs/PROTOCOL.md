@@ -121,7 +121,7 @@ u32 listening · str process · str cwd · str title · str status · str contro
 lease passes a person's input through: a handoff).
 
 The other verbs (`observe`, `read`, `send`, `signal`, `watch`, `new`) are in
-`src/platform/ipc/stream_msg.odin`, next to the message numbers.
+`src/features/session_proto/msg.odin`, next to the message numbers.
 
 ## Automation: snapshot, settle, act and lease
 
@@ -131,8 +131,8 @@ contracts, steps, elements and adapters).
 What a program shows, parsed once by the core (never raw PTY bytes), a wait
 for the screen to change, and input for it. None of them resizes, scrolls or
 focuses the session.
-Field-by-field types are in `src/platform/ipc/stream_msg_auto.odin`, the order
-in `stream_codec_auto.odin`.
+Field-by-field types are in `src/features/session_proto/msg_auto.odin`, the order
+in `codec_auto.odin`.
 
 | kind | payload | answer |
 |---|---|---|

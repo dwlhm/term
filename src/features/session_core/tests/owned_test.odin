@@ -7,7 +7,7 @@ import "core:os"
 import "core:testing"
 import "core:time"
 import client "../../session_client"
-import ipc "../../../platform/ipc"
+import proto "../../session_proto"
 
 // leave_a_background_session: a viewer starts a program, detaches it (nobody
 // shows it) and disconnects without killing anything, as a crashed owner would.
@@ -32,8 +32,8 @@ leave_a_background_session :: proc(t: ^testing.T) -> (pid: u32) {
 
 @(test)
 test_owned_dir_ends_sessions_with_its_owner :: proc(t: ^testing.T) {
-	os.set_env(ipc.SESSION_OWNED_ENV, "1")
-	defer os.unset_env(ipc.SESSION_OWNED_ENV)
+	os.set_env(proto.SESSION_OWNED_ENV, "1")
+	defer os.unset_env(proto.SESSION_OWNED_ENV)
 	tiers := tiers_start()
 	pid := leave_a_background_session(t)
 	testing.expect(t, pid > 0, "program pid")
@@ -43,7 +43,7 @@ test_owned_dir_ends_sessions_with_its_owner :: proc(t: ^testing.T) {
 		time.sleep(10 * time.Millisecond)
 	}
 	testing.expect(t, gone, "the program ended with its owner's last viewer")
-	rows: [8]ipc.Session_Row
+	rows: [8]proto.Session_Row
 	testing.expect_value(t, len(cli_list_rows(rows[:])), 0)
 	testing.expect(t, tiers_stop(tiers), "tiers end and remove the dir")
 }
@@ -54,7 +54,7 @@ test_unowned_dir_keeps_background_sessions :: proc(t: ^testing.T) {
 	pid := leave_a_background_session(t)
 	time.sleep(300 * time.Millisecond)
 	testing.expect(t, pid_alive(pid), "the program keeps running in the background")
-	rows: [8]ipc.Session_Row
+	rows: [8]proto.Session_Row
 	testing.expect_value(t, len(cli_list_rows(rows[:])), 1)
 	testing.expect(t, tiers_stop(tiers), "tiers end")
 }

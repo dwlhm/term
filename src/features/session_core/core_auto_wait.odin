@@ -4,6 +4,7 @@ package feature_session_core
 // program went quiet, or it exited. Event-driven: output only moves the next
 // wake-up, the loop checks waits once per round.
 
+import proto "../session_proto"
 import ipc "../../platform/ipc"
 
 CORE_MAX_SETTLES :: 32
@@ -19,7 +20,7 @@ Core_Settle :: struct {
 }
 
 core_viewer_settle :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
-	req := ipc.dec_settle_req(r)
+	req := proto.dec_settle_req(r)
 	if !ipc.wr_done(r) {
 		core_viewer_fail(c, vi, 0, .Bad_Request, "malformed settle request")
 		return
@@ -95,13 +96,13 @@ _settle_try :: proc(c: ^Core, w: ^Core_Settle, now: i64) -> bool {
 @(private = "file")
 _settle_answer :: proc(c: ^Core, w: ^Core_Settle, s: ^Core_Session) {
 	msg := ipc.wire_writer(c.msg)
-	ipc.enc_settle_result(&msg, {id = s.id, gen = s.gen, exited = s.exited, exit_code = s.exit.code})
-	ipc.stream_send(&c.viewers[w.viewer_idx].conn, ipc.MSG_SETTLE_RESULT, 0, ipc.wire_bytes_written(&msg))
+	proto.enc_settle_result(&msg, {id = s.id, gen = s.gen, exited = s.exited, exit_code = s.exit.code})
+	ipc.stream_send(&c.viewers[w.viewer_idx].conn, proto.MSG_SETTLE_RESULT, 0, ipc.wire_bytes_written(&msg))
 	ipc.stream_flush(&c.viewers[w.viewer_idx].conn)
 }
 
 @(private = "file")
-_settle_fail :: proc(c: ^Core, w: ^Core_Settle, code: ipc.Fail_Code, reason: string) {
+_settle_fail :: proc(c: ^Core, w: ^Core_Settle, code: proto.Fail_Code, reason: string) {
 	core_viewer_fail(c, w.viewer_idx, 0, code, reason)
 	ipc.stream_flush(&c.viewers[w.viewer_idx].conn)
 }

@@ -22,6 +22,7 @@ import "core:os"
 import "core:strconv"
 import "core:time"
 import client_feat "../../features/session_client"
+import proto "../../features/session_proto"
 import plat_ipc "../../platform/ipc"
 
 
@@ -73,7 +74,7 @@ _agent_target :: proc(args: []string) -> (id: u32, rest: []string, ok: bool) {
 	switch args[0] {
 	case "read", "observe":
 		if self, inside := app_agent_self_id(); inside do return self, args[1:], true
-		fmt.eprintfln("term: %s needs a session id: term session %s <id> (inside a term session it defaults to $%s)", args[0], args[0], plat_ipc.SESSION_ID_ENV)
+		fmt.eprintfln("term: %s needs a session id: term session %s <id> (inside a term session it defaults to $%s)", args[0], args[0], proto.SESSION_ID_ENV)
 	case:
 		fmt.eprintfln("term: %s needs a session id: term session %s <id> … (see term session %s --help)", args[0], args[0], args[0])
 	}
@@ -82,7 +83,7 @@ _agent_target :: proc(args: []string) -> (id: u32, rest: []string, ok: bool) {
 
 // app_agent_self_id is the session this process runs in ($TERM_SESSION_ID).
 app_agent_self_id :: proc() -> (u32, bool) {
-	return _parse_id(os.get_env(plat_ipc.SESSION_ID_ENV, context.temp_allocator))
+	return _parse_id(os.get_env(proto.SESSION_ID_ENV, context.temp_allocator))
 }
 
 @(private = "file")
@@ -93,7 +94,7 @@ _agent_whoami :: proc(args: []string) -> int {
 	}
 	id, inside := app_agent_self_id()
 	if !inside {
-		fmt.eprintfln("term: not inside a term session ($%s is not set)", plat_ipc.SESSION_ID_ENV)
+		fmt.eprintfln("term: not inside a term session ($%s is not set)", proto.SESSION_ID_ENV)
 		return 1
 	}
 	fmt.println(id)
@@ -109,7 +110,7 @@ _agent_kill :: proc(id: u32, args: []string) -> int {
 	b: [4]u8
 	w := plat_ipc.wire_writer(b[:])
 	plat_ipc.ww_u32(&w, id)
-	return app_agent_request_ok(plat_ipc.MSG_KILL, b[:])
+	return app_agent_request_ok(proto.MSG_KILL, b[:])
 }
 
 @(private = "file")
@@ -134,7 +135,7 @@ app_agent_request_ok :: proc(kind: u8, payload: []u8) -> int {
 	if !app_agent_conn(&conn, false) do return 2
 	defer plat_ipc.stream_conn_destroy(&conn)
 	plat_ipc.stream_send(&conn, kind, 0, payload)
-	_, code := app_agent_answer(&conn, plat_ipc.MSG_OK)
+	_, code := app_agent_answer(&conn, proto.MSG_OK)
 	return code
 }
 
@@ -159,10 +160,10 @@ app_agent_answer :: proc(conn: ^plat_ipc.Stream_Conn, want: u8, timeout_ms := AG
 			return {}, 1
 		}
 		if f.kind == want do return f, 0
-		if f.kind != plat_ipc.MSG_FAIL do continue
+		if f.kind != proto.MSG_FAIL do continue
 		r := plat_ipc.wire_reader(f.payload)
 		_ = plat_ipc.wr_u32(&r)
-		fail := plat_ipc.Fail_Code(plat_ipc.wr_u8(&r))
+		fail := proto.Fail_Code(plat_ipc.wr_u8(&r))
 		fmt.eprintf("term: %s\n", plat_ipc.wr_str(&r))
 		return {}, AGENT_EXIT_TIMEOUT if fail == .Timeout else 1
 	}
@@ -189,8 +190,8 @@ _agent_read :: proc(id: u32, args: []string) -> int {
 	w := plat_ipc.wire_writer(b[:])
 	plat_ipc.ww_u32(&w, id)
 	plat_ipc.ww_u32(&w, lines)
-	plat_ipc.stream_send(&conn, plat_ipc.MSG_READ, 0, b[:])
-	f, code := app_agent_answer(&conn, plat_ipc.MSG_TEXT)
+	plat_ipc.stream_send(&conn, proto.MSG_READ, 0, b[:])
+	f, code := app_agent_answer(&conn, proto.MSG_TEXT)
 	if code != 0 do return code
 	os.write(os.stdout, f.payload)
 	return 0
@@ -205,7 +206,7 @@ _agent_send :: proc(id: u32, args: []string) -> int {
 	msg: [16 * 1024]u8
 	payload, ok := app_agent_send_payload(msg[:], id, args[0], "")
 	if !ok do return 1
-	return app_agent_request_ok(plat_ipc.MSG_SEND, payload)
+	return app_agent_request_ok(proto.MSG_SEND, payload)
 }
 
 // app_agent_send_payload encodes a SEND of text (escapes decoded) + suffix.

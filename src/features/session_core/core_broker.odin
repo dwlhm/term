@@ -10,7 +10,7 @@ package feature_session_core
 // with what the core must do; effects stay valid until the next call.
 
 import "core:strings"
-import ipc "../../platform/ipc"
+import proto "../session_proto"
 
 broker_init :: proc(b: ^Broker, now: proc() -> i64) {
 	b.now = now
@@ -76,7 +76,7 @@ broker_request :: proc(b: ^Broker, id: u64) -> ^Broker_Request {
 }
 
 // broker_row is sid's part in requests, for its session row.
-broker_row :: proc(b: ^Broker, sid: u32) -> (m: ipc.Row_Request) {
+broker_row :: proc(b: ^Broker, sid: u32) -> (m: proto.Row_Request) {
 	if sid == 0 do return
 	for &r in b.reqs {
 		if r.phase != .Starting && r.phase != .Running do continue

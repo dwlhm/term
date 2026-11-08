@@ -6,36 +6,37 @@ import "core:testing"
 import "core:thread"
 import "core:time"
 import client "../../session_client"
+import proto "../../session_proto"
 import ipc "../../../platform/ipc"
 
 @(private = "file")
-cli_watch :: proc(id: u32, events: ipc.Watch_Event_Flags, timeout_ms: u32) -> (res: ipc.Watch_Result, ok, timed_out: bool) {
-	fail: ipc.Fail_Code
+cli_watch :: proc(id: u32, events: proto.Watch_Event_Flags, timeout_ms: u32) -> (res: proto.Watch_Result, ok, timed_out: bool) {
+	fail: proto.Fail_Code
 	res, fail = cli_watch_req({id = id, events = events, timeout_ms = timeout_ms})
 	return res, fail == {}, fail == .Timeout
 }
 
 // cli_watch_req sends one watch; fail is the FAIL code ({} = answered).
 @(private = "file")
-cli_watch_req :: proc(req: ipc.Watch_Request) -> (res: ipc.Watch_Result, fail: ipc.Fail_Code) {
+cli_watch_req :: proc(req: proto.Watch_Request) -> (res: proto.Watch_Result, fail: proto.Fail_Code) {
 	conn: ipc.Stream_Conn
 	if !cli_conn(&conn) do return {}, .Bad_Request
 	defer ipc.stream_conn_destroy(&conn)
 	buf: [64]u8
 	w := ipc.wire_writer(buf[:])
-	ipc.enc_watch_req(&w, req)
-	ipc.stream_send(&conn, ipc.MSG_WATCH, 0, ipc.wire_bytes_written(&w))
+	proto.enc_watch_req(&w, req)
+	ipc.stream_send(&conn, proto.MSG_WATCH, 0, ipc.wire_bytes_written(&w))
 	for {
 		f, got := client.client_wait_frame(&conn, int(req.timeout_ms + 2000))
 		if !got do return {}, .Busy
 		switch f.kind {
-		case ipc.MSG_FAIL:
+		case proto.MSG_FAIL:
 			r := ipc.wire_reader(f.payload)
 			_ = ipc.wr_u32(&r)
-			return {}, ipc.Fail_Code(ipc.wr_u8(&r))
-		case ipc.MSG_WATCH_RESULT:
+			return {}, proto.Fail_Code(ipc.wr_u8(&r))
+		case proto.MSG_WATCH_RESULT:
 			r := ipc.wire_reader(f.payload)
-			res = ipc.dec_watch_result(&r)
+			res = proto.dec_watch_result(&r)
 			return res, {} if r.ok else .Bad_Request
 		}
 	}
@@ -59,7 +60,7 @@ test_watch_blocking_on_exit :: proc(t: ^testing.T) {
 	testing.expect(t, ok, "watch succeeded")
 	testing.expect(t, !timed_out, "did not time out")
 	testing.expect_value(t, res.id, id)
-	testing.expect_value(t, res.event, ipc.Watch_Event.Exit)
+	testing.expect_value(t, res.event, proto.Watch_Event.Exit)
 	testing.expect_value(t, res.exit_code, 0)
 	testing.expect(t, dur >= 150 && dur < 2500, "woke promptly on exit")
 }
@@ -83,7 +84,7 @@ test_watch_blocking_on_prompt :: proc(t: ^testing.T) {
 	testing.expect(t, ok, "watch prompt succeeded")
 	testing.expect(t, !timed_out, "did not time out")
 	testing.expect_value(t, res.id, id)
-	testing.expect_value(t, res.event, ipc.Watch_Event.Prompt)
+	testing.expect_value(t, res.event, proto.Watch_Event.Prompt)
 	testing.expect_value(t, res.exit_code, 0)
 	testing.expect(t, dur >= 150 && dur < 2500, "woke promptly on prompt")
 }
@@ -118,12 +119,12 @@ test_watch_since_answers_finished_command :: proc(t: ^testing.T) {
 	id := view_attached(v, s)
 	testing.expect(t, view_wait_screen(v, s, "$"), "prompt drawn")
 	res, fail := cli_watch_req({id = id, events = {.Prompt}, timeout_ms = 3000, has_since = true, since = 0})
-	testing.expect_value(t, fail, ipc.Fail_Code{})
-	testing.expect_value(t, res.event, ipc.Watch_Event.Prompt)
+	testing.expect_value(t, fail, proto.Fail_Code{})
+	testing.expect_value(t, res.event, proto.Watch_Event.Prompt)
 	testing.expect_value(t, res.exit_code, 5)
 	testing.expect_value(t, res.cmd_seq, 1)
 	_, fail = cli_watch_req({id = id, events = {.Prompt}, timeout_ms = 200, has_since = true, since = 1})
-	testing.expect_value(t, fail, ipc.Fail_Code.Timeout)
+	testing.expect_value(t, fail, proto.Fail_Code.Timeout)
 	view_close(v)
 	testing.expect(t, tiers_stop(tiers), "tiers end and remove the dir")
 }
@@ -139,7 +140,7 @@ test_watch_fast_command_in_one_chunk :: proc(t: ^testing.T) {
 	id := view_attached(v, s)
 	testing.expect(t, view_wait_screen(v, s, "$"), "first prompt drawn")
 	res, fail := cli_watch_req({id = id, events = {.Prompt}, timeout_ms = 3000})
-	testing.expect_value(t, fail, ipc.Fail_Code{})
+	testing.expect_value(t, fail, proto.Fail_Code{})
 	testing.expect_value(t, res.exit_code, 3)
 	testing.expect_value(t, res.cmd_seq, 1)
 	view_close(v)
@@ -154,8 +155,8 @@ test_watch_answers_at_once_for_exited_and_removed :: proc(t: ^testing.T) {
 	gone_id := view_attached(v, gone)
 	testing.expect(t, view_wait_row(v, gone_id, .Exited) >= 0, "program exited")
 	res, fail := cli_watch_req({id = gone_id, events = {.Prompt}, timeout_ms = 3000})
-	testing.expect_value(t, fail, ipc.Fail_Code{})
-	testing.expect_value(t, res.event, ipc.Watch_Event.Exit)
+	testing.expect_value(t, fail, proto.Fail_Code{})
+	testing.expect_value(t, res.event, proto.Watch_Event.Exit)
 	testing.expect_value(t, res.exit_code, 4)
 
 	live := view_attached(v, view_sh(v, "sleep 30"))
@@ -168,7 +169,7 @@ test_watch_answers_at_once_for_exited_and_removed :: proc(t: ^testing.T) {
 	_, fail = cli_watch_req({id = live, events = {.Prompt}, timeout_ms = 5000})
 	thread.join(th)
 	thread.destroy(th)
-	testing.expect_value(t, fail, ipc.Fail_Code.Not_Found)
+	testing.expect_value(t, fail, proto.Fail_Code.Not_Found)
 	view_close(v)
 	testing.expect(t, tiers_stop(tiers), "tiers end and remove the dir")
 }

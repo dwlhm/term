@@ -8,13 +8,14 @@ import "core:encoding/hex"
 import "core:strings"
 import "core:testing"
 import client "../../session_client"
+import proto "../../session_proto"
 import ipc "../../../platform/ipc"
 
 // Driver: one connection that keeps its lease and collects lease events.
 @(private = "file")
 Driver :: struct {
 	conn:   ipc.Stream_Conn,
-	events: [dynamic]ipc.Lease_Event,
+	events: [dynamic]proto.Lease_Event,
 }
 
 @(private = "file")
@@ -29,26 +30,26 @@ _drop :: proc(d: ^Driver) {
 // _call sends one request and returns the answer kind (MSG_OK / MSG_ACT_RESULT
 // / MSG_TELL_RESULT / MSG_FAIL) and, for FAIL, its code; events are kept.
 @(private = "file")
-_call :: proc(d: ^Driver, kind: u8, payload: []u8) -> (answer: u8, code: ipc.Fail_Code, tell: ipc.Tell_Result) {
+_call :: proc(d: ^Driver, kind: u8, payload: []u8) -> (answer: u8, code: proto.Fail_Code, tell: proto.Tell_Result) {
 	ipc.stream_send(&d.conn, kind, 0, payload)
 	for {
 		f, got := client.client_wait_frame(&d.conn, 4000)
 		if !got do return
 		r := ipc.wire_reader(f.payload)
 		switch f.kind {
-		case ipc.MSG_LEASE_EVENT: append(&d.events, ipc.dec_lease_event(&r))
-		case ipc.MSG_OK, ipc.MSG_ACT_RESULT: return f.kind, {}, {}
-		case ipc.MSG_TELL_RESULT: return f.kind, {}, ipc.dec_tell_result(&r)
-		case ipc.MSG_FAIL:
+		case proto.MSG_LEASE_EVENT: append(&d.events, proto.dec_lease_event(&r))
+		case proto.MSG_OK, proto.MSG_ACT_RESULT: return f.kind, {}, {}
+		case proto.MSG_TELL_RESULT: return f.kind, {}, proto.dec_tell_result(&r)
+		case proto.MSG_FAIL:
 			_ = ipc.wr_u32(&r)
-			return f.kind, ipc.Fail_Code(ipc.wr_u8(&r)), {}
+			return f.kind, proto.Fail_Code(ipc.wr_u8(&r)), {}
 		}
 	}
 }
 
 // _event waits for the next lease event of kind (true when it came).
 @(private = "file")
-_event :: proc(d: ^Driver, kind: ipc.Lease_Event_Kind) -> (ev: ipc.Lease_Event, ok: bool) {
+_event :: proc(d: ^Driver, kind: proto.Lease_Event_Kind) -> (ev: proto.Lease_Event, ok: bool) {
 	for {
 		for e, i in d.events {
 			if e.kind != kind do continue
@@ -57,16 +58,16 @@ _event :: proc(d: ^Driver, kind: ipc.Lease_Event_Kind) -> (ev: ipc.Lease_Event, 
 		}
 		f := client.client_wait_frame(&d.conn, 4000) or_return
 		r := ipc.wire_reader(f.payload)
-		if f.kind == ipc.MSG_LEASE_EVENT do append(&d.events, ipc.dec_lease_event(&r))
+		if f.kind == proto.MSG_LEASE_EVENT do append(&d.events, proto.dec_lease_event(&r))
 	}
 }
 
 @(private = "file")
-_lease :: proc(d: ^Driver, id: u32, owner := "flow.lua:test") -> (u8, ipc.Fail_Code) {
+_lease :: proc(d: ^Driver, id: u32, owner := "flow.lua:test") -> (u8, proto.Fail_Code) {
 	b: [128]u8
 	w := ipc.wire_writer(b[:])
 	ipc.ww_u32(&w, id); ipc.ww_str(&w, owner)
-	a, code, _ := _call(d, ipc.MSG_LEASE, ipc.wire_bytes_written(&w))
+	a, code, _ := _call(d, proto.MSG_LEASE, ipc.wire_bytes_written(&w))
 	return a, code
 }
 
@@ -75,7 +76,7 @@ _release :: proc(d: ^Driver, id: u32, flush: bool) -> u8 {
 	b: [8]u8
 	w := ipc.wire_writer(b[:])
 	ipc.ww_u32(&w, id); ipc.ww_bool(&w, flush)
-	a, _, _ := _call(d, ipc.MSG_LEASE_RELEASE, ipc.wire_bytes_written(&w))
+	a, _, _ := _call(d, proto.MSG_LEASE_RELEASE, ipc.wire_bytes_written(&w))
 	return a
 }
 
@@ -84,22 +85,22 @@ _pass :: proc(d: ^Driver, id: u32, pass: bool) -> u8 {
 	b: [8]u8
 	w := ipc.wire_writer(b[:])
 	ipc.ww_u32(&w, id); ipc.ww_bool(&w, pass)
-	a, _, _ := _call(d, ipc.MSG_LEASE_MODE, ipc.wire_bytes_written(&w))
+	a, _, _ := _call(d, proto.MSG_LEASE_MODE, ipc.wire_bytes_written(&w))
 	return a
 }
 
 @(private = "file")
-_text :: proc(d: ^Driver, id: u32, text: string) -> (u8, ipc.Fail_Code) {
+_text :: proc(d: ^Driver, id: u32, text: string) -> (u8, proto.Fail_Code) {
 	b: [256]u8
 	w := ipc.wire_writer(b[:])
-	ipc.enc_act_text(&w, id, text, false)
-	a, code, _ := _call(d, ipc.MSG_ACT, ipc.wire_bytes_written(&w))
+	proto.enc_act_text(&w, id, text, false)
+	a, code, _ := _call(d, proto.MSG_ACT, ipc.wire_bytes_written(&w))
 	return a, code
 }
 
 @(private = "file")
 _controller :: proc(id: u32) -> string {
-	rows: [16]ipc.Session_Row
+	rows: [16]proto.Session_Row
 	for row in cli_list_rows(rows[:]) do if row.id == id do return row.controller
 	return "<none>"
 }
@@ -121,7 +122,7 @@ _person :: proc(p: ^Person, id: u32) -> bool {
 
 @(private = "file")
 _type :: proc(p: ^Person, bytes: string) {
-	ipc.stream_send(&p.conn, ipc.MSG_V_INPUT, p.channel, transmute([]u8)bytes)
+	ipc.stream_send(&p.conn, proto.MSG_V_INPUT, p.channel, transmute([]u8)bytes)
 	ipc.stream_flush(&p.conn)
 }
 
@@ -136,27 +137,27 @@ test_lease_owner_drives_and_others_are_refused :: proc(t: ^testing.T) {
 	defer { _drop(&owner); _drop(&other) }
 
 	a, code := _lease(&owner, id)
-	testing.expect_value(t, a, ipc.MSG_OK)
+	testing.expect_value(t, a, proto.MSG_OK)
 	testing.expect_value(t, _controller(id), "flow.lua:test")
 	a, code = _lease(&other, id, "second")
-	testing.expect(t, a == ipc.MSG_FAIL && code == .Busy, "one lease per session")
+	testing.expect(t, a == proto.MSG_FAIL && code == .Busy, "one lease per session")
 	a, code = _text(&other, id, "x")
-	testing.expect(t, a == ipc.MSG_FAIL && code == .Busy, "another driver's input is refused")
-	a, code, _ = _call(&other, ipc.MSG_SEND, _id_and(id, "y"))
-	testing.expect(t, a == ipc.MSG_FAIL && code == .Busy, "send is refused")
+	testing.expect(t, a == proto.MSG_FAIL && code == .Busy, "another driver's input is refused")
+	a, code, _ = _call(&other, proto.MSG_SEND, _id_and(id, "y"))
+	testing.expect(t, a == proto.MSG_FAIL && code == .Busy, "send is refused")
 	b: [64]u8
 	w := ipc.wire_writer(b[:])
-	ipc.enc_tell_req(&w, {to = id, body = "echo hi"})
-	_, _, tell := _call(&other, ipc.MSG_TELL, ipc.wire_bytes_written(&w))
+	proto.enc_tell_req(&w, {to = id, body = "echo hi"})
+	_, _, tell := _call(&other, proto.MSG_TELL, ipc.wire_bytes_written(&w))
 	testing.expect(t, tell.phase == .Rejected && tell.reject == .Leased, "broker requests are refused")
 	a, _ = _text(&owner, id, "ok")
-	testing.expect(t, a == ipc.MSG_ACT_RESULT && echo_received(id, "ok"), "the owner's input goes in")
+	testing.expect(t, a == proto.MSG_ACT_RESULT && echo_received(id, "ok"), "the owner's input goes in")
 
-	testing.expect_value(t, _release(&other, id, false), ipc.MSG_FAIL)
-	testing.expect_value(t, _release(&owner, id, false), ipc.MSG_OK)
+	testing.expect_value(t, _release(&other, id, false), proto.MSG_FAIL)
+	testing.expect_value(t, _release(&owner, id, false), proto.MSG_OK)
 	testing.expect_value(t, _controller(id), "")
 	a, _ = _text(&other, id, "free")
-	testing.expect(t, a == ipc.MSG_ACT_RESULT && echo_received(id, "free"), "released: anyone may drive it")
+	testing.expect(t, a == proto.MSG_ACT_RESULT && echo_received(id, "free"), "released: anyone may drive it")
 }
 
 @(private = "file")
@@ -187,13 +188,13 @@ test_lease_holds_and_reports_human_input :: proc(t: ^testing.T) {
 	_type(&person, "\x1b")
 	ev, got = _event(&owner, .Human)
 	testing.expect(t, got && ev.interrupt, "Esc is reported as an interrupt")
-	testing.expect_value(t, _pass(&owner, id, true), ipc.MSG_OK)
+	testing.expect_value(t, _pass(&owner, id, true), proto.MSG_OK)
 	_type(&person, "P")
 	ev, got = _event(&owner, .Human)
 	testing.expect(t, got && ev.held == 4, "pass mode reports but does not hold")
 	testing.expect(t, echo_received(id, "P"), "pass mode lets it through")
 	_pass(&owner, id, false)
-	testing.expect_value(t, _release(&owner, id, true), ipc.MSG_OK)
+	testing.expect_value(t, _release(&owner, id, true), proto.MSG_OK)
 	testing.expect(t, echo_received(id, "abc\x1b"), "flush delivers what was held, in order")
 }
 
@@ -225,7 +226,7 @@ test_lease_ends_on_disconnect_takeover_exit_and_kill :: proc(t: ^testing.T) {
 	_driver(&owner)
 	defer _drop(&owner)
 	_lease(&owner, id)
-	ipc.stream_send(&person.conn, ipc.MSG_V_TAKEOVER, person.channel)
+	ipc.stream_send(&person.conn, proto.MSG_V_TAKEOVER, person.channel)
 	ipc.stream_flush(&person.conn)
 	_, took := _event(&owner, .Takeover)
 	testing.expect(t, took && _controller(id) == "", "a takeover ends the lease")
@@ -252,13 +253,13 @@ test_lease_refused_while_a_request_runs :: proc(t: ^testing.T) {
 	defer _drop(&d)
 	b: [64]u8
 	w := ipc.wire_writer(b[:])
-	ipc.enc_tell_req(&w, {to = id, body = "sleep 2", shell = true})
-	_, _, tell := _call(&d, ipc.MSG_TELL, ipc.wire_bytes_written(&w))
-	testing.expect_value(t, tell.phase, ipc.Tell_Phase.Accepted)
+	proto.enc_tell_req(&w, {to = id, body = "sleep 2", shell = true})
+	_, _, tell := _call(&d, proto.MSG_TELL, ipc.wire_bytes_written(&w))
+	testing.expect_value(t, tell.phase, proto.Tell_Phase.Accepted)
 	a, code := _lease(&d, id)
-	testing.expect(t, a == ipc.MSG_FAIL && code == .Busy, "a running shell request keeps the session")
+	testing.expect(t, a == proto.MSG_FAIL && code == .Busy, "a running shell request keeps the session")
 	a, code = _lease(&d, id, "")
-	testing.expect(t, a == ipc.MSG_FAIL && code == .Bad_Request, "an owner name is required")
+	testing.expect(t, a == proto.MSG_FAIL && code == .Bad_Request, "an owner name is required")
 }
 
 // _got_any: the echo fixture printed an input line (after the screen settled).
@@ -288,7 +289,7 @@ test_lease_window_takeover_through_the_client :: proc(t: ^testing.T) {
 	defer _drop(&owner)
 	_lease(&owner, id, "flow.lua:take")
 	_pass(&owner, id, true)
-	rows: [16]ipc.Session_Row
+	rows: [16]proto.Session_Row
 	got_pass := false
 	for row in cli_list_rows(rows[:]) do if row.id == id do got_pass = row.controller == "flow.lua:take" && row.controller_pass
 	testing.expect(t, got_pass, "rows carry the controller and its pass mode")

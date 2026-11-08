@@ -10,6 +10,7 @@ import "core:sys/posix"
 import "core:thread"
 import "core:time"
 import holder ".."
+import proto "../../session_proto"
 import ipc "../../../platform/ipc"
 
 Fixture :: struct {
@@ -63,7 +64,7 @@ fixture_stop :: proc(f: ^Fixture) -> int {
 	if fixture_running(f) {
 		if c := client_connect(f.path); c != nil {
 			client_goodbye(c, .Shutdown)
-			client_wait_kind(c, ipc.MSG_BYE, 0, 6000)
+			client_wait_kind(c, proto.MSG_BYE, 0, 6000)
 			client_close(c)
 		}
 	}
@@ -87,8 +88,8 @@ client_connect :: proc(path: string) -> ^Client {
 	ipc.stream_conn_init(&c.conn, fd, 2 << 20)
 	buf: [128]u8
 	w := ipc.wire_writer(buf[:])
-	ipc.enc_hello(&w, {version = ipc.STREAM_PROTO_VERSION, role = .Core, build = "test"})
-	client_send(c, ipc.MSG_HELLO, 0, ipc.wire_bytes_written(&w))
+	proto.enc_hello(&w, {version = proto.STREAM_PROTO_VERSION, role = .Core, build = "test"})
+	client_send(c, proto.MSG_HELLO, 0, ipc.wire_bytes_written(&w))
 	return c
 }
 
@@ -116,12 +117,12 @@ client_pump :: proc(c: ^Client, timeout_ms: int) {
 	for {
 		f, ok := ipc.stream_next(&c.conn)
 		if !ok do break
-		if f.kind == ipc.MSG_OUTPUT {
+		if f.kind == proto.MSG_OUTPUT {
 			c.bytes += len(f.payload)
 			if f.channel < len(c.by_ch) do c.by_ch[f.channel] += len(f.payload)
 			c.max_f = max(c.max_f, len(f.payload))
 		}
-		if f.kind == ipc.MSG_OUTPUT && !c.keep do continue
+		if f.kind == proto.MSG_OUTPUT && !c.keep do continue
 		append(&c.log, Rec{f.kind, f.channel, clone(f.payload)})
 	}
 	if err != .None || c.conn.err != .None do c.closed = true
@@ -155,7 +156,7 @@ client_output :: proc(c: ^Client, channel: u32, before := max(int)) -> string {
 	out := make([dynamic]u8, context.temp_allocator)
 	for r, i in c.log {
 		if i >= before do break
-		if r.kind == ipc.MSG_OUTPUT && r.channel == channel do append(&out, ..r.data)
+		if r.kind == proto.MSG_OUTPUT && r.channel == channel do append(&out, ..r.data)
 	}
 	return string(out[:])
 }
@@ -175,26 +176,26 @@ contains :: proc(s, sub: string) -> bool {
 }
 
 client_spawn :: proc(c: ^Client, id: u32, argv: []string, cols: u16 = 80, rows: u16 = 24) {
-	m: ipc.Spawn_Msg
+	m: proto.Spawn_Msg
 	for a, i in argv do m.argv[i] = a
 	m.argc = len(argv)
 	m.cols, m.rows = cols, rows
 	buf: [4096]u8
 	w := ipc.wire_writer(buf[:])
-	ipc.enc_spawn(&w, &m)
-	client_send(c, ipc.MSG_SPAWN, id, ipc.wire_bytes_written(&w))
+	proto.enc_spawn(&w, &m)
+	client_send(c, proto.MSG_SPAWN, id, ipc.wire_bytes_written(&w))
 }
 
 client_signal :: proc(c: ^Client, id: u32, sig: posix.Signal) {
 	b: [4]u8
 	w := ipc.wire_writer(b[:])
 	ipc.ww_i32(&w, i32(sig))
-	client_send(c, ipc.MSG_SIGNAL, id, b[:])
+	client_send(c, proto.MSG_SIGNAL, id, b[:])
 }
 
-client_goodbye :: proc(c: ^Client, g: ipc.Goodbye) {
+client_goodbye :: proc(c: ^Client, g: proto.Goodbye) {
 	b := [1]u8{u8(g)}
-	client_send(c, ipc.MSG_GOODBYE, 0, b[:])
+	client_send(c, proto.MSG_GOODBYE, 0, b[:])
 }
 
 rec_u32 :: proc(r: Rec) -> u32 {

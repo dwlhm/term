@@ -9,6 +9,7 @@ import "core:os"
 import "core:strconv"
 import "core:strings"
 import auto "../../features/automation"
+import proto "../../features/session_proto"
 import plat_ipc "../../platform/ipc"
 
 AUTO_VERBS := [?]Verb_Help{
@@ -98,13 +99,13 @@ _auto_snapshot :: proc(args: []string) -> int {
 	defer plat_ipc.stream_conn_destroy(&conn)
 	b: [16]u8
 	w := plat_ipc.wire_writer(b[:])
-	plat_ipc.enc_snapshot_req(&w, {id = id, history = history, since = -1})
-	plat_ipc.stream_send(&conn, plat_ipc.MSG_SNAPSHOT, 0, plat_ipc.wire_bytes_written(&w))
-	f, code := app_agent_answer(&conn, plat_ipc.MSG_SNAPSHOT_RESULT)
+	proto.enc_snapshot_req(&w, {id = id, history = history, since = -1})
+	plat_ipc.stream_send(&conn, proto.MSG_SNAPSHOT, 0, plat_ipc.wire_bytes_written(&w))
+	f, code := app_agent_answer(&conn, proto.MSG_SNAPSHOT_RESULT)
 	if code != 0 do return code
 	if len(adapter) > 0 do return _print_adapted(f.payload, adapter)
 	r := plat_ipc.wire_reader(f.payload)
-	snap := plat_ipc.dec_snapshot(&r, context.temp_allocator)
+	snap := proto.dec_snapshot(&r, context.temp_allocator)
 	if !plat_ipc.wr_done(&r) {
 		fmt.eprintln("term: malformed snapshot from core")
 		return 1
@@ -150,7 +151,7 @@ _parse_snapshot_args :: proc(args: []string) -> (id, history: u32, as_json: bool
 }
 
 @(private = "file")
-_print_snapshot :: proc(s: plat_ipc.Snapshot) {
+_print_snapshot :: proc(s: proto.Snapshot) {
 	alt := " · alt screen" if s.alt_screen else ""
 	fmt.printfln("session %d · %dx%d · gen %d · cursor %d,%d · %s%s", s.id, s.cols, s.rows, s.gen, s.cursor_row, s.cursor_col, s.process, alt)
 	for row in s.history do _print_snap_row(row, "│ ")
@@ -162,7 +163,7 @@ _print_snapshot :: proc(s: plat_ipc.Snapshot) {
 }
 
 @(private = "file")
-_print_snap_row :: proc(row: plat_ipc.Snap_Row, prefix: string) {
+_print_snap_row :: proc(row: proto.Snap_Row, prefix: string) {
 	b := strings.builder_make(context.temp_allocator)
 	strings.write_string(&b, prefix)
 	for run in row.runs do strings.write_string(&b, run.text)

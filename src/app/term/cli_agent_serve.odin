@@ -9,6 +9,7 @@ package term
 import "core:encoding/json"
 import "core:fmt"
 import "core:strconv"
+import proto "../../features/session_proto"
 import plat_ipc "../../platform/ipc"
 
 NEXT_DEFAULT_S :: 0.0 // wait until a request comes
@@ -35,12 +36,12 @@ app_cli_agent_next :: proc(args: []string) -> int {
 	b: [8]u8
 	w := plat_ipc.wire_writer(b[:])
 	plat_ipc.ww_u32(&w, sid); plat_ipc.ww_u32(&w, u32(timeout_s * 1000))
-	plat_ipc.stream_send(&conn, plat_ipc.MSG_NEXT, 0, plat_ipc.wire_bytes_written(&w))
+	plat_ipc.stream_send(&conn, proto.MSG_NEXT, 0, plat_ipc.wire_bytes_written(&w))
 	wait_ms := int(timeout_s * 1000) + WATCH_GRACE_MS if timeout_s > 0 else 0 // 0: until a request comes
-	f, code := app_agent_answer(&conn, plat_ipc.MSG_REQUEST, wait_ms)
+	f, code := app_agent_answer(&conn, proto.MSG_REQUEST, wait_ms)
 	if code != 0 do return code
 	r := plat_ipc.wire_reader(f.payload)
-	req := plat_ipc.dec_next_result(&r)
+	req := proto.dec_next_result(&r)
 	if !plat_ipc.wr_done(&r) {
 		fmt.eprintln("term: malformed request from core")
 		return 1
@@ -59,7 +60,7 @@ app_cli_agent_next :: proc(args: []string) -> int {
 // final = false `progress <request> <text|->`.
 app_cli_agent_answer :: proc(req_id: u32, args: []string, final: bool) -> int {
 	sid, rest, ok := _worker_session(args)
-	m := plat_ipc.Answer_Msg{by = sid, id = u64(req_id)}
+	m := proto.Answer_Msg{by = sid, id = u64(req_id)}
 	for a in rest {
 		switch {
 		case a == "--failed" && final: m.failed = true
@@ -73,8 +74,8 @@ app_cli_agent_answer :: proc(req_id: u32, args: []string, final: bool) -> int {
 	}
 	msg := make([]u8, len(m.text) + 64, context.temp_allocator)
 	w := plat_ipc.wire_writer(msg)
-	plat_ipc.enc_answer(&w, m)
-	return app_agent_request_ok(plat_ipc.MSG_ANSWER if final else plat_ipc.MSG_PROGRESS, plat_ipc.wire_bytes_written(&w))
+	proto.enc_answer(&w, m)
+	return app_agent_request_ok(proto.MSG_ANSWER if final else proto.MSG_PROGRESS, plat_ipc.wire_bytes_written(&w))
 }
 
 // _worker_session: --as <session>, else this process's own session.

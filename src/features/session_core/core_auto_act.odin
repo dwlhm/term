@@ -8,13 +8,14 @@ import "core:strings"
 import "core:unicode/utf8"
 import terminal "../../core/terminal"
 import ie "../../core/terminal/input_encode"
+import proto "../session_proto"
 import ipc "../../platform/ipc"
 
 core_viewer_act :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 	s := _target(c, vi, r, true, false)
 	if s == nil || _no_program(c, vi, s) || core_lease_fail(c, s, vi) do return
 	k := ipc.wr_u8(r)
-	if k < u8(ipc.Act_Kind.Keys) || k > u8(ipc.Act_Kind.Mouse) {
+	if k < u8(proto.Act_Kind.Keys) || k > u8(proto.Act_Kind.Mouse) {
 		core_viewer_fail(c, vi, 0, .Bad_Request, "malformed act request")
 		return
 	}
@@ -23,9 +24,9 @@ core_viewer_act :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 		return
 	}
 	clear(&c.act)
-	code: ipc.Fail_Code
+	code: proto.Fail_Code
 	reason: string
-	switch ipc.Act_Kind(k) {
+	switch proto.Act_Kind(k) {
 	case .Keys:  code, reason = _act_keys(c, s, r)
 	case .Text:  code, reason = _act_text(c, s, r)
 	case .Mouse: code, reason = _act_mouse(c, s, r)
@@ -37,21 +38,21 @@ core_viewer_act :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 	}
 	gen := s.gen
 	core_broker_human_input(c, s, c.act[:])
-	core_holder_send(c, s.holder, ipc.MSG_INPUT, s.id, c.act[:])
+	core_holder_send(c, s.holder, proto.MSG_INPUT, s.id, c.act[:])
 	w := ipc.wire_writer(c.msg)
 	ipc.ww_u32(&w, s.id)
 	ipc.ww_u64(&w, gen)
-	ipc.stream_send(&c.viewers[vi].conn, ipc.MSG_ACT_RESULT, 0, ipc.wire_bytes_written(&w))
+	ipc.stream_send(&c.viewers[vi].conn, proto.MSG_ACT_RESULT, 0, ipc.wire_bytes_written(&w))
 }
 
 @(private = "file")
-_act_keys :: proc(c: ^Core, s: ^Core_Session, r: ^ipc.Wire_Reader) -> (ipc.Fail_Code, string) {
+_act_keys :: proc(c: ^Core, s: ^Core_Session, r: ^ipc.Wire_Reader) -> (proto.Fail_Code, string) {
 	n := ipc.wr_u32(r)
-	if !r.ok || n == 0 || n > ipc.ACT_KEYS_MAX do return .Bad_Request, "1 to 64 keys per act"
+	if !r.ok || n == 0 || n > proto.ACT_KEYS_MAX do return .Bad_Request, "1 to 64 keys per act"
 	t := &s.sess.term
 	modes := ie.Key_Modes{app_cursor = t.parser.cursor_key_mode, kitty_flags = terminal.terminal_kitty_keyboard_flags(t)}
 	for _ in 0 ..< n {
-		ev, ok := _act_key_event(ipc.dec_act_key(r))
+		ev, ok := _act_key_event(proto.dec_act_key(r))
 		if !ok || !r.ok do return .Bad_Request, "malformed key"
 		if !_act_tap(c, ev, modes) do return .Unsupported, "the program has no encoding for that key"
 	}
@@ -60,7 +61,7 @@ _act_keys :: proc(c: ^Core, s: ^Core_Session, r: ^ipc.Wire_Reader) -> (ipc.Fail_
 
 // _act_key_event checks a wire key against input_encode's enums.
 @(private = "file")
-_act_key_event :: proc(k: ipc.Act_Key) -> (ev: ie.Key_Event, ok: bool) {
+_act_key_event :: proc(k: proto.Act_Key) -> (ev: ie.Key_Event, ok: bool) {
 	if k.key == 0 || k.key > u8(max(ie.Key)) || k.mods > 0xF do return {}, false
 	ev = {key = ie.Key(k.key), mods = transmute(ie.Mods)k.mods, kind = .Press}
 	if ev.key == .Char {
@@ -98,10 +99,10 @@ _act_tap :: proc(c: ^Core, key: ie.Key_Event, modes: ie.Key_Modes) -> bool {
 // \r\n are Enter. A paste cannot end itself early: an embedded end marker is
 // dropped.
 @(private = "file")
-_act_text :: proc(c: ^Core, s: ^Core_Session, r: ^ipc.Wire_Reader) -> (ipc.Fail_Code, string) {
+_act_text :: proc(c: ^Core, s: ^Core_Session, r: ^ipc.Wire_Reader) -> (proto.Fail_Code, string) {
 	want_paste := ipc.wr_bool(r)
 	text := ipc.wr_str(r)
-	if !r.ok || len(text) == 0 || len(text) > ipc.ACT_TEXT_MAX do return .Bad_Request, "text must be 1 byte to 64 KiB"
+	if !r.ok || len(text) == 0 || len(text) > proto.ACT_TEXT_MAX do return .Bad_Request, "text must be 1 byte to 64 KiB"
 	t := &s.sess.term
 	if want_paste && t.parser.bracketed_paste {
 		append(&c.act, "\x1b[200~")
@@ -138,8 +139,8 @@ _act_rune :: proc(c: ^Core, ch: rune) {
 }
 
 @(private = "file")
-_act_mouse :: proc(c: ^Core, s: ^Core_Session, r: ^ipc.Wire_Reader) -> (ipc.Fail_Code, string) {
-	m := ipc.dec_act_mouse(r)
+_act_mouse :: proc(c: ^Core, s: ^Core_Session, r: ^ipc.Wire_Reader) -> (proto.Fail_Code, string) {
+	m := proto.dec_act_mouse(r)
 	t := &s.sess.term
 	if !r.ok || m.kind > u8(max(ie.Mouse_Kind)) || m.button > u8(max(ie.Mouse_Button)) || m.mods > 0xF ||
 	   m.col == 0 || int(m.col) > t.cols || m.row == 0 || int(m.row) > t.rows {

@@ -4,6 +4,7 @@ package feature_session_core
 // (agents: `term session kill|send|signal|resize|observe`). Each answers OK, FAIL or a result.
 
 import "core:strings"
+import proto "../session_proto"
 import ipc "../../platform/ipc"
 import session "../session"
 import terminal "../../core/terminal"
@@ -20,7 +21,7 @@ core_viewer_send :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 	s := _target(c, vi, r, true, false)
 	if s == nil || _no_program(c, vi, s) || core_lease_fail(c, s, vi) do return
 	core_broker_human_input(c, s, r.buf[r.off:])
-	core_holder_send(c, s.holder, ipc.MSG_INPUT, s.id, r.buf[r.off:])
+	core_holder_send(c, s.holder, proto.MSG_INPUT, s.id, r.buf[r.off:])
 	_ok(c, vi)
 }
 
@@ -34,7 +35,7 @@ core_viewer_signal :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 		return
 	}
 	b := _i32_bytes(sig)
-	core_holder_send(c, s.holder, ipc.MSG_SIGNAL, s.id, b[:])
+	core_holder_send(c, s.holder, proto.MSG_SIGNAL, s.id, b[:])
 	_ok(c, vi)
 }
 
@@ -43,7 +44,7 @@ core_viewer_signal :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 core_viewer_resize :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 	s := _target(c, vi, r, true, false)
 	if s == nil || core_lease_fail(c, s, vi) do return
-	size := ipc.dec_size(r)
+	size := proto.dec_size(r)
 	switch {
 	case !ipc.wr_done(r) || size.cols == 0 || size.rows == 0:
 		core_viewer_fail(c, vi, 0, .Bad_Request, "bad size")
@@ -84,7 +85,7 @@ core_viewer_observe :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 	rows := u16(s.sess.term.grid.row_count)
 	is_alt := terminal.terminal_in_alt_screen(&s.sess.term)
 
-	ps: ipc.Prompt_State = .None
+	ps: proto.Prompt_State = .None
 	switch s.sess.term.parser.prompt_state {
 	case .Prompt:    ps = .Prompt
 	case .Input:     ps = .Input
@@ -98,7 +99,7 @@ core_viewer_observe :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 	text_len := min(len(c.text), max_text_len)
 	text_slice := c.text[len(c.text) - text_len:]
 
-	res := ipc.Observe_Result{
+	res := proto.Observe_Result{
 		row           = row,
 		cols          = cols,
 		rows          = rows,
@@ -111,9 +112,9 @@ core_viewer_observe :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 	}
 
 	w := ipc.wire_writer(c.msg)
-	ipc.enc_observe_result(&w, res)
+	proto.enc_observe_result(&w, res)
 	payload := ipc.wire_bytes_written(&w)
-	ipc.stream_send(&c.viewers[vi].conn, ipc.MSG_OBSERVE_RESULT, 0, payload)
+	ipc.stream_send(&c.viewers[vi].conn, proto.MSG_OBSERVE_RESULT, 0, payload)
 }
 
 // _target reads the session id and answers FAIL when the session is unknown,
@@ -141,5 +142,5 @@ _no_program :: proc(c: ^Core, vi: int, s: ^Core_Session) -> bool {
 
 @(private)
 _ok :: proc(c: ^Core, vi: int) {
-	ipc.stream_send(&c.viewers[vi].conn, ipc.MSG_OK, 0)
+	ipc.stream_send(&c.viewers[vi].conn, proto.MSG_OK, 0)
 }

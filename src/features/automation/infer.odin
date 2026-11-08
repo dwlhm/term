@@ -4,7 +4,7 @@ package feature_automation
 // boxes, brackets, highlights, bars. Nothing here knows a program by name;
 // adapters refine it for one. Everything found is source .Inferred.
 
-import ipc "../../platform/ipc"
+import proto "../session_proto"
 
 // infer finds panels first: controls and lists are placed in them.
 infer :: proc(s: ^Screen, out: ^[dynamic]Element) {
@@ -20,7 +20,7 @@ STYLE_INVERSE :: u8(1 << 4)
 
 // bg_key: a cell's effective background (inverse swaps it with the
 // foreground), comparable across palette and RGB colours.
-bg_key :: proc(st: ipc.Snap_Style) -> u32 {
+bg_key :: proc(st: proto.Snap_Style) -> u32 {
 	if st.style & STYLE_INVERSE != 0 do return _color_key(st.fg, st.has_fg_rgb, st.fg_rgb)
 	return _color_key(st.bg, st.has_bg_rgb, st.bg_rgb)
 }

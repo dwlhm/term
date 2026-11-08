@@ -5,13 +5,14 @@ package term
 import "core:encoding/json"
 import "core:fmt"
 import "core:strconv"
+import proto "../../features/session_proto"
 import plat_ipc "../../platform/ipc"
 
 WATCH_DEFAULT_S :: 600.0
 WATCH_GRACE_MS  :: 1500 // the core answers the timeout; the CLI waits a bit longer
 
 Watch_Args :: struct {
-	req:     plat_ipc.Watch_Request,
+	req:     proto.Watch_Request,
 	as_json: bool,
 }
 
@@ -33,16 +34,16 @@ app_cli_agent_watch :: proc(id: u32, args: []string) -> int {
 
 // app_agent_watch sends one watch and waits for its answer. code: 0
 // answered, 1 error, 3 timed out.
-app_agent_watch :: proc(conn: ^plat_ipc.Stream_Conn, req: plat_ipc.Watch_Request) -> (res: plat_ipc.Watch_Result, code: int) {
+app_agent_watch :: proc(conn: ^plat_ipc.Stream_Conn, req: proto.Watch_Request) -> (res: proto.Watch_Result, code: int) {
 	buf: [64]u8
 	w := plat_ipc.wire_writer(buf[:])
-	plat_ipc.enc_watch_req(&w, req)
-	plat_ipc.stream_send(conn, plat_ipc.MSG_WATCH, 0, plat_ipc.wire_bytes_written(&w))
+	proto.enc_watch_req(&w, req)
+	plat_ipc.stream_send(conn, proto.MSG_WATCH, 0, plat_ipc.wire_bytes_written(&w))
 	f: plat_ipc.Stream_Frame
-	f, code = app_agent_answer(conn, plat_ipc.MSG_WATCH_RESULT, int(req.timeout_ms) + WATCH_GRACE_MS)
+	f, code = app_agent_answer(conn, proto.MSG_WATCH_RESULT, int(req.timeout_ms) + WATCH_GRACE_MS)
 	if code != 0 do return
 	r := plat_ipc.wire_reader(f.payload)
-	res = plat_ipc.dec_watch_result(&r)
+	res = proto.dec_watch_result(&r)
 	if !r.ok {
 		fmt.eprintln("term: malformed watch result from core")
 		return {}, 1
@@ -50,7 +51,7 @@ app_agent_watch :: proc(conn: ^plat_ipc.Stream_Conn, req: plat_ipc.Watch_Request
 	return res, 0
 }
 
-app_print_watch_result :: proc(res: plat_ipc.Watch_Result, as_json: bool) {
+app_print_watch_result :: proc(res: proto.Watch_Result, as_json: bool) {
 	if as_json {
 		data, err := json.marshal(res, {use_enum_names = true}, context.temp_allocator)
 		fmt.println(string(data) if err == nil else "{}")

@@ -1,8 +1,8 @@
-package platform_ipc
+package feature_session_proto
 
-// Message catalog for both stream links. Every payload is encoded with
-// stream_wire.odin; decoded strings are views into the frame payload.
-// Kinds 0..2 are the transport's own (stream.odin).
+// Message catalog for both of term's links. Every payload is encoded with
+// the Wire_Writer/Wire_Reader of platform/ipc; decoded strings are views
+// into the frame payload. Kinds 0..2 are the transport's own.
 
 // Every link starts with HELLO from the connecting side, answered by HELLO.
 MSG_HELLO :: u8(10)

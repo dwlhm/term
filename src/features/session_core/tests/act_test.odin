@@ -9,6 +9,7 @@ import "core:strings"
 import "core:testing"
 import "core:time"
 import client "../../session_client"
+import proto "../../session_proto"
 import ipc "../../../platform/ipc"
 
 // ECHO_FIXTURE: raw mode, prints argv[1] (escapes decoded: the modes to ask
@@ -56,53 +57,53 @@ echo_received :: proc(id: u32, want: string) -> bool {
 	return _snap_until_text(id, strings.concatenate({"IN:", string(hex.encode(transmute([]u8)want, context.temp_allocator)), "\n"}, context.temp_allocator))
 }
 
-cli_act :: proc(payload: proc(w: ^ipc.Wire_Writer, id: u32, data: rawptr), id: u32, data: rawptr) -> (gen: u64, code: ipc.Fail_Code, ok: bool) {
+cli_act :: proc(payload: proc(w: ^ipc.Wire_Writer, id: u32, data: rawptr), id: u32, data: rawptr) -> (gen: u64, code: proto.Fail_Code, ok: bool) {
 	conn: ipc.Stream_Conn
 	if !cli_conn(&conn) do return
 	defer ipc.stream_conn_destroy(&conn)
 	buf: [4096]u8
 	w := ipc.wire_writer(buf[:])
 	payload(&w, id, data)
-	ipc.stream_send(&conn, ipc.MSG_ACT, 0, ipc.wire_bytes_written(&w))
+	ipc.stream_send(&conn, proto.MSG_ACT, 0, ipc.wire_bytes_written(&w))
 	for {
 		f := client.client_wait_frame(&conn, 4000) or_return
 		r := ipc.wire_reader(f.payload)
 		switch f.kind {
-		case ipc.MSG_ACT_RESULT:
+		case proto.MSG_ACT_RESULT:
 			_ = ipc.wr_u32(&r)
 			return ipc.wr_u64(&r), {}, true
-		case ipc.MSG_FAIL:
+		case proto.MSG_FAIL:
 			_ = ipc.wr_u32(&r)
-			return 0, ipc.Fail_Code(ipc.wr_u8(&r)), false
+			return 0, proto.Fail_Code(ipc.wr_u8(&r)), false
 		}
 	}
 }
 
 @(private = "file")
-_keys :: proc(id: u32, keys: ..ipc.Act_Key) -> (ipc.Fail_Code, bool) {
+_keys :: proc(id: u32, keys: ..proto.Act_Key) -> (proto.Fail_Code, bool) {
 	k := keys
 	_, code, ok := cli_act(proc(w: ^ipc.Wire_Writer, id: u32, data: rawptr) {
-		ipc.enc_act_keys(w, id, (^[]ipc.Act_Key)(data)^)
+		proto.enc_act_keys(w, id, (^[]proto.Act_Key)(data)^)
 	}, id, &k)
 	return code, ok
 }
 
 @(private = "file")
-_text :: proc(id: u32, text: string, paste := false) -> (ipc.Fail_Code, bool) {
+_text :: proc(id: u32, text: string, paste := false) -> (proto.Fail_Code, bool) {
 	T :: struct { text: string, paste: bool }
 	t := T{text, paste}
 	_, code, ok := cli_act(proc(w: ^ipc.Wire_Writer, id: u32, data: rawptr) {
 		t := (^T)(data)
-		ipc.enc_act_text(w, id, t.text, t.paste)
+		proto.enc_act_text(w, id, t.text, t.paste)
 	}, id, &t)
 	return code, ok
 }
 
 @(private = "file")
-_mouse :: proc(id: u32, m: ipc.Act_Mouse) -> (ipc.Fail_Code, bool) {
+_mouse :: proc(id: u32, m: proto.Act_Mouse) -> (proto.Fail_Code, bool) {
 	mm := m
 	_, code, ok := cli_act(proc(w: ^ipc.Wire_Writer, id: u32, data: rawptr) {
-		ipc.enc_act_mouse(w, id, (^ipc.Act_Mouse)(data)^)
+		proto.enc_act_mouse(w, id, (^proto.Act_Mouse)(data)^)
 	}, id, &mm)
 	return code, ok
 }
@@ -195,9 +196,9 @@ test_act_reports_the_generation_and_refuses_ended_targets :: proc(t: ^testing.T)
 	defer { view_close(v); tiers_stop(tiers) }
 
 	before, _, _ := cli_snapshot(id)
-	k := []ipc.Act_Key{{key = K_ENTER}}
+	k := []proto.Act_Key{{key = K_ENTER}}
 	gen, _, ok := cli_act(proc(w: ^ipc.Wire_Writer, id: u32, data: rawptr) {
-		ipc.enc_act_keys(w, id, (^[]ipc.Act_Key)(data)^)
+		proto.enc_act_keys(w, id, (^[]proto.Act_Key)(data)^)
 	}, id, &k)
 	testing.expect(t, ok && gen == before.gen, "the generation the input went in at")
 	res, _, settled := cli_settle({id = id, since = gen, quiet_ms = 30, timeout_ms = 3000})

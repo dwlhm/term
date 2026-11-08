@@ -6,6 +6,7 @@ package feature_holder
 import "core:fmt"
 import "core:os"
 import "core:sys/posix"
+import proto "../session_proto"
 import ipc "../../platform/ipc"
 
 _accept_all :: proc(h: ^Holder, now: i64) {
@@ -47,13 +48,13 @@ _pending_read :: proc(h: ^Holder, index: int, now: i64) {
 	p.len += int(n)
 	if p.len < ipc.STREAM_HEADER do return
 	kind, _, length, valid := ipc.stream_parse_header(p.buf[:p.len])
-	if !valid || kind != ipc.MSG_HELLO || length > len(p.buf) - ipc.STREAM_HEADER {
+	if !valid || kind != proto.MSG_HELLO || length > len(p.buf) - ipc.STREAM_HEADER {
 		_pending_close(p)
 		return
 	}
 	end := ipc.STREAM_HEADER + length
 	if p.len < end do return
-	_, _, ok := ipc.stream_hello_check(p.buf[ipc.STREAM_HEADER:end], {.Core})
+	_, _, ok := proto.stream_hello_check(p.buf[ipc.STREAM_HEADER:end], {.Core})
 	if !ok || h.stopping {
 		_pending_close(p)
 		return
@@ -84,15 +85,15 @@ _core_link :: proc(h: ^Holder, p: ^Pending, hello_end: int, now: i64) {
 @(private = "file")
 _send_hello :: proc(h: ^Holder) {
 	w := ipc.wire_writer(h.msg_buf[:])
-	ipc.enc_hello(&w, {version = ipc.STREAM_PROTO_VERSION, role = .Holder, build = h.build})
-	_core_send(h, ipc.MSG_HELLO, 0, ipc.wire_bytes_written(&w))
+	proto.enc_hello(&w, {version = proto.STREAM_PROTO_VERSION, role = .Holder, build = h.build})
+	_core_send(h, proto.MSG_HELLO, 0, ipc.wire_bytes_written(&w))
 }
 
 @(private = "file")
 _send_welcome :: proc(h: ^Holder) {
 	w := ipc.wire_writer(h.msg_buf[:])
-	ipc.enc_welcome(&w, {
-		version  = ipc.STREAM_PROTO_VERSION,
+	proto.enc_welcome(&w, {
+		version  = proto.STREAM_PROTO_VERSION,
 		instance = h.instance,
 		pid      = u32(os.get_pid()),
 		build    = h.build,
@@ -102,10 +103,10 @@ _send_welcome :: proc(h: ^Holder) {
 	})
 	for slot in h.live[:h.count] {
 		s := &h.sessions[slot]
-		ipc.enc_held(&w, {id = s.id, pid = u32(s.pid), started_unix = s.started_unix, size = s.size, exited = s.exit_final, exit = s.exit})
+		proto.enc_held(&w, {id = s.id, pid = u32(s.pid), started_unix = s.started_unix, size = s.size, exited = s.exit_final, exit = s.exit})
 		s.tailed, s.exit_sent = false, s.exit_final
 	}
-	_core_send(h, ipc.MSG_WELCOME, 0, ipc.wire_bytes_written(&w))
+	_core_send(h, proto.MSG_WELCOME, 0, ipc.wire_bytes_written(&w))
 }
 
 // _send_tails offers each untailed session its TAIL while the backlog has
@@ -118,7 +119,7 @@ _send_tails :: proc(h: ^Holder) {
 		if ipc.stream_queued(&h.core) + ipc.STREAM_HEADER + s.tail.len > HOLDER_BACKLOG do return
 		front := ipc.ring_front(&s.tail)
 		wrapped := s.tail.buf[:s.tail.len - len(front)]
-		if !_core_send(h, ipc.MSG_TAIL, s.id, front, wrapped) do return
+		if !_core_send(h, proto.MSG_TAIL, s.id, front, wrapped) do return
 		s.tailed = true
 		_session_report_exit(h, s)
 	}
@@ -150,7 +151,7 @@ _core_pump :: proc(h: ^Holder, now: i64) {
 
 // _core_begin_close queues BYE and lets the link linger until flushed.
 _core_begin_close :: proc(h: ^Holder, now: i64) {
-	_core_send(h, ipc.MSG_BYE, 0)
+	_core_send(h, proto.MSG_BYE, 0)
 	if h.core_state == .None {
 		if h.stopping do h.done = true
 		return

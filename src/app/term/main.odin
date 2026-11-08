@@ -14,6 +14,7 @@ import "vendor:sdl3"
 import plat_win "../../platform/window"
 import plat_clip "../../platform/clipboard"
 import plat_font "../../platform/font"
+import proto "../../features/session_proto"
 import plat_ipc "../../platform/ipc"
 import contract "../../core/render/contract"
 import damage "../../core/terminal/damage"
@@ -467,7 +468,7 @@ main :: proc() {
 		case .None:
 		case .Already_Running:
 			buf: [256]u8
-			path, _ := plat_ipc.ipc_default_socket_path(buf[:])
+			path, _ := proto.ctl_socket_path(buf[:])
 			reply_buf: [512]u8
 			_, cerr := app_control_request(path, "show", reply_buf[:])
 			os.exit(0 if cerr == .None else 1)

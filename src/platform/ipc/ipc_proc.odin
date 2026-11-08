@@ -5,16 +5,7 @@ package platform_ipc
 
 import "core:c"
 import "core:fmt"
-import "core:os"
 import "core:sys/posix"
-
-// SESSION_ID_ENV names the session a program runs in (set for every spawn,
-// last so it wins over an inherited one): `term session` verbs default to it.
-SESSION_ID_ENV :: "TERM_SESSION_ID"
-SESSION_DIR_ENV :: "TERM_SESSION_DIR" // a private session (Standalone runs, tests)
-// "1": one viewer process owns the session dir (client_use_private_session):
-// the core ends every session when that owner's last viewer link goes.
-SESSION_OWNED_ENV :: "TERM_SESSION_OWNED"
 
 when ODIN_OS == .Darwin {
 	foreign import libc "system:System.framework"
@@ -22,40 +13,6 @@ when ODIN_OS == .Darwin {
 	foreign libc {
 		_NSGetExecutablePath :: proc(buf: [^]u8, size: ^u32) -> c.int ---
 	}
-}
-
-// ipc_session_dir: $TERM_SESSION_DIR (created 0700) or the directory of the
-// control socket ($TMPDIR/term-<uid>). Both are validated private to us.
-ipc_session_dir :: proc(buf: []u8) -> (dir: string, err: Ipc_Error) {
-	env: [256]u8
-	if override, _ := os.lookup_env(env[:], SESSION_DIR_ENV); len(override) > 0 {
-		if len(override) + 16 > sun_path_len() || len(override) > len(buf) do return "", .Path_Too_Long
-		dir = string(buf[:copy(buf, override)])
-		return dir, _ensure_private_dir(dir)
-	}
-	path := ipc_default_socket_path(buf) or_return
-	for i := len(path) - 1; i > 0; i -= 1 do if path[i] == '/' do return path[:i], .None
-	return "", .Unsafe_Path
-}
-
-// ipc_session_path joins dir and name into buf, checking sun_path.
-ipc_session_path :: proc(buf: []u8, dir, name: string) -> (string, bool) {
-	path := fmt.bprintf(buf, "%s/%s", dir, name)
-	return path, len(path) == len(dir) + 1 + len(name) && len(path) + 1 <= sun_path_len()
-}
-
-@(private = "file")
-_ensure_private_dir :: proc(dir: string) -> Ipc_Error {
-	cbuf: [256]u8
-	cpath, ok := cstring_from(cbuf[:], dir)
-	if !ok do return .Path_Too_Long
-	if posix.mkdir(cpath, posix.S_IRWXU) != .OK && posix.errno() != .EEXIST do return .Unsafe_Path
-	st: posix.stat_t
-	if posix.lstat(cpath, &st) != .OK do return .Unsafe_Path
-	if !posix.S_ISDIR(st.st_mode) || st.st_uid != posix.getuid() || group_other_access(st.st_mode) {
-		return .Unsafe_Path
-	}
-	return .None
 }
 
 // ipc_self_exe is the absolute path of the running binary ("" if unknown).
@@ -147,17 +104,3 @@ ipc_unlink_if_ours :: proc(path: string, ino: u64) {
 	if ok && posix.lstat(cpath, &st) == .OK && u64(st.st_ino) == ino do posix.unlink(cpath)
 }
 
-// ipc_log_path is where a detached tier appends its stdout/stderr: the shared
-// $TMPDIR/term-<uid> dir even for a private session, so a private session dir
-// holds nothing but sockets and is removed when its last tier exits.
-ipc_log_path :: proc(buf: []u8, name: string) -> string {
-	sock_buf: [256]u8
-	path, err := ipc_default_socket_path(sock_buf[:])
-	if err != .None do return "/dev/null"
-	for i := len(path) - 1; i > 0; i -= 1 {
-		if path[i] != '/' do continue
-		if p, ok := ipc_session_path(buf, path[:i], name); ok do return p
-		break
-	}
-	return "/dev/null"
-}

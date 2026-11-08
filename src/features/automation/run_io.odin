@@ -11,6 +11,7 @@ import "core:fmt"
 import "core:sys/posix"
 import "core:time"
 import client "../session_client"
+import proto "../session_proto"
 import ipc "../../platform/ipc"
 
 @(private = "file")
@@ -46,7 +47,7 @@ run_pump :: proc(r: ^Runner, want: u8, timeout: time.Duration) -> (f: ipc.Stream
 		ipc.stream_flush(&r.conn)
 		if frame, got := ipc.stream_next(&r.conn); got {
 			if _dispatch(r, frame) do continue
-			if frame.kind == want || frame.kind == ipc.MSG_FAIL do return frame, true
+			if frame.kind == want || frame.kind == proto.MSG_FAIL do return frame, true
 			continue
 		}
 		if r.conn.err != .None {
@@ -64,15 +65,15 @@ run_pump :: proc(r: ^Runner, want: u8, timeout: time.Duration) -> (f: ipc.Stream
 _dispatch :: proc(r: ^Runner, f: ipc.Stream_Frame) -> bool {
 	rd := ipc.wire_reader(f.payload)
 	switch f.kind {
-	case ipc.MSG_LEASE_EVENT: _lease_event(r, ipc.dec_lease_event(&rd))
-	case ipc.MSG_REQUEST:
+	case proto.MSG_LEASE_EVENT: _lease_event(r, proto.dec_lease_event(&rd))
+	case proto.MSG_REQUEST:
 		if r.awaiting_request do return false // serve: a request for the agent, the answer it waits for
-		run_reply_request(r, ipc.dec_next_result(&rd))
-	case ipc.MSG_TELL_RESULT:
-		res := ipc.dec_tell_result(&rd)
+		run_reply_request(r, proto.dec_next_result(&rd))
+	case proto.MSG_TELL_RESULT:
+		res := proto.dec_tell_result(&rd)
 		if r.serving_id == 0 || res.id != r.serving_id || res.phase != .Finished do return false
 		r.ended, r.end_status = true, res.status // answered or cancelled elsewhere
-	case ipc.MSG_EVENT:       // a session row changed: not for the runner
+	case proto.MSG_EVENT:       // a session row changed: not for the runner
 	case:                     return false
 	}
 	return true
@@ -88,14 +89,14 @@ _poll :: proc(r: ^Runner, wait: time.Duration) {
 }
 
 // run_fail_code reads a FAIL frame's code and reason.
-run_fail_code :: proc(f: ipc.Stream_Frame) -> (code: ipc.Fail_Code, reason: string) {
+run_fail_code :: proc(f: ipc.Stream_Frame) -> (code: proto.Fail_Code, reason: string) {
 	rd := ipc.wire_reader(f.payload)
 	_ = ipc.wr_u32(&rd)
-	return ipc.Fail_Code(ipc.wr_u8(&rd)), ipc.wr_str(&rd)
+	return proto.Fail_Code(ipc.wr_u8(&rd)), ipc.wr_str(&rd)
 }
 
 @(private = "file")
-_lease_event :: proc(r: ^Runner, ev: ipc.Lease_Event) {
+_lease_event :: proc(r: ^Runner, ev: proto.Lease_Event) {
 	switch ev.kind {
 	case .Human:
 		run_trace(r, "human", fmt.tprintf(`"bytes":%d,"interrupt":%v`, len(ev.bytes), ev.interrupt))
@@ -117,10 +118,10 @@ _lease_event :: proc(r: ^Runner, ev: ipc.Lease_Event) {
 run_lease :: proc(r: ^Runner, owner: string) -> bool {
 	b: [128]u8
 	w := ipc.wire_writer(b[:])
-	ipc.ww_u32(&w, r.sid); ipc.ww_str(&w, owner[:min(len(owner), ipc.LEASE_OWNER_MAX)])
-	f, ok := run_request(r, ipc.MSG_LEASE, ipc.wire_bytes_written(&w), ipc.MSG_OK, 5 * time.Second)
+	ipc.ww_u32(&w, r.sid); ipc.ww_str(&w, owner[:min(len(owner), proto.LEASE_OWNER_MAX)])
+	f, ok := run_request(r, proto.MSG_LEASE, ipc.wire_bytes_written(&w), proto.MSG_OK, 5 * time.Second)
 	if !ok do return false
-	if f.kind == ipc.MSG_FAIL {
+	if f.kind == proto.MSG_FAIL {
 		code, reason := run_fail_code(f)
 		run_stop(r, .Rejected if code == .Busy else .Contract, fmt.tprintf("cannot take session %d: %s", r.sid, reason))
 		return false
@@ -134,7 +135,7 @@ run_release :: proc(r: ^Runner, flush: bool) {
 	b: [8]u8
 	w := ipc.wire_writer(b[:])
 	ipc.ww_u32(&w, r.sid); ipc.ww_bool(&w, flush)
-	ipc.stream_send(&r.conn, ipc.MSG_LEASE_RELEASE, 0, ipc.wire_bytes_written(&w))
+	ipc.stream_send(&r.conn, proto.MSG_LEASE_RELEASE, 0, ipc.wire_bytes_written(&w))
 	ipc.stream_flush(&r.conn)
 	r.leased = false
 }
@@ -143,9 +144,9 @@ run_release :: proc(r: ^Runner, flush: bool) {
 run_snapshot :: proc(r: ^Runner) -> (payload: []u8, ok: bool) {
 	b: [16]u8
 	w := ipc.wire_writer(b[:])
-	ipc.enc_snapshot_req(&w, {id = r.sid, history = 0, since = -1})
-	f := run_request(r, ipc.MSG_SNAPSHOT, ipc.wire_bytes_written(&w), ipc.MSG_SNAPSHOT_RESULT, 5 * time.Second) or_return
-	if f.kind == ipc.MSG_FAIL {
+	proto.enc_snapshot_req(&w, {id = r.sid, history = 0, since = -1})
+	f := run_request(r, proto.MSG_SNAPSHOT, ipc.wire_bytes_written(&w), proto.MSG_SNAPSHOT_RESULT, 5 * time.Second) or_return
+	if f.kind == proto.MSG_FAIL {
 		_, reason := run_fail_code(f)
 		run_stop(r, .Exited, fmt.tprintf("cannot read the screen: %s", reason))
 		return nil, false
@@ -159,18 +160,18 @@ run_settle :: proc(r: ^Runner, since: u64, timeout: time.Duration) -> (gen: u64,
 	b: [24]u8
 	w := ipc.wire_writer(b[:])
 	ms := u32(max(timeout, 1 * time.Millisecond) / time.Millisecond)
-	ipc.enc_settle_req(&w, {id = r.sid, since = since, quiet_ms = u32(r.quiet / time.Millisecond), timeout_ms = ms})
-	f := run_request(r, ipc.MSG_SETTLE, ipc.wire_bytes_written(&w), ipc.MSG_SETTLE_RESULT, timeout + 2 * time.Second) or_return
-	if f.kind == ipc.MSG_FAIL do return since, false
+	proto.enc_settle_req(&w, {id = r.sid, since = since, quiet_ms = u32(r.quiet / time.Millisecond), timeout_ms = ms})
+	f := run_request(r, proto.MSG_SETTLE, ipc.wire_bytes_written(&w), proto.MSG_SETTLE_RESULT, timeout + 2 * time.Second) or_return
+	if f.kind == proto.MSG_FAIL do return since, false
 	rd := ipc.wire_reader(f.payload)
-	res := ipc.dec_settle_result(&rd)
+	res := proto.dec_settle_result(&rd)
 	return res.gen, !res.exited
 }
 
 // run_act sends one encoded MSG_ACT body; gen is the generation it went in at.
 run_act :: proc(r: ^Runner, body: []u8) -> (gen: u64, ok: bool) {
-	f := run_request(r, ipc.MSG_ACT, body, ipc.MSG_ACT_RESULT, 5 * time.Second) or_return
-	if f.kind == ipc.MSG_FAIL {
+	f := run_request(r, proto.MSG_ACT, body, proto.MSG_ACT_RESULT, 5 * time.Second) or_return
+	if f.kind == proto.MSG_FAIL {
 		code, reason := run_fail_code(f)
 		#partial switch code {
 		case .Unsupported: run_stop(r, .Unsupported, reason)

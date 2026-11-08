@@ -9,6 +9,7 @@ import "core:fmt"
 import "core:strings"
 import "core:time"
 
+import proto "../../features/session_proto"
 import plat_ipc "../../platform/ipc"
 import ctrl_feat "../../features/control"
 
@@ -39,7 +40,7 @@ app_run_control_cli :: proc(args: []string) -> (handled: bool, exit_code: int) {
 		return true, 1
 	}
 	path_buf: [256]u8
-	path, path_err := plat_ipc.ipc_default_socket_path(path_buf[:])
+	path, path_err := proto.ctl_socket_path(path_buf[:])
 	if path_err != .None do return true, _cli_fail(path_err)
 	req_buf: [64]u8
 	reply_buf: [plat_ipc.IPC_MAX_REPLY]u8

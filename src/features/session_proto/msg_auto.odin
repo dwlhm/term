@@ -1,4 +1,4 @@
-package platform_ipc
+package feature_session_proto
 
 // Payloads of the session automation primitives (MSG_SNAPSHOT, MSG_SETTLE;
 // docs/PROTOCOL.md). A snapshot is the parsed screen, never raw PTY bytes: the

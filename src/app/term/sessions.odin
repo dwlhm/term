@@ -12,7 +12,7 @@ import mux_feat "../../features/multiplexer"
 import sess_feat "../../features/session"
 import client_feat "../../features/session_client"
 import tabs_feat "../../features/tabs"
-import plat_ipc "../../platform/ipc"
+import proto "../../features/session_proto"
 
 APP_ATTACH_HISTORY :: 2000
 
@@ -30,7 +30,7 @@ app_sessions_poll :: proc(app: ^Term_App) -> (dirty: bool) {
 			dirty |= sess_feat.session_registry_remove(&app.session_reg, ev.id)
 		case .Sessions:
 			for _ in 0..<ev.count {
-				row := plat_ipc.dec_row(&ev.sessions)
+				row := proto.dec_row(&ev.sessions)
 				if !ev.sessions.ok do break
 				dirty |= _apply_row(app, row)
 			}
@@ -53,7 +53,7 @@ app_sessions_poll :: proc(app: ^Term_App) -> (dirty: bool) {
 // _apply_row keeps a shown session's process facts current and mirrors the
 // others (background sessions) into the registry.
 @(private = "file")
-_apply_row :: proc(app: ^Term_App, row: plat_ipc.Session_Row) -> bool {
+_apply_row :: proc(app: ^Term_App, row: proto.Session_Row) -> bool {
 	shown := app_shown_session(app, row.id)
 	controlled := false // an automation took or left it: its banner changes
 	if shown != nil {
@@ -123,7 +123,7 @@ app_attach_background_session :: proc(app: ^Term_App, id: u32) -> bool {
 	content := layout_compute_content_area(&app.layout)
 	cols := max(20, int((content[2] - 2.0 * app.layout.metrics.pane_pad_x) / app.layout.metrics.cell_w))
 	rows := max(10, int((content[3] - 2.0 * app.layout.metrics.pane_pad_y) / app.layout.metrics.cell_h))
-	size := plat_ipc.Size_Msg{
+	size := proto.Size_Msg{
 		cols = u16(cols), rows = u16(rows),
 		xpixel = u16(f32(cols) * app.layout.metrics.cell_w), ypixel = u16(f32(rows) * app.layout.metrics.cell_h),
 	}

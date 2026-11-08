@@ -15,6 +15,7 @@ import "core:path/filepath"
 import "core:strings"
 import "core:time"
 import lua "../../platform/lua"
+import proto "../session_proto"
 import ipc "../../platform/ipc"
 
 @(private = "file")
@@ -50,26 +51,26 @@ run_serve :: proc(opts: Run_Options) -> Run_Code {
 
 // _next_request waits in `next` as the session for its next request.
 @(private = "file")
-_next_request :: proc(r: ^Runner) -> (req: ipc.Next_Result, ok: bool) {
+_next_request :: proc(r: ^Runner) -> (req: proto.Next_Result, ok: bool) {
 	b: [8]u8
 	w := ipc.wire_writer(b[:])
 	ipc.ww_u32(&w, r.sid); ipc.ww_u32(&w, 0)
 	r.awaiting_request = true
 	defer r.awaiting_request = false
-	f := run_request(r, ipc.MSG_NEXT, ipc.wire_bytes_written(&w), ipc.MSG_REQUEST, 365 * 24 * time.Hour) or_return // until one comes
-	if f.kind == ipc.MSG_FAIL {
+	f := run_request(r, proto.MSG_NEXT, ipc.wire_bytes_written(&w), proto.MSG_REQUEST, 365 * 24 * time.Hour) or_return // until one comes
+	if f.kind == proto.MSG_FAIL {
 		_, reason := run_fail_code(f)
 		run_stop(r, .Rejected, fmt.tprintf("cannot take session %d's requests: %s", r.sid, reason))
 		return {}, false
 	}
 	rd := ipc.wire_reader(f.payload)
-	req = ipc.dec_next_result(&rd)
+	req = proto.dec_next_result(&rd)
 	req.body = strings.clone(req.body, context.temp_allocator)
 	return req, rd.ok
 }
 
 @(private = "file")
-_serve_one :: proc(r: ^Runner, owner: string, req: ipc.Next_Result) {
+_serve_one :: proc(r: ^Runner, owner: string, req: proto.Next_Result) {
 	r.serving_id = req.id
 	_watch_request(r, req.id)
 	if status := _status(r); status == STATUS_WORKING || status == STATUS_BLOCKED {
@@ -97,7 +98,7 @@ _serve_one :: proc(r: ^Runner, owner: string, req: ipc.Next_Result) {
 
 // _call_serve: serve(text, {id, from}) → steps, carried out.
 @(private = "file")
-_call_serve :: proc(r: ^Runner, req: ipc.Next_Result) {
+_call_serve :: proc(r: ^Runner, req: proto.Next_Result) {
 	L := r.vm.L
 	lua.getfield(L, lua.REGISTRYINDEX, RUN_CONTRACT_KEY)
 	lua.getfield(L, -1, "serve")
@@ -137,8 +138,8 @@ run_cancel_steps :: proc(r: ^Runner) {
 _watch_request :: proc(r: ^Runner, id: u64) {
 	b: [128]u8
 	w := ipc.wire_writer(b[:])
-	ipc.enc_result_req(&w, {wait = true, ids = {0 = id}, n_ids = 1})
-	ipc.stream_send(&r.conn, ipc.MSG_RESULT, 0, ipc.wire_bytes_written(&w))
+	proto.enc_result_req(&w, {wait = true, ids = {0 = id}, n_ids = 1})
+	ipc.stream_send(&r.conn, proto.MSG_RESULT, 0, ipc.wire_bytes_written(&w))
 }
 
 @(private = "file")
@@ -146,7 +147,7 @@ _status :: proc(r: ^Runner) -> u8 {
 	payload, ok := run_snapshot(r)
 	if !ok do return 0
 	rd := ipc.wire_reader(payload)
-	snap := ipc.dec_snapshot(&rd, context.temp_allocator)
+	snap := proto.dec_snapshot(&rd, context.temp_allocator)
 	return snap.status_state
 }
 
@@ -154,10 +155,10 @@ _status :: proc(r: ^Runner) -> u8 {
 _answer :: proc(r: ^Runner, id: u64, failed: bool, text: string) {
 	b := make([]u8, len(text) + 64, context.temp_allocator)
 	w := ipc.wire_writer(b)
-	ipc.enc_answer(&w, {by = r.sid, id = id, failed = failed, text = text})
+	proto.enc_answer(&w, {by = r.sid, id = id, failed = failed, text = text})
 	keep := r.stop
 	r.stop = .Ok // a failed request is still answered
-	_, _ = run_request(r, ipc.MSG_ANSWER, ipc.wire_bytes_written(&w), ipc.MSG_OK, 5 * time.Second)
+	_, _ = run_request(r, proto.MSG_ANSWER, ipc.wire_bytes_written(&w), proto.MSG_OK, 5 * time.Second)
 	if r.stop == .Ok do r.stop = keep
 }
 

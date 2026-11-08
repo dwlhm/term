@@ -33,7 +33,6 @@ IPC_IO_DEADLINE_MS    :: 2000 // reading a request / writing a reply
 IPC_REPLY_DEADLINE_MS :: 3000 // main thread must reply within this after queueing
 IPC_POLL_MAX_MS       :: 1000 // listener poll() upper bound
 IPC_CLIENT_TIMEOUT_MS :: 5000
-IPC_SOCKET_PATH_ENV   :: "TERM_CTL_SOCK"
 
 Ipc_Error :: enum u8 {
 	None,

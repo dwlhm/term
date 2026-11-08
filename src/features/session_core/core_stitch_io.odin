@@ -7,6 +7,7 @@ import "core:strings"
 import terminal "../../core/terminal"
 import grid "../../core/terminal/grid"
 import ie "../../core/terminal/input_encode"
+import proto "../session_proto"
 import ipc "../../platform/ipc"
 
 // _stitch_reply answers the read with the stitched history and the screen the
@@ -23,7 +24,7 @@ _stitch_reply :: proc(c: ^Core, s: ^Core_Session) {
 	n := min(len(c.text), ipc.STREAM_MAX_PAYLOAD)
 	if core_viewer_current(c, st.viewer, st.seq) {
 		v := &c.viewers[st.viewer]
-		ipc.stream_send(&v.conn, ipc.MSG_TEXT, 0, c.text[len(c.text) - n:])
+		ipc.stream_send(&v.conn, proto.MSG_TEXT, 0, c.text[len(c.text) - n:])
 	}
 }
 
@@ -71,7 +72,7 @@ _stitch_write_page :: proc(b: ^strings.Builder, page: ^Stitch_Page) {
 @(private)
 _stitch_input :: proc(c: ^Core, s: ^Core_Session, bytes: []u8) {
 	if len(bytes) == 0 || s.exited do return
-	core_holder_send(c, s.holder, ipc.MSG_INPUT, s.id, bytes)
+	core_holder_send(c, s.holder, proto.MSG_INPUT, s.id, bytes)
 }
 
 // _stitch_wheel encodes one wheel notch at the screen centre the way the

@@ -7,7 +7,7 @@ package feature_automation
 import "core:c"
 import "core:fmt"
 import lua "../../platform/lua"
-import ipc "../../platform/ipc"
+import proto "../session_proto"
 
 // _push_on pushes contract.on[key] and returns its type (the caller pops 1).
 @(private = "file")
@@ -27,7 +27,7 @@ _push_on :: proc(r: ^Runner, key: cstring) -> lua.Type {
 
 // run_human_says_cancel: on.human(input) → "cancel" | "hold"; without it an
 // interrupt (Esc, ^C) cancels.
-run_human_says_cancel :: proc(r: ^Runner, ev: ipc.Lease_Event) -> bool {
+run_human_says_cancel :: proc(r: ^Runner, ev: proto.Lease_Event) -> bool {
 	L := r.vm.L
 	if _push_on(r, "human") != .Function {
 		lua.pop(L, 1)

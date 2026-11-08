@@ -10,6 +10,7 @@ import "core:sync"
 import "core:sys/posix"
 import "core:thread"
 import "core:time"
+import proto "../session_proto"
 import ipc "../../platform/ipc"
 import session "../session"
 
@@ -33,7 +34,7 @@ Client_Link :: struct {
 	sess:        ^session.Terminal_Session,
 	pending:     [CLIENT_PENDING_IN]u8,
 	pending_len: int,
-	pending_size: Maybe(ipc.Size_Msg), // the latest resize before ATTACHED: sent first on bind
+	pending_size: Maybe(proto.Size_Msg), // the latest resize before ATTACHED: sent first on bind
 	observe:     bool,
 	cancelled:   bool, // released before the core answered: undo the attach when it does
 	cancel_kill: bool,
@@ -85,9 +86,9 @@ client_reconnect :: proc(c: ^Client) -> bool {
 			l.token, l.state, l.channel = c.next_token, .Pending, 0
 			w := ipc.wire_writer(msg[:])
 			ipc.ww_u32(&w, l.token)
-			size := ipc.Size_Msg{cols = u16(l.sess.term.cols), rows = u16(l.sess.term.rows)}
-			ipc.enc_attach(&w, {id = l.id, size = size, observe = l.observe})
-			_send(c, ipc.MSG_ATTACH, 0, ipc.wire_bytes_written(&w))
+			size := proto.Size_Msg{cols = u16(l.sess.term.cols), rows = u16(l.sess.term.rows)}
+			proto.enc_attach(&w, {id = l.id, size = size, observe = l.observe})
+			_send(c, proto.MSG_ATTACH, 0, ipc.wire_bytes_written(&w))
 		case l.state == .Pending:
 			l.sess.info.alive = false // its CREATE died with the old core
 		}
@@ -117,14 +118,14 @@ _io_stop :: proc(c: ^Client) {
 
 // client_dial connects to the core (starting it when absent and start is set)
 // and completes the HELLO exchange synchronously. Returns a non-blocking fd.
-client_dial :: proc(role: ipc.Stream_Role, start: bool) -> (fd: posix.FD, ok: bool) {
+client_dial :: proc(role: proto.Stream_Role, start: bool) -> (fd: posix.FD, ok: bool) {
 	dir_buf, sock_buf, log_buf: [256]u8
-	dir, err := ipc.ipc_session_dir(dir_buf[:])
+	dir, err := proto.session_dir(dir_buf[:])
 	if err != .None do return -1, false
-	sock, _ := ipc.ipc_session_path(sock_buf[:], dir, "core.sock")
+	sock, _ := proto.session_path(sock_buf[:], dir, "core.sock")
 	if fd, err = ipc.ipc_connect(sock, 500); err != .None {
 		if !start do return -1, false
-		log_path := ipc.ipc_log_path(log_buf[:], "core.log")
+		log_path := proto.log_path(log_buf[:], "core.log")
 		if !ipc.ipc_spawn_self_detached({"--core"}, log_path) do return -1, false
 		deadline := time.tick_now()._nsec + CLIENT_START_MS * 1_000_000
 		for err != .None && time.tick_now()._nsec < deadline {
@@ -138,17 +139,17 @@ client_dial :: proc(role: ipc.Stream_Role, start: bool) -> (fd: posix.FD, ok: bo
 
 // _hello owns fd: it comes back open after a good HELLO exchange, else it is closed.
 @(private = "file")
-_hello :: proc(fd: posix.FD, role: ipc.Stream_Role) -> (posix.FD, bool) {
+_hello :: proc(fd: posix.FD, role: proto.Stream_Role) -> (posix.FD, bool) {
 	conn: ipc.Stream_Conn
 	if !ipc.stream_conn_init(&conn, fd, 0) do return -1, false
 	defer ipc.stream_conn_destroy(&conn)
 	build_buf, msg: [128]u8
 	w := ipc.wire_writer(msg[:])
-	ipc.enc_hello(&w, {version = ipc.STREAM_PROTO_VERSION, role = role, build = ipc.ipc_build_id(build_buf[:])})
-	ipc.stream_send(&conn, ipc.MSG_HELLO, 0, ipc.wire_bytes_written(&w))
+	proto.enc_hello(&w, {version = proto.STREAM_PROTO_VERSION, role = role, build = ipc.ipc_build_id(build_buf[:])})
+	ipc.stream_send(&conn, proto.MSG_HELLO, 0, ipc.wire_bytes_written(&w))
 	f, got := client_wait_frame(&conn, 2000)
-	if !got || f.kind != ipc.MSG_HELLO do return -1, false
-	if _, _, ok := ipc.stream_hello_check(f.payload, {.Core}); !ok do return -1, false
+	if !got || f.kind != proto.MSG_HELLO do return -1, false
+	if _, _, ok := proto.stream_hello_check(f.payload, {.Core}); !ok do return -1, false
 	return ipc.stream_conn_release(&conn), true
 }
 

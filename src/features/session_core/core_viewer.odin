@@ -6,6 +6,7 @@ package feature_session_core
 import "core:strings"
 import "core:sys/posix"
 import terminal "../../core/terminal"
+import proto "../session_proto"
 import ipc "../../platform/ipc"
 
 core_viewer_service :: proc(c: ^Core, vi: int, rev: posix.Poll_Event) {
@@ -53,8 +54,8 @@ _any_viewer :: proc(c: ^Core) -> bool {
 _viewer_frame :: proc(c: ^Core, vi: int, f: ipc.Stream_Frame) -> bool {
 	v := &c.viewers[vi]
 	if !v.hello {
-		if f.kind != ipc.MSG_HELLO do return false
-		m, code, ok := ipc.stream_hello_check(f.payload, {.Viewer, .Cli})
+		if f.kind != proto.MSG_HELLO do return false
+		m, code, ok := proto.stream_hello_check(f.payload, {.Viewer, .Cli})
 		if !ok {
 			core_viewer_fail(c, vi, 0, code, "unsupported protocol version or role")
 			ipc.stream_flush(&v.conn)
@@ -62,8 +63,8 @@ _viewer_frame :: proc(c: ^Core, vi: int, f: ipc.Stream_Frame) -> bool {
 		}
 		v.hello, v.role = true, m.role
 		w := ipc.wire_writer(c.msg)
-		ipc.enc_hello(&w, {version = ipc.STREAM_PROTO_VERSION, role = .Core, build = c.build})
-		ipc.stream_send(&v.conn, ipc.MSG_HELLO, 0, ipc.wire_bytes_written(&w))
+		proto.enc_hello(&w, {version = proto.STREAM_PROTO_VERSION, role = .Core, build = c.build})
+		ipc.stream_send(&v.conn, proto.MSG_HELLO, 0, ipc.wire_bytes_written(&w))
 		return true
 	}
 	if f.channel != 0 {
@@ -72,30 +73,30 @@ _viewer_frame :: proc(c: ^Core, vi: int, f: ipc.Stream_Frame) -> bool {
 	}
 	r := ipc.wire_reader(f.payload)
 	switch f.kind {
-	case ipc.MSG_LIST:   core_list_request(c, vi)
-	case ipc.MSG_CREATE: _create(c, vi, &r)
-	case ipc.MSG_ATTACH: _attach(c, vi, &r)
-	case ipc.MSG_KILL:   core_viewer_kill(c, vi, &r)
-	case ipc.MSG_OBSERVE: core_viewer_observe(c, vi, &r)
-	case ipc.MSG_READ:   _read(c, vi, &r)
-	case ipc.MSG_SEND:   core_viewer_send(c, vi, &r)
-	case ipc.MSG_TELL:   core_viewer_tell(c, vi, &r)
-	case ipc.MSG_CANCEL: core_viewer_cancel(c, vi, &r)
-	case ipc.MSG_NEXT:     core_viewer_next(c, vi, &r)
-	case ipc.MSG_ANSWER:   core_viewer_answer(c, vi, &r, true)
-	case ipc.MSG_PROGRESS: core_viewer_answer(c, vi, &r, false)
-	case ipc.MSG_RESULT:   core_viewer_result(c, vi, &r)
-	case ipc.MSG_ENDPOINT: core_viewer_endpoint(c, vi, &r)
-	case ipc.MSG_WATCH:      core_viewer_watch(c, vi, &r)
-	case ipc.MSG_SNAPSHOT:   core_viewer_snapshot(c, vi, &r)
-	case ipc.MSG_SETTLE:     core_viewer_settle(c, vi, &r)
-	case ipc.MSG_ACT:        core_viewer_act(c, vi, &r)
-	case ipc.MSG_LEASE:         core_viewer_lease(c, vi, &r)
-	case ipc.MSG_LEASE_RELEASE: core_viewer_lease_release(c, vi, &r)
-	case ipc.MSG_LEASE_MODE:    core_viewer_lease_mode(c, vi, &r)
-	case ipc.MSG_SESSION_SIGNAL: core_viewer_signal(c, vi, &r)
-	case ipc.MSG_SESSION_SIZE:   core_viewer_resize(c, vi, &r)
-	case ipc.MSG_DETACH:
+	case proto.MSG_LIST:   core_list_request(c, vi)
+	case proto.MSG_CREATE: _create(c, vi, &r)
+	case proto.MSG_ATTACH: _attach(c, vi, &r)
+	case proto.MSG_KILL:   core_viewer_kill(c, vi, &r)
+	case proto.MSG_OBSERVE: core_viewer_observe(c, vi, &r)
+	case proto.MSG_READ:   _read(c, vi, &r)
+	case proto.MSG_SEND:   core_viewer_send(c, vi, &r)
+	case proto.MSG_TELL:   core_viewer_tell(c, vi, &r)
+	case proto.MSG_CANCEL: core_viewer_cancel(c, vi, &r)
+	case proto.MSG_NEXT:     core_viewer_next(c, vi, &r)
+	case proto.MSG_ANSWER:   core_viewer_answer(c, vi, &r, true)
+	case proto.MSG_PROGRESS: core_viewer_answer(c, vi, &r, false)
+	case proto.MSG_RESULT:   core_viewer_result(c, vi, &r)
+	case proto.MSG_ENDPOINT: core_viewer_endpoint(c, vi, &r)
+	case proto.MSG_WATCH:      core_viewer_watch(c, vi, &r)
+	case proto.MSG_SNAPSHOT:   core_viewer_snapshot(c, vi, &r)
+	case proto.MSG_SETTLE:     core_viewer_settle(c, vi, &r)
+	case proto.MSG_ACT:        core_viewer_act(c, vi, &r)
+	case proto.MSG_LEASE:         core_viewer_lease(c, vi, &r)
+	case proto.MSG_LEASE_RELEASE: core_viewer_lease_release(c, vi, &r)
+	case proto.MSG_LEASE_MODE:    core_viewer_lease_mode(c, vi, &r)
+	case proto.MSG_SESSION_SIGNAL: core_viewer_signal(c, vi, &r)
+	case proto.MSG_SESSION_SIZE:   core_viewer_resize(c, vi, &r)
+	case proto.MSG_DETACH:
 		if s, a := core_attach_find(c, vi, ipc.wr_u32(&r)); s != nil do core_detach(c, s, a, true)
 	case:
 		return false
@@ -107,8 +108,8 @@ _viewer_frame :: proc(c: ^Core, vi: int, f: ipc.Stream_Frame) -> bool {
 _create :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 	token := ipc.wr_u32(r)
 	spec_payload := r.buf[r.off:]
-	spec: ipc.Spawn_Msg
-	ipc.dec_spawn(r, &spec)
+	spec: proto.Spawn_Msg
+	proto.dec_spawn(r, &spec)
 	if !ipc.wr_done(r) {
 		core_viewer_fail(c, vi, token, .Bad_Request, "malformed spawn request")
 		return
@@ -129,7 +130,7 @@ _create :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 @(private = "file")
 _attach :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 	token := ipc.wr_u32(r)
-	req := ipc.dec_attach(r)
+	req := proto.dec_attach(r)
 	if !ipc.wr_done(r) {
 		core_viewer_fail(c, vi, token, .Bad_Request, "malformed attach request")
 		return
@@ -177,7 +178,7 @@ _read :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 	if start == .Screen_Marked do strings.write_string(&b, CORE_READ_ALT_NOTE)
 	c.text = b.buf
 	n := min(len(c.text), ipc.STREAM_MAX_PAYLOAD)
-	ipc.stream_send(&c.viewers[vi].conn, ipc.MSG_TEXT, 0, c.text[len(c.text) - n:])
+	ipc.stream_send(&c.viewers[vi].conn, proto.MSG_TEXT, 0, c.text[len(c.text) - n:])
 }
 
 @(private = "file")
@@ -186,16 +187,16 @@ _attached :: proc(c: ^Core, vi: int, token, id, channel: u32) {
 	w := ipc.wire_writer(b[:])
 	ipc.ww_u32(&w, token); ipc.ww_u32(&w, id); ipc.ww_u32(&w, channel)
 	// Control frames go out before stream data: ATTACHED precedes the first paint.
-	ipc.stream_send(&c.viewers[vi].conn, ipc.MSG_ATTACHED, 0, b[:])
+	ipc.stream_send(&c.viewers[vi].conn, proto.MSG_ATTACHED, 0, b[:])
 }
 
 // core_viewer_fail answers a request with MSG_FAIL.
-core_viewer_fail :: proc(c: ^Core, vi: int, token: u32, code: ipc.Fail_Code, reason: string) {
+core_viewer_fail :: proc(c: ^Core, vi: int, token: u32, code: proto.Fail_Code, reason: string) {
 	w := ipc.wire_writer(c.msg)
 	ipc.ww_u32(&w, token)
 	ipc.ww_u8(&w, u8(code))
 	ipc.ww_str(&w, reason)
-	ipc.stream_send(&c.viewers[vi].conn, ipc.MSG_FAIL, 0, ipc.wire_bytes_written(&w))
+	ipc.stream_send(&c.viewers[vi].conn, proto.MSG_FAIL, 0, ipc.wire_bytes_written(&w))
 }
 
 // core_viewer_current: the connection in that slot is still the one with seq
@@ -207,7 +208,7 @@ core_viewer_current :: proc(c: ^Core, vi: int, seq: u32) -> bool {
 }
 
 // core_viewer_fail_seq answers a request that was accepted earlier.
-core_viewer_fail_seq :: proc(c: ^Core, vi: int, seq: u32, code: ipc.Fail_Code, reason: string) {
+core_viewer_fail_seq :: proc(c: ^Core, vi: int, seq: u32, code: proto.Fail_Code, reason: string) {
 	if !core_viewer_current(c, vi, seq) do return
 	core_viewer_fail(c, vi, 0, code, reason)
 }

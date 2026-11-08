@@ -7,6 +7,7 @@ import "core:testing"
 import "core:time"
 import client "../../session_client"
 import session "../../session"
+import proto "../../session_proto"
 import ipc "../../../platform/ipc"
 
 @(test)
@@ -50,7 +51,7 @@ test_core_restart_preserves_elapsed :: proc(t: ^testing.T) {
 	testing.expect(t, view_wait(v, .Core_Lost) >= 0, "viewer notices the core is gone")
 	tiers_core_start(tiers)
 
-	rows: [8]ipc.Session_Row
+	rows: [8]proto.Session_Row
 	got_rows := cli_wait_rows(rows[:])
 	testing.expect_value(t, len(got_rows), 1)
 	if len(got_rows) == 1 {
@@ -72,8 +73,8 @@ hostile_dropped :: proc(hello: bool, bytes: []u8) -> bool {
 		if fd, ok = client.client_dial(.Viewer, false); !ok do return false
 	} else {
 		buf, sbuf: [128]u8
-		dir, _ := ipc.ipc_session_dir(buf[:])
-		sock, _ := ipc.ipc_session_path(sbuf[:], dir, "core.sock")
+		dir, _ := proto.session_dir(buf[:])
+		sock, _ := proto.session_path(sbuf[:], dir, "core.sock")
 		err: ipc.Ipc_Error
 		if fd, err = ipc.ipc_connect(sock, 500); err != .None do return false
 	}
@@ -99,7 +100,7 @@ test_hostile_viewers_dropped :: proc(t: ^testing.T) {
 	s := view_sh(v, "stty -echo; while read x; do printf 'echo:%s\\n' \"$x\"; done")
 	testing.expect(t, view_attached(v, s) != 0, "a good viewer")
 	oversize: [ipc.STREAM_HEADER]u8
-	ipc.stream_put_header(oversize[:], ipc.MSG_LIST, 0, 0)
+	ipc.stream_put_header(oversize[:], proto.MSG_LIST, 0, 0)
 	oversize[5], oversize[6], oversize[7], oversize[8] = 0xff, 0xff, 0xff, 0x7f
 	unknown: [ipc.STREAM_HEADER]u8
 	ipc.stream_put_header(unknown[:], 200, 0, 0)

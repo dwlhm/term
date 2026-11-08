@@ -12,6 +12,7 @@ import "core:strconv"
 import "core:strings"
 import "core:sys/posix"
 import "core:time"
+import proto "../session_proto"
 import ipc "../../platform/ipc"
 
 // run_ask asks and waits for a valid answer (kind: string, number or boolean;
@@ -53,7 +54,7 @@ run_wait_reply :: proc(r: ^Runner) -> (text: string, ok: bool) {
 }
 
 // run_reply_request takes a broker request that reached the run's endpoint.
-run_reply_request :: proc(r: ^Runner, req: ipc.Next_Result) {
+run_reply_request :: proc(r: ^Runner, req: proto.Next_Result) {
 	delete(r.reply)
 	r.reply, r.replied, r.reply_id, r.listening = strings.clone(strings.trim_space(req.body)), true, req.id, false
 }
@@ -75,8 +76,8 @@ run_answer_reply :: proc(r: ^Runner, failed: bool, text: string) {
 	}
 	b: [512]u8
 	w := ipc.wire_writer(b[:])
-	ipc.enc_answer(&w, {by = r.endpoint, id = r.reply_id, failed = failed, text = text[:min(len(text), 400)]})
-	_, _ = run_request(r, ipc.MSG_ANSWER, ipc.wire_bytes_written(&w), ipc.MSG_OK, 5 * time.Second)
+	proto.enc_answer(&w, {by = r.endpoint, id = r.reply_id, failed = failed, text = text[:min(len(text), 400)]})
+	_, _ = run_request(r, proto.MSG_ANSWER, ipc.wire_bytes_written(&w), proto.MSG_OK, 5 * time.Second)
 	r.reply_id = 0
 }
 
@@ -106,8 +107,8 @@ run_ensure_endpoint :: proc(r: ^Runner) -> bool {
 	w := ipc.wire_writer(b[:])
 	ipc.ww_str(&w, fmt.tprintf("auto-%d", posix.getpid()))
 	ipc.ww_bool(&w, true)
-	f, ok := run_request(r, ipc.MSG_ENDPOINT, ipc.wire_bytes_written(&w), ipc.MSG_OK, 5 * time.Second)
-	if !ok || f.kind == ipc.MSG_FAIL {
+	f, ok := run_request(r, proto.MSG_ENDPOINT, ipc.wire_bytes_written(&w), proto.MSG_OK, 5 * time.Second)
+	if !ok || f.kind == proto.MSG_FAIL {
 		run_stop(r, .Contract, "cannot open a reply endpoint")
 		return false
 	}
@@ -122,6 +123,6 @@ run_listen :: proc(r: ^Runner) {
 	b: [8]u8
 	w := ipc.wire_writer(b[:])
 	ipc.ww_u32(&w, r.endpoint); ipc.ww_u32(&w, 0)
-	ipc.stream_send(&r.conn, ipc.MSG_NEXT, 0, ipc.wire_bytes_written(&w))
+	ipc.stream_send(&r.conn, proto.MSG_NEXT, 0, ipc.wire_bytes_written(&w))
 	r.listening = true
 }

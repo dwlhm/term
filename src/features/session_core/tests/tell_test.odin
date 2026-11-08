@@ -6,6 +6,7 @@ package feature_session_core_tests
 import "core:strings"
 import "core:testing"
 import session "../../session"
+import proto "../../session_proto"
 import ipc "../../../platform/ipc"
 
 @(test)
@@ -19,7 +20,7 @@ test_tell_shell_blocking_result :: proc(t: ^testing.T) {
 	testing.expect(t, ok && res.phase == .Accepted, "accepted")
 	res, ok = tell_next(&conn, 5000)
 	testing.expect(t, ok && res.phase == .Finished, "finished")
-	testing.expect_value(t, res.status, ipc.Tell_Status.Failed)
+	testing.expect_value(t, res.status, proto.Tell_Status.Failed)
 	testing.expect_value(t, res.exit_code, 3)
 	testing.expect_value(t, res.text, "a\nb\n")
 	ipc.stream_conn_destroy(&conn)
@@ -100,7 +101,7 @@ test_tell_output_survives_window_resize :: proc(t: ^testing.T) {
 		session.session_resize(tell_view_sess, 100, 6)
 		view_pump(v, 50)
 	})
-	testing.expect_value(t, res.status, ipc.Tell_Status.Done)
+	testing.expect_value(t, res.status, proto.Tell_Status.Done)
 	testing.expect_value(t, res.text, LONG + "\ntail\n")
 	view_close(v)
 	testing.expect(t, tiers_stop(tiers), "tiers end and remove the dir")

@@ -6,6 +6,7 @@ package feature_session
 // and, on the viewer, pushes program output into the inbox from its IO thread.
 
 import "core:sync"
+import proto "../session_proto"
 import ipc "../../platform/ipc"
 
 // One credit window plus one chunk: the sender never has more in flight.
@@ -14,7 +15,7 @@ SESSION_INBOX_BYTES :: ipc.STREAM_WINDOW + ipc.STREAM_DATA_CHUNK
 Session_Link :: struct {
 	write:    proc(user: rawptr, data: []u8), // what a person typed or pasted
 	reply:    proc(user: rawptr, data: []u8), // the Terminal answering a query (DSR, DA, APC…)
-	resize:   proc(user: rawptr, size: ipc.Size_Msg),
+	resize:   proc(user: rawptr, size: proto.Size_Msg),
 	consumed: proc(user: rawptr, n: int), // output bytes the Terminal took (flow-control credit); may be nil
 	user:     rawptr,
 }

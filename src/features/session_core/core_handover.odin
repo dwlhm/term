@@ -11,6 +11,7 @@ import "core:os"
 import "core:time"
 import terminal "../../core/terminal"
 import extension "../../core/terminal/extension"
+import proto "../session_proto"
 import ipc "../../platform/ipc"
 
 CORE_SNAPSHOT_HISTORY :: 10_000 // scrollback lines kept across a planned restart
@@ -27,10 +28,10 @@ core_handover :: proc(c: ^Core) {
 	}
 	core_endpoints_save(c)
 	_save_broker(c)
-	mode := [1]u8{u8(ipc.Goodbye.Handover)}
+	mode := [1]u8{u8(proto.Goodbye.Handover)}
 	for &h in c.holders {
 		if !h.used do continue
-		ipc.stream_send(&h.conn, ipc.MSG_GOODBYE, 0, mode[:])
+		ipc.stream_send(&h.conn, proto.MSG_GOODBYE, 0, mode[:])
 		deadline := _now() + 1_000_000_000
 		for ipc.stream_wants_write(&h.conn) && h.conn.err == .None && _now() < deadline {
 			ipc.stream_flush(&h.conn)
@@ -86,7 +87,7 @@ _parse_snapshot_name :: proc(name: string, id: ^u32) -> bool {
 @(private = "file")
 _snapshot_path :: proc(c: ^Core, buf: []u8, id: u32) -> (string, bool) {
 	name_buf: [32]u8
-	return ipc.ipc_session_path(buf, c.dir, fmt.bprintf(name_buf[:], "snap.%d.vt", id))
+	return proto.session_path(buf, c.dir, fmt.bprintf(name_buf[:], "snap.%d.vt", id))
 }
 
 // _write_atomic writes temp + rename, mode 0600: a restart interrupted
@@ -106,7 +107,7 @@ _write_atomic :: proc(path: string, data: []u8) {
 @(private = "file")
 _save_broker :: proc(c: ^Core) {
 	path_buf: [256]u8
-	path, ok := ipc.ipc_session_path(path_buf[:], c.dir, CORE_BROKER_SNAPSHOT)
+	path, ok := proto.session_path(path_buf[:], c.dir, CORE_BROKER_SNAPSHOT)
 	if !ok do return
 	buf := make([]u8, CORE_MAX_REQUESTS * (BROKER_BODY_CAP + BROKER_TEXT_CAP + 128) + CORE_MAX_SESSIONS * 16 + 64)
 	defer delete(buf)
@@ -120,7 +121,7 @@ _save_broker :: proc(c: ^Core) {
 // blocking tells lost their connection with the old core.
 core_restore_broker :: proc(c: ^Core) {
 	path_buf: [256]u8
-	path, ok := ipc.ipc_session_path(path_buf[:], c.dir, CORE_BROKER_SNAPSHOT)
+	path, ok := proto.session_path(path_buf[:], c.dir, CORE_BROKER_SNAPSHOT)
 	if !ok do return
 	data, err := os.read_entire_file_from_path(path, context.allocator)
 	if err != nil do return

@@ -7,7 +7,7 @@ package feature_session_core_tests
 import "core:strings"
 import "core:testing"
 import session "../../session"
-import ipc "../../../platform/ipc"
+import proto "../../session_proto"
 
 @(test)
 test_human_ctrl_c_cancels_with_partial_output :: proc(t: ^testing.T) {
@@ -20,7 +20,7 @@ test_human_ctrl_c_cancels_with_partial_output :: proc(t: ^testing.T) {
 		session.session_write(tell_view_sess, {0x03})
 		view_pump(v, 20)
 	})
-	testing.expect_value(t, res.status, ipc.Tell_Status.Cancelled)
+	testing.expect_value(t, res.status, proto.Tell_Status.Cancelled)
 	testing.expect_value(t, res.text, "before\n")
 	view_close(v)
 	testing.expect(t, tiers_stop(tiers), "tiers end and remove the dir")
@@ -36,12 +36,12 @@ test_human_typing_and_send_take_over :: proc(t: ^testing.T) {
 		session.session_write_string(tell_view_sess, "x")
 		view_pump(v, 20)
 	})
-	testing.expect_value(t, res.status, ipc.Tell_Status.Interrupted)
+	testing.expect_value(t, res.status, proto.Tell_Status.Interrupted)
 	view_pump(v, 1200) // the typed x ran after sleep: back at the prompt
 	res = tell_run(v, id, "sleep 1", proc(v: ^View) {
-		cli_ctl(ipc.MSG_SEND, view_id(v, tell_view_sess), transmute([]u8)string("y"))
+		cli_ctl(proto.MSG_SEND, view_id(v, tell_view_sess), transmute([]u8)string("y"))
 	})
-	testing.expect_value(t, res.status, ipc.Tell_Status.Interrupted)
+	testing.expect_value(t, res.status, proto.Tell_Status.Interrupted)
 	view_close(v)
 	testing.expect(t, tiers_stop(tiers), "tiers end and remove the dir")
 }
@@ -57,7 +57,7 @@ test_viewer_reply_is_no_human_input :: proc(t: ^testing.T) {
 	res := tell_run(v, id, `printf '\033_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\033\\'; sleep 0.5; echo ok`, proc(v: ^View) {
 		view_pump(v, 300) // the window draws the output and answers the query
 	})
-	testing.expect_value(t, res.status, ipc.Tell_Status.Done)
+	testing.expect_value(t, res.status, proto.Tell_Status.Done)
 	// The answer reached the program (the tty echoes it: the REPL never reads it).
 	testing.expectf(t, strings.contains(res.text, "_Gi=31;OK") && strings.has_suffix(res.text, "ok\n"), "answer delivered: %q", res.text)
 	view_close(v)

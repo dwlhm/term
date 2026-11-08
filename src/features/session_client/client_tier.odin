@@ -9,7 +9,7 @@ import "core:os"
 import "core:sys/posix"
 import holder_feat "../holder"
 import core_feat "../session_core"
-import ipc "../../platform/ipc"
+import proto "../session_proto"
 
 // client_tier_main runs `--holder <socket>` or `--core` (no window, no SDL).
 // handled = false for every other invocation.
@@ -37,8 +37,8 @@ client_tier_main :: proc(args: []string) -> (handled: bool, code: int) {
 // sessions, and its tiers end with it, however it ends (SESSION_OWNED_ENV).
 client_use_private_session :: proc() -> bool {
 	buf, name_buf, path_buf: [256]u8
-	dir, err := ipc.ipc_session_dir(buf[:])
+	dir, err := proto.session_dir(buf[:])
 	if err != .None do return false
-	path, ok := ipc.ipc_session_path(path_buf[:], dir, fmt.bprintf(name_buf[:], "s%d", int(posix.getpid())))
-	return ok && os.set_env(ipc.SESSION_DIR_ENV, path) == nil && os.set_env(ipc.SESSION_OWNED_ENV, "1") == nil
+	path, ok := proto.session_path(path_buf[:], dir, fmt.bprintf(name_buf[:], "s%d", int(posix.getpid())))
+	return ok && os.set_env(proto.SESSION_DIR_ENV, path) == nil && os.set_env(proto.SESSION_OWNED_ENV, "1") == nil
 }

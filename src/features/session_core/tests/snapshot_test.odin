@@ -10,39 +10,40 @@ import "core:testing"
 import "core:thread"
 import "core:time"
 import client "../../session_client"
+import proto "../../session_proto"
 import ipc "../../../platform/ipc"
 
-cli_snapshot :: proc(id: u32, history: u32 = 0, since: i64 = -1) -> (snap: ipc.Snapshot, code: ipc.Fail_Code, ok: bool) {
+cli_snapshot :: proc(id: u32, history: u32 = 0, since: i64 = -1) -> (snap: proto.Snapshot, code: proto.Fail_Code, ok: bool) {
 	conn: ipc.Stream_Conn
 	if !cli_conn(&conn) do return
 	defer ipc.stream_conn_destroy(&conn)
 	b: [16]u8
 	w := ipc.wire_writer(b[:])
-	ipc.enc_snapshot_req(&w, {id = id, history = history, since = since})
-	ipc.stream_send(&conn, ipc.MSG_SNAPSHOT, 0, ipc.wire_bytes_written(&w))
-	f, got := _answer(&conn, ipc.MSG_SNAPSHOT_RESULT, 4000)
+	proto.enc_snapshot_req(&w, {id = id, history = history, since = since})
+	ipc.stream_send(&conn, proto.MSG_SNAPSHOT, 0, ipc.wire_bytes_written(&w))
+	f, got := _answer(&conn, proto.MSG_SNAPSHOT_RESULT, 4000)
 	if !got do return
 	r := ipc.wire_reader(f.payload)
-	if f.kind == ipc.MSG_FAIL do return {}, _fail_code(&r), false
+	if f.kind == proto.MSG_FAIL do return {}, _fail_code(&r), false
 	// The payload belongs to the connection, which closes here.
 	r = ipc.wire_reader(slice.clone(f.payload, context.temp_allocator))
-	snap = ipc.dec_snapshot(&r, context.temp_allocator)
+	snap = proto.dec_snapshot(&r, context.temp_allocator)
 	return snap, {}, ipc.wr_done(&r)
 }
 
-cli_settle :: proc(req: ipc.Settle_Request) -> (res: ipc.Settle_Result, code: ipc.Fail_Code, ok: bool) {
+cli_settle :: proc(req: proto.Settle_Request) -> (res: proto.Settle_Result, code: proto.Fail_Code, ok: bool) {
 	conn: ipc.Stream_Conn
 	if !cli_conn(&conn) do return
 	defer ipc.stream_conn_destroy(&conn)
 	b: [24]u8
 	w := ipc.wire_writer(b[:])
-	ipc.enc_settle_req(&w, req)
-	ipc.stream_send(&conn, ipc.MSG_SETTLE, 0, ipc.wire_bytes_written(&w))
-	f, got := _answer(&conn, ipc.MSG_SETTLE_RESULT, int(req.timeout_ms) + 4000)
+	proto.enc_settle_req(&w, req)
+	ipc.stream_send(&conn, proto.MSG_SETTLE, 0, ipc.wire_bytes_written(&w))
+	f, got := _answer(&conn, proto.MSG_SETTLE_RESULT, int(req.timeout_ms) + 4000)
 	if !got do return
 	r := ipc.wire_reader(f.payload)
-	if f.kind == ipc.MSG_FAIL do return {}, _fail_code(&r), false
-	res = ipc.dec_settle_result(&r)
+	if f.kind == proto.MSG_FAIL do return {}, _fail_code(&r), false
+	res = proto.dec_settle_result(&r)
 	return res, {}, ipc.wr_done(&r)
 }
 
@@ -50,19 +51,19 @@ cli_settle :: proc(req: ipc.Settle_Request) -> (res: ipc.Settle_Result, code: ip
 _answer :: proc(conn: ^ipc.Stream_Conn, want: u8, ms: int) -> (f: ipc.Stream_Frame, ok: bool) {
 	for {
 		f = client.client_wait_frame(conn, ms) or_return
-		if f.kind == want || f.kind == ipc.MSG_FAIL do return f, true
+		if f.kind == want || f.kind == proto.MSG_FAIL do return f, true
 	}
 }
 
 @(private = "file")
-_fail_code :: proc(r: ^ipc.Wire_Reader) -> ipc.Fail_Code {
+_fail_code :: proc(r: ^ipc.Wire_Reader) -> proto.Fail_Code {
 	_ = ipc.wr_u32(r)
-	return ipc.Fail_Code(ipc.wr_u8(r))
+	return proto.Fail_Code(ipc.wr_u8(r))
 }
 
 // _snap_until polls snapshots until one shows want (tests only: callers use SETTLE).
 @(private = "file")
-_snap_until :: proc(id: u32, want: string, history: u32 = 0, since: i64 = -1) -> (snap: ipc.Snapshot, ok: bool) {
+_snap_until :: proc(id: u32, want: string, history: u32 = 0, since: i64 = -1) -> (snap: proto.Snapshot, ok: bool) {
 	for _ in 0 ..< 200 {
 		s, _, got := cli_snapshot(id, history, since)
 		if got && strings.contains(_snap_text(s.screen), want) do return s, true
@@ -72,7 +73,7 @@ _snap_until :: proc(id: u32, want: string, history: u32 = 0, since: i64 = -1) ->
 }
 
 @(private = "file")
-_snap_text :: proc(rows: []ipc.Snap_Row) -> string {
+_snap_text :: proc(rows: []proto.Snap_Row) -> string {
 	b := strings.builder_make(context.temp_allocator)
 	for row in rows {
 		for run in row.runs do strings.write_string(&b, run.text)
@@ -82,7 +83,7 @@ _snap_text :: proc(rows: []ipc.Snap_Row) -> string {
 }
 
 @(private = "file")
-_find_run :: proc(rows: []ipc.Snap_Row, text: string) -> (run: ipc.Snap_Run, ok: bool) {
+_find_run :: proc(rows: []proto.Snap_Row, text: string) -> (run: proto.Snap_Run, ok: bool) {
 	for row in rows do for r in row.runs do if strings.contains(r.text, text) do return r, true
 	return
 }
@@ -216,11 +217,11 @@ test_snapshot_rejects_malformed_requests :: proc(t: ^testing.T) {
 	conn: ipc.Stream_Conn
 	testing.expect(t, cli_conn(&conn))
 	defer ipc.stream_conn_destroy(&conn)
-	ipc.stream_send(&conn, ipc.MSG_SNAPSHOT, 0, []u8{1, 2, 3})
-	f, got := _answer(&conn, ipc.MSG_SNAPSHOT_RESULT, 3000)
-	testing.expect(t, got && f.kind == ipc.MSG_FAIL)
+	ipc.stream_send(&conn, proto.MSG_SNAPSHOT, 0, []u8{1, 2, 3})
+	f, got := _answer(&conn, proto.MSG_SNAPSHOT_RESULT, 3000)
+	testing.expect(t, got && f.kind == proto.MSG_FAIL)
 	r := ipc.wire_reader(f.payload)
-	testing.expect_value(t, _fail_code(&r), ipc.Fail_Code.Bad_Request)
+	testing.expect_value(t, _fail_code(&r), proto.Fail_Code.Bad_Request)
 	_, code, ok := cli_snapshot(424_242)
 	testing.expect(t, !ok && code == .Not_Found)
 }

@@ -7,7 +7,7 @@ package feature_automation
 import "core:strings"
 import "core:unicode/utf8"
 import ie "../../core/terminal/input_encode"
-import ipc "../../platform/ipc"
+import proto "../session_proto"
 
 @(private = "file")
 _NAMES := [?]struct {
@@ -25,7 +25,7 @@ _NAMES := [?]struct {
 }
 
 // parse_key reads one key name; ok = false names an unknown key.
-parse_key :: proc(name: string) -> (k: ipc.Act_Key, ok: bool) {
+parse_key :: proc(name: string) -> (k: proto.Act_Key, ok: bool) {
 	mods: ie.Mods
 	rest := name
 	for {

@@ -8,6 +8,7 @@ package feature_session_core_tests
 import "core:strings"
 import "core:testing"
 import client "../../session_client"
+import proto "../../session_proto"
 import ipc "../../../platform/ipc"
 
 // worker_next opens a worker connection for sid and sends MSG_NEXT.
@@ -17,25 +18,25 @@ worker_next :: proc(conn: ^ipc.Stream_Conn, sid: u32, timeout_ms: u32 = 0) -> bo
 	b: [8]u8
 	w := ipc.wire_writer(b[:])
 	ipc.ww_u32(&w, sid); ipc.ww_u32(&w, timeout_ms)
-	ipc.stream_send(conn, ipc.MSG_NEXT, 0, ipc.wire_bytes_written(&w))
+	ipc.stream_send(conn, proto.MSG_NEXT, 0, ipc.wire_bytes_written(&w))
 	ipc.stream_flush(conn) // nobody reads this connection until a request comes
 	return true
 }
 
 // worker_take waits for the request a `next` took (fail: the FAIL code).
 @(private = "file")
-worker_take :: proc(conn: ^ipc.Stream_Conn, ms := 3000) -> (req: ipc.Next_Result, fail: ipc.Fail_Code) {
+worker_take :: proc(conn: ^ipc.Stream_Conn, ms := 3000) -> (req: proto.Next_Result, fail: proto.Fail_Code) {
 	for {
 		f, got := client.client_wait_frame(conn, ms)
 		if !got do return {}, .Busy
 		switch f.kind {
-		case ipc.MSG_FAIL:
+		case proto.MSG_FAIL:
 			r := ipc.wire_reader(f.payload)
 			_ = ipc.wr_u32(&r)
-			return {}, ipc.Fail_Code(ipc.wr_u8(&r))
-		case ipc.MSG_REQUEST:
+			return {}, proto.Fail_Code(ipc.wr_u8(&r))
+		case proto.MSG_REQUEST:
 			r := ipc.wire_reader(f.payload)
-			req = ipc.dec_next_result(&r)
+			req = proto.dec_next_result(&r)
 			req.body = strings.clone(req.body, context.temp_allocator)
 			return req, {}
 		}
@@ -43,22 +44,22 @@ worker_take :: proc(conn: ^ipc.Stream_Conn, ms := 3000) -> (req: ipc.Next_Result
 }
 
 @(private = "file")
-worker_say :: proc(by: u32, id: u64, text: string, final: bool, failed := false) -> ipc.Fail_Code {
+worker_say :: proc(by: u32, id: u64, text: string, final: bool, failed := false) -> proto.Fail_Code {
 	conn: ipc.Stream_Conn
 	if !cli_conn(&conn) do return .Busy
 	defer ipc.stream_conn_destroy(&conn)
 	b: [512]u8
 	w := ipc.wire_writer(b[:])
-	ipc.enc_answer(&w, {by = by, id = id, failed = failed, text = text})
-	ipc.stream_send(&conn, ipc.MSG_ANSWER if final else ipc.MSG_PROGRESS, 0, ipc.wire_bytes_written(&w))
+	proto.enc_answer(&w, {by = by, id = id, failed = failed, text = text})
+	ipc.stream_send(&conn, proto.MSG_ANSWER if final else proto.MSG_PROGRESS, 0, ipc.wire_bytes_written(&w))
 	for {
 		f, got := client.client_wait_frame(&conn, 3000)
 		if !got do return .Busy
-		if f.kind == ipc.MSG_OK do return {}
-		if f.kind == ipc.MSG_FAIL {
+		if f.kind == proto.MSG_OK do return {}
+		if f.kind == proto.MSG_FAIL {
 			r := ipc.wire_reader(f.payload)
 			_ = ipc.wr_u32(&r)
-			return ipc.Fail_Code(ipc.wr_u8(&r))
+			return proto.Fail_Code(ipc.wr_u8(&r))
 		}
 	}
 }
@@ -87,16 +88,16 @@ test_worker_takes_reports_and_answers :: proc(t: ^testing.T) {
 	other: ipc.Stream_Conn
 	busy, _ := tell_send(&other, {to = w, body = "x"})
 	ipc.stream_conn_destroy(&other)
-	testing.expect_value(t, busy.reject, ipc.Tell_Reject.Busy)
+	testing.expect_value(t, busy.reject, proto.Tell_Reject.Busy)
 
-	testing.expect_value(t, worker_say(w + 1000, req.id, "x", true), ipc.Fail_Code.Bad_Request) // not its request
-	testing.expect_value(t, worker_say(w, req.id, "half way", false), ipc.Fail_Code{})
+	testing.expect_value(t, worker_say(w + 1000, req.id, "x", true), proto.Fail_Code.Bad_Request) // not its request
+	testing.expect_value(t, worker_say(w, req.id, "half way", false), proto.Fail_Code{})
 	prog, _ := tell_next(&sc, 3000)
 	testing.expect(t, prog.phase == .Progress && prog.progress == "half way", "the sender hears progress")
-	testing.expect_value(t, worker_say(w, req.id, "foo looks fine", true), ipc.Fail_Code{})
+	testing.expect_value(t, worker_say(w, req.id, "foo looks fine", true), proto.Fail_Code{})
 	fin, _ := tell_next(&sc, 3000)
 	testing.expect(t, fin.phase == .Finished && fin.status == .Done && fin.text == "foo looks fine", "the answer")
-	testing.expect_value(t, worker_say(w, req.id, "again", true), ipc.Fail_Code.Not_Found) // taken by its sender
+	testing.expect_value(t, worker_say(w, req.id, "again", true), proto.Fail_Code.Not_Found) // taken by its sender
 	ipc.stream_conn_destroy(&wc)
 	ipc.stream_conn_destroy(&sc)
 	view_close(v)
@@ -130,11 +131,11 @@ test_worker_start_window_timeouts_and_departure :: proc(t: ^testing.T) {
 	}
 	r1, _ := tell_send(&c, {to = settled, body = "x"})
 	ipc.stream_conn_destroy(&c)
-	testing.expect_value(t, r1.reject, ipc.Tell_Reject.Not_Listening)
+	testing.expect_value(t, r1.reject, proto.Tell_Reject.Not_Listening)
 
 	worker_next(&wc, settled, 200)
 	_, fail = worker_take(&wc)
-	testing.expect_value(t, fail, ipc.Fail_Code.Timeout)
+	testing.expect_value(t, fail, proto.Fail_Code.Timeout)
 	ipc.stream_conn_destroy(&wc)
 
 	worker_next(&wc, settled)
@@ -143,7 +144,7 @@ test_worker_start_window_timeouts_and_departure :: proc(t: ^testing.T) {
 	for i := 0; i < 100 && listening(settled) != 0; i += 1 do view_pump(v, 5)
 	r2, _ := tell_send(&c, {to = settled, body = "x"})
 	ipc.stream_conn_destroy(&c)
-	testing.expect_value(t, r2.reject, ipc.Tell_Reject.Not_Listening)
+	testing.expect_value(t, r2.reject, proto.Tell_Reject.Not_Listening)
 	view_close(v)
 	testing.expect(t, tiers_stop(tiers), "tiers end and remove the dir")
 }
@@ -171,7 +172,7 @@ test_worker_child_request_ends_with_parent :: proc(t: ^testing.T) {
 	pres, _ := tell_next(&sc, 3000)
 	cres, _ := tell_next(&cc, 3000)
 	testing.expect(t, pres.status == .Cancelled && cres.status == .Cancelled, "both ended")
-	testing.expect_value(t, worker_say(w, req.id, "late", true), ipc.Fail_Code.Not_Found) // ended, and its sender took the result
+	testing.expect_value(t, worker_say(w, req.id, "late", true), proto.Fail_Code.Not_Found) // ended, and its sender took the result
 	// SIGINT ends `sleep` (and this plain sh REPL with it): no longer running it.
 	stopped := false
 	for i := 0; i < 400 && !stopped; i += 1 {
@@ -199,8 +200,8 @@ test_worker_async_result_read_and_wait :: proc(t: ^testing.T) {
 	if !cli_conn(&ac) do return
 	b: [256]u8
 	ww := ipc.wire_writer(b[:])
-	ipc.enc_tell_req(&ww, {to = w, body = "async task"}) // no wait
-	ipc.stream_send(&ac, ipc.MSG_TELL, 0, ipc.wire_bytes_written(&ww))
+	proto.enc_tell_req(&ww, {to = w, body = "async task"}) // no wait
+	ipc.stream_send(&ac, proto.MSG_TELL, 0, ipc.wire_bytes_written(&ww))
 	acc, _ := tell_next(&ac, 3000)
 	ipc.stream_conn_destroy(&ac) // the sender may go: the request stays
 	req, _ := worker_take(&wc)
@@ -209,8 +210,8 @@ test_worker_async_result_read_and_wait :: proc(t: ^testing.T) {
 	rc: ipc.Stream_Conn
 	cli_conn(&rc)
 	ww = ipc.wire_writer(b[:])
-	ipc.enc_result_req(&ww, {wait = true, ids = {0 = acc.id, 1 = acc.id + 77}, n_ids = 1, timeout_ms = 3000})
-	ipc.stream_send(&rc, ipc.MSG_RESULT, 0, ipc.wire_bytes_written(&ww))
+	proto.enc_result_req(&ww, {wait = true, ids = {0 = acc.id, 1 = acc.id + 77}, n_ids = 1, timeout_ms = 3000})
+	ipc.stream_send(&rc, proto.MSG_RESULT, 0, ipc.wire_bytes_written(&ww))
 	ipc.stream_flush(&rc)
 	for i := 0; i < 100; i += 1 do view_pump(v, 2) // the wait is registered before the answer
 	worker_say(w, req.id, "done later", true)
@@ -233,7 +234,7 @@ test_worker_next_ends_with_its_session :: proc(t: ^testing.T) {
 	for i := 0; i < 100 && listening(w) == 0; i += 1 do view_pump(v, 5)
 	testing.expect(t, cli_kill(w), "kill the worker's session")
 	_, fail := worker_take(&wc)
-	testing.expect_value(t, fail, ipc.Fail_Code.Not_Found)
+	testing.expect_value(t, fail, proto.Fail_Code.Not_Found)
 	ipc.stream_conn_destroy(&wc)
 	view_close(v)
 	testing.expect(t, tiers_stop(tiers), "tiers end and remove the dir")

@@ -6,6 +6,7 @@ package feature_session_client
 import "core:sync"
 import "core:time"
 import "core:sys/posix"
+import proto "../session_proto"
 import ipc "../../platform/ipc"
 import session "../session"
 
@@ -43,8 +44,8 @@ _io_turn :: proc(c: ^Client) -> bool {
 			}
 			continue
 		}
-		if f.kind == ipc.MSG_ATTACHED do _bind_attached(c, f.payload)
-		if f.kind == ipc.MSG_FAIL do _drop_cancelled(c, f.payload)
+		if f.kind == proto.MSG_ATTACHED do _bind_attached(c, f.payload)
+		if f.kind == proto.MSG_FAIL do _drop_cancelled(c, f.payload)
 		hdr: [ipc.STREAM_HEADER]u8
 		ipc.stream_put_header(hdr[:], f.kind, f.channel, len(f.payload))
 		if !ipc.ring_push(&c.ctl_inbox, hdr[:], f.payload) do c.conn.err = .Overflow
@@ -71,8 +72,8 @@ _io_settle :: proc(c: ^Client, deadline_ns: i64) {
 		ipc.stream_flush(&c.conn)
 		ipc.stream_fill(&c.conn)
 		for f in ipc.stream_next(&c.conn) {
-			if f.kind == ipc.MSG_ATTACHED do _bind_attached(c, f.payload)
-			if f.kind == ipc.MSG_FAIL do _drop_cancelled(c, f.payload)
+			if f.kind == proto.MSG_ATTACHED do _bind_attached(c, f.payload)
+			if f.kind == proto.MSG_FAIL do _drop_cancelled(c, f.payload)
 		}
 	}
 }
@@ -89,7 +90,7 @@ _bind_attached :: proc(c: ^Client, payload: []u8) {
 			b: [4]u8
 			w := ipc.wire_writer(b[:])
 			ipc.ww_u32(&w, id if l.cancel_kill else channel)
-			ipc.stream_send(&c.conn, ipc.MSG_KILL if l.cancel_kill else ipc.MSG_DETACH, 0, b[:])
+			ipc.stream_send(&c.conn, proto.MSG_KILL if l.cancel_kill else proto.MSG_DETACH, 0, b[:])
 			l = {}
 			return
 		}
@@ -98,7 +99,7 @@ _bind_attached :: proc(c: ^Client, payload: []u8) {
 		// The size first: held input then reaches a program that already has it.
 		if size, resized := l.pending_size.?; resized do client_send_size(c, channel, size)
 		l.pending_size = nil
-		if l.pending_len > 0 do ipc.stream_send(&c.conn, ipc.MSG_V_INPUT, channel, l.pending[:l.pending_len])
+		if l.pending_len > 0 do ipc.stream_send(&c.conn, proto.MSG_V_INPUT, channel, l.pending[:l.pending_len])
 		l.pending_len = 0
 		return
 	}

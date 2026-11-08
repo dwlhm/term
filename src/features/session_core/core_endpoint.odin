@@ -7,6 +7,7 @@ package feature_session_core
 // planned restart keeps the unowned ones under their ids.
 
 import "core:os"
+import proto "../session_proto"
 import ipc "../../platform/ipc"
 
 CORE_ENDPOINT_NAME_MAX :: 64
@@ -35,7 +36,7 @@ core_viewer_endpoint :: proc(c: ^Core, vi: int, r: ^ipc.Wire_Reader) {
 	}
 	if owned do s.endpoint.owner, s.endpoint.owner_seq = vi, c.viewers[vi].seq
 	b := _i32_bytes(i32(s.id))
-	ipc.stream_send(&c.viewers[vi].conn, ipc.MSG_OK, 0, b[:])
+	ipc.stream_send(&c.viewers[vi].conn, proto.MSG_OK, 0, b[:])
 	core_broadcast_row(c, s)
 }
 
@@ -58,7 +59,7 @@ core_endpoints_save :: proc(c: ^Core) {
 		ipc.ww_u32(&w, s.id); ipc.ww_str(&w, core_endpoint_name(&s))
 	}
 	path_buf: [256]u8
-	if path, ok := ipc.ipc_session_path(path_buf[:], c.dir, CORE_ENDPOINT_SNAPSHOT); ok && w.ok {
+	if path, ok := proto.session_path(path_buf[:], c.dir, CORE_ENDPOINT_SNAPSHOT); ok && w.ok {
 		_ = os.write_entire_file(path, ipc.wire_bytes_written(&w))
 	}
 }
@@ -66,7 +67,7 @@ core_endpoints_save :: proc(c: ^Core) {
 // core_endpoints_restore brings them back (before the broker's requests).
 core_endpoints_restore :: proc(c: ^Core) {
 	path_buf: [256]u8
-	path, ok := ipc.ipc_session_path(path_buf[:], c.dir, CORE_ENDPOINT_SNAPSHOT)
+	path, ok := proto.session_path(path_buf[:], c.dir, CORE_ENDPOINT_SNAPSHOT)
 	if !ok do return
 	data, err := os.read_entire_file_from_path(path, context.allocator)
 	if err != nil do return
