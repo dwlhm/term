@@ -17,6 +17,10 @@ import ipc "../../platform/ipc"
 RUN_EXPECT_DEFAULT :: 10 * time.Second
 RUN_QUIET_DEFAULT  :: 50 * time.Millisecond
 RUN_LIMIT_DEFAULT  :: 600 * time.Second
+// after an action the screen gets this long to answer before the next step;
+// a program that does not redraw for it (it buffers a paste) does not stall
+// the run: correctness rests on the next expect, not on this wait
+RUN_ACT_SETTLE_MAX :: 1 * time.Second
 
 RUN_CONTRACT_KEY :: "term.run.contract"
 RUN_TERM_KEY     :: "term.run.term"
@@ -28,6 +32,7 @@ Run_Options :: struct {
 	session:    u32,
 	trace_path: string,
 	serve:      bool, // term auto serve: the contract's serve function, once per request
+	adapter:    string, // serve with this adapter's own serve steps (no contract file)
 }
 
 Runner :: struct {
@@ -113,7 +118,7 @@ _run_prepare :: proc(r: ^Runner, opts: Run_Options) -> bool {
 		h, err := os.open(opts.trace_path, os.O_WRONLY | os.O_CREATE | os.O_TRUNC, {.Read_User, .Write_User})
 		r.trace, r.tracing = h, err == nil
 	}
-	if err, loaded := vm_load_file(vm, opts.contract); !loaded {
+	if err, loaded := _load_contract(vm, opts); !loaded {
 		run_stop(r, .Contract, err)
 		return false
 	}
@@ -223,3 +228,15 @@ run_trace :: proc(r: ^Runner, ev: string, fields: string) {
 	os.write_string(r.trace, line)
 }
 
+
+// _load_contract runs the contract file, or for `serve --adapter <name>` the
+// contract made of that adapter and its own serve steps.
+@(private = "file")
+_load_contract :: proc(vm: ^Vm, opts: Run_Options) -> (err: string, ok: bool) {
+	if len(opts.adapter) == 0 do return vm_load_file(vm, opts.contract)
+	src := strings.concatenate({`local t = require "term"
+local a = require("term.adapter.`, opts.adapter, `")
+assert(a.steps.serve, "adapter `, opts.adapter, ` has no serve steps: write a contract with a serve function")
+return t.contract { adapter = a, serve = function(text, req) return a.steps.serve(text, req) end }`}, context.temp_allocator)
+	return vm_load_chunk(vm, transmute([]u8)src, strings.concatenate({"adapter ", opts.adapter}, context.temp_allocator))
+}

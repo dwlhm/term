@@ -143,12 +143,12 @@ _mouse :: proc(r: ^Runner, m: ipc.Act_Mouse) -> bool {
 	return _act_and_settle(r, ipc.wire_bytes_written(&w))
 }
 
-// _act_and_settle sends input, then waits for the screen to answer it (a
-// screen that never goes quiet is not an error).
+// _act_and_settle sends input, then gives the screen up to
+// RUN_ACT_SETTLE_MAX to answer it (no answer, or no quiet, is not an error).
 @(private = "file")
 _act_and_settle :: proc(r: ^Runner, body: []u8) -> bool {
 	gen := run_act(r, body) or_return
-	run_settle(r, gen, r.expect)
+	run_settle(r, gen, min(r.expect, RUN_ACT_SETTLE_MAX))
 	return r.stop == .Ok
 }
 

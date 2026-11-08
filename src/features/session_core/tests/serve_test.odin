@@ -14,24 +14,31 @@ import ipc "../../../platform/ipc"
 
 // FAKE_AGENT: idle until a line comes, then working; "slow" stays working
 // until Esc (which cancels the turn), anything else replies after 300 ms.
-FAKE_AGENT :: `import os, time, tty
+FAKE_AGENT :: `import os, sys, time, tty
 tty.setraw(0)
-def st(s): os.write(1, ("\x1b]7501;state=%s:app=fake-agent\x1b\\" % s).encode())
-st("idle"); os.write(1, b"AGENT READY\r\n")
-buf = b""
+APP = sys.argv[1] if len(sys.argv) > 1 else "fake-agent"
+def st(s): os.write(1, ("\x1b]7501;state=%s:app=%s\x1b\\" % (s, APP)).encode())
+def prompt(text):
+    os.write(1, ("PROMPT:%s\r\n" % text[:200]).encode()); st("working")
+    if "slow" not in text:
+        time.sleep(0.3); os.write(1, ("REPLY:%s\r\n" % text[:40]).encode()); st("idle")
+os.write(1, b"\x1b[?2004h"); st("idle"); os.write(1, b"AGENT READY\r\n")
+buf, line = b"", b""
 while True:
     d = os.read(0, 4096)
     if not d: break
-    for ch in d:
-        if ch == 0x1b:
-            os.write(1, b"CANCELLED\r\n"); st("idle"); buf = b""
-        elif ch in (13, 10):
-            line = buf.decode(); buf = b""
-            os.write(1, ("PROMPT:%s\r\n" % line[:60]).encode()); st("working")
-            if "slow" not in line:
-                time.sleep(0.3); os.write(1, ("REPLY:%s\r\n" % line[:40]).encode()); st("idle")
+    buf += d
+    while buf:
+        if buf.startswith(b"\x1b[200~"):          # one paste is one prompt line
+            end = buf.find(b"\x1b[201~")
+            if end < 0: break
+            line += buf[6:end].replace(b"\r", b" "); buf = buf[end + 6:]
+        elif buf[:1] == b"\x1b":
+            os.write(1, b"CANCELLED\r\n"); st("idle"); line = b""; buf = buf[1:]
+        elif buf[:1] in (b"\r", b"\n"):
+            prompt(line.decode()); line = b""; buf = buf[1:]
         else:
-            buf += bytes([ch])
+            line += buf[:1]; buf = buf[1:]
 `
 
 @(private = "file")
@@ -131,4 +138,30 @@ _count :: proc(id: u32, text: string) -> (n: int) {
 	snap, _, _ := cli_snapshot(id)
 	for row in snap.screen do for run in row.runs do if run.text == text || (len(run.text) >= len(text) && run.text[:len(text)] == text) do n += 1
 	return
+}
+
+@(test)
+test_serve_with_a_bundled_adapter_and_no_contract :: proc(t: ^testing.T) {
+	tiers := tiers_start()
+	v := view_open()
+	id := view_attached(v, view_spawn(v, {"/usr/bin/env", "python3", "-I", "-c", FAKE_AGENT, "antigravity"}))
+	defer { view_close(v); tiers_stop(tiers) }
+	testing.expect(t, rig_wait_screen(id, "AGENT READY"))
+	testing.expect_value(t, auto.run_serve({adapter = "nope", contract = "nope"}), auto.Run_Code.Contract)
+	served := Served{opts = {adapter = "agy", contract = "agy"}}
+	served.thread = thread.create_and_start_with_data(&served, proc(data: rawptr) {
+		s := (^Served)(data)
+		s.code = auto.run_serve(s.opts)
+	})
+	rig_wait_listening(id)
+	pending, pc := _tell(id, "slow task", wait = false)
+	testing.expect(t, rig_wait_screen(id, "PROMPT:slow task"), "agy's serve steps pasted the task")
+	testing.expect(t, rig_wait_screen(id, "term session answer"), "with how to answer it")
+	testing.expect(t, rig_answer_as(id, pending.id, "done by agy"))
+	final, _ := tell_next(&pc, 10_000)
+	ipc.stream_conn_destroy(&pc)
+	testing.expect(t, final.status == .Done && final.text == "done by agy")
+	cli_kill(id)
+	thread.join(served.thread)
+	thread.destroy(served.thread)
 }

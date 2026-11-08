@@ -55,7 +55,8 @@ Reserved keys:
 
 Defaults, so a contract only says what is particular to it:
 
-- Every action waits for its target first and for the screen to settle after.
+- Every action waits for its target first, and gives the screen up to a second
+  to settle after it.
   Waits look at a new snapshot each time the screen changes; nothing sleeps.
 - The session is leased for the run: other drivers, `send`, broker requests
   and scrolling reads are refused. What a person types is held, not delivered.
@@ -140,7 +141,7 @@ return t.adapter {
 
 `require "term.adapter.<name>"` looks in `./.term/adapters/<name>.lua`, then
 `~/.config/term/adapters/<name>.lua` (or `$XDG_CONFIG_HOME/term/adapters`), then
-among the bundled adapters: `lazygit`, `fzf`, `agent`, `claude_code`, `opencode`.
+among the bundled adapters: `lazygit`, `fzf`, `agent`, `claude_code`, `opencode`, `agy`.
 A file replaces a bundled adapter of the same name.
 
 Test an adapter on saved screens with plain asserts:
@@ -167,7 +168,7 @@ assert(lg.detect(s))
    Esc. A permission prompt mid-turn is handed to a person.
 
 ```lua
-local cc = require "term.adapter.claude_code"   -- or term.adapter.opencode
+local cc = require "term.adapter.claude_code"   -- or term.adapter.opencode, term.adapter.agy
 return t.contract { adapter = cc, serve = function(text, req) return cc.steps.serve(text, req) end }
 ```
 

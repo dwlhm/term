@@ -14,8 +14,8 @@ import plat_ipc "../../platform/ipc"
 AUTO_VERBS := [?]Verb_Help{
 	{"run", "[--session id] [--trace file] <contract.lua> <function> [params…]", "Run a contract function on a session",
 		"The function returns steps; the runner leases the session and carries them out:\nactions wait for their target and for the screen to settle, a person's Esc or\n^C cancels (on.finally still runs), other input is held. Params: positional\nor --name value; missing ones are asked for. Questions (t.ask, t.handoff) are\nJSON lines on stdout, answered with `term auto reply`. Exit: 0 ok · 1 contract\n· 2 no core · 3 timed out · 4 the program ended · 5 session taken · 6 the\nscreen did not come or t.fail · 7 taken back or cancelled."},
-	{"serve", "[--session id] [--trace file] <contract.lua>", "Answer requests to a session's program with the contract's serve function",
-		"Waits in `next` as the session (found by the adapter's detect, or --session):\neach `term session tell <id> <text>` becomes serve(text, {id, from}) → steps on\nthe leased session. A request ends when the program answers it itself\n(`term session answer`), when the steps end (t.done answers it), or when its\nsender cancels it (the adapter's cancel steps run). Refused while the program\nreports working or blocked (OSC 7501). ^C stops serving."},
+	{"serve", "[--session id] [--trace file] <contract.lua | --adapter name>", "Answer requests to a session's program with the contract's serve function",
+		"Waits in `next` as the session (found by the adapter's detect, or --session):\neach `term session tell <id> <text>` becomes serve(text, {id, from}) → steps on\nthe leased session. A request ends when the program answers it itself\n(`term session answer`), when the steps end (t.done answers it), or when its\nsender cancels it (the adapter's cancel steps run). Refused while the program\nreports working or blocked (OSC 7501). ^C stops serving. --adapter name serves\nwith that adapter's own serve steps (claude_code, opencode, agy): no contract file."},
 	{"reply", "<id> <answer>", "Answer a running contract's question (t.ask, a param, the end of a handoff)", ""},
 	{"check", "<contract.lua>", "Validate a contract without running it",
 		"Loads it in the sandbox and checks its shape: api, functions, params,\non, timeouts. Prints its functions."},
@@ -201,11 +201,13 @@ _auto_run :: proc(args: []string) -> int {
 @(private = "file")
 _auto_serve :: proc(args: []string) -> int {
 	opts, rest, ok := _run_options(args)
-	if !ok || len(rest) != 1 {
-		fmt.eprintln("usage: term auto serve [--session id] [--trace file] <contract.lua>")
+	switch {
+	case ok && len(rest) == 2 && rest[0] == "--adapter": opts.adapter, opts.contract = rest[1], rest[1]
+	case ok && len(rest) == 1:                         opts.contract = rest[0]
+	case:
+		fmt.eprintln("usage: term auto serve [--session id] [--trace file] <contract.lua | --adapter name>")
 		return 1
 	}
-	opts.contract = rest[0]
 	return auto.run_exit_code(auto.run_serve(opts))
 }
 
