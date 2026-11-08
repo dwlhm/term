@@ -4,7 +4,7 @@ import "core:c"
 import "core:sys/posix"
 
 // Poll_Set backend on Linux: poll(2) keeps no per-call kernel state worth
-// caching (from platform/poller, which goes away in M2).
+// caching (formerly platform/poller).
 @(private)
 _Backend :: struct {
 	capacity: int,

@@ -31,7 +31,7 @@ ifeq ($(UNAME_S),Darwin)
 LUA_CFLAGS += -mmacosx-version-min=$(MIN_OS_VERSION)
 endif
 
-.PHONY: all lua test-automation test-ipc-contract ipc-example test-session-proto term release run term-debug harness-features run-harness-features harness-render-chrome run-harness-render-chrome harness-render-terminal run-harness-render-terminal harness-render-composer run-harness-composer test test-app test-holder test-session-core test-font test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-gpu check esctest clean help bench bench-quick bundle dmg portable dist install uninstall test-unicode-width gen-unicode bench-parser bench-session bench-throughput test-poller
+.PHONY: all lua test-automation test-ipc-contract ipc-example test-session-proto term release run term-debug harness-features run-harness-features harness-render-chrome run-harness-render-chrome harness-render-terminal run-harness-render-terminal harness-render-composer run-harness-composer test test-app test-holder test-session-core test-font test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-gpu check esctest clean help bench bench-quick bundle dmg portable dist install uninstall test-unicode-width gen-unicode bench-parser bench-session bench-throughput
 
 all: term harness-features harness-render-chrome harness-render-terminal harness-composer
 
@@ -162,7 +162,7 @@ bench-session:
 bench-throughput: term
 	python3 -I scripts/stress/throughput.py -t $(OUT_DIR)/term $(ARGS)
 
-test: test-app test-automation test-unicode-width test-terminal test-pty test-holder test-session-core test-font test-window test-session test-control test-ipc test-session-proto test-poller test-tabs test-multiplexer test-interaction test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-gpu test-features test-e2e
+test: test-app test-automation test-unicode-width test-terminal test-pty test-holder test-session-core test-font test-window test-session test-control test-ipc test-session-proto test-tabs test-multiplexer test-interaction test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-gpu test-features test-e2e
 
 # VT conformance suite (esctest2) driven inside a real Term pane; requires a GUI
 # session. Extra esctest flags: make esctest ESCTEST_ARGS="--include=CUP"
@@ -257,11 +257,15 @@ IPC_GREEN_LIST := \
 	test_P26_line_server_full \
 	test_P26_silent_line_client \
 	test_P27_watched_fd_closed_under_the_set \
+	test_P27_watch_waits_for_writable \
+	test_P27_want_nothing_pauses_a_readable_fd \
 	test_P28_ten_thousand_pokes_from_a_signal_handler \
 	test_P29_link_listener_closed_from_outside \
 	test_P29_server_listener_closed_from_outside \
 	test_P30_emfile_backs_off_then_accepts \
 	test_P31_replaced_socket_path_is_not_unlinked \
+	test_P32_lost_peer_is_not_replaced \
+	test_P32_drop_keeps_listening \
 	test_P32_garbage_is_closed \
 	test_P32_newest_peer_replaces_the_old \
 	test_P32_oldest_pending_hello_yields \
@@ -271,6 +275,7 @@ IPC_GREEN_LIST := \
 IPC_GREEN_TESTS := $(subst $(eval) ,$(COMMA),$(strip $(IPC_GREEN_LIST)))
 
 test-ipc: ipc-example
+	$(ODIN) test src/platform/ipc $(CHECK_FLAGS) $(TEST_FLAGS) -out:build/ipc-private
 	$(ODIN) test src/platform/ipc/tests $(CHECK_FLAGS) $(TEST_FLAGS)
 	$(ODIN) test src/platform/ipc/contract $(CHECK_FLAGS) $(TEST_FLAGS) -out:build/ipc-green \
 		-define:IPC_EXAMPLE=$(CURDIR)/$(IPC_EXAMPLE) -define:ODIN_TEST_NAMES=$(IPC_GREEN_TESTS)
@@ -294,9 +299,6 @@ test-ipc-contract: ipc-example $(LUA_LIB)
 
 test-session-proto:
 	$(ODIN) test src/features/session_proto/tests $(CHECK_FLAGS) $(TEST_FLAGS)
-
-test-poller:
-	$(ODIN) test src/platform/poller/tests $(CHECK_FLAGS) $(TEST_FLAGS)
 
 test-tabs:
 	$(ODIN) test src/features/tabs/tests $(TEST_FLAGS)

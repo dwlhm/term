@@ -4,7 +4,7 @@ package feature_session_core
 // holders that own the programs, served to viewers and the `term session` CLI.
 //
 // Invariants:
-// 1. Single-threaded wait loop (platform/poller); timeout = nearest deadline, -1 when idle.
+// 1. Single-threaded wait loop (an ipc.Poll_Set); deadline = the nearest one, none when idle.
 // 2. Buffers are allocated at start, per session at create/adopt and per
 //    connection at accept; the steady-state loop does not allocate.
 // 3. Every byte a program prints reaches its Terminal; viewers get the same
@@ -22,7 +22,6 @@ import "core:time"
 import terminal "../../core/terminal"
 import proto "../session_proto"
 import ipc "../../platform/ipc"
-import poller "../../platform/poller"
 import session "../session"
 
 CORE_MAX_SESSIONS :: 256
@@ -44,7 +43,8 @@ Core_Holder :: struct {
 	poisoned: bool, // its tails keep crashing cores: rebuild screens without them
 	handover: bool, // the last core left on purpose: tails are unanswered output
 	instance: u64,
-	conn:     ipc.Stream_Conn,
+	link:     ipc.Link,
+	broken:   bool, // its backlog overflowed: dropped after this round
 	path_buf: [128]u8,
 	path_len: int, // its socket: removed when the holder dies without unlinking it
 }
@@ -91,6 +91,9 @@ Core_Session :: struct {
 
 Core_Viewer :: struct {
 	used:          bool,
+	core:          ^Core,
+	index:         int,
+	watch:         ipc.Fd_Watch, // its fd in the Poll_Set
 	hello:         bool,
 	role:          proto.Stream_Role,
 	seq:           u32, // per accepted connection: a stitch answers only its own reader
@@ -114,8 +117,8 @@ Core :: struct {
 	empty_since: i64,
 	grace_ns:    i64,
 	owned:       bool, // SESSION_OWNED_ENV: sessions end with the owner's last viewer
-	stop_pipe:   [2]posix.FD, // core_request_stop / SIGTERM wake the wait
-	poller:      poller.Poller,
+	set:         ipc.Poll_Set, // core_request_stop / SIGTERM poke it
+	listen_watch: ipc.Fd_Watch,
 	holders:     [CORE_MAX_HOLDERS]Core_Holder,
 	sessions:    [CORE_MAX_SESSIONS]Core_Session,
 	viewers:     [CORE_MAX_VIEWERS]Core_Viewer,
@@ -144,7 +147,7 @@ _now_unix :: proc() -> i64 { return time.to_unix_seconds(time.now()) }
 // core_new allocates a core and every buffer its loop uses (no sockets yet).
 core_new :: proc() -> ^Core {
 	c := new(Core)
-	c.listen_fd, c.stop_pipe = -1, {-1, -1}
+	c.listen_fd = -1
 	c.build = ipc.ipc_build_id(c.build_buf[:])
 	c.next_id = 1
 	c.grace_ns = _grace_ms() * 1_000_000
@@ -164,9 +167,9 @@ core_new :: proc() -> ^Core {
 core_run :: proc() -> int {
 	c := core_new()
 	defer core_destroy(c)
+	if err := ipc.poll_set_init(&c.set, CORE_MAX_POLL); err.kind != .None do return 1
 	if !_core_listen(c) do return 0 if c.listen_fd == -2 else 1
-	if !_stop_pipe_open(c) do return 1
-	if !poller.poller_init(&c.poller, CORE_MAX_POLL) do return 1
+	_stop_open(c)
 	_install_stop_signals()
 	core_adopt_holders(c)
 	if core_current_holder(c) < 0 && !core_start_holder(c) do return 1
@@ -181,35 +184,6 @@ core_run :: proc() -> int {
 	return 0
 }
 
-// _remove_private_dir: a private session (TERM_SESSION_DIR) ends with its last
-// tier. rmdir only succeeds once the holder removed its socket (empty dir).
-@(private = "file")
-_remove_private_dir :: proc(c: ^Core) {
-	env: [256]u8
-	if v, _ := os.lookup_env(env[:], proto.SESSION_DIR_ENV); len(v) == 0 do return
-	posix.close(c.listen_fd)
-	ipc.ipc_unlink_if_ours(c.sock, c.listen_ino)
-	c.listen_fd = -1
-	cbuf: [256]u8
-	copy(cbuf[:len(cbuf) - 1], c.dir)
-	for _ in 0..<50 {
-		if posix.rmdir(cstring(raw_data(cbuf[:]))) == .OK do return
-		time.sleep(20 * time.Millisecond)
-	}
-}
-
-@(private = "file")
-_core_listen :: proc(c: ^Core) -> bool {
-	c.listen_fd = -1
-	err: ipc.Ipc_Error
-	if c.dir, err = proto.session_dir(c.dir_buf[:]); err != .None do return false
-	ok: bool
-	if c.sock, ok = proto.session_path(c.sock_buf[:], c.dir, CORE_SOCKET_NAME); !ok do return false
-	c.listen_fd, c.listen_ino, err = ipc.ipc_bind_listener(c.sock)
-	if err == .Already_Running do c.listen_fd = -2
-	return err == .None
-}
-
 @(private = "file")
 _grace_ms :: proc() -> i64 {
 	buf: [32]u8
@@ -218,13 +192,18 @@ _grace_ms :: proc() -> i64 {
 }
 
 core_destroy :: proc(c: ^Core) {
-	_stop_pipe_close(c)
+	_stop_close(c)
 	if c.listen_fd >= 0 {
+		ipc.poll_set_unwatch(&c.set, c.listen_watch)
 		posix.close(c.listen_fd)
 		ipc.ipc_unlink_if_ours(c.sock, c.listen_ino)
 	}
-	for &h in c.holders do if h.used do ipc.stream_conn_destroy(&h.conn)
-	for &v in c.viewers do if v.used do ipc.stream_conn_destroy(&v.conn)
+	for &h in c.holders do if h.used do ipc.link_close(&h.link)
+	for &v in c.viewers {
+		if !v.used do continue
+		ipc.poll_set_unwatch(&c.set, v.watch)
+		ipc.stream_conn_destroy(&v.conn)
+	}
 	for &s in c.sessions do if s.used do core_session_free(c, &s)
 	delete(c.viewer_out)
 	delete(c.replies)
@@ -237,7 +216,7 @@ core_destroy :: proc(c: ^Core) {
 	delete(c.typed)
 	delete(c.msg)
 	broker_destroy(&c.broker)
-	poller.poller_destroy(&c.poller)
+	ipc.poll_set_destroy(&c.set)
 	free(c)
 }
 

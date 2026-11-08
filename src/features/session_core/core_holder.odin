@@ -70,18 +70,15 @@ _holder_connect :: proc(c: ^Core, path: string) -> bool {
 	slot := -1
 	for &h, i in c.holders do if !h.used { slot = i; break }
 	if slot < 0 do return false
-	fd, err := ipc.ipc_connect(path, 500)
-	if err != .None do return false
 	h := &c.holders[slot]
 	h^ = {used = true}
 	h.path_len = copy(h.path_buf[:], path)
-	if !ipc.stream_conn_init(&h.conn, fd, CORE_HOLDER_CTL) {
-		_holder_drop(c, slot)
+	slash := strings.last_index_byte(path, '/')
+	at := ipc.Endpoint{path[:max(slash, 0)], path[slash + 1:]}
+	if err := ipc.link_dial(&h.link, at, proto.holder(), u8(proto.Stream_Role.Core), &c.set, {backlog = CORE_HOLDER_CTL}); err.kind != .None {
+		h^ = {}
 		return false
 	}
-	w := ipc.wire_writer(c.msg)
-	proto.enc_hello(&w, {version = proto.STREAM_PROTO_VERSION, role = .Core, build = c.build})
-	ipc.stream_send(&h.conn, proto.MSG_HELLO, 0, ipc.wire_bytes_written(&w))
 	return true
 }
 
@@ -92,23 +89,31 @@ _unlink_socket :: proc(path: string) {
 	posix.unlink(cstring(raw_data(cbuf[:])))
 }
 
-// core_holder_send queues one frame for a session's holder (dropped if the holder is gone).
+// core_holder_send queues one frame for a session's holder (dropped if the
+// holder is gone; one whose backlog overflows is dropped after this round).
 core_holder_send :: proc(c: ^Core, holder: int, kind: u8, id: u32, parts: ..[]u8) {
 	if holder < 0 || !c.holders[holder].used do return
-	ipc.stream_send(&c.holders[holder].conn, kind, id, ..parts)
+	h := &c.holders[holder]
+	if !h.broken && !ipc.link_send(&h.link, kind, id, ..parts) do h.broken = true
 }
 
-core_holder_service :: proc(c: ^Core, i: int, rev: posix.Poll_Event) {
+// core_holder_events handles what a holder link reported after a wait.
+core_holder_events :: proc(c: ^Core, i: int) {
 	h := &c.holders[i]
-	if .OUT in rev do ipc.stream_flush(&h.conn)
-	gone := ipc.stream_fill(&h.conn) != .None
-	for f in ipc.stream_next(&h.conn) {
-		if !_holder_frame(c, i, f) {
-			gone = true
-			break
+	for ev in ipc.link_next(&h.link) {
+		switch e in ev {
+		case ipc.Link_Up: // its WELCOME follows
+		case ipc.Link_Down:
+			_holder_drop(c, i)
+			return
+		case ipc.Link_Frame:
+			if !_holder_frame(c, i, ipc.Stream_Frame{e.kind, e.channel, e.body}) {
+				_holder_drop(c, i)
+				return
+			}
 		}
 	}
-	if gone || h.conn.err == .Bad_Frame || h.conn.err == .Overflow do _holder_drop(c, i)
+	if h.broken do _holder_drop(c, i)
 }
 
 // _holder_frame applies one holder frame; false = the holder broke protocol.
@@ -116,9 +121,6 @@ core_holder_service :: proc(c: ^Core, i: int, rev: posix.Poll_Event) {
 _holder_frame :: proc(c: ^Core, hi: int, f: ipc.Stream_Frame) -> bool {
 	r := ipc.wire_reader(f.payload)
 	switch f.kind {
-	case proto.MSG_HELLO:
-		_, _, ok := proto.stream_hello_check(f.payload, {.Holder})
-		return ok
 	case proto.MSG_WELCOME:
 		return _holder_welcome(c, hi, &r)
 	case proto.MSG_TAIL:
@@ -155,7 +157,7 @@ _holder_welcome :: proc(c: ^Core, hi: int, r: ^ipc.Wire_Reader) -> bool {
 	h.handover = wel.previous == 1
 	if h.poisoned do fmt.eprintfln("core: %d core crashes in 5 min: screens start empty (tails not replayed)", wel.crashes)
 	// Another build keeps what it runs, takes nothing new and exits when empty.
-	if !h.current do ipc.stream_send(&h.conn, proto.MSG_DRAIN, 0)
+	if !h.current do core_holder_send(c, hi, proto.MSG_DRAIN, 0)
 	for _ in 0..<wel.count {
 		held := proto.dec_held(r)
 		if !r.ok do return false
@@ -174,7 +176,7 @@ _holder_drop :: proc(c: ^Core, hi: int) {
 		}
 	}
 	h := &c.holders[hi]
-	ipc.stream_conn_destroy(&h.conn)
+	ipc.link_close(&h.link)
 	// A holder killed outright leaves its socket; nobody answers there any more.
 	path := string(h.path_buf[:h.path_len])
 	if len(path) > 0 && ipc.ipc_probe(path) == .Not_Running do _unlink_socket(path)
@@ -182,15 +184,25 @@ _holder_drop :: proc(c: ^Core, hi: int) {
 }
 
 // core_shutdown_holders: the last session and viewer are gone; holders exit too.
-core_shutdown_holders :: proc(c: ^Core) {
-	mode := [1]u8{u8(proto.Goodbye.Shutdown)}
-	for &h in c.holders {
-		if !h.used do continue
-		ipc.stream_send(&h.conn, proto.MSG_GOODBYE, 0, mode[:])
-		deadline := _now() + 1_000_000_000
-		for ipc.stream_wants_write(&h.conn) && h.conn.err == .None && _now() < deadline {
-			ipc.stream_flush(&h.conn)
-			time.sleep(5 * time.Millisecond)
-		}
+core_shutdown_holders :: proc(c: ^Core) { core_holders_goodbye(c, .Shutdown) }
+
+// core_holders_goodbye tells every holder how this core leaves and gives the
+// links up to 1 s to write it. Only the holder links move from here on: the
+// listener and the viewers are no longer waited on.
+core_holders_goodbye :: proc(c: ^Core, mode: proto.Goodbye) {
+	ipc.poll_set_unwatch(&c.set, c.listen_watch)
+	c.listen_watch = 0
+	for &v in c.viewers {
+		ipc.poll_set_unwatch(&c.set, v.watch)
+		v.watch = 0
+	}
+	b := [1]u8{u8(mode)}
+	for &h, i in c.holders do if h.used do core_holder_send(c, i, proto.MSG_GOODBYE, 0, b[:])
+	deadline := _now() + 1_000_000_000
+	for _now() < deadline {
+		queued := 0
+		for &h in c.holders do if h.used do queued += ipc.link_backlog(&h.link)
+		if queued == 0 do return
+		ipc.poll_set_wait(&c.set, deadline)
 	}
 }

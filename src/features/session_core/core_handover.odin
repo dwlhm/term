@@ -8,7 +8,6 @@ package feature_session_core
 
 import "core:fmt"
 import "core:os"
-import "core:time"
 import terminal "../../core/terminal"
 import extension "../../core/terminal/extension"
 import proto "../session_proto"
@@ -28,16 +27,7 @@ core_handover :: proc(c: ^Core) {
 	}
 	core_endpoints_save(c)
 	_save_broker(c)
-	mode := [1]u8{u8(proto.Goodbye.Handover)}
-	for &h in c.holders {
-		if !h.used do continue
-		ipc.stream_send(&h.conn, proto.MSG_GOODBYE, 0, mode[:])
-		deadline := _now() + 1_000_000_000
-		for ipc.stream_wants_write(&h.conn) && h.conn.err == .None && _now() < deadline {
-			ipc.stream_flush(&h.conn)
-			time.sleep(5 * time.Millisecond)
-		}
-	}
+	core_holders_goodbye(c, .Handover)
 }
 
 // core_restore_snapshot feeds a saved screen into a fresh Terminal (its

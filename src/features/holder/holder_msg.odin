@@ -8,26 +8,7 @@ import proto "../session_proto"
 import ipc "../../platform/ipc"
 import pty "../../platform/pty"
 
-_core_read :: proc(h: ^Holder, now: i64) {
-	err := ipc.stream_fill(&h.core)
-	_core_frames(h, now)
-	if err != .None && h.core_state == .Linked do _core_drop(h, now)
-}
-
-// _core_frames handles every complete frame already buffered.
-_core_frames :: proc(h: ^Holder, now: i64) {
-	for h.core_state == .Linked {
-		frame, ok := ipc.stream_next(&h.core)
-		if !ok {
-			if h.core.err == .Bad_Frame do _core_drop(h, now)
-			return
-		}
-		if !_core_message(h, frame, now) && h.core_state == .Linked do _core_drop(h, now)
-	}
-}
-
 // _core_message returns false for a malformed or unknown request.
-@(private = "file")
 _core_message :: proc(h: ^Holder, f: ipc.Stream_Frame, now: i64) -> bool {
 	switch f.kind {
 	case proto.MSG_SPAWN:      return _on_spawn(h, f)

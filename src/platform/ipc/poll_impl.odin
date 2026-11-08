@@ -35,6 +35,7 @@ _Ref :: struct {
 _Poll :: struct {
 	backend:   _Backend,
 	sources:   []_Source,
+	top:       int, // sources[top:] are all free: a round looks at sources[:top] only
 	pfds:      []posix.pollfd,
 	refs:      []_Ref, // refs[i] owns pfds[i] this round
 	wake:      [2]posix.FD,
@@ -55,6 +56,7 @@ _poll_add :: proc(p: ^_Poll, src: _Source) -> (id: u32, ok: bool) {
 		gen := s.gen + 1
 		s = src
 		s.gen, s.used = gen, true
+		p.top = max(p.top, i + 2)
 		return u32(gen) << 16 | u32(i + 1), true
 	}
 	return 0, false
@@ -70,7 +72,14 @@ _poll_source :: proc(p: ^_Poll, id: u32) -> ^_Source {
 
 @(private)
 _poll_remove :: proc(p: ^_Poll, id: u32) {
-	if s := _poll_source(p, id); s != nil do s^ = {fd = -1, gen = s.gen}
+	if s := _poll_source(p, id); s != nil do _poll_free_source(p, s)
+}
+
+// _poll_free_source frees a slot and lowers top past the free tail.
+@(private)
+_poll_free_source :: proc(p: ^_Poll, s: ^_Source) {
+	s^ = {fd = -1, gen = s.gen}
+	for p.top > 1 && !p.sources[p.top - 1].used do p.top -= 1
 }
 
 // _poll_round waits once (until due_ns, or the earliest source deadline;
@@ -78,7 +87,7 @@ _poll_remove :: proc(p: ^_Poll, id: u32) {
 @(private)
 _poll_round :: proc(p: ^_Poll, due_ns: i64) {
 	n, due := 0, due_ns
-	for &s, i in p.sources {
+	for &s, i in p.sources[:p.top] {
 		if !s.used do continue
 		if s.due > 0 && (due < 0 || s.due < due) do due = s.due
 		if s.fd < 0 || s.want == {} do continue
@@ -105,21 +114,23 @@ _poll_dispatch :: proc(p: ^_Poll, n: int) {
 @(private = "file")
 _poll_deadlines :: proc(p: ^_Poll) {
 	now := time.tick_now()._nsec
-	for &s in p.sources {
+	for &s in p.sources[:p.top] {
 		if !s.used || s.due <= 0 || s.due > now do continue
 		s.due = 0
 		s.on_due(s.data)
 	}
 }
 
-// _watch_ready: Readable while there is input, then Ended (and forgotten) on NVAL/ERR/HUP.
+// _watch_ready: Readable while there is input, Writable while there is room,
+// then Ended (and forgotten) on NVAL/ERR/HUP.
 @(private = "file")
 _watch_ready :: proc(p: ^_Poll, s: ^_Source, rev: posix.Poll_Event) {
 	cb, data, gen := s.watch, s.data, s.gen
 	ended := rev & {.NVAL, .ERR, .HUP} != {}
 	if .IN in rev && .NVAL not_in rev do cb(data, .Readable)
+	if .OUT in rev && !ended && s.used && s.gen == gen do cb(data, .Writable)
 	if !ended || !s.used || s.gen != gen do return // unwatched (or replaced) in its callback
-	s^ = {fd = -1, gen = s.gen}
+	_poll_free_source(p, s)
 	cb(data, .Ended)
 }
 

@@ -1,8 +1,9 @@
 package platform_ipc_contract
 
 // P32: link_listen against garbage, a HELLO that trickles in, more pending
-// HELLOs than allowed, and a newer peer. The listening side's memory is
-// counted on its own allocator and must not move after link_listen.
+// HELLOs than allowed, a newer peer (its Link_Down says replaced), a peer
+// that just leaves, and link_drop (the listener stays). The listening side's
+// memory is counted on its own allocator and must not move after link_listen.
 
 import "core:mem"
 import "core:sys/posix"
@@ -16,7 +17,7 @@ _Listen :: struct {
 	l:      ipc.Link,
 	track:  mem.Tracking_Allocator,
 	base:   i64,     // listen side bytes right after link_listen
-	events: [8]u8,   // 'U' / 'D' in the order they came
+	events: [8]u8,   // 'U' / 'D' / 'R' (Down, replaced by a newer peer) in order
 	n:      int,
 }
 
@@ -70,7 +71,7 @@ _mark :: proc(ls: ^_Listen, ev: ipc.Link_Event) {
 	mark: u8
 	#partial switch _ in ev {
 	case ipc.Link_Up:   mark = 'U'
-	case ipc.Link_Down: mark = 'D'
+	case ipc.Link_Down: mark = 'R' if ev.(ipc.Link_Down).replaced else 'D'
 	}
 	if mark != 0 && ls.n < len(ls.events) do ls.events[ls.n], ls.n = mark, ls.n + 1
 }
@@ -156,6 +157,47 @@ test_P32_newest_peer_replaces_the_old :: proc(t: ^testing.T) {
 	_pump(&ls, 100, &d)
 	if !expect_ok(t, ipc.link_dial(&d.b, {dir, "l"}, link_protocol(), TEST_ROLE_CLIENT, &d.set), "dial b") do return
 	_pump(&ls, 100, &d)
-	testing.expect_value(t, string(ls.events[:ls.n]), "UDU")
+	testing.expect_value(t, string(ls.events[:ls.n]), "URU")
 	testing.expect(t, d.a_down, "the replaced peer saw no Link_Down")
+}
+
+@(test)
+test_P32_lost_peer_is_not_replaced :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, 10 * time.Second)
+	dir := test_dir()
+	defer test_dir_remove(dir)
+	ls: _Listen
+	if !_listen_open(t, &ls, {dir, "l"}, {}) do return
+	defer _listen_close(t, &ls)
+	d: _Dial
+	if !expect_ok(t, ipc.poll_set_init(&d.set, 8), "poll_set_init") do return
+	defer ipc.poll_set_destroy(&d.set)
+	if !expect_ok(t, ipc.link_dial(&d.a, {dir, "l"}, link_protocol(), TEST_ROLE_CLIENT, &d.set), "dial a") do return
+	_pump(&ls, 100, &d)
+	ipc.link_close(&d.a)
+	_pump(&ls, 100, &d)
+	testing.expect_value(t, string(ls.events[:ls.n]), "UD")
+}
+
+@(test)
+test_P32_drop_keeps_listening :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, 10 * time.Second)
+	dir := test_dir()
+	defer test_dir_remove(dir)
+	ls: _Listen
+	if !_listen_open(t, &ls, {dir, "l"}, {}) do return
+	defer _listen_close(t, &ls)
+	d: _Dial
+	if !expect_ok(t, ipc.poll_set_init(&d.set, 8), "poll_set_init") do return
+	defer ipc.poll_set_destroy(&d.set)
+	defer ipc.link_close(&d.a)
+	defer ipc.link_close(&d.b)
+	if !expect_ok(t, ipc.link_dial(&d.a, {dir, "l"}, link_protocol(), TEST_ROLE_CLIENT, &d.set), "dial a") do return
+	_pump(&ls, 100, &d)
+	ipc.link_drop(&ls.l) // the caller ends it: no Link_Down for it
+	_pump(&ls, 100, &d)
+	testing.expect(t, d.a_down, "the dropped peer saw no Link_Down")
+	if !expect_ok(t, ipc.link_dial(&d.b, {dir, "l"}, link_protocol(), TEST_ROLE_CLIENT, &d.set), "dial b") do return
+	_pump(&ls, 100, &d)
+	testing.expect_value(t, string(ls.events[:ls.n]), "UU")
 }

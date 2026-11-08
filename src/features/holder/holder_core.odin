@@ -1,92 +1,50 @@
 package feature_holder
 
-// The core link: accepting, the HELLO handshake (newest wins), WELCOME and
-// TAILs, flushing, and closing (BYE + linger).
+// The core link (an ipc.Link: HELLO, newest wins and the pending HELLOs live
+// there): WELCOME and TAILs when a core arrives, its frames, backpressure,
+// and closing (BYE + linger).
 
 import "core:fmt"
 import "core:os"
-import "core:sys/posix"
 import proto "../session_proto"
 import ipc "../../platform/ipc"
 
-_accept_all :: proc(h: ^Holder, now: i64) {
-	for {
-		fd := posix.accept(h.listen_fd, nil, nil)
-		if fd < 0 {
-			if posix.errno() == .EINTR do continue
-			return
+// _core_events handles what the link reports after a wait.
+_core_events :: proc(h: ^Holder, now: i64) {
+	for ev in ipc.link_next(&h.link) {
+		switch e in ev {
+		case ipc.Link_Up:   _core_up(h, now)
+		case ipc.Link_Down: _core_down(h, e, now)
+		case ipc.Link_Frame:
+			if h.core_state != .Linked do continue // Closing: only BYE goes out
+			if !_core_message(h, ipc.Stream_Frame{e.kind, e.channel, e.body}, now) do _core_drop(h, now)
 		}
-		uid, ok := ipc.ipc_peer_uid(fd)
-		if !ok || uid != posix.getuid() || !ipc.ipc_set_nonblocking_cloexec(fd) {
-			posix.close(fd)
-			continue
-		}
-		slot := &h.pending[0]
-		for &p in h.pending {
-			if p.fd < 0 || p.deadline < slot.deadline do slot = &p
-			if p.fd < 0 do break
-		}
-		_pending_close(slot) // full: the oldest attempt gives way
-		slot.fd, slot.len, slot.deadline = fd, 0, now + _ms(HOLDER_HELLO_MS)
 	}
 }
 
-_pending_close :: proc(p: ^Pending) {
-	if p.fd >= 0 do posix.close(p.fd)
-	p.fd, p.len = -1, 0
-}
-
-// _pending_read collects one HELLO frame; anything else closes the attempt.
-_pending_read :: proc(h: ^Holder, index: int, now: i64) {
-	p := &h.pending[index]
-	n := posix.recv(p.fd, &p.buf[p.len], uint(len(p.buf) - p.len), {})
-	if n < 0 && (posix.errno() == .EAGAIN || posix.errno() == .EINTR) do return
-	if n <= 0 {
-		_pending_close(p)
-		return
-	}
-	p.len += int(n)
-	if p.len < ipc.STREAM_HEADER do return
-	kind, _, length, valid := ipc.stream_parse_header(p.buf[:p.len])
-	if !valid || kind != proto.MSG_HELLO || length > len(p.buf) - ipc.STREAM_HEADER {
-		_pending_close(p)
-		return
-	}
-	end := ipc.STREAM_HEADER + length
-	if p.len < end do return
-	_, _, ok := proto.stream_hello_check(p.buf[ipc.STREAM_HEADER:end], {.Core})
-	if !ok || h.stopping {
-		_pending_close(p)
-		return
-	}
-	_core_link(h, p, end, now)
-}
-
-// _core_link makes p the core (an older link is cut) and greets it with
-// HELLO, WELCOME and, as the backlog allows, one TAIL per session.
+// _core_up greets a new core with WELCOME and, as the backlog allows, one
+// TAIL per session (the link already sent our HELLO).
 @(private = "file")
-_core_link :: proc(h: ^Holder, p: ^Pending, hello_end: int, now: i64) {
-	_core_destroy(h) // an older core loses the holder (previous stays crash)
-	fd := p.fd
-	p.fd = -1
-	if !ipc.stream_conn_init(&h.core, fd, HOLDER_CTL_CAP) do return
-	rest := p.buf[hello_end:p.len]
-	copy(h.core.in_buf, rest) // frames the core pipelined behind its HELLO
-	h.core.in_len = len(rest)
-	p.len = 0
+_core_up :: proc(h: ^Holder, now: i64) {
+	if h.stopping {
+		ipc.link_drop(&h.link) // on the way out: no new core
+		return
+	}
 	h.core_state = .Linked
 	_supervisor_linked(&h.sup)
-	_send_hello(h)
 	_send_welcome(h)
 	h.previous = PREVIOUS_CRASH // until the core says GOODBYE
-	_core_frames(h, now)
 }
 
+// _core_down: replaced by a newer core (its Up follows), or gone.
 @(private = "file")
-_send_hello :: proc(h: ^Holder) {
-	w := ipc.wire_writer(h.msg_buf[:])
-	proto.enc_hello(&w, {version = proto.STREAM_PROTO_VERSION, role = .Holder, build = h.build})
-	_core_send(h, proto.MSG_HELLO, 0, ipc.wire_bytes_written(&w))
+_core_down :: proc(h: ^Holder, e: ipc.Link_Down, now: i64) {
+	if e.replaced {
+		_core_destroy(h) // an older core loses the holder (previous stays crash)
+		return
+	}
+	if h.core_state == .Linked do _core_crashed(h, now)
+	_core_closed(h, now)
 }
 
 @(private = "file")
@@ -116,7 +74,7 @@ _send_tails :: proc(h: ^Holder) {
 		s := &h.sessions[slot]
 		if s.tailed do continue
 		if h.core_state != .Linked do return
-		if ipc.stream_queued(&h.core) + ipc.STREAM_HEADER + s.tail.len > HOLDER_BACKLOG do return
+		if ipc.link_backlog(&h.link) + ipc.STREAM_HEADER + s.tail.len > HOLDER_BACKLOG do return
 		front := ipc.ring_front(&s.tail)
 		wrapped := s.tail.buf[:s.tail.len - len(front)]
 		if !_core_send(h, proto.MSG_TAIL, s.id, front, wrapped) do return
@@ -125,13 +83,11 @@ _send_tails :: proc(h: ^Holder) {
 	}
 }
 
-// _core_send queues a frame; a core that let the control queue fill up is
-// dropped (it stopped reading while asking for more).
+// _core_send queues a frame; a core that let the backlog fill up is dropped
+// (it stopped reading while asking for more).
 _core_send :: proc(h: ^Holder, kind: u8, channel: u32, parts: ..[]u8) -> bool {
 	if h.core_state == .None do return false
-	total := ipc.STREAM_HEADER
-	for p in parts do total += len(p)
-	if len(h.core.ctl.buf) - h.core.ctl.len < total || !ipc.stream_send(&h.core, kind, channel, ..parts) {
+	if !ipc.link_send(&h.link, kind, channel, ..parts) {
 		fmt.eprintln("holder: core stopped reading, dropping the link")
 		_core_drop(h, _now())
 		return false
@@ -139,13 +95,10 @@ _core_send :: proc(h: ^Holder, kind: u8, channel: u32, parts: ..[]u8) -> bool {
 	return true
 }
 
-// _core_pump runs after every poll round: tails, flush, linger end, pause.
+// _core_pump runs after every wait: tails, linger end, pause.
 _core_pump :: proc(h: ^Holder, now: i64) {
 	_send_tails(h)
-	if h.core_state != .None && ipc.stream_wants_write(&h.core) {
-		if ipc.stream_flush(&h.core) != .None do _core_drop(h, now)
-	}
-	if h.core_state == .Closing && !ipc.stream_wants_write(&h.core) do _core_closed(h, now)
+	if h.core_state == .Closing && ipc.link_backlog(&h.link) == 0 do _core_closed(h, now)
 	_update_pause(h, now)
 }
 
@@ -162,12 +115,15 @@ _core_begin_close :: proc(h: ^Holder, now: i64) {
 
 // _core_drop ends a link that failed or misbehaved: a crash for the next core.
 _core_drop :: proc(h: ^Holder, now: i64) {
-	if h.core_state == .Linked {
-		h.previous = PREVIOUS_CRASH
-		h.crash_times[h.crash_next] = now
-		h.crash_next = (h.crash_next + 1) % HOLDER_CRASH_MEMORY
-	}
+	if h.core_state == .Linked do _core_crashed(h, now)
 	_core_closed(h, now)
+}
+
+@(private = "file")
+_core_crashed :: proc(h: ^Holder, now: i64) {
+	h.previous = PREVIOUS_CRASH
+	h.crash_times[h.crash_next] = now
+	h.crash_next = (h.crash_next + 1) % HOLDER_CRASH_MEMORY
 }
 
 // HOLDER_CRASH_MEMORY crashes are remembered; WELCOME reports those of the last 5 minutes
@@ -181,7 +137,9 @@ _recent_crashes :: proc(h: ^Holder, now: i64) -> u32 {
 	return n
 }
 
+// _core_closed ends our side of the link (the listener stays for the next core).
 _core_closed :: proc(h: ^Holder, now: i64) {
+	ipc.link_drop(&h.link)
 	_core_destroy(h)
 	_supervisor_unlinked(&h.sup, now)
 	if h.stopping do h.done = true
@@ -189,7 +147,6 @@ _core_closed :: proc(h: ^Holder, now: i64) {
 
 _core_destroy :: proc(h: ^Holder) {
 	if h.core_state == .None do return
-	ipc.stream_conn_destroy(&h.core)
 	h.core_state = .None
 	for slot in h.live[:h.count] do h.sessions[slot].tailed = false
 	_update_pause(h, _now())

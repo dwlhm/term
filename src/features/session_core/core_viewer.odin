@@ -38,6 +38,7 @@ _viewer_drop :: proc(c: ^Core, vi: int) {
 	broker_viewer_gone(&c.broker, vi)
 	core_broker_apply(c)
 	core_endpoints_owner_gone(c, vi)
+	ipc.poll_set_unwatch(&c.set, c.viewers[vi].watch)
 	ipc.stream_conn_destroy(&c.viewers[vi].conn)
 	c.viewers[vi] = {}
 	if c.owned && was_viewer && !_any_viewer(c) do for &s in c.sessions do if s.used do core_session_kill(c, &s)

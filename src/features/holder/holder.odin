@@ -2,17 +2,17 @@ package feature_holder
 
 // Holder (`term --holder <socket>`): a process supervisor with no VT parser.
 // It owns every PTY so shells survive a GUI or core crash; one core at a time
-// drives it over a framed ipc.Stream_Conn (channel = session id).
+// drives it over an ipc.Link (proto.holder(), channel = session id): the
+// newest core to pass HELLO takes the holder.
 //
 // Invariants:
-// 1. One thread, one wait (platform/poller: a kqueue kept across rounds on
-//    macOS) over the listener, pending connections, the core link, every
-//    session master and a SIGCHLD self-pipe. The timeout is
-//    the nearest deadline, -1 when idle (zero wakeups). A round reads the
-//    clock once, visits only live sessions and drains each ready master into
-//    one OUTPUT frame (macOS hands out ~1 KiB per read).
-// 2. Allocation only at spawn (tail + input rings) and at connect (the
-//    core's Stream_Conn); the steady-state loop never allocates.
+// 1. One thread, one wait (an ipc.Poll_Set) over the link, every session
+//    master (poll_set_watch) and SIGCHLD (poll_set_poke from the handler).
+//    The deadline is the nearest one, none when idle (zero wakeups). A round
+//    reads the clock once, visits only live sessions and drains each ready
+//    master into one OUTPUT frame (macOS hands out ~1 KiB per read).
+// 2. Allocation only at spawn (tail + input rings) and at open (the link's
+//    buffers, reused by every core); the steady-state loop never allocates.
 // 3. PTYs are always read: into the 1 MiB overwrite-oldest tail and, with a
 //    core, as MSG_OUTPUT. Reading pauses only while more than HOLDER_BACKLOG
 //    is queued for the core, so a stalled core slows programs down instead
@@ -23,10 +23,9 @@ package feature_holder
 //    at EOF) or HOLDER_EXIT_FLOW_MS of flowing time after the child exit.
 
 import "core:fmt"
-import "core:sys/posix"
+import "core:strings"
 import proto "../session_proto"
 import ipc "../../platform/ipc"
-import poller "../../platform/poller"
 
 HOLDER_MAX_SESSIONS :: 256
 HOLDER_TAIL_BYTES   :: 1 << 20
@@ -60,14 +59,8 @@ Session :: struct {
 	tailed:        bool, // the current core has this session's TAIL: OUTPUT may flow
 	exit:          proto.Exit_Msg,
 	exit_deadline: i64, // reap + HOLDER_EXIT_FLOW_MS, shifted by paused time
-}
-
-// Pending is an accepted connection that has not sent its HELLO yet.
-Pending :: struct {
-	fd:       posix.FD, // -1 = free
-	buf:      [512]u8,
-	len:      int,
-	deadline: i64,
+	holder:        ^Holder,
+	watch:         ipc.Fd_Watch, // the master in the Poll_Set; 0 once at EOF
 }
 
 Core_State :: enum u8 {
@@ -76,27 +69,16 @@ Core_State :: enum u8 {
 	Closing, // BYE queued: only flushed until empty or the linger deadline
 }
 
-Poll_Kind :: enum u8 { Listener, Signal, Pending, Core, Session }
-
-Poll_Tag :: struct {
-	kind:  Poll_Kind,
-	index: int,
-}
-
-HOLDER_MAX_POLL :: 3 + HOLDER_MAX_PENDING + HOLDER_MAX_SESSIONS
+HOLDER_POLL_CAP :: HOLDER_MAX_SESSIONS + 4 // the masters, the link and its pending HELLOs
 
 Holder :: struct {
-	listen_fd:     posix.FD,
-	listen_ino:    u64,
-	path_buf:      [256]u8,
-	path_len:      int,
+	set:           ipc.Poll_Set,
+	link:          ipc.Link,
 	build_buf:     [64]u8,
 	build:         string, // ipc_build_id: holders of another build get drained
 	sessions:      [HOLDER_MAX_SESSIONS]Session,
 	count:         int,
 	live:          [HOLDER_MAX_SESSIONS]u16, // slots in use: live[:count], unordered
-	pending:       [HOLDER_MAX_PENDING]Pending,
-	core:          ipc.Stream_Conn,
 	core_state:    Core_State,
 	core_deadline: i64, // Closing: linger end
 	previous:      u8, // how the last core link ended, for the next WELCOME
@@ -112,9 +94,6 @@ Holder :: struct {
 	sup:           Supervisor,
 	signals:       Signal_State,
 	orphans:       [HOLDER_MAX_SESSIONS]i32, // released, not yet reaped children
-	poller:        poller.Poller,
-	pfds:          [HOLDER_MAX_POLL]posix.pollfd,
-	tags:          [HOLDER_MAX_POLL]Poll_Tag,
 	msg_buf:       [16 * 1024]u8, // WELCOME / PROC_INFO encoding scratch
 	read_buf:      [HOLDER_READ_CHUNK]u8, // one drained frame (a stack array would be zeroed per read)
 }
@@ -128,19 +107,15 @@ holder_run :: proc(socket_path: string) -> int {
 		_holder_close(h)
 		return 1
 	}
-	now := _now() // one clock read per round: taken when poll returns
+	now := _now() // one clock read per round: taken when the wait returns
 	for !h.done {
 		_holder_tick(h, now)
 		if h.done do break
-		n := _poll_build(h)
-		ready := poller.poller_poll(&h.poller, h.pfds[:n], int(_poll_timeout(h, now)))
+		_holder_wants(h)
+		ipc.poll_set_wait(&h.set, _holder_due(h, now))
 		now = _now()
-		if ready < 0 && posix.errno() != .EINTR {
-			fmt.eprintfln("holder: poll failed: %v", posix.errno())
-			h.exit_code = 1
-			break
-		}
-		if ready > 0 do _poll_dispatch(h, n, now)
+		if ipc.poll_set_woken(&h.set) do _reap_all(h, now) // SIGCHLD
+		_core_events(h, now)
 		_core_pump(h, now)
 	}
 	code := h.exit_code
@@ -150,26 +125,19 @@ holder_run :: proc(socket_path: string) -> int {
 
 @(private = "file")
 _holder_open :: proc(h: ^Holder, socket_path: string) -> bool {
-	h.listen_fd = -1
-	for &p in h.pending do p.fd = -1
-	if !poller.poller_init(&h.poller, HOLDER_MAX_POLL) {
-		fmt.eprintfln("holder: cannot create its poller: %v", posix.errno())
+	if err := ipc.poll_set_init(&h.set, HOLDER_POLL_CAP); err.kind != .None {
+		fmt.eprintfln("holder: cannot create its poll set: %s", ipc.error_message(err))
 		return false
 	}
-	if len(socket_path) >= len(h.path_buf) {
-		fmt.eprintln("holder: socket path too long")
+	slash := strings.last_index_byte(socket_path, '/')
+	at := ipc.Endpoint{socket_path[:max(slash, 0)], socket_path[slash + 1:]}
+	opts := ipc.Link_Opts{hello_ms = HOLDER_HELLO_MS, pending = HOLDER_MAX_PENDING, backlog = HOLDER_CTL_CAP, role = u8(proto.Stream_Role.Holder)}
+	if err := ipc.link_listen(&h.link, at, proto.holder(), &h.set, opts); err.kind != .None {
+		fmt.eprintfln("holder: cannot listen on %s: %s (%s)", socket_path, ipc.error_message(err), err.reason)
 		return false
 	}
-	copy(h.path_buf[:], socket_path)
-	h.path_len = len(socket_path)
-	fd, ino, err := ipc.ipc_bind_listener(socket_path)
-	if err != .None {
-		fmt.eprintfln("holder: cannot listen on %s: %s", socket_path, ipc.ipc_error_message(err))
-		return false
-	}
-	h.listen_fd, h.listen_ino = fd, ino
-	if !_signals_install(&h.signals) {
-		fmt.eprintln("holder: cannot install the SIGCHLD pipe")
+	if !_signals_install(&h.signals, &h.set) {
+		fmt.eprintln("holder: cannot install the SIGCHLD handler")
 		return false
 	}
 	h.instance = _random_u64()
@@ -183,15 +151,10 @@ _holder_open :: proc(h: ^Holder, socket_path: string) -> bool {
 @(private = "file")
 _holder_close :: proc(h: ^Holder) {
 	_forget_all(h)
-	_core_destroy(h)
-	for &p in h.pending do _pending_close(&p)
-	if h.listen_fd >= 0 {
-		posix.close(h.listen_fd)
-		ipc.ipc_unlink_if_ours(string(h.path_buf[:h.path_len]), h.listen_ino)
-	}
+	ipc.link_close(&h.link) // unlinks the socket while it is still ours
 	_orphans_reap_wait(h)
 	_signals_restore(&h.signals)
-	poller.poller_destroy(&h.poller)
+	ipc.poll_set_destroy(&h.set)
 }
 
 // _holder_finish ends the holder: BYE to a linked core (flushed within the

@@ -72,12 +72,17 @@ _link_attach :: proc(k: ^_Link, fd: posix.FD, read_ahead: []u8, due: i64) -> boo
 
 // _link_lost ends the current peer and reports why.
 @(private)
-_link_lost :: proc(k: ^_Link, err: Error) {
+_link_lost :: proc(k: ^_Link, err: Error, replaced := false) {
+	_link_detach(k)
+	_link_push(k, Link_Down{err, replaced})
+	if k.dialed do k.ended = true
+}
+
+@(private)
+_link_detach :: proc(k: ^_Link) {
 	_poll_remove(k.set, k.conn_src)
 	stream_conn_detach(&k.conn)
 	k.conn_src, k.up, k.closing = 0, false, false
-	_link_push(k, Link_Down{err})
-	if k.dialed do k.ended = true
 }
 
 @(private)

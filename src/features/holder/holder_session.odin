@@ -18,12 +18,7 @@ _session_find :: proc(h: ^Holder, id: u32) -> ^Session {
 // only allocations a session makes.
 _session_spawn :: proc(h: ^Holder, id: u32, m: ^proto.Spawn_Msg) -> (s: ^Session, reason: string) {
 	index := -1
-	for slot, i in h.sessions {
-		if !slot.used {
-			index = i
-			break
-		}
-	}
+	for slot, i in h.sessions do if !slot.used { index = i; break }
 	if index < 0 do return nil, "too many sessions"
 	cfg := pty.Pty_Config{
 		shell  = m.argv[0],
@@ -54,12 +49,26 @@ _session_spawn :: proc(h: ^Holder, id: u32, m: ^proto.Spawn_Msg) -> (s: ^Session
 	s.input.buf = make([]u8, HOLDER_INPUT_BYTES)
 	h.live[h.count] = u16(index)
 	h.count += 1
+	s.holder = h
+	_session_watch(h, s)
 	return s, ""
+}
+
+// _session_watch puts the master in the Poll_Set (what it waits for is set
+// each round by _holder_wants).
+_session_watch :: proc(h: ^Holder, s: ^Session) {
+	id, err := ipc.poll_set_watch(&h.set, posix.FD(s.master), _session_ready, s, {})
+	if err.kind != .None {
+		fmt.eprintfln("holder: session %d cannot be watched: %s", s.id, ipc.error_message(err))
+		return
+	}
+	s.watch = id
 }
 
 // _session_forget releases a session. Output not at EOF (someone still holds
 // the tty) or a live child → pty_hangup; an unreaped child becomes an orphan.
 _session_forget :: proc(h: ^Holder, s: ^Session) {
+	ipc.poll_set_unwatch(&h.set, s.watch)
 	if !s.eof || !s.reaped {
 		pty.pty_hangup(s.master, s.pid)
 		if !s.reaped do _orphan_add(h, s.pid)
@@ -102,7 +111,7 @@ _session_drain :: proc(h: ^Holder, s: ^Session, now: i64) {
 	if _backlogged(h) do return
 	send := h.core_state == .Linked && s.tailed
 	budget := len(h.read_buf)
-	if send do budget = min(budget, len(h.core.ctl.buf) - h.core.ctl.len - ipc.STREAM_HEADER)
+	if send do budget = min(budget, HOLDER_CTL_CAP - ipc.link_backlog(&h.link) - ipc.STREAM_HEADER)
 	got, ended := 0, false
 	for got < budget {
 		n := posix.read(posix.FD(s.master), &h.read_buf[got], uint(budget - got))
@@ -111,7 +120,7 @@ _session_drain :: proc(h: ^Holder, s: ^Session, now: i64) {
 			continue
 		}
 		if n < 0 && posix.errno() == .EINTR do continue
-		ended = n == 0 || posix.errno() != .EAGAIN || (got == 0 && _master_hung_up(s))
+		ended = n == 0 || posix.errno() != .EAGAIN
 		break
 	}
 	if got > 0 {
@@ -120,16 +129,10 @@ _session_drain :: proc(h: ^Holder, s: ^Session, now: i64) {
 	}
 	if !ended do return
 	s.eof = true // EOF / EIO: the reader is done
+	ipc.poll_set_unwatch(&h.set, s.watch)
+	s.watch = 0
 	ipc.ring_clear(&s.input)
 	_session_check_exit(h, s, now)
-}
-
-// _master_hung_up: an EAGAIN with nothing read is a spurious wakeup unless the
-// master reports a hangup with nothing left to read.
-@(private = "file")
-_master_hung_up :: proc(s: ^Session) -> bool {
-	pfd := posix.pollfd{fd = posix.FD(s.master), events = {.IN}}
-	return posix.poll(&pfd, 1, 0) > 0 && pfd.revents & {.HUP, .ERR} != {} && .IN not_in pfd.revents
 }
 
 _session_write :: proc(s: ^Session) {

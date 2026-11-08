@@ -23,7 +23,8 @@ Link_Up :: struct {}
 // .Listener_Broken) the link can no longer accept; that one comes once and
 // link_next returns false afterwards.
 Link_Down :: struct {
-	err: Error,
+	err:      Error,
+	replaced: bool, // a newer peer took the link (listening side)
 }
 
 Link_Frame :: struct {
@@ -71,6 +72,15 @@ link_dial :: proc(l: ^Link, at: Endpoint, proto: Protocol, role: u8, set: ^Poll_
 	_link_send_hello(k, role)
 	l._impl = k
 	return {}
+}
+
+// link_drop ends the current peer now (no Link_Down: the caller knows); the
+// listening side keeps accepting the next one.
+link_drop :: proc(l: ^Link) {
+	k := _link(l)
+	if k == nil || !k.conn.open do return
+	_link_detach(k)
+	if k.dialed do k.ended = true
 }
 
 link_close :: proc(l: ^Link) {

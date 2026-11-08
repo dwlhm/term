@@ -49,12 +49,8 @@ _link_accept :: proc(data: rawptr, fd: posix.FD) {
 _link_broken :: proc(data: rawptr) {
 	k := (^_Link)(data)
 	for &pd in k.pending do if pd.src != 0 do _pending_drop(&pd)
-	if k.conn.open {
-		_poll_remove(k.set, k.conn_src)
-		stream_conn_detach(&k.conn)
-		k.conn_src, k.up, k.closing = 0, false, false
-	}
-	_link_push(k, Link_Down{{kind = .Listener_Broken, reason = "the link can no longer accept"}})
+	if k.conn.open do _link_detach(k)
+	_link_push(k, Link_Down{err = {kind = .Listener_Broken, reason = "the link can no longer accept"}})
 	k.ended = true
 }
 
@@ -111,7 +107,7 @@ _pending_check :: proc(pd: ^_Pending) {
 
 @(private = "file")
 _link_promote :: proc(k: ^_Link, pd: ^_Pending, hello_end: int) {
-	if k.conn.open do _link_lost(k, {kind = .Closed, reason = "a newer peer took the link"})
+	if k.conn.open do _link_lost(k, {kind = .Closed, reason = "a newer peer took the link"}, replaced = true)
 	fd, extra := pd.fd, pd.buf[hello_end:pd.n]
 	_poll_remove(k.set, pd.src)
 	defer pd^ = {link = k}

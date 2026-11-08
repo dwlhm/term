@@ -19,6 +19,10 @@ Fd_Event :: enum u8 {
 
 Fd_Watch :: distinct u32
 
+// Fd_Want: what a watch waits for now; {} pauses it (and then Ended cannot
+// be noticed either, since the fd is not waited on).
+Fd_Want :: bit_set[Fd_Event; u8]
+
 @(private = "file")
 _POLL_SET_MAX :: 4096 // capacity bound
 
@@ -39,6 +43,7 @@ poll_set_init :: proc(set: ^Poll_Set, capacity: int) -> Error {
 	p.pfds = make([]posix.pollfd, capacity + 1)
 	p.refs = make([]_Ref, capacity + 1)
 	p.sources[0] = {fd = p.wake[0], want = {.IN}, on = _wake_ready, data = p, used = true}
+	p.top = 1
 	set._impl = p
 	return {}
 }
@@ -82,15 +87,29 @@ poll_set_woken :: proc(set: ^Poll_Set) -> bool {
 	return true
 }
 
-// poll_set_watch adds a non-IPC fd (a PTY master, stdin) for input. The
-// caller keeps owning fd; on_ready runs from poll_set_wait.
-poll_set_watch :: proc(set: ^Poll_Set, fd: posix.FD, on_ready: proc(data: rawptr, ev: Fd_Event), data: rawptr) -> (Fd_Watch, Error) {
+// poll_set_watch adds a non-IPC fd (a PTY master, stdin). The caller keeps
+// owning fd; on_ready runs from poll_set_wait with Readable, Writable (as
+// want asks) and, once the fd hangs up or breaks, Ended: the watch is gone
+// after that.
+poll_set_watch :: proc(set: ^Poll_Set, fd: posix.FD, on_ready: proc(data: rawptr, ev: Fd_Event), data: rawptr, want := Fd_Want{.Readable}) -> (Fd_Watch, Error) {
 	p := _poll(set)
 	if p == nil do return 0, {kind = .Closed, reason = "poll set is not open"}
 	if fd < 0 || on_ready == nil do return 0, {kind = .Bad_Opts, reason = "nothing to watch"}
-	id, ok := _poll_add(p, {fd = fd, want = {.IN}, watch = on_ready, data = data})
+	id, ok := _poll_add(p, {fd = fd, want = _want_events(want), watch = on_ready, data = data})
 	if !ok do return 0, {kind = .Busy, reason = "poll set is full"}
 	return Fd_Watch(id), {}
+}
+
+// poll_set_want changes what a watch waits for.
+poll_set_want :: proc(set: ^Poll_Set, id: Fd_Watch, want: Fd_Want) {
+	if s := _poll_source(_poll(set), u32(id)); s != nil && s.watch != nil do s.want = _want_events(want)
+}
+
+@(private = "file")
+_want_events :: proc(want: Fd_Want) -> (ev: posix.Poll_Event) {
+	if .Readable in want do ev += {.IN}
+	if .Writable in want do ev += {.OUT}
+	return
 }
 
 poll_set_unwatch :: proc(set: ^Poll_Set, id: Fd_Watch) {

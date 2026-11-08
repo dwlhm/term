@@ -14,8 +14,10 @@ import proto "../../session_proto"
 import ipc "../../../platform/ipc"
 
 Fixture :: struct {
+	dir:      string,
+	dir_buf:  [64]u8,
 	path:     string,
-	path_buf: [64]u8,
+	path_buf: [80]u8,
 	th:       ^thread.Thread,
 	code:     int,
 	finished: bool, // atomic
@@ -45,7 +47,13 @@ fixture_start :: proc() -> ^Fixture {
 	os.set_env("TERM_HOLDER_GRACE_MS", "1500")
 	f := new(Fixture)
 	_fixture_seq += 1
-	f.path = fmt.bprintf(f.path_buf[:], "/tmp/term-test-%d-%d.sock", posix.getpid(), _fixture_seq)
+	// The socket's dir must be private to us (0700, not a symlink): /tmp is
+	// neither, so each holder gets its own dir under its real path.
+	real: [256]u8
+	base := string(posix.realpath("/tmp", raw_data(real[:])))
+	f.dir = fmt.bprintf(f.dir_buf[:], "%s/th-%d-%d", base, posix.getpid(), _fixture_seq)
+	posix.mkdir(fmt.ctprintf("%s", f.dir), posix.S_IRWXU)
+	f.path = fmt.bprintf(f.path_buf[:], "%s/h.sock", f.dir)
 	f.th = thread.create_and_start_with_poly_data(f, proc(f: ^Fixture) {
 		f.code = holder.holder_run(f.path)
 		sync.atomic_store(&f.finished, true)
@@ -71,6 +79,7 @@ fixture_stop :: proc(f: ^Fixture) -> int {
 	thread.join(f.th)
 	thread.destroy(f.th)
 	code := f.code
+	posix.rmdir(fmt.ctprintf("%s", f.dir)) // the holder unlinked its socket
 	free(f)
 	return code
 }

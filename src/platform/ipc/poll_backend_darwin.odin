@@ -1,6 +1,6 @@
 package platform_ipc
 
-// Poll_Set backend on Darwin (from platform/poller, which goes away in M2):
+// Poll_Set backend on Darwin (formerly platform/poller):
 // one kqueue kept across rounds. Every round re-adds its interests, so an fd
 // closed under the set comes back as NVAL (EBADF), like poll(2).
 // Linux: poll_backend_linux.odin.

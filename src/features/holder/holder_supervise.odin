@@ -2,7 +2,6 @@ package feature_holder
 
 // Core supervision (grace, backoff, idle exit) and the SIGCHLD self-pipe.
 
-import "core:c"
 import "core:crypto"
 import "core:fmt"
 import "core:os"
@@ -81,34 +80,25 @@ _random_u64 :: proc() -> u64 {
 }
 
 Signal_State :: struct {
-	pipe:      [2]posix.FD,
 	old_chld:  posix.sigaction_t,
 	old_pipe:  posix.sigaction_t,
 	installed: bool,
 }
 
 @(private = "file")
-_sigchld_fd: posix.FD = -1
+_sigchld_set: ^ipc.Poll_Set
 
 @(private = "file")
 _on_sigchld :: proc "c" (sig: posix.Signal) {
 	saved := posix.errno()
-	b: u8 = 1
-	posix.write(_sigchld_fd, &b, 1) // a full pipe already means "reap"
+	ipc.poll_set_poke(_sigchld_set) // the loop reaps once it wakes
 	posix.errno(saved)
 }
 
-// _signals_install: SIGCHLD → self-pipe, SIGPIPE ignored (children get
+// _signals_install: SIGCHLD → a poke of set, SIGPIPE ignored (children get
 // default dispositions back at spawn).
-_signals_install :: proc(st: ^Signal_State) -> bool {
-	st.pipe = {-1, -1}
-	if posix.pipe(&st.pipe) != .OK do return false
-	for fd in st.pipe {
-		flags := posix.fcntl(fd, .GETFL)
-		posix.fcntl(fd, .SETFL, flags | c.int(posix.O_NONBLOCK))
-		posix.fcntl(fd, .SETFD, c.int(posix.FD_CLOEXEC))
-	}
-	_sigchld_fd = st.pipe[1]
+_signals_install :: proc(st: ^Signal_State, set: ^ipc.Poll_Set) -> bool {
+	_sigchld_set = set
 	act := posix.sigaction_t{sa_handler = _on_sigchld, sa_flags = {.RESTART, .NOCLDSTOP}}
 	posix.sigemptyset(&act.sa_mask)
 	if posix.sigaction(.SIGCHLD, &act, &st.old_chld) != .OK do return false
@@ -125,16 +115,7 @@ _signals_restore :: proc(st: ^Signal_State) {
 		posix.sigaction(.SIGPIPE, &st.old_pipe, nil)
 		st.installed = false
 	}
-	_sigchld_fd = -1
-	for &fd in st.pipe {
-		if fd >= 0 do posix.close(fd)
-		fd = -1
-	}
-}
-
-_signals_drain :: proc(st: ^Signal_State) {
-	buf: [64]u8
-	for posix.read(st.pipe[0], &buf[0], len(buf)) > 0 {}
+	_sigchld_set = nil
 }
 
 // _start_core launches `<own executable> --core` detached (new session,
