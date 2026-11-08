@@ -183,9 +183,21 @@ client_stream_ack :: proc(c: ^Client, channel: u32, n: int) {
 }
 
 // line_call: a .Line client. Connects, checks the server's uid, sends one
-// line and reads until the server closes.
+// line (a missing '\n' is added) and reads until the server closes. The
+// answer is returned as is, "err ..." lines included; out too small for it
+// is .Bad_Reply.
 line_call :: proc(at: Endpoint, line: string, out: []u8, timeout := CALL_DEFAULT) -> (reply: string, err: Error) {
 	path_buf: [_SUN_PATH]u8
-	if _, err = _endpoint_path(at, path_buf[:]); err.kind != .None do return
-	return "", _not_implemented()
+	path: string
+	if path, err = _endpoint_path(at, path_buf[:]); err.kind != .None do return
+	fd: posix.FD
+	if fd, err = _dial(path); err.kind != .None do return
+	defer posix.close(fd)
+	due := _call_due(timeout)
+	nl := "" if len(line) > 0 && line[len(line) - 1] == '\n' else "\n"
+	if err = _line_send(fd, transmute([]u8)line, due); err.kind != .None do return
+	if err = _line_send(fd, transmute([]u8)nl, due); err.kind != .None do return
+	n: int
+	n, err = _line_read_all(fd, out, due)
+	return string(out[:n]), err
 }

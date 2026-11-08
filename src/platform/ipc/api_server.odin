@@ -79,9 +79,15 @@ Notify_To :: union {
 
 server_open :: proc(s: ^Server, at: Endpoint, proto: Protocol, set: ^Poll_Set, opts := Server_Opts{}) -> Error {
 	path_buf: [_SUN_PATH]u8
-	k, path, err := _server_new(s, at, proto, set, opts, path_buf[:])
+	k, path, err := _server_new(s, at, proto, opts, path_buf[:])
 	if err.kind != .None do return err
-	if err = _listener_open(&k.listener, k.set, path, _server_accept, _server_broken, k); err.kind != .None {
+	ps := _poll(set)
+	switch {
+	case ps == nil:              err = {kind = .Closed, reason = "the poll set is not open"}
+	case k.opts.framing == .Line: k.line, err = _line_new(path, ps, k.opts)
+	case:                        err = _server_slots(k, path, ps)
+	}
+	if err.kind != .None {
 		_server_free(k)
 		return err
 	}
@@ -90,12 +96,24 @@ server_open :: proc(s: ^Server, at: Endpoint, proto: Protocol, set: ^Poll_Set, o
 }
 
 // server_open_thread runs the IO on a thread of its own, for an owner whose
-// main loop is not a Poll_Set (a GUI window): on_wake wakes that loop, which
-// then calls server_next. The owner's thread never blocks.
+// main loop is not a Poll_Set (a GUI window): on_wake wakes that loop (from
+// the IO thread), which then calls server_next. The owner's thread never
+// blocks. Only .Line is served this way.
 server_open_thread :: proc(s: ^Server, at: Endpoint, proto: Protocol, on_wake: proc "contextless" (data: rawptr), data: rawptr, opts := Server_Opts{}) -> Error {
 	path_buf: [_SUN_PATH]u8
-	if _, err := _endpoint_path(at, path_buf[:]); err.kind != .None do return err
-	return _not_implemented()
+	k, path, err := _server_new(s, at, proto, opts, path_buf[:])
+	if err.kind != .None do return err
+	if k.opts.framing != .Line {
+		err = {kind = .Bad_Opts, reason = "server_open_thread serves .Line only"}
+	} else if k.line, err = _line_new(path, nil, k.opts); err.kind == .None {
+		_line_run_thread(k.line, on_wake, data)
+	}
+	if err.kind != .None {
+		_server_free(k)
+		return err
+	}
+	s._impl = k
+	return {}
 }
 
 // server_close drops every peer and unlinks the socket while its inode is still ours.
@@ -110,6 +128,7 @@ server_close :: proc(s: ^Server) {
 server_next :: proc(s: ^Server) -> (Server_Event, bool) {
 	k := _server(s)
 	if k == nil do return nil, false
+	if k.line != nil do return _line_next(k.line, k)
 	if ev, ok := _server_pop(k); ok do return ev, true
 	if k.down do return nil, false
 	for i in 0 ..< len(k.peers) {
@@ -147,6 +166,10 @@ request_line :: proc(req: ^Request) -> string {
 reply :: proc(s: ^Server, req: Request, body: ..[]u8) {
 	k := _server(s)
 	if k == nil do return
+	if k.line != nil {
+		_line_reply(k.line, req, ..body)
+		return
+	}
 	row, _ := _row(k.proto, req.kind)
 	_server_reply(k, req, true, row.answer, ..body)
 }
@@ -155,6 +178,10 @@ fail :: proc(s: ^Server, req: Request, code: u8, reason: string) {
 	when ODIN_TEST do assert(code != FAIL_BAD_REQUEST && code != FAIL_BUSY && code != FAIL_VERSION && code != FAIL_TIMEOUT, _ASSERT_RESERVED_FAIL)
 	k := _server(s)
 	if k == nil do return
+	if k.line != nil {
+		_line_reply(k.line, req, transmute([]u8)string("err "), transmute([]u8)reason, transmute([]u8)string("\n"))
+		return
+	}
 	fb: [512]u8
 	_server_reply(k, req, true, k.proto.fail_kind, _fail_body(fb[:], 0, code, reason)[4:])
 }

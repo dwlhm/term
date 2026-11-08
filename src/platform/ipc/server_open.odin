@@ -9,27 +9,35 @@ import "core:fmt"
 @(private = "file")
 _BUSY_DEFAULT :: "all connections are in use"
 
+// _server_new validates what server_open and server_open_thread share and
+// allocates the Server; the framing's own state comes after.
 @(private)
-_server_new :: proc(s: ^Server, at: Endpoint, proto: Protocol, set: ^Poll_Set, opts: Server_Opts, buf: []u8) -> (k: ^_Server, path: string, err: Error) {
+_server_new :: proc(s: ^Server, at: Endpoint, proto: Protocol, opts: Server_Opts, buf: []u8) -> (k: ^_Server, path: string, err: Error) {
 	if s._impl != nil do return nil, "", {kind = .Bad_Opts, reason = "the server is already open"}
 	if path, err = _endpoint_path(at, buf); err.kind != .None do return
-	p: Protocol
-	if p, err = _protocol_resolve(proto, false); err.kind != .None do return
+	p := proto
 	o: Server_Opts
 	if o, err = _server_opts(opts); err.kind != .None do return
-	if o.framing == .Line do return nil, "", _not_implemented()
-	ps := _poll(set)
-	if ps == nil do return nil, "", {kind = .Closed, reason = "the poll set is not open"}
+	if o.framing == .Frames {
+		if p, err = _protocol_resolve(proto, false); err.kind != .None do return // .Line uses no catalog
+	}
 	k = new(_Server)
-	k^ = {set = ps, proto = p, opts = o, allocator = context.allocator}
-	k.peers = make([]_Peer_Slot, o.max_peers + _HELLO_SPARE)
+	k^ = {proto = p, opts = o, allocator = context.allocator}
+	return k, path, {}
+}
+
+// _server_slots allocates the .Frames peer slots and listens on set.
+@(private)
+_server_slots :: proc(k: ^_Server, path: string, set: ^_Poll) -> Error {
+	k.set = set
+	k.peers = make([]_Peer_Slot, k.opts.max_peers + _HELLO_SPARE)
 	k.events = make([]Server_Event, 2 * len(k.peers) + 2)
 	for &slot in k.peers {
 		slot.srv = k
-		slot.open = make([]_Open_Req, o.max_open)
-		stream_conn_reserve(&slot.conn, 0, max_payload = o.max_payload)
+		slot.open = make([]_Open_Req, k.opts.max_open)
+		stream_conn_reserve(&slot.conn, 0, max_payload = k.opts.max_payload)
 	}
-	return k, path, {}
+	return _listener_open(&k.listener, k.set, path, _server_accept, _server_broken, k)
 }
 
 @(private = "file")
@@ -54,6 +62,7 @@ _server_opts :: proc(opts: Server_Opts) -> (o: Server_Opts, err: Error) {
 @(private)
 _server_free :: proc(k: ^_Server) {
 	context.allocator = k.allocator
+	if k.line != nil do _line_free(k.line)
 	_listener_close(&k.listener)
 	for &slot in k.peers {
 		_poll_remove(k.set, slot.src)

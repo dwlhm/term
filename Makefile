@@ -252,6 +252,10 @@ IPC_GREEN_LIST := \
 	test_P23_start_that_never_listens \
 	test_P23_two_clients_race_to_start_one_server \
 	test_P24_fuzzed_frames_hurt_only_their_peer \
+	test_P25_line_call_to_a_threaded_line_server \
+	test_P26_line_past_max_payload \
+	test_P26_line_server_full \
+	test_P26_silent_line_client \
 	test_P27_watched_fd_closed_under_the_set \
 	test_P28_ten_thousand_pokes_from_a_signal_handler \
 	test_P29_link_listener_closed_from_outside \

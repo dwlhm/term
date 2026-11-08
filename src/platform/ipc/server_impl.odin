@@ -50,6 +50,7 @@ _Server :: struct {
 	ev_len:    int,
 	turn:      int,
 	down:      bool,
+	line:      ^_Line, // .Line: everything lives there (line_impl.odin)
 	allocator: runtime.Allocator,
 }
 
