@@ -64,7 +64,6 @@ Error_Kind :: enum u8 {
 	Interrupted,     // client_interrupt, or on_event returned .Stop
 	Bad_Reply,       // an answer for our req whose kind is not in the catalog
 	Listener_Broken, // the server or link can no longer accept
-	Not_Implemented, // only while the API is a skeleton (spec section 10); removed in I5
 }
 
 // FAIL codes the package uses itself; applications use any other non-zero code.
@@ -93,7 +92,6 @@ error_message :: proc(e: Error) -> string {
 	case .Interrupted:     return "interrupted"
 	case .Bad_Reply:       return "the answer does not fit the protocol"
 	case .Listener_Broken: return "the listening socket broke"
-	case .Not_Implemented: return "not implemented"
 	}
 	return "unknown error"
 }
@@ -103,6 +101,3 @@ error_message :: proc(e: Error) -> string {
 private_dir :: proc(buf: []u8, app: string) -> (dir: string, err: Error) {
 	return _private_dir(buf, app)
 }
-
-@(private)
-_not_implemented :: proc "contextless" () -> Error { return {kind = .Not_Implemented} }
