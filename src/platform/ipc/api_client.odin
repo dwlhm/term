@@ -78,6 +78,8 @@ Client_Event :: union {
 }
 
 client_open :: proc(c: ^Client, at: Endpoint, proto: Protocol, opts := Client_Opts{}) -> Error {
+	path_buf: [_SUN_PATH]u8
+	if _, err := _endpoint_path(at, path_buf[:]); err.kind != .None do return err
 	return _not_implemented()
 }
 
@@ -110,5 +112,7 @@ client_stream_ack :: proc(c: ^Client, channel: u32, n: int) {}
 // line_call: a .Line client. Connects, checks the server's uid, sends one
 // line and reads until the server closes.
 line_call :: proc(at: Endpoint, line: string, out: []u8, timeout := CALL_DEFAULT) -> (reply: string, err: Error) {
+	path_buf: [_SUN_PATH]u8
+	if _, err = _endpoint_path(at, path_buf[:]); err.kind != .None do return
 	return "", _not_implemented()
 }

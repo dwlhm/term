@@ -76,6 +76,8 @@ Notify_To :: union {
 }
 
 server_open :: proc(s: ^Server, at: Endpoint, proto: Protocol, set: ^Poll_Set, opts := Server_Opts{}) -> Error {
+	path_buf: [_SUN_PATH]u8
+	if _, err := _endpoint_path(at, path_buf[:]); err.kind != .None do return err
 	return _not_implemented()
 }
 
@@ -83,6 +85,8 @@ server_open :: proc(s: ^Server, at: Endpoint, proto: Protocol, set: ^Poll_Set, o
 // main loop is not a Poll_Set (a GUI window): on_wake wakes that loop, which
 // then calls server_next. The owner's thread never blocks.
 server_open_thread :: proc(s: ^Server, at: Endpoint, proto: Protocol, on_wake: proc "contextless" (data: rawptr), data: rawptr, opts := Server_Opts{}) -> Error {
+	path_buf: [_SUN_PATH]u8
+	if _, err := _endpoint_path(at, path_buf[:]); err.kind != .None do return err
 	return _not_implemented()
 }
 

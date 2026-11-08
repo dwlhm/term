@@ -3,8 +3,8 @@ package platform_ipc_contract
 // Contract tests of the IPC package, written before the package (spec section
 // 10). They use a protocol of their own, not term's messages, so passing them
 // also shows the package works outside term. `make test-ipc-contract` runs them
-// and lists the IDs still red; a test moves to src/platform/ipc/tests (and into
-// `make test`) in the slice that turns it green.
+// and lists the IDs still red; once every test of an ID passes, they join
+// IPC_GREEN_TESTS in the Makefile, so `make test` runs them too.
 
 import "core:testing"
 import ipc "../"

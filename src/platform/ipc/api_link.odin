@@ -36,10 +36,14 @@ Link_Event :: union {
 }
 
 link_listen :: proc(l: ^Link, at: Endpoint, proto: Protocol, set: ^Poll_Set, opts := Link_Opts{}) -> Error {
+	path_buf: [_SUN_PATH]u8
+	if _, err := _endpoint_path(at, path_buf[:]); err.kind != .None do return err
 	return _not_implemented()
 }
 
 link_dial :: proc(l: ^Link, at: Endpoint, proto: Protocol, role: u8, set: ^Poll_Set, opts := Link_Opts{}) -> Error {
+	path_buf: [_SUN_PATH]u8
+	if _, err := _endpoint_path(at, path_buf[:]); err.kind != .None do return err
 	return _not_implemented()
 }
 

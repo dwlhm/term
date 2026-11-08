@@ -74,13 +74,32 @@ FAIL_TIMEOUT     :: u8(7)
 
 // error_message is generic English text without the application's name.
 error_message :: proc(e: Error) -> string {
-	return "not implemented"
+	switch e.kind {
+	case .None:            return "no error"
+	case .Unsafe_Path:     return "the socket directory is not private"
+	case .Unsafe_Peer:     return "the other side runs as another user"
+	case .Bad_Protocol:    return "the protocol description is invalid"
+	case .Bad_Opts:        return "an option is out of range"
+	case .No_Server:       return "nothing is listening"
+	case .Start_Failed:    return "the server could not be started"
+	case .Busy:            return "the server is busy"
+	case .Version:         return "the two sides speak different protocol versions"
+	case .Handshake:       return "the handshake did not complete"
+	case .Failed:          return "the request failed"
+	case .Timeout:         return "no answer in time"
+	case .Closed:          return "the connection closed"
+	case .Interrupted:     return "interrupted"
+	case .Bad_Reply:       return "the answer does not fit the protocol"
+	case .Listener_Broken: return "the listening socket broke"
+	case .Not_Implemented: return "not implemented"
+	}
+	return "unknown error"
 }
 
 // private_dir: "$TMPDIR/<app>-<uid>" (or /tmp), created 0700 when missing,
 // then validated like any Endpoint dir.
 private_dir :: proc(buf: []u8, app: string) -> (dir: string, err: Error) {
-	return "", {kind = .Not_Implemented}
+	return _private_dir(buf, app)
 }
 
 @(private)
