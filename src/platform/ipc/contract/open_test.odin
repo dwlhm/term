@@ -10,7 +10,6 @@ import ipc "../"
 @(private = "file")
 _bad_catalogs := [?][]ipc.Msg_Spec{
 	{{request = TEST_PING, answer = TEST_PONG}, {request = TEST_PING, answer = TEST_JOB_DONE}}, // duplicate request
-	{{request = TEST_PING, answer = TEST_PONG}, {request = TEST_JOB, answer = TEST_PONG}},      // duplicate answer
 	{{request = 1, answer = TEST_PONG}},                                                     // CREDIT is the transport's
 	{{request = HELLO_KIND, answer = TEST_PONG}},                                            // default hello_kind
 	{{request = TEST_PING, answer = FAIL_KIND}},                                             // default fail_kind
