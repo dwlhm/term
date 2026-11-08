@@ -95,7 +95,7 @@ client_open :: proc(c: ^Client, at: Endpoint, proto: Protocol, opts := Client_Op
 		_client_free(k)
 		return {kind = .Start_Failed, reason = "cannot create the wake pipe"}
 	}
-	for fd in k.wake do ipc_set_nonblocking_cloexec(fd)
+	for fd in k.wake do _set_nonblocking_cloexec(fd)
 	if err = _client_connect(k, path, o); err.kind != .None {
 		_client_free(k)
 		return err

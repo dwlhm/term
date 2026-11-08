@@ -31,7 +31,7 @@ ifeq ($(UNAME_S),Darwin)
 LUA_CFLAGS += -mmacosx-version-min=$(MIN_OS_VERSION)
 endif
 
-.PHONY: all lua test-automation test-ipc-contract ipc-example test-session-proto term release run term-debug harness-features run-harness-features harness-render-chrome run-harness-render-chrome harness-render-terminal run-harness-render-terminal harness-render-composer run-harness-composer test test-app test-holder test-session-core test-font test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-gpu check esctest clean help bench bench-quick bundle dmg portable dist install uninstall test-unicode-width gen-unicode bench-parser bench-session bench-throughput
+.PHONY: all lua test-automation ipc-example test-session-proto test-byte-ring term release run term-debug harness-features run-harness-features harness-render-chrome run-harness-render-chrome harness-render-terminal run-harness-render-terminal harness-render-composer run-harness-composer test test-app test-holder test-session-core test-font test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-gpu check esctest clean help bench bench-quick bundle dmg portable dist install uninstall test-unicode-width gen-unicode bench-parser bench-session bench-throughput
 
 all: term harness-features harness-render-chrome harness-render-terminal harness-composer
 
@@ -162,7 +162,7 @@ bench-session:
 bench-throughput: term
 	python3 -I scripts/stress/throughput.py -t $(OUT_DIR)/term $(ARGS)
 
-test: test-app test-automation test-unicode-width test-terminal test-pty test-holder test-session-core test-font test-window test-session test-control test-ipc test-session-proto test-tabs test-multiplexer test-interaction test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-gpu test-features test-e2e
+test: test-app test-automation test-unicode-width test-terminal test-pty test-holder test-session-core test-font test-window test-session test-control test-ipc test-session-proto test-byte-ring test-tabs test-multiplexer test-interaction test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-gpu test-features test-e2e
 
 # VT conformance suite (esctest2) driven inside a real Term pane; requires a GUI
 # session. Extra esctest flags: make esctest ESCTEST_ARGS="--include=CUP"
@@ -215,89 +215,17 @@ ipc-example:
 	@mkdir -p build
 	$(ODIN) build src/platform/ipc/example $(CHECK_FLAGS) -out:$(IPC_EXAMPLE)
 
-COMMA := ,
-# Contract tests that are green (whole IDs only) run in `make test` too.
-IPC_GREEN_LIST := \
-	test_P5_client_closes_twice \
-	test_P5_link_closes_twice \
-	test_P5_poll_set_closes_twice \
-	test_P5_server_closes_twice \
-	test_P6_bad_catalog_is_refused \
-	test_P6_limits_out_of_range_are_refused \
-	test_P7_private_dir_is_made_0700_and_validated \
-	test_P7_unsafe_dirs_are_refused \
-	test_P8_call_gets_its_answer \
-	test_P9_application_fail_code_reaches_the_client \
-	test_P9_application_sends_bad_request \
-	test_P9_application_sends_busy \
-	test_P9_application_sends_timeout \
-	test_P9_fail_with_version_code_asserts \
-	test_P10_unanswered_call_times_out_at_5s \
-	test_P11_server_gone_ends_a_forever_wait \
-	test_P12_notice_before_the_answer \
-	test_P13_interrupt_from_a_signal_handler \
-	test_P13_on_event_stop_interrupts_the_call \
-	test_P14_late_answer_while_another_call_waits \
-	test_P15_answer_kind_outside_the_catalog \
-	test_P16_reply_to_a_peer_that_left_reaches_nobody \
-	test_P16_second_reply_asserts \
-	test_P17_bad_req_numbers_and_too_many_open \
-	test_P18_bodies_that_do_not_decode \
-	test_P19_peer_that_stops_reading_is_dropped \
-	test_P20_refusal_is_hello_then_fail_version \
-	test_P20_versions_that_match_and_that_do_not \
-	test_P21_connection_without_hello_is_dropped \
-	test_P22_one_peer_too_many_gets_busy \
-	test_P23_no_server_and_no_start \
-	test_P23_start_that_never_listens \
-	test_P23_two_clients_race_to_start_one_server \
-	test_P24_fuzzed_frames_hurt_only_their_peer \
-	test_P25_line_call_to_a_threaded_line_server \
-	test_P26_line_past_max_payload \
-	test_P26_line_server_full \
-	test_P26_silent_line_client \
-	test_P27_watched_fd_closed_under_the_set \
-	test_P27_watch_waits_for_writable \
-	test_P27_want_nothing_pauses_a_readable_fd \
-	test_P28_ten_thousand_pokes_from_a_signal_handler \
-	test_P29_link_listener_closed_from_outside \
-	test_P29_server_listener_closed_from_outside \
-	test_P30_emfile_backs_off_then_accepts \
-	test_P31_replaced_socket_path_is_not_unlinked \
-	test_P32_lost_peer_is_not_replaced \
-	test_P32_drop_keeps_listening \
-	test_P32_garbage_is_closed \
-	test_P32_newest_peer_replaces_the_old \
-	test_P32_oldest_pending_hello_yields \
-	test_P32_slow_hello_is_closed_at_hello_ms \
-	test_P36_no_allocation_after_open \
-	test_P37_echo_example_runs \
-	test_P39_poll_returns_when_its_watch_fd_is_readable \
-	test_P39_poll_without_a_watch_still_times_out \
-	test_P40_credit_releases_waiting_data_on_an_idle_server
-IPC_GREEN_TESTS := $(subst $(eval) ,$(COMMA),$(strip $(IPC_GREEN_LIST)))
-
 test-ipc: ipc-example
 	$(ODIN) test src/platform/ipc $(CHECK_FLAGS) $(TEST_FLAGS) -out:build/ipc-private
 	$(ODIN) test src/platform/ipc/tests $(CHECK_FLAGS) $(TEST_FLAGS)
-	$(ODIN) test src/platform/ipc/contract $(CHECK_FLAGS) $(TEST_FLAGS) -out:build/ipc-green \
-		-define:IPC_EXAMPLE=$(CURDIR)/$(IPC_EXAMPLE) -define:ODIN_TEST_NAMES=$(IPC_GREEN_TESTS)
-
-# Contract tests of the IPC package that are still red (IPC spec, section 10).
-# Not part of `test`: once every test of an ID passes, its tests join
-# IPC_GREEN_TESTS. Since M3 none is red (the tier test P34 runs in
-# test-session-core); the target goes in M5.
-# Prints each failure summary and the red IDs (a list that must never grow).
-test-ipc-contract: ipc-example $(LUA_LIB)
-	@$(ODIN) test src/platform/ipc/contract $(CHECK_FLAGS) $(TEST_FLAGS) -define:ODIN_TEST_FANCY=false -out:build/ipc-contract \
-		-define:IPC_EXAMPLE=$(CURDIR)/$(IPC_EXAMPLE) > build/ipc-contract.log 2>&1; lib=$$?; \
-	if grep -q '^Finished' build/ipc-contract.log; then sed -n '/^Finished/,/^$$/p' build/ipc-contract.log; \
-	else tail -n 40 build/ipc-contract.log; fi; \
-	echo "red: $$(sed -n 's/^ - [a-z_]*\.test_\(P[0-9]*\)_.*/\1/p' build/ipc-contract.log | sort -u | sort -k1.2n | tr '\n' ' ')"; \
-	test $$lib -eq 0
+	$(ODIN) test src/platform/ipc/contract $(CHECK_FLAGS) $(TEST_FLAGS) -out:build/ipc-contract \
+		-define:IPC_EXAMPLE=$(CURDIR)/$(IPC_EXAMPLE)
 
 test-session-proto:
 	$(ODIN) test src/features/session_proto/tests $(CHECK_FLAGS) $(TEST_FLAGS)
+
+test-byte-ring:
+	$(ODIN) test src/core/byte_ring/tests $(TEST_FLAGS)
 
 test-tabs:
 	$(ODIN) test src/features/tabs/tests $(TEST_FLAGS)
@@ -376,6 +304,7 @@ check: $(LUA_LIB)
 	$(ODIN) check src/cmd/bench_parser $(CHECK_FLAGS)
 	$(ODIN) check src/cmd/term_driver $(CHECK_FLAGS)
 	$(ODIN) check src/core/cursor $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/core/byte_ring $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/core/unicode_width $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/core/unicode_width/reference $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/core/unicode_width/gen $(CHECK_FLAGS)
@@ -392,6 +321,7 @@ check: $(LUA_LIB)
 	$(ODIN) check src/platform/clipboard $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/platform/ipc $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/platform/ipc/example $(CHECK_FLAGS)
+	$(ODIN) test src/platform/ipc/tests $(CHECK_FLAGS) $(TEST_FLAGS)
 	$(ODIN) check src/features/control $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/features/holder $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/features/session_core $(CHECK_FLAGS) -no-entry-point

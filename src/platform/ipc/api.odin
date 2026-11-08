@@ -103,3 +103,13 @@ error_message :: proc(e: Error) -> string {
 private_dir :: proc(buf: []u8, app: string) -> (dir: string, err: Error) {
 	return _private_dir(buf, app)
 }
+
+// endpoint_alive: someone accepts connections at at. false only when the
+// socket is missing, or three tries 50 ms apart are refused (a listener whose
+// backlog is full is refused too), so a live socket is never taken for one a
+// dead process left behind. An unsafe dir is not probed: false.
+endpoint_alive :: proc(at: Endpoint) -> bool {
+	path_buf: [_SUN_PATH]u8
+	path, err := _endpoint_path(at, path_buf[:])
+	return err.kind == .None && _probe_settled(path)
+}

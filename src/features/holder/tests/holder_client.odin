@@ -1,7 +1,8 @@
 package feature_holder_tests
 
 // Test fixture: holder_run in a thread on a unique socket, plus a minimal
-// core client over ipc.Stream_Conn that logs every frame in arrival order.
+// core: an ipc.Link dialled with proto.holder() that logs every frame in
+// arrival order.
 
 import "core:fmt"
 import "core:os"
@@ -30,7 +31,8 @@ Rec :: struct {
 }
 
 Client :: struct {
-	conn:   ipc.Stream_Conn,
+	set:    ipc.Poll_Set,
+	link:   ipc.Link,
 	log:    [dynamic]Rec,
 	closed: bool,
 	bytes:  int, // OUTPUT bytes received
@@ -59,7 +61,7 @@ fixture_start :: proc() -> ^Fixture {
 		sync.atomic_store(&f.finished, true)
 	})
 	for _ in 0..<200 {
-		if ipc.ipc_probe(f.path) == .None do break
+		if ipc.endpoint_alive({f.dir, "h.sock"}) do break
 		time.sleep(5 * time.Millisecond)
 	}
 	return f
@@ -85,56 +87,52 @@ fixture_stop :: proc(f: ^Fixture) -> int {
 }
 
 client_connect :: proc(path: string) -> ^Client {
-	fd := posix.socket(.UNIX, .STREAM)
-	addr: posix.sockaddr_un
-	ipc.ipc_fill_sockaddr(path, &addr)
-	if posix.connect(fd, (^posix.sockaddr)(&addr), size_of(addr)) != .OK {
-		posix.close(fd)
-		return nil
-	}
 	c := new(Client)
 	c.keep = true
-	ipc.stream_conn_init(&c.conn, fd, 2 << 20)
-	buf: [128]u8
-	w := ipc.wire_writer(buf[:])
-	proto.enc_hello(&w, {version = proto.STREAM_PROTO_VERSION, role = .Core, build = "test"})
-	client_send(c, proto.MSG_HELLO, 0, ipc.wire_bytes_written(&w))
+	slash := len(path) - 1
+	for slash > 0 && path[slash] != '/' do slash -= 1
+	at := ipc.Endpoint{path[:slash], path[slash + 1:]}
+	if ipc.poll_set_init(&c.set, 8).kind != .None || ipc.link_dial(&c.link, at, proto.holder(), u8(proto.Stream_Role.Core), &c.set, {backlog = 2 << 20}).kind != .None {
+		client_close(c)
+		return nil
+	}
 	return c
 }
 
 client_close :: proc(c: ^Client) {
 	for r in c.log do delete(r.data)
 	delete(c.log)
-	ipc.stream_conn_destroy(&c.conn)
+	ipc.link_close(&c.link)
+	ipc.poll_set_destroy(&c.set)
 	free(c)
 }
 
+// client_send queues one frame and waits (≤ 1 s) until the link wrote it.
 client_send :: proc(c: ^Client, kind: u8, channel: u32, payload: []u8 = nil) {
-	ipc.stream_send(&c.conn, kind, channel, payload)
+	ipc.link_send(&c.link, kind, channel, payload)
 	for _ in 0..<1000 {
-		if ipc.stream_flush(&c.conn) != .None || !ipc.stream_wants_write(&c.conn) do return
-		time.sleep(time.Millisecond)
+		if ipc.link_backlog(&c.link) == 0 || c.closed do return
+		ipc.poll_set_wait(&c.set, time.tick_now()._nsec + 1_000_000)
 	}
 }
 
 // client_pump waits up to timeout_ms for input and logs every frame.
 client_pump :: proc(c: ^Client, timeout_ms: int) {
 	if c.closed do return
-	pfd := posix.pollfd{fd = c.conn.fd, events = {.IN}}
-	if posix.poll(&pfd, 1, i32(timeout_ms)) <= 0 do return
-	err := ipc.stream_fill(&c.conn)
-	for {
-		f, ok := ipc.stream_next(&c.conn)
-		if !ok do break
-		if f.kind == proto.MSG_OUTPUT {
-			c.bytes += len(f.payload)
-			if f.channel < len(c.by_ch) do c.by_ch[f.channel] += len(f.payload)
-			c.max_f = max(c.max_f, len(f.payload))
+	ipc.poll_set_wait(&c.set, time.tick_now()._nsec + i64(timeout_ms) * 1_000_000)
+	for ev in ipc.link_next(&c.link) {
+		#partial switch e in ev {
+		case ipc.Link_Down: c.closed = true
+		case ipc.Link_Frame:
+			if e.kind == proto.MSG_OUTPUT {
+				c.bytes += len(e.body)
+				if e.channel < len(c.by_ch) do c.by_ch[e.channel] += len(e.body)
+				c.max_f = max(c.max_f, len(e.body))
+			}
+			if e.kind == proto.MSG_OUTPUT && !c.keep do continue
+			append(&c.log, Rec{e.kind, e.channel, clone(e.body)})
 		}
-		if f.kind == proto.MSG_OUTPUT && !c.keep do continue
-		append(&c.log, Rec{f.kind, f.channel, clone(f.payload)})
 	}
-	if err != .None || c.conn.err != .None do c.closed = true
 }
 
 @(private = "file")

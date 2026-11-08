@@ -124,7 +124,7 @@ _signals_restore :: proc(st: ^Signal_State) {
 _start_core :: proc() {
 	log_buf: [256]u8
 	log_path := proto.log_path(log_buf[:], proto.CORE_LOG)
-	if !ipc.ipc_spawn_self_detached({"--core"}, log_path) {
+	if !proto.spawn_self({"--core"}, log_path) {
 		fmt.eprintfln("holder: cannot start a core: %v", posix.errno())
 	}
 }

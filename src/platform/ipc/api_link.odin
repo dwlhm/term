@@ -104,10 +104,10 @@ link_next :: proc(l: ^Link) -> (Link_Event, bool) {
 	return _link_pop(k)
 }
 
-// link_send: false = not linked, or the backlog is full (apply backpressure).
+// link_send: false = not connected, or the backlog is full (apply backpressure).
 link_send :: proc(l: ^Link, kind: u8, channel: u32, body: ..[]u8) -> bool {
 	k := _link(l)
-	if k == nil || !k.up || k.closing do return false
+	if k == nil || !k.conn.open || k.closing || k.ended do return false
 	n := 0
 	for b in body do n += len(b)
 	if n > STREAM_MAX_PAYLOAD || len(k.conn.ctl.buf) - k.conn.ctl.len < STREAM_HEADER + n do return false

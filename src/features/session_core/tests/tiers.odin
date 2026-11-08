@@ -46,7 +46,7 @@ tiers_start :: proc() -> ^Tiers {
 		holder.holder_run(t.hsock)
 		sync.atomic_store(&t.holder_done, true)
 	})
-	_wait_socket(t.hsock)
+	_wait_socket({t.dir, t.hsock[len(t.dir) + 1:]})
 	tiers_core_start(t)
 	return t
 }
@@ -57,8 +57,7 @@ tiers_core_start :: proc(t: ^Tiers) {
 		core.core_run()
 		sync.atomic_store(&t.core_done, true)
 	})
-	buf: [128]u8
-	_wait_socket(fmt.bprintf(buf[:], "%s/core.sock", t.dir))
+	_wait_socket({t.dir, proto.CORE_SOCKET})
 }
 
 // tiers_core_restart_stop stops the core as SIGTERM does (a planned restart:
@@ -105,9 +104,9 @@ _wait_flag :: proc(flag: ^bool, ms: int) -> bool {
 }
 
 @(private = "file")
-_wait_socket :: proc(path: string) {
+_wait_socket :: proc(at: ipc.Endpoint) {
 	for _ in 0..<400 {
-		if ipc.ipc_probe(path) == .None do return
+		if ipc.endpoint_alive(at) do return
 		time.sleep(5 * time.Millisecond)
 	}
 }

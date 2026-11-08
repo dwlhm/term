@@ -9,6 +9,7 @@ package feature_session_client
 import "core:sync"
 import "core:thread"
 import "core:time"
+import byte_ring "../../core/byte_ring"
 import proto "../session_proto"
 import ipc "../../platform/ipc"
 import session "../session"
@@ -49,8 +50,8 @@ Client :: struct {
 	wake:      Client_Wake,
 	wake_data: rawptr,
 	links:     [CLIENT_MAX_LINKS]Client_Link,
-	ops:       ipc.Byte_Ring,
-	events:    ipc.Byte_Ring,
+	ops:       byte_ring.Byte_Ring,
+	events:    byte_ring.Byte_Ring,
 	scratch:   []u8, // UI thread: one event, see client_poll
 	io_buf:    []u8, // IO thread: one op
 }
@@ -73,8 +74,8 @@ client_connect :: proc(c: ^Client, wake: Client_Wake, wake_data: rawptr) -> bool
 client_reconnect :: proc(c: ^Client) -> bool {
 	_io_stop(c)
 	ipc.client_close(&c.link)
-	ipc.ring_clear(&c.ops)
-	ipc.ring_clear(&c.events)
+	byte_ring.ring_clear(&c.ops)
+	byte_ring.ring_clear(&c.events)
 	sync.atomic_store(&c.overflow, false)
 	if !_link_up(c) do return false
 	for &l in c.links {

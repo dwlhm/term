@@ -6,6 +6,7 @@ package feature_session
 // and, on the viewer, pushes program output into the inbox from its IO thread.
 
 import "core:sync"
+import byte_ring "../../core/byte_ring"
 import proto "../session_proto"
 import ipc "../../platform/ipc"
 
@@ -32,7 +33,7 @@ Session_Info :: struct {
 }
 
 Session_Inbox :: struct {
-	ring:  ipc.Byte_Ring,
+	ring:  byte_ring.Byte_Ring,
 	mutex: sync.Mutex,
 }
 
@@ -41,7 +42,7 @@ Session_Inbox :: struct {
 session_inbox_push :: proc(sess: ^Terminal_Session, bytes: []u8) -> bool {
 	sync.mutex_lock(&sess.inbox.mutex)
 	defer sync.mutex_unlock(&sess.inbox.mutex)
-	return ipc.ring_push(&sess.inbox.ring, bytes)
+	return byte_ring.ring_push(&sess.inbox.ring, bytes)
 }
 
 session_inbox_pending :: proc(sess: ^Terminal_Session) -> bool {
@@ -54,7 +55,7 @@ session_inbox_pending :: proc(sess: ^Terminal_Session) -> bool {
 _inbox_pop :: proc(sess: ^Terminal_Session, out: []u8) -> int {
 	sync.mutex_lock(&sess.inbox.mutex)
 	defer sync.mutex_unlock(&sess.inbox.mutex)
-	return ipc.ring_pop(&sess.inbox.ring, out)
+	return byte_ring.ring_pop(&sess.inbox.ring, out)
 }
 
 session_set_info :: proc(sess: ^Terminal_Session, pid, pgid: i32, alive: bool, exit_code: int, name, cwd: string) {

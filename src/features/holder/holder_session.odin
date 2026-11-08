@@ -5,6 +5,7 @@ package feature_holder
 import "core:c"
 import "core:fmt"
 import "core:sys/posix"
+import byte_ring "../../core/byte_ring"
 import proto "../session_proto"
 import ipc "../../platform/ipc"
 import pty "../../platform/pty"
@@ -93,14 +94,14 @@ _forget_all :: proc(h: ^Holder) {
 }
 
 // _tail_push keeps the newest HOLDER_TAIL_BYTES: the oldest bytes make room.
-_tail_push :: proc(r: ^ipc.Byte_Ring, data: []u8) {
+_tail_push :: proc(r: ^byte_ring.Byte_Ring, data: []u8) {
 	d := data
 	if len(d) >= len(r.buf) {
-		ipc.ring_clear(r)
+		byte_ring.ring_clear(r)
 		d = d[len(d) - len(r.buf):]
 	}
-	if room := len(r.buf) - r.len; room < len(d) do ipc.ring_consume(r, len(d) - room)
-	ipc.ring_push(r, d)
+	if room := len(r.buf) - r.len; room < len(d) do byte_ring.ring_consume(r, len(d) - room)
+	byte_ring.ring_push(r, d)
 }
 
 // _session_drain reads the master until it would block, ends, or one frame
@@ -131,21 +132,21 @@ _session_drain :: proc(h: ^Holder, s: ^Session, now: i64) {
 	s.eof = true // EOF / EIO: the reader is done
 	ipc.poll_set_unwatch(&h.set, s.watch)
 	s.watch = 0
-	ipc.ring_clear(&s.input)
+	byte_ring.ring_clear(&s.input)
 	_session_check_exit(h, s, now)
 }
 
 _session_write :: proc(s: ^Session) {
 	for s.input.len > 0 {
-		run := ipc.ring_front(&s.input)
+		run := byte_ring.ring_front(&s.input)
 		n := posix.write(posix.FD(s.master), raw_data(run), uint(len(run)))
 		if n > 0 {
-			ipc.ring_consume(&s.input, int(n))
+			byte_ring.ring_consume(&s.input, int(n))
 			continue
 		}
 		if n < 0 && posix.errno() == .EINTR do continue
 		if n < 0 && posix.errno() == .EAGAIN do return
-		ipc.ring_clear(&s.input) // EIO: nobody reads the tty any more
+		byte_ring.ring_clear(&s.input) // EIO: nobody reads the tty any more
 		return
 	}
 }
@@ -153,7 +154,7 @@ _session_write :: proc(s: ^Session) {
 // _session_input queues bytes for the program; a full queue drops them.
 _session_input :: proc(s: ^Session, data: []u8) {
 	if s.eof do return
-	if !ipc.ring_push(&s.input, data) {
+	if !byte_ring.ring_push(&s.input, data) {
 		fmt.eprintfln("holder: session %d input queue full, dropped %d bytes", s.id, len(data))
 		return
 	}

@@ -90,8 +90,8 @@ test_default_path_creates_private_dir :: proc(t: ^testing.T) {
 
 	buf: [512]u8
 	path, err := proto.ctl_socket_path(buf[:])
-	testing.expect_value(t, err, ipc.Ipc_Error.None)
-	if err != ipc.Ipc_Error.None {
+	testing.expect_value(t, err.kind, ipc.Error_Kind.None)
+	if err.kind != .None {
 		return
 	}
 	suffix := fmt.tprintf("/term-%d/ctl.sock", int(posix.getuid()))
@@ -122,7 +122,7 @@ test_default_path_rejects_open_dir :: proc(t: ^testing.T) {
 
 	buf: [512]u8
 	path, err := proto.ctl_socket_path(buf[:])
-	testing.expect_value(t, err, ipc.Ipc_Error.Unsafe_Path)
+	testing.expect_value(t, err.kind, ipc.Error_Kind.Unsafe_Path)
 	testing.expect_value(t, path, "")
 }
 
@@ -145,7 +145,7 @@ test_default_path_rejects_symlink :: proc(t: ^testing.T) {
 
 	buf: [512]u8
 	_, err := proto.ctl_socket_path(buf[:])
-	testing.expect_value(t, err, ipc.Ipc_Error.Unsafe_Path)
+	testing.expect_value(t, err.kind, ipc.Error_Kind.Unsafe_Path)
 }
 
 @test
@@ -156,7 +156,7 @@ test_env_override_and_too_long :: proc(t: ^testing.T) {
 	buf: [512]u8
 	os.set_env(proto.CTL_SOCK_ENV, "/x/y.sock")
 	path, err := proto.ctl_socket_path(buf[:])
-	testing.expect_value(t, err, ipc.Ipc_Error.None)
+	testing.expect_value(t, err.kind, ipc.Error_Kind.None)
 	testing.expect_value(t, path, "/x/y.sock")
 
 	long: [200]u8
@@ -165,7 +165,7 @@ test_env_override_and_too_long :: proc(t: ^testing.T) {
 	}
 	os.set_env(proto.CTL_SOCK_ENV, string(long[:]))
 	path, err = proto.ctl_socket_path(buf[:])
-	testing.expect_value(t, err, ipc.Ipc_Error.Path_Too_Long)
+	testing.expect_value(t, err.kind, ipc.Error_Kind.Unsafe_Path) // too long for sun_path
 	testing.expect_value(t, path, "")
 	os.unset_env(proto.CTL_SOCK_ENV)
 }

@@ -38,7 +38,6 @@ test_reconnect_gets_welcome_and_tail :: proc(t: ^testing.T) {
 	client_close(a) // drop without GOODBYE: a crash for the next core
 
 	b := client_connect(f.path)
-	testing.expect(t, client_wait_kind(b, proto.MSG_HELLO, 0, 3000) >= 0, "HELLO back")
 	wi := client_wait_kind(b, proto.MSG_WELCOME, 0, 3000)
 	testing.expect(t, wi >= 0, "WELCOME")
 	if wi >= 0 {

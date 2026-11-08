@@ -4,21 +4,22 @@ package feature_holder
 // that does not decode is hostile: the link is dropped.
 
 import "core:sys/posix"
+import byte_ring "../../core/byte_ring"
 import proto "../session_proto"
 import ipc "../../platform/ipc"
 import pty "../../platform/pty"
 
 // _core_message returns false for a malformed or unknown request.
-_core_message :: proc(h: ^Holder, f: ipc.Stream_Frame, now: i64) -> bool {
+_core_message :: proc(h: ^Holder, f: ipc.Link_Frame, now: i64) -> bool {
 	switch f.kind {
 	case proto.MSG_SPAWN:      return _on_spawn(h, f)
-	case proto.MSG_INPUT:      if s := _session_find(h, f.channel); s != nil do _session_input(s, f.payload)
+	case proto.MSG_INPUT:      if s := _session_find(h, f.channel); s != nil do _session_input(s, f.body)
 	case proto.MSG_RESIZE:     return _on_resize(h, f)
 	case proto.MSG_SIGNAL:     return _on_signal(h, f)
 	case proto.MSG_RELEASE:    if s := _session_find(h, f.channel); s != nil do _session_forget(h, s)
 	case proto.MSG_PROC_QUERY: _on_proc_query(h, f.channel)
 	case proto.MSG_DRAIN:      h.draining = true
-	case proto.MSG_GOODBYE:    return _on_goodbye(h, f.payload, now)
+	case proto.MSG_GOODBYE:    return _on_goodbye(h, f.body, now)
 	case:                    return false
 	}
 	return true
@@ -26,9 +27,9 @@ _core_message :: proc(h: ^Holder, f: ipc.Stream_Frame, now: i64) -> bool {
 
 // _on_spawn is idempotent: a known id re-answers SPAWNED.
 @(private = "file")
-_on_spawn :: proc(h: ^Holder, f: ipc.Stream_Frame) -> bool {
+_on_spawn :: proc(h: ^Holder, f: ipc.Link_Frame) -> bool {
 	m: proto.Spawn_Msg
-	r := ipc.wire_reader(f.payload)
+	r := ipc.wire_reader(f.body)
 	proto.dec_spawn(&r, &m)
 	if !ipc.wr_done(&r) {
 		_send_text(h, proto.MSG_SPAWN_FAILED, f.channel, "bad spawn request")
@@ -55,8 +56,8 @@ _on_spawn :: proc(h: ^Holder, f: ipc.Stream_Frame) -> bool {
 }
 
 @(private = "file")
-_on_resize :: proc(h: ^Holder, f: ipc.Stream_Frame) -> bool {
-	r := ipc.wire_reader(f.payload)
+_on_resize :: proc(h: ^Holder, f: ipc.Link_Frame) -> bool {
+	r := ipc.wire_reader(f.body)
 	size := proto.dec_size(&r)
 	if !ipc.wr_done(&r) || size.cols == 0 || size.rows == 0 do return false
 	if s := _session_find(h, f.channel); s != nil && !s.eof {
@@ -68,8 +69,8 @@ _on_resize :: proc(h: ^Holder, f: ipc.Stream_Frame) -> bool {
 
 // _on_signal never signals a reaped pid (it may belong to someone else now).
 @(private = "file")
-_on_signal :: proc(h: ^Holder, f: ipc.Stream_Frame) -> bool {
-	r := ipc.wire_reader(f.payload)
+_on_signal :: proc(h: ^Holder, f: ipc.Link_Frame) -> bool {
+	r := ipc.wire_reader(f.body)
 	sig := ipc.wr_i32(&r)
 	if !ipc.wr_done(&r) || sig < 1 || sig > 64 do return false
 	if s := _session_find(h, f.channel); s != nil && !s.reaped do pty.pty_signal(-1 if s.eof else s.master, s.pid, posix.Signal(sig))
@@ -96,7 +97,7 @@ _on_goodbye :: proc(h: ^Holder, payload: []u8, now: i64) -> bool {
 	if len(payload) != 1 do return false
 	switch proto.Goodbye(payload[0]) {
 	case .Handover:
-		for slot in h.live[:h.count] do ipc.ring_clear(&h.sessions[slot].tail)
+		for slot in h.live[:h.count] do byte_ring.ring_clear(&h.sessions[slot].tail)
 		h.previous = PREVIOUS_HANDOVER
 		_core_begin_close(h, now)
 	case .Shutdown:

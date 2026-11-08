@@ -18,7 +18,7 @@ _line_accept :: proc(data: rawptr, fd: posix.FD) {
 	for sl in ln.slots do if sl.state != .Free && sl.state != .Draining do busy += 1
 	for &sl in ln.slots {
 		if sl.state != .Free do continue
-		if !ipc_set_nonblocking_cloexec(fd) do break
+		if !_set_nonblocking_cloexec(fd) do break
 		id, ok := _poll_add(ln.set, {fd = fd, want = {.IN}, on = _line_ready, data = &sl, on_due = _line_late})
 		if !ok do break
 		sl.fd, sl.src, sl.in_len, sl.taken = fd, id, 0, false

@@ -57,7 +57,7 @@ stream_conn_reserve :: proc(s: ^Stream_Conn, ctl_cap: int, allocator := context.
 // O_NONBLOCK|FD_CLOEXEC) and the bytes already read from it, if any; on
 // failure fd is closed and s stays detached.
 stream_conn_attach :: proc(s: ^Stream_Conn, fd: posix.FD, read_ahead: []u8 = nil) -> bool {
-	if s.open || len(read_ahead) > len(s.in_buf) || !ipc_set_nonblocking_cloexec(fd) {
+	if s.open || len(read_ahead) > len(s.in_buf) || !_set_nonblocking_cloexec(fd) {
 		posix.close(fd)
 		return false
 	}

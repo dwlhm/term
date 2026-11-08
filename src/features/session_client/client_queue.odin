@@ -7,6 +7,7 @@ package feature_session_client
 // ipc.client_interrupt.
 
 import "core:sync"
+import byte_ring "../../core/byte_ring"
 import ipc "../../platform/ipc"
 
 @(private)
@@ -30,7 +31,7 @@ _Op :: enum u8 {
 
 // _rec_push queues one record (c.mutex held); false = no room.
 @(private)
-_rec_push :: proc(ring: ^ipc.Byte_Ring, kind: u8, link: u32, parts: ..[]u8) -> bool {
+_rec_push :: proc(ring: ^byte_ring.Byte_Ring, kind: u8, link: u32, parts: ..[]u8) -> bool {
 	n := 0
 	for p in parts do n += len(p)
 	if ring.len + _REC_HEADER + n > len(ring.buf) do return false
@@ -38,20 +39,20 @@ _rec_push :: proc(ring: ^ipc.Byte_Ring, kind: u8, link: u32, parts: ..[]u8) -> b
 	h[0] = kind
 	_put(h[1:5], link)
 	_put(h[5:9], u32(n))
-	ipc.ring_push(ring, h[:])
-	for p in parts do ipc.ring_push(ring, p)
+	byte_ring.ring_push(ring, h[:])
+	for p in parts do byte_ring.ring_push(ring, p)
 	return true
 }
 
 // _rec_pop takes the next record into out (c.mutex held).
 @(private)
-_rec_pop :: proc(ring: ^ipc.Byte_Ring, out: []u8) -> (kind: u8, link: u32, body: []u8, ok: bool) {
+_rec_pop :: proc(ring: ^byte_ring.Byte_Ring, out: []u8) -> (kind: u8, link: u32, body: []u8, ok: bool) {
 	if ring.len < _REC_HEADER do return
 	h: [_REC_HEADER]u8
-	ipc.ring_pop(ring, h[:])
+	byte_ring.ring_pop(ring, h[:])
 	n := int(_get(h[5:9]))
-	got := ipc.ring_pop(ring, out[:min(n, len(out))])
-	if got < n do ipc.ring_consume(ring, n - got) // cannot happen: out holds the largest record
+	got := byte_ring.ring_pop(ring, out[:min(n, len(out))])
+	if got < n do byte_ring.ring_consume(ring, n - got) // cannot happen: out holds the largest record
 	return h[0], _get(h[1:5]), out[:got], true
 }
 

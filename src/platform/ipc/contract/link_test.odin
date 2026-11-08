@@ -201,3 +201,39 @@ test_P32_drop_keeps_listening :: proc(t: ^testing.T) {
 	_pump(&ls, 100, &d)
 	testing.expect_value(t, string(ls.events[:ls.n]), "UU")
 }
+
+@(test)
+test_P32_link_send_immediately_after_dial :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, 10 * time.Second)
+	dir := test_dir()
+	defer test_dir_remove(dir)
+	ls: _Listen
+	if !_listen_open(t, &ls, {dir, "l"}, {}) do return
+	defer _listen_close(t, &ls)
+	d: _Dial
+	if !expect_ok(t, ipc.poll_set_init(&d.set, 8), "poll_set_init") do return
+	defer ipc.poll_set_destroy(&d.set)
+	defer ipc.link_close(&d.a)
+	if !expect_ok(t, ipc.link_dial(&d.a, {dir, "l"}, link_protocol(), TEST_ROLE_CLIENT, &d.set), "dial a") do return
+	payload := transmute([]u8)string("hello early")
+	testing.expect(t, ipc.link_send(&d.a, 42, 7, payload), "link_send immediately after dial must succeed")
+	got_up := false
+	got_frame := false
+	due := now_ns() + 1_000_000_000
+	for now_ns() < due && !got_frame {
+		ipc.poll_set_wait(&ls.set, min(due, now_ns() + 5_000_000))
+		ipc.poll_set_wait(&d.set, min(due, now_ns() + 5_000_000))
+		for ev in ipc.link_next(&ls.l) {
+			#partial switch e in ev {
+			case ipc.Link_Up: got_up = true
+			case ipc.Link_Frame:
+				testing.expect(t, got_up, "Link_Up must precede Link_Frame")
+				testing.expect_value(t, e.kind, u8(42))
+				testing.expect_value(t, e.channel, u32(7))
+				testing.expect_value(t, string(e.body), "hello early")
+				got_frame = true
+			}
+		}
+	}
+	testing.expect(t, got_frame, "the early frame was never delivered to the listener")
+}

@@ -11,8 +11,7 @@ CORE_LOG    :: "core.log"
 // session_endpoint: core.sock in the session dir; dir lives in buf.
 session_endpoint :: proc(buf: []u8) -> (ipc.Endpoint, ipc.Error) {
 	dir, err := session_dir(buf)
-	if err != .None do return {}, {kind = .Unsafe_Path, reason = ipc.ipc_error_message(err)}
-	return {dir, CORE_SOCKET}, {}
+	return {dir, CORE_SOCKET}, err
 }
 
 // session_open connects c to the session core with role; start = start a

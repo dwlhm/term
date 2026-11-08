@@ -36,18 +36,27 @@ test_stalled_core_throttles_program :: proc(t: ^testing.T) {
 @(test)
 test_oversize_frame_closes_conn :: proc(t: ^testing.T) {
 	f := fixture_start()
-	c := client_connect(f.path)
-	testing.expect(t, client_wait_kind(c, proto.MSG_WELCOME, 0, 3000) >= 0, "WELCOME")
-	hdr: [ipc.STREAM_HEADER]u8
-	ipc.stream_put_header(hdr[:], proto.MSG_INPUT, 1, 0)
-	hdr[5], hdr[6], hdr[7], hdr[8] = 0xff, 0xff, 0xff, 0x7f // len > STREAM_MAX_PAYLOAD
-	posix.send(c.conn.fd, &hdr[0], len(hdr), {})
-	for _ in 0..<40 do if !c.closed do client_pump(c, 50)
-	testing.expect(t, c.closed, "oversize frame closes the link")
-	client_close(c)
+	fd := client_connect_raw(f.path)
+	hb: [9 + 64]u8
+	w := ipc.wire_writer(hb[9:])
+	proto.enc_hello(&w, {version = proto.STREAM_PROTO_VERSION, role = .Core, build = "test"})
+	_raw_header(hb[:], proto.MSG_HELLO, 0, u32(w.n))
+	posix.send(fd, &hb[0], uint(9 + w.n), {})
+	hdr: [9]u8
+	_raw_header(hdr[:], proto.MSG_INPUT, 1, 0x7fff_ffff) // len > the largest payload
+	posix.send(fd, &hdr[0], len(hdr), {})
+	testing.expect(t, wait_eof(fd), "oversize frame closes the link")
+	posix.close(fd)
 	testing.expect(t, fixture_running(f), "holder survives")
 	expect_new_core_works(t, f)
 	testing.expect_value(t, fixture_stop(f), 0)
+}
+
+// _raw_header lays out [kind u8][channel u32 LE][len u32 LE].
+@(private = "file")
+_raw_header :: proc(dst: []u8, kind: u8, channel, length: u32) {
+	dst[0] = kind
+	for i in 0 ..< 4 do dst[1 + i], dst[5 + i] = u8(channel >> uint(8 * i)), u8(length >> uint(8 * i))
 }
 
 @(test)
@@ -97,15 +106,20 @@ expect_new_core_works :: proc(t: ^testing.T, f: ^Fixture) {
 
 client_connect_raw :: proc(path: string) -> posix.FD {
 	fd := posix.socket(.UNIX, .STREAM)
-	addr: posix.sockaddr_un
-	ipc.ipc_fill_sockaddr(path, &addr)
+	addr := posix.sockaddr_un{sun_family = .UNIX}
+	copy(([^]u8)(&addr.sun_path[0])[:len(addr.sun_path) - 1], path)
 	posix.connect(fd, (^posix.sockaddr)(&addr), size_of(addr))
 	return fd
 }
 
+// wait_eof: the other side closed fd within 3 s (what it sent first is skipped).
 wait_eof :: proc(fd: posix.FD) -> bool {
-	pfd := posix.pollfd{fd = fd, events = {.IN}}
-	if posix.poll(&pfd, 1, 3000) <= 0 do return false
-	b: [16]u8
-	return posix.recv(fd, &b[0], len(b), {}) <= 0
+	deadline := time.tick_now()._nsec + 3_000_000_000
+	for time.tick_now()._nsec < deadline {
+		pfd := posix.pollfd{fd = fd, events = {.IN}}
+		if posix.poll(&pfd, 1, 100) <= 0 do continue
+		b: [4096]u8
+		if posix.recv(fd, &b[0], len(b), {}) <= 0 do return true
+	}
+	return false
 }

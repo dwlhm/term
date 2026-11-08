@@ -15,8 +15,9 @@ when ODIN_OS == .Darwin {
 	}
 }
 
-// ipc_self_exe is the absolute path of the running binary ("" if unknown).
-ipc_self_exe :: proc(buf: []u8) -> string {
+// _self_exe is the absolute path of the running binary ("" if unknown).
+@(private)
+_self_exe :: proc(buf: []u8) -> string {
 	when ODIN_OS == .Darwin {
 		size := u32(len(buf))
 		if _NSGetExecutablePath(raw_data(buf), &size) != 0 do return ""
@@ -29,11 +30,12 @@ ipc_self_exe :: proc(buf: []u8) -> string {
 	}
 }
 
-// ipc_build_id names the running build: binary size + mtime. Two tiers of
+// _build_id names the running build: binary size + mtime. Two tiers of
 // different builds never adopt each other's protocol state (old holders drain).
-ipc_build_id :: proc(buf: []u8) -> string {
+@(private)
+_build_id :: proc(buf: []u8) -> string {
 	exe_buf: [1024]u8
-	exe := ipc_self_exe(exe_buf[:])
+	exe := _self_exe(exe_buf[:])
 	cbuf: [1024]u8
 	cpath, ok := cstring_from(cbuf[:], exe)
 	st: posix.stat_t
@@ -41,15 +43,8 @@ ipc_build_id :: proc(buf: []u8) -> string {
 	return fmt.bprintf(buf, "%x-%x", i64(st.st_size), i64(st.st_mtim.tv_sec))
 }
 
-IPC_SPAWN_MAX_ARGS :: 8
-
-// ipc_spawn_self_detached starts this binary with args, as _spawn_detached.
-ipc_spawn_self_detached :: proc(args: []string, log_path: string) -> bool {
-	if len(args) + 1 > IPC_SPAWN_MAX_ARGS do return false
-	argv: [IPC_SPAWN_MAX_ARGS]string
-	copy(argv[1:], args)
-	return _spawn_detached(argv[:len(args) + 1], log_path)
-}
+@(private)
+_SPAWN_MAX_ARGS :: 8
 
 // _spawn_detached starts argv ("" in argv[0] = this binary) in a new
 // session (double fork + setsid, reparented to init), stdin from /dev/null
@@ -58,12 +53,12 @@ ipc_spawn_self_detached :: proc(args: []string, log_path: string) -> bool {
 // be multi-threaded).
 @(private)
 _spawn_detached :: proc(argv_in: []string, log_path: string) -> bool {
-	if len(argv_in) == 0 || len(argv_in) > IPC_SPAWN_MAX_ARGS do return false
+	if len(argv_in) == 0 || len(argv_in) > _SPAWN_MAX_ARGS do return false
 	exe_buf: [1024]u8
-	exe := argv_in[0] if argv_in[0] != "" else ipc_self_exe(exe_buf[:])
+	exe := argv_in[0] if argv_in[0] != "" else _self_exe(exe_buf[:])
 	if len(exe) == 0 do return false
-	store: [IPC_SPAWN_MAX_ARGS][512]u8
-	argv: [IPC_SPAWN_MAX_ARGS + 1]cstring
+	store: [_SPAWN_MAX_ARGS][512]u8
+	argv: [_SPAWN_MAX_ARGS + 1]cstring
 	ok: bool
 	if argv[0], ok = cstring_from(store[0][:], exe); !ok do return false
 	for a, i in argv_in[1:] do if argv[i + 1], ok = cstring_from(store[i + 1][:], a); !ok do return false
@@ -96,11 +91,11 @@ _detached_child :: proc(exe: cstring, argv: [^]cstring, log_c: cstring) -> ! {
 	posix._exit(127)
 }
 
-// ipc_unlink_if_ours removes path only while it is still the socket inode we bound.
-ipc_unlink_if_ours :: proc(path: string, ino: u64) {
+// _unlink_if_ours removes path only while it is still the socket inode we bound.
+@(private)
+_unlink_if_ours :: proc(path: string, ino: u64) {
 	cbuf: [256]u8
 	cpath, ok := cstring_from(cbuf[:], path)
 	st: posix.stat_t
 	if ok && posix.lstat(cpath, &st) == .OK && u64(st.st_ino) == ino do posix.unlink(cpath)
 }
-

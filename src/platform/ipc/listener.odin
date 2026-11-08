@@ -32,13 +32,8 @@ _Listener :: struct {
 
 @(private)
 _listener_open :: proc(l: ^_Listener, p: ^_Poll, path: string, on_accept: proc(data: rawptr, fd: posix.FD), on_broken: proc(data: rawptr), data: rawptr) -> Error {
-	fd, ino, err := ipc_bind_listener(path)
-	#partial switch err {
-	case .None:
-	case .Already_Running: return {kind = .Already_Running, reason = fmt.tprintf("another server listens at %s", path)}
-	case .Unsafe_Path, .Path_Too_Long: return {kind = .Unsafe_Path, reason = fmt.tprintf("cannot use %s", path)}
-	case: return {kind = .Start_Failed, reason = fmt.tprintf("cannot listen at %s", path)}
-	}
+	fd, ino, err := _bind_listener(path)
+	if err.kind != .None do return err
 	l^ = {set = p, fd = fd, ino = ino, on_accept = on_accept, on_broken = on_broken, data = data}
 	l.path_len = copy(l.path[:], path)
 	id, ok := _poll_add(p, {fd = fd, want = {.IN}, on = _listener_ready, data = l, on_due = _listener_resume})
@@ -55,7 +50,7 @@ _listener_close :: proc(l: ^_Listener) {
 	if l.set == nil do return
 	_poll_remove(l.set, l.src)
 	if l.fd >= 0 do posix.close(l.fd)
-	ipc_unlink_if_ours(string(l.path[:l.path_len]), l.ino)
+	_unlink_if_ours(string(l.path[:l.path_len]), l.ino)
 	l^ = {}
 }
 
@@ -88,7 +83,7 @@ _listener_ready :: proc(data: rawptr, rev: posix.Poll_Event) {
 
 @(private = "file")
 _listener_take :: proc(l: ^_Listener, fd: posix.FD) {
-	uid, ok := ipc_peer_uid(fd)
+	uid, ok := _peer_uid(fd)
 	if !ok || uid != posix.getuid() {
 		posix.close(fd)
 		return

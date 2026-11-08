@@ -25,9 +25,7 @@ core_adopt_holders :: proc(c: ^Core) {
 		buf: [256]u8
 		path, ok := proto.session_path(buf[:], c.dir, e.name)
 		if !ok do continue
-		if !_holder_connect(c, path) && ipc.ipc_probe(path) == .Not_Running {
-			_unlink_socket(path)
-		}
+		if !_holder_connect(c, path) && !ipc.endpoint_alive(_endpoint(path)) do _unlink_socket(path)
 	}
 	free_all(context.temp_allocator)
 	// Settle the handshakes so adopted sessions exist before viewers arrive.
@@ -49,7 +47,7 @@ core_start_holder :: proc(c: ^Core) -> bool {
 	name := fmt.bprintf(name_buf[:], "%s%08x.sock", HOLDER_PREFIX, u32(_now()) ~ u32(posix.getpid()))
 	path, ok := proto.session_path(path_buf[:], c.dir, name)
 	log_path := proto.log_path(log_buf[:], "holder.log")
-	if !ok || !ipc.ipc_spawn_self_detached({"--holder", path}, log_path) do return false
+	if !ok || !proto.spawn_self({"--holder", path}, log_path) do return false
 	deadline := _now() + 3 * 1_000_000_000
 	for _now() < deadline {
 		if _holder_connect(c, path) do break
@@ -73,13 +71,18 @@ _holder_connect :: proc(c: ^Core, path: string) -> bool {
 	h := &c.holders[slot]
 	h^ = {used = true}
 	h.path_len = copy(h.path_buf[:], path)
-	slash := strings.last_index_byte(path, '/')
-	at := ipc.Endpoint{path[:max(slash, 0)], path[slash + 1:]}
-	if err := ipc.link_dial(&h.link, at, proto.holder(), u8(proto.Stream_Role.Core), &c.set, {backlog = CORE_HOLDER_CTL}); err.kind != .None {
+	if err := ipc.link_dial(&h.link, _endpoint(path), proto.holder(), u8(proto.Stream_Role.Core), &c.set, {backlog = CORE_HOLDER_CTL}); err.kind != .None {
 		h^ = {}
 		return false
 	}
 	return true
+}
+
+// _endpoint: a holder socket path as dir + name.
+@(private = "file")
+_endpoint :: proc(path: string) -> ipc.Endpoint {
+	slash := strings.last_index_byte(path, '/')
+	return {path[:max(slash, 0)], path[slash + 1:]}
 }
 
 @(private = "file")
@@ -107,7 +110,7 @@ core_holder_events :: proc(c: ^Core, i: int) {
 			_holder_drop(c, i)
 			return
 		case ipc.Link_Frame:
-			if !_holder_frame(c, i, ipc.Stream_Frame{e.kind, e.channel, e.body}) {
+			if !_holder_frame(c, i, e) {
 				_holder_drop(c, i)
 				return
 			}
@@ -118,15 +121,15 @@ core_holder_events :: proc(c: ^Core, i: int) {
 
 // _holder_frame applies one holder frame; false = the holder broke protocol.
 @(private = "file")
-_holder_frame :: proc(c: ^Core, hi: int, f: ipc.Stream_Frame) -> bool {
-	r := ipc.wire_reader(f.payload)
+_holder_frame :: proc(c: ^Core, hi: int, f: ipc.Link_Frame) -> bool {
+	r := ipc.wire_reader(f.body)
 	switch f.kind {
 	case proto.MSG_WELCOME:
 		return _holder_welcome(c, hi, &r)
 	case proto.MSG_TAIL:
-		if s := core_session_find(c, f.channel); s != nil do core_session_adopt_tail(c, s, f.payload)
+		if s := core_session_find(c, f.channel); s != nil do core_session_adopt_tail(c, s, f.body)
 	case proto.MSG_OUTPUT:
-		if s := core_session_find(c, f.channel); s != nil do core_session_output(c, s, f.payload)
+		if s := core_session_find(c, f.channel); s != nil do core_session_output(c, s, f.body)
 	case proto.MSG_SPAWNED:
 		pid := i32(ipc.wr_u32(&r))
 		started_unix := i64(ipc.wr_u64(&r))
@@ -134,7 +137,7 @@ _holder_frame :: proc(c: ^Core, hi: int, f: ipc.Stream_Frame) -> bool {
 			core_session_spawned(c, s, pid, started_unix)
 		}
 	case proto.MSG_SPAWN_FAILED:
-		if s := core_session_find(c, f.channel); s != nil do core_session_exited(c, s, {code = 127}, string(f.payload))
+		if s := core_session_find(c, f.channel); s != nil do core_session_exited(c, s, {code = 127}, string(f.body))
 	case proto.MSG_EXITED:
 		exit := proto.dec_exit(&r)
 		if s := core_session_find(c, f.channel); s != nil && r.ok do core_session_exited(c, s, exit, "")
@@ -179,7 +182,7 @@ _holder_drop :: proc(c: ^Core, hi: int) {
 	ipc.link_close(&h.link)
 	// A holder killed outright leaves its socket; nobody answers there any more.
 	path := string(h.path_buf[:h.path_len])
-	if len(path) > 0 && ipc.ipc_probe(path) == .Not_Running do _unlink_socket(path)
+	if len(path) > 0 && !ipc.endpoint_alive(_endpoint(path)) do _unlink_socket(path)
 	h^ = {}
 }
 

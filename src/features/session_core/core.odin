@@ -153,7 +153,7 @@ _now_unix :: proc() -> i64 { return time.to_unix_seconds(time.now()) }
 // core_new allocates a core and every buffer its loop uses (no sockets yet).
 core_new :: proc() -> ^Core {
 	c := new(Core)
-	c.build = ipc.ipc_build_id(c.build_buf[:])
+	c.build = proto.build_id(c.build_buf[:])
 	c.next_id = 1
 	c.grace_ns = _grace_ms() * 1_000_000
 	owned_buf: [64]u8 // lookup_env also stores the key here

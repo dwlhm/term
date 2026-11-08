@@ -30,6 +30,7 @@ STREAM_DATA   :: u8(0) // stream payload bytes
 STREAM_CREDIT :: u8(1) // u32 LE: the receiver consumed this many bytes
 STREAM_CLOSE  :: u8(2) // the channel is over (payload: reason text, may be empty)
 
+@(private)
 Stream_Error :: enum u8 {
 	None,
 	Closed,       // peer closed (EOF) or we closed
@@ -38,6 +39,7 @@ Stream_Error :: enum u8 {
 	Socket_Failed,
 }
 
+@(private)
 Stream_Frame :: struct {
 	kind:    u8,
 	channel: u32,
@@ -45,12 +47,14 @@ Stream_Frame :: struct {
 }
 
 // Byte_Ring is a fixed-capacity FIFO of bytes; pushes are all-or-nothing.
+@(private)
 Byte_Ring :: struct {
 	buf:  []u8,
 	head: int, // read position
 	len:  int,
 }
 
+@(private)
 ring_push :: proc(r: ^Byte_Ring, parts: ..[]u8) -> bool {
 	total := 0
 	for p in parts do total += len(p)
@@ -66,20 +70,24 @@ ring_push :: proc(r: ^Byte_Ring, parts: ..[]u8) -> bool {
 }
 
 // ring_front is the contiguous readable run starting at head.
+@(private)
 ring_front :: proc(r: ^Byte_Ring) -> []u8 {
 	if r.len == 0 do return nil
 	return r.buf[r.head:r.head + min(r.len, len(r.buf) - r.head)]
 }
 
+@(private)
 ring_consume :: proc(r: ^Byte_Ring, n: int) {
 	k := min(n, r.len)
 	r.len -= k
 	r.head = 0 if r.len == 0 else (r.head + k) % len(r.buf)
 }
 
+@(private)
 ring_clear :: proc(r: ^Byte_Ring) { r.head, r.len = 0, 0 }
 
 // ring_pop copies up to len(out) bytes out of the ring.
+@(private)
 ring_pop :: proc(r: ^Byte_Ring, out: []u8) -> int {
 	n := 0
 	for n < len(out) && r.len > 0 {
@@ -91,12 +99,14 @@ ring_pop :: proc(r: ^Byte_Ring, out: []u8) -> int {
 	return n
 }
 
+@(private)
 stream_put_header :: proc(dst: []u8, kind: u8, channel: u32, length: int) {
 	dst[0] = kind
 	_put_u32(dst[1:], channel)
 	_put_u32(dst[5:], u32(length))
 }
 
+@(private)
 stream_parse_header :: proc(src: []u8, max_payload := STREAM_MAX_PAYLOAD) -> (kind: u8, channel: u32, length: int, ok: bool) {
 	if len(src) < STREAM_HEADER do return
 	length = int(_get_u32(src[5:]))

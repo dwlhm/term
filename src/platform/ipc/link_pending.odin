@@ -32,7 +32,7 @@ _link_accept :: proc(data: rawptr, fd: posix.FD) {
 	}
 	if slot.src != 0 do _pending_drop(slot) // every slot taken: the oldest yields
 	k.seq += 1
-	if !ipc_set_nonblocking_cloexec(fd) {
+	if !_set_nonblocking_cloexec(fd) {
 		posix.close(fd)
 		return
 	}

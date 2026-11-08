@@ -6,6 +6,7 @@ package feature_holder
 
 import "core:fmt"
 import "core:os"
+import byte_ring "../../core/byte_ring"
 import proto "../session_proto"
 import ipc "../../platform/ipc"
 
@@ -17,7 +18,7 @@ _core_events :: proc(h: ^Holder, now: i64) {
 		case ipc.Link_Down: _core_down(h, e, now)
 		case ipc.Link_Frame:
 			if h.core_state != .Linked do continue // Closing: only BYE goes out
-			if !_core_message(h, ipc.Stream_Frame{e.kind, e.channel, e.body}, now) do _core_drop(h, now)
+			if !_core_message(h, e, now) do _core_drop(h, now)
 		}
 	}
 }
@@ -75,7 +76,7 @@ _send_tails :: proc(h: ^Holder) {
 		if s.tailed do continue
 		if h.core_state != .Linked do return
 		if ipc.link_backlog(&h.link) + ipc.STREAM_HEADER + s.tail.len > HOLDER_BACKLOG do return
-		front := ipc.ring_front(&s.tail)
+		front := byte_ring.ring_front(&s.tail)
 		wrapped := s.tail.buf[:s.tail.len - len(front)]
 		if !_core_send(h, proto.MSG_TAIL, s.id, front, wrapped) do return
 		s.tailed = true

@@ -41,8 +41,8 @@ _capture :: proc(cp: ^_Capture) {
 
 @(private = "file")
 _listen_unix :: proc(path: string) -> posix.FD {
-	addr: posix.sockaddr_un
-	if !ipc.ipc_fill_sockaddr(path, &addr) do return -1
+	addr := posix.sockaddr_un{sun_family = .UNIX}
+	copy(([^]u8)(&addr.sun_path[0])[:len(addr.sun_path) - 1], path)
 	fd := posix.socket(.UNIX, .STREAM)
 	if fd < 0 do return -1
 	if posix.bind(fd, (^posix.sockaddr)(&addr), size_of(addr)) != .OK || posix.listen(fd, 4) != .OK {
@@ -64,7 +64,7 @@ _whole_frame :: proc(b: []u8) -> bool {
 @(private = "file")
 _hello_0_0_2 :: proc(buf: []u8) -> []u8 {
 	bb: [64]u8
-	build := ipc.ipc_build_id(bb[:])
+	build := proto.build_id(bb[:])
 	w := ipc.wire_writer(buf)
 	ipc.ww_u8(&w, 10)
 	ipc.ww_u32(&w, 0)

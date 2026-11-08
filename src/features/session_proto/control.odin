@@ -18,13 +18,11 @@ control :: proc() -> ipc.Protocol {
 }
 
 // control_endpoint: ctl_socket_path split into {dir, name} at the last '/'.
-// A path the OS cannot use is .Unsafe_Path; the caller passes the endpoint to
-// the package, which validates dir (ours, no symlink, closed to others).
+// The caller passes the endpoint to the package, which validates dir (ours,
+// no symlink, closed to others).
 control_endpoint :: proc(buf: []u8) -> (at: ipc.Endpoint, err: ipc.Error) {
-	path, perr := ctl_socket_path(buf)
-	if perr != .None {
-		return {}, {kind = .Unsafe_Path, reason = "the control socket path is not usable"}
-	}
+	path: string
+	if path, err = ctl_socket_path(buf); err.kind != .None do return
 	for i := len(path) - 1; i > 0; i -= 1 {
 		if path[i] == '/' do return {dir = path[:i], name = path[i + 1:]}, {}
 	}

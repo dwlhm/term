@@ -69,15 +69,41 @@ hostile_link :: proc(hello: bool) -> (fd: posix.FD, ok: bool) {
 	buf, sbuf: [128]u8
 	dir, _ := proto.session_dir(buf[:])
 	sock, _ := proto.session_path(sbuf[:], dir, proto.CORE_SOCKET)
-	err: ipc.Ipc_Error
-	if fd, err = ipc.ipc_connect(sock, 500); err != .None do return -1, false
+	if fd = _raw_connect(sock); fd < 0 do return -1, false
 	if !hello do return fd, true
-	hb: [ipc.STREAM_HEADER + 64]u8
-	w := ipc.wire_writer(hb[ipc.STREAM_HEADER:])
+	hb: [9 + 64]u8
+	w := ipc.wire_writer(hb[9:])
 	proto.enc_hello(&w, {version = 0x000100, role = .Viewer, build = "hostile"})
-	ipc.stream_put_header(hb[:], proto.MSG_HELLO, 0, w.n)
-	posix.send(fd, raw_data(hb[:]), uint(ipc.STREAM_HEADER + w.n), {.NOSIGNAL})
+	_raw_header(hb[:], proto.MSG_HELLO, 0, u32(w.n))
+	posix.send(fd, raw_data(hb[:]), uint(9 + w.n), {.NOSIGNAL})
 	return fd, true
+}
+
+@(private = "file")
+_raw_connect :: proc(path: string) -> posix.FD {
+	fd := posix.socket(.UNIX, .STREAM)
+	if fd < 0 do return -1
+	addr := posix.sockaddr_un{sun_family = .UNIX}
+	copy(([^]u8)(&addr.sun_path[0])[:len(addr.sun_path) - 1], path)
+	if posix.connect(fd, (^posix.sockaddr)(&addr), size_of(addr)) != .OK {
+		posix.close(fd)
+		return -1
+	}
+	return fd
+}
+
+@(private = "file")
+_raw_header :: proc(dst: []u8, kind: u8, channel, length: u32) {
+	dst[0] = kind
+	for i in 0 ..< 4 do dst[1 + i], dst[5 + i] = u8(channel >> uint(8 * i)), u8(length >> uint(8 * i))
+}
+
+@(private = "file")
+_raw_parse_header :: proc(src: []u8) -> (kind: u8, channel: u32, length: int, ok: bool) {
+	if len(src) < 9 do return
+	channel = u32(src[1]) | u32(src[2]) << 8 | u32(src[3]) << 16 | u32(src[4]) << 24
+	len32 := u32(src[5]) | u32(src[6]) << 8 | u32(src[7]) << 16 | u32(src[8]) << 24
+	return src[0], channel, int(len32), true
 }
 
 // hostile_read collects what the core sends for up to 5 s; closed = it hung up.
@@ -119,18 +145,18 @@ hostile_refused :: proc() -> bool {
 	fd, ok := hostile_link(true)
 	if !ok do return false
 	defer posix.close(fd)
-	frame: [ipc.STREAM_HEADER + 4]u8
-	ipc.stream_put_header(frame[:], 200, 0, 4)
-	frame[ipc.STREAM_HEADER] = 9
+	frame: [9 + 4]u8
+	_raw_header(frame[:], 200, 0, 4)
+	frame[9] = 9
 	posix.send(fd, raw_data(frame[:]), len(frame), {.NOSIGNAL})
 	in_buf: [8192]u8
 	n, closed := hostile_read(fd, in_buf[:], false)
-	for off := 0; off + ipc.STREAM_HEADER <= n; {
-		kind, _, length, valid := ipc.stream_parse_header(in_buf[off:n])
-		if !valid || off + ipc.STREAM_HEADER + length > n do break
-		r := ipc.wire_reader(in_buf[off + ipc.STREAM_HEADER:][:length])
+	for off := 0; off + 9 <= n; {
+		kind, _, length, valid := _raw_parse_header(in_buf[off:n])
+		if !valid || off + 9 + length > n do break
+		r := ipc.wire_reader(in_buf[off + 9:][:length])
 		if kind == proto.MSG_FAIL do return !closed && ipc.wr_u32(&r) == 9 && proto.Fail_Code(ipc.wr_u8(&r)) == .Bad_Request
-		off += ipc.STREAM_HEADER + length
+		off += 9 + length
 	}
 	return false
 }
@@ -141,11 +167,11 @@ test_hostile_viewers_dropped :: proc(t: ^testing.T) {
 	v := view_open()
 	s := view_sh(v, "stty -echo; while read x; do printf 'echo:%s\\n' \"$x\"; done")
 	testing.expect(t, view_attached(v, s) != 0, "a good viewer")
-	oversize: [ipc.STREAM_HEADER]u8
-	ipc.stream_put_header(oversize[:], proto.MSG_LIST, 0, 0)
+	oversize: [9]u8
+	_raw_header(oversize[:], proto.MSG_LIST, 0, 0)
 	oversize[5], oversize[6], oversize[7], oversize[8] = 0xff, 0xff, 0xff, 0x7f
-	bad_credit: [ipc.STREAM_HEADER + 1]u8
-	ipc.stream_put_header(bad_credit[:], ipc.STREAM_CREDIT, 1, 1)
+	bad_credit: [9 + 1]u8
+	_raw_header(bad_credit[:], 1, 1, 1) // 1 = CREDIT
 	testing.expect(t, hostile_dropped(false, transmute([]u8)string("GET / HTTP/1.1\r\n\r\n")), "garbage before HELLO")
 	testing.expect(t, hostile_dropped(true, oversize[:]), "oversize frame")
 	testing.expect(t, hostile_refused(), "an unknown request kind is answered Bad_Request, not dropped")

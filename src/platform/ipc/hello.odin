@@ -42,7 +42,7 @@ _hello_body :: proc(buf: []u8, v: Version, role: u8) -> []u8 {
 	ww_u32(&w, _version_u32(v))
 	ww_u8(&w, role)
 	ww_u64(&w, 0)
-	ww_str(&w, ipc_build_id(bb[:]))
+	ww_str(&w, _build_id(bb[:]))
 	return wire_bytes_written(&w)
 }
 

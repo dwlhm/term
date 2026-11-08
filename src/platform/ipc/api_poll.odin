@@ -38,7 +38,7 @@ poll_set_init :: proc(set: ^Poll_Set, capacity: int) -> Error {
 		_poll_free(p)
 		return {kind = .Start_Failed, reason = "cannot create the poll backend"}
 	}
-	for fd in p.wake do ipc_set_nonblocking_cloexec(fd)
+	for fd in p.wake do _set_nonblocking_cloexec(fd)
 	p.sources = make([]_Source, capacity + 1)
 	p.pfds = make([]posix.pollfd, capacity + 1)
 	p.refs = make([]_Ref, capacity + 1)

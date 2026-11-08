@@ -13,6 +13,7 @@ import cell "../../core/terminal/cell"
 import grid "../../core/terminal/grid"
 import damage "../../core/terminal/damage"
 import egc "../../core/terminal/egc"
+import byte_ring "../../core/byte_ring"
 import ipc "../../platform/ipc"
 import session "../../features/session"
 import client_feat "../../features/session_client"
@@ -376,7 +377,7 @@ bench_suite2_egc :: proc() -> Benchmark_Result {
 // ==============================================================================
 
 bench_suite3_ring :: proc() -> Benchmark_Result {
-	ring: ipc.Byte_Ring
+	ring: byte_ring.Byte_Ring
 	ring.buf = make([]u8, session.SESSION_INBOX_BYTES)
 	defer delete(ring.buf)
 
@@ -392,8 +393,8 @@ bench_suite3_ring :: proc() -> Benchmark_Result {
 
 	for i in 0..<ITERS {
 		start := time.tick_now()
-		_ = ipc.ring_push(&ring, data)
-		_ = ipc.ring_pop(&ring, read_buf)
+		_ = byte_ring.ring_push(&ring, data)
+		_ = byte_ring.ring_pop(&ring, read_buf)
 		dur := time.tick_since(start)
 		samples[i] = f64(time.duration_nanoseconds(dur))
 	}

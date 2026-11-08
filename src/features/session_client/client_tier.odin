@@ -38,7 +38,7 @@ client_tier_main :: proc(args: []string) -> (handled: bool, code: int) {
 client_use_private_session :: proc() -> bool {
 	buf, name_buf, path_buf: [256]u8
 	dir, err := proto.session_dir(buf[:])
-	if err != .None do return false
+	if err.kind != .None do return false
 	path, ok := proto.session_path(path_buf[:], dir, fmt.bprintf(name_buf[:], "s%d", int(posix.getpid())))
 	return ok && os.set_env(proto.SESSION_DIR_ENV, path) == nil && os.set_env(proto.SESSION_OWNED_ENV, "1") == nil
 }

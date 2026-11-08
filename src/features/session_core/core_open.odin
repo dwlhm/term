@@ -27,9 +27,7 @@ _remove_private_dir :: proc(c: ^Core) {
 // core_listen opens the session Server on c.set; .Already_Running = another
 // core serves this session dir.
 core_listen :: proc(c: ^Core) -> ipc.Error {
-	err: ipc.Ipc_Error
-	if c.dir, err = proto.session_dir(c.dir_buf[:]); err != .None {
-		return {kind = .Unsafe_Path, reason = ipc.ipc_error_message(err)}
-	}
+	err: ipc.Error
+	if c.dir, err = proto.session_dir(c.dir_buf[:]); err.kind != .None do return err
 	return ipc.server_open(&c.srv, {c.dir, proto.CORE_SOCKET}, proto.session(), &c.set, {max_peers = CORE_MAX_VIEWERS, busy_reason = CORE_BUSY_REASON})
 }

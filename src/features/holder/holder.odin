@@ -24,6 +24,7 @@ package feature_holder
 
 import "core:fmt"
 import "core:strings"
+import byte_ring "../../core/byte_ring"
 import proto "../session_proto"
 import ipc "../../platform/ipc"
 
@@ -50,8 +51,8 @@ Session :: struct {
 	started_unix:  i64,
 	master:        i32,
 	size:          proto.Size_Msg,
-	tail:          ipc.Byte_Ring, // last HOLDER_TAIL_BYTES of output, overwrite-oldest
-	input:         ipc.Byte_Ring, // bytes for the program, written on POLLOUT
+	tail:          byte_ring.Byte_Ring, // last HOLDER_TAIL_BYTES of output, overwrite-oldest
+	input:         byte_ring.Byte_Ring, // bytes for the program, written on POLLOUT
 	eof:           bool, // reader done (0/EIO): the master is no longer polled
 	reaped:        bool,
 	exit_final:    bool, // EXITED may be reported
@@ -75,7 +76,7 @@ Holder :: struct {
 	set:           ipc.Poll_Set,
 	link:          ipc.Link,
 	build_buf:     [64]u8,
-	build:         string, // ipc_build_id: holders of another build get drained
+	build:         string, // proto.build_id: holders of another build get drained
 	sessions:      [HOLDER_MAX_SESSIONS]Session,
 	count:         int,
 	live:          [HOLDER_MAX_SESSIONS]u16, // slots in use: live[:count], unordered
@@ -141,7 +142,7 @@ _holder_open :: proc(h: ^Holder, socket_path: string) -> bool {
 		return false
 	}
 	h.instance = _random_u64()
-	h.build = ipc.ipc_build_id(h.build_buf[:])
+	h.build = proto.build_id(h.build_buf[:])
 	now := _now()
 	_supervisor_init(&h.sup, now)
 	return true
