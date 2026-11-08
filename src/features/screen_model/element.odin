@@ -1,4 +1,4 @@
-package feature_automation
+package feature_screen_model
 
 // Elements: what a screen shows, found from marked sources (OSC 133 regions,
 // OSC 8 links: never overridden) and generic inference. Refs (@e1, @e2…) are

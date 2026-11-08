@@ -225,3 +225,35 @@ test_snapshot_rejects_malformed_requests :: proc(t: ^testing.T) {
 	_, code, ok := cli_snapshot(424_242)
 	testing.expect(t, !ok && code == .Not_Found)
 }
+
+@(test)
+test_snapshot_generational_tracking :: proc(t: ^testing.T) {
+	tiers := tiers_start()
+	v := view_open()
+	s := view_sh(v, "printf '\\033]7501;state=working:msg=work\\007'; /bin/sleep 0.2; printf '\\033]133;A\\007'; /bin/sleep 3")
+	id := view_attached(v, s)
+	defer { view_close(v); tiers_stop(tiers) }
+
+	// Wait until program status and prompt have registered
+	time.sleep(500 * time.Millisecond)
+	snap, _, ok := cli_snapshot(id)
+	testing.expect(t, ok)
+	testing.expect(t, snap.status_gen > 0, "status_gen tracked OSC 7501")
+	testing.expect(t, snap.prompt_gen > 0, "prompt_gen tracked OSC 133")
+
+	// Send input to the session via MSG_SEND
+	conn: Cli
+	testing.expect(t, cli_conn(&conn))
+	defer cli_close(&conn)
+	buf: [128]u8
+	w := ipc.wire_writer(buf[:])
+	proto.enc_send_req(&w, {id = id, bytes = transmute([]u8)string("hi")})
+	cli_send(&conn, proto.MSG_SEND, ipc.wire_bytes_written(&w))
+	_, got := _answer(&conn, proto.MSG_OK, 3000)
+	testing.expect(t, got, "send accepted")
+
+	snap_after, _, ok2 := cli_snapshot(id)
+	testing.expect(t, ok2)
+	testing.expect(t, snap_after.input_gen > 0, "input_gen tracked MSG_SEND")
+	testing.expect(t, snap_after.input_gen >= snap.gen, "input_gen updated to at least previous screen gen")
+}

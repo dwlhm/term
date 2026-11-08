@@ -1,4 +1,4 @@
-package feature_automation
+package feature_screen_model
 
 // Bars and the field being typed in: a status bar is a top or bottom row on
 // its own background; a scrollbar is a right-hand column of block characters;

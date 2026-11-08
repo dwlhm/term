@@ -1,4 +1,4 @@
-package feature_automation
+package feature_screen_model
 
 // Controls drawn as text: [x] / ( ) toggles, [____] fields, <OK> and [ OK ]
 // buttons, and "pill" buttons (padded text on its own background, two or more

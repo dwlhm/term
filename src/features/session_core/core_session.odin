@@ -126,6 +126,13 @@ core_session_output :: proc(c: ^Core, s: ^Core_Session, bytes: []u8) {
 	s.gen += 1
 	s.settle_due_ns = s.output_ns + CORE_SETTLE_MS * 1_000_000
 	edges := core_shell_edges(s)
+	if edges.prompted || s.sess.term.parser.prompt_state == .Prompt {
+		s.prompt_gen = s.gen
+	}
+	if u8(s.sess.program_status.state) != s.last_status_state {
+		s.last_status_state = u8(s.sess.program_status.state)
+		s.status_gen = s.gen
+	}
 	core_watch_output(c, s, edges)
 	core_broker_shell_edges(c, s, edges)
 	core_row_changed(c, s)

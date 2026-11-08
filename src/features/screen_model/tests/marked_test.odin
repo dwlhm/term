@@ -1,4 +1,4 @@
-package feature_automation_tests
+package feature_screen_model_tests
 
 // Marked elements come from what the program said: OSC 133 prompt rows, the
 // line being typed and the last command's output; OSC 8 links.

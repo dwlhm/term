@@ -33,6 +33,7 @@ core_viewer_act :: proc(c: ^Core, req: ^ipc.Request) {
 		return
 	}
 	gen := s.gen
+	s.input_gen = gen
 	core_broker_human_input(c, s, c.act[:])
 	core_holder_send(c, s.holder, proto.MSG_INPUT, s.id, c.act[:])
 	w := ipc.wire_writer(c.msg)

@@ -1,4 +1,4 @@
-package feature_automation
+package feature_screen_model
 
 // Marked elements: what programs say themselves. OSC 133 shell integration
 // gives the prompt rows, the line being typed and the last command's output;

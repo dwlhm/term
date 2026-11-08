@@ -89,6 +89,9 @@ _snap_head :: proc(s: ^Core_Session) -> proto.Snapshot {
 		status_kind = string(st.kind_buf[:st.kind_len]), status_msg = extension.program_status_msg(st),
 		title = string(t.title_buf[:t.title_len]),
 		process = process,
+		input_gen = s.input_gen,
+		prompt_gen = s.prompt_gen,
+		status_gen = s.status_gen,
 	}
 }
 

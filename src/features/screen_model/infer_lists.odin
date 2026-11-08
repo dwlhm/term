@@ -1,4 +1,4 @@
-package feature_automation
+package feature_screen_model
 
 // Lists: a highlighted row (its background differs from its container's over
 // at least half the width) is the selected item; the rows aligned with it are

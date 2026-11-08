@@ -1,4 +1,4 @@
-package feature_automation
+package feature_screen_model
 
 // Screen: a snapshot laid out as cells (what inference reads) and row text
 // with a byte offset per cell (what element names are cut from). Built once

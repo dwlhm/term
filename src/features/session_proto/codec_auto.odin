@@ -30,6 +30,7 @@ enc_snapshot_head :: proc(w: ^ipc.Wire_Writer, m: Snapshot) {
 	ipc.ww_u8(w, m.status_state); ipc.ww_str(w, m.status_app); ipc.ww_str(w, m.status_kind); ipc.ww_str(w, m.status_msg)
 	ipc.ww_str(w, m.title); ipc.ww_str(w, m.process)
 	ipc.ww_bool(w, m.history_truncated)
+	ipc.ww_u64(w, m.input_gen); ipc.ww_u64(w, m.prompt_gen); ipc.ww_u64(w, m.status_gen)
 }
 
 @(private = "file")
@@ -50,6 +51,7 @@ _dec_snapshot_head :: proc(r: ^ipc.Wire_Reader, m: ^Snapshot) {
 	m.status_state, m.status_app, m.status_kind, m.status_msg = ipc.wr_u8(r), ipc.wr_str(r), ipc.wr_str(r), ipc.wr_str(r)
 	m.title, m.process = ipc.wr_str(r), ipc.wr_str(r)
 	m.history_truncated = ipc.wr_bool(r)
+	m.input_gen, m.prompt_gen, m.status_gen = ipc.wr_u64(r), ipc.wr_u64(r), ipc.wr_u64(r)
 }
 
 enc_snap_row :: proc(w: ^ipc.Wire_Writer, line: i64, wrap, prompt: bool, runs: []Snap_Run) {

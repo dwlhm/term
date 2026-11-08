@@ -95,6 +95,9 @@ Snapshot :: struct {
 	title:           string,
 	process:         string,
 	history_truncated: bool, // more history matched than fit
+	input_gen:       u64, // gen when input last went in (ACT, send, window typing)
+	prompt_gen:      u64, // gen when OSC 133 prompt last appeared
+	status_gen:      u64, // gen when OSC 7501 status last changed
 	history:         []Snap_Row, // oldest first, ending right above the screen
 	screen:          []Snap_Row, // rows 0..rows-1
 	links:           []Snap_Link, // every link a run refers to

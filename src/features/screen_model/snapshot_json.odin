@@ -1,4 +1,4 @@
-package feature_automation
+package feature_screen_model
 
 // Snapshots saved by `term auto snapshot --save` (JSON, enum names), for
 // adapter tests (term.screen.load) and golden files.

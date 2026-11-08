@@ -1,4 +1,4 @@
-package feature_automation
+package feature_screen_model
 
 // Panels and dialogs: rectangles drawn with box-drawing characters. A title
 // sits on the top edge, a footer on the bottom one. A rectangle may be partly

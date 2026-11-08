@@ -24,6 +24,7 @@ core_viewer_send :: proc(c: ^Core, req: ^ipc.Request) {
 	if !ipc.request_decode(req, &m, proto.dec_send_req) do return
 	s := _target(c, req, m.id, true)
 	if s == nil || _no_program(c, req, s) || core_lease_fail(c, s, req) do return
+	s.input_gen = s.gen
 	core_broker_human_input(c, s, m.bytes)
 	core_holder_send(c, s.holder, proto.MSG_INPUT, s.id, m.bytes)
 	_ok(c, req)

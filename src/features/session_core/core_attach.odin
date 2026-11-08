@@ -142,6 +142,7 @@ core_attach_input :: proc(c: ^Core, f: ipc.Stream_Input) {
 	case proto.MSG_V_INPUT:
 		// The typist owns the size first: its input is read at its size.
 		core_attach_touch(c, s, a)
+		s.input_gen = s.gen
 		if core_lease_human_input(c, s, f.body) do return // held for the automation
 		core_broker_human_input(c, s, f.body)
 		if core_stitch_hold(s, f.body) do return // delivered when the stitch ends

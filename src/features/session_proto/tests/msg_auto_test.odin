@@ -10,7 +10,7 @@ import ipc "../../../platform/ipc"
 @(private = "file")
 _write_snapshot :: proc(buf: []u8) -> []u8 {
 	w := ipc.wire_writer(buf)
-	proto.enc_snapshot_head(&w, {id = 7, gen = 42, cols = 80, rows = 2, top_line = 100, title = "T", process = "sh", prompt_state = .Input, status_state = 2, status_msg = "busy"})
+	proto.enc_snapshot_head(&w, {id = 7, gen = 42, cols = 80, rows = 2, top_line = 100, title = "T", process = "sh", prompt_state = .Input, status_state = 2, status_msg = "busy", input_gen = 11, prompt_gen = 22, status_gen = 33})
 	ipc.ww_u32(&w, 1)
 	proto.enc_snap_row(&w, 99, true, false, {{cells = 3, text = "old"}})
 	ipc.ww_u32(&w, 2)
@@ -29,6 +29,7 @@ test_snapshot_roundtrip :: proc(t: ^testing.T) {
 	m := proto.dec_snapshot(&r, context.temp_allocator)
 	testing.expect(t, ipc.wr_done(&r))
 	testing.expect(t, m.id == 7 && m.gen == 42 && m.top_line == 100 && m.prompt_state == .Input)
+	testing.expect(t, m.input_gen == 11 && m.prompt_gen == 22 && m.status_gen == 33, "generational tracking fields match")
 	testing.expect(t, m.title == "T" && m.process == "sh" && m.status_state == 2 && m.status_msg == "busy")
 	testing.expect(t, len(m.history) == 1 && m.history[0].line == 99 && m.history[0].wrap)
 	testing.expect_value(t, m.history[0].runs[0].text, "old")

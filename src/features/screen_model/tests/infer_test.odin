@@ -1,4 +1,4 @@
-package feature_automation_tests
+package feature_screen_model_tests
 
 // Inference on snapshots of real programs (recorded with `term auto snapshot
 // --save` from the apps pinned in flake.nix): every element must match the

@@ -1,4 +1,4 @@
-package feature_automation
+package feature_screen_model
 
 // Generic inference: what a screen shows, from how terminal UIs draw it —
 // boxes, brackets, highlights, bars. Nothing here knows a program by name;
