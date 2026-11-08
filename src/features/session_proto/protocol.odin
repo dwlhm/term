@@ -41,6 +41,7 @@ session_catalog := [?]ipc.Msg_Spec{
 	{request = MSG_LEASE, answer = MSG_OK},
 	{request = MSG_LEASE_RELEASE, answer = MSG_OK},
 	{request = MSG_LEASE_MODE, answer = MSG_OK},
+	{request = MSG_ELEMENTS, answer = MSG_ELEMENTS_RESULT},
 	{request = MSG_EVENT, notice = true},
 	{request = MSG_REMOVED, notice = true},
 	{request = MSG_LEASE_EVENT, notice = true},

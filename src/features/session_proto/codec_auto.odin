@@ -171,3 +171,22 @@ dec_lease_event :: proc(r: ^ipc.Wire_Reader) -> (m: Lease_Event) {
 	m.interrupt, m.held, m.exit_code, m.bytes = ipc.wr_bool(r), ipc.wr_u32(r), ipc.wr_i32(r), ipc.wr_str(r)
 	return
 }
+
+enc_element_report :: proc(w: ^ipc.Wire_Writer, m: Element_Report) {
+	ipc.ww_u32(w, m.ref)
+	ipc.ww_u8(w, m.role)
+	ipc.ww_u16(w, m.row); ipc.ww_u16(w, m.col); ipc.ww_u16(w, m.width); ipc.ww_u16(w, m.height)
+	ipc.ww_u8(w, m.state)
+	ipc.ww_str(w, m.name)
+	ipc.ww_str(w, m.text)
+}
+
+dec_element_report :: proc(r: ^ipc.Wire_Reader) -> (m: Element_Report) {
+	m.ref = ipc.wr_u32(r)
+	m.role = ipc.wr_u8(r)
+	m.row, m.col, m.width, m.height = ipc.wr_u16(r), ipc.wr_u16(r), ipc.wr_u16(r), ipc.wr_u16(r)
+	m.state = ipc.wr_u8(r)
+	m.name = ipc.wr_str(r)
+	m.text = ipc.wr_str(r)
+	return
+}

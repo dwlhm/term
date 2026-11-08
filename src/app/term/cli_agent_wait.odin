@@ -116,7 +116,7 @@ _wait_text :: proc(c: ^plat_ipc.Client, t: ^Row_Track, text: string, deadline_ns
 	t.row = row
 	req: [8]u8
 	w := plat_ipc.wire_writer(req[:])
-	proto.enc_read_req(&w, {t.id, 0})
+	proto.enc_read_req(&w, {t.id, 0, false})
 	for time.tick_now()._nsec < deadline_ns {
 		a, err := plat_ipc.client_call(c, proto.MSG_READ, req[:], {on_event = app_track, data = t})
 		switch {

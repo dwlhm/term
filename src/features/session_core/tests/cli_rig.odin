@@ -62,6 +62,13 @@ cli_frame :: proc(conn: ^Cli, ms: int) -> (f: Cli_Frame, ok: bool) {
 	return
 }
 
+cli_answer :: proc(conn: ^Cli, want: u8, ms: int) -> (f: Cli_Frame, ok: bool) {
+	for {
+		f = cli_frame(conn, ms) or_return
+		if f.kind == want || f.kind == proto.MSG_FAIL do return f, true
+	}
+}
+
 // cli_fail_code reads a FAIL frame's code.
 cli_fail_code :: proc(payload: []u8) -> proto.Fail_Code {
 	r := ipc.wire_reader(payload)
@@ -130,4 +137,19 @@ cli_kill :: proc(id: u32) -> bool {
 	defer ipc.client_close(&c)
 	_, err := ipc.client_call(&c, proto.MSG_KILL, b[:], {timeout = 3 * time.Second})
 	return err.kind == .None
+}
+
+cli_attach_channel :: proc(conn: ^Cli, id: u32) -> (u32, bool) {
+	b: [64]u8
+	w := ipc.wire_writer(b[:])
+	proto.enc_attach(&w, {id = id, size = {cols = 80, rows = 24}})
+	cli_send(conn, proto.MSG_ATTACH, ipc.wire_bytes_written(&w))
+	for {
+		f, got := cli_frame(conn, 3000)
+		if !got do return 0, false
+		if f.kind != proto.MSG_ATTACHED do continue
+		r := ipc.wire_reader(f.payload)
+		got_id, ch := ipc.wr_u32(&r), ipc.wr_u32(&r)
+		return ch, got_id == id
+	}
 }

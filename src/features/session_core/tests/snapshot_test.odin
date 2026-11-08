@@ -61,9 +61,8 @@ _fail_code :: proc(r: ^ipc.Wire_Reader) -> proto.Fail_Code {
 	return proto.Fail_Code(ipc.wr_u8(r))
 }
 
-// _snap_until polls snapshots until one shows want (tests only: callers use SETTLE).
-@(private = "file")
-_snap_until :: proc(id: u32, want: string, history: u32 = 0, since: i64 = -1) -> (snap: proto.Snapshot, ok: bool) {
+// snap_until polls snapshots until one shows want (tests only: callers use SETTLE).
+snap_until :: proc(id: u32, want: string, history: u32 = 0, since: i64 = -1) -> (snap: proto.Snapshot, ok: bool) {
 	for _ in 0 ..< 200 {
 		s, _, got := cli_snapshot(id, history, since)
 		if got && strings.contains(_snap_text(s.screen), want) do return s, true
@@ -96,7 +95,7 @@ test_snapshot_runs_links_wide_and_title :: proc(t: ^testing.T) {
 	id := view_attached(v, s)
 	defer { view_close(v); tiers_stop(tiers) }
 
-	snap, ok := _snap_until(id, "LINK")
+	snap, ok := snap_until(id, "LINK")
 	testing.expect(t, ok, "the snapshot shows the output")
 	testing.expect_value(t, snap.id, id)
 	testing.expect(t, snap.gen > 0, "output moved the generation")
@@ -123,7 +122,7 @@ test_snapshot_modes_and_alt_screen :: proc(t: ^testing.T) {
 	id := view_attached(v, s)
 	defer { view_close(v); tiers_stop(tiers) }
 
-	snap, ok := _snap_until(id, "ALT_MODES")
+	snap, ok := snap_until(id, "ALT_MODES")
 	testing.expect(t, ok)
 	testing.expect(t, snap.alt_screen && snap.app_cursor && snap.bracketed_paste, "screen modes")
 	testing.expect_value(t, snap.mouse_mode, u8(3))   // ?1002
@@ -142,14 +141,14 @@ test_snapshot_history_since_a_line :: proc(t: ^testing.T) {
 	id := view_attached(v, s)
 	defer { view_close(v); tiers_stop(tiers) }
 
-	first, ok := _snap_until(id, "L60")
+	first, ok := snap_until(id, "L60")
 	testing.expect(t, ok)
 	few, _, _ := cli_snapshot(id, history = 5)
 	testing.expect_value(t, len(few.history), 5)
 	testing.expect(t, few.history_truncated, "more history matched than was asked for")
 	testing.expect_value(t, few.history[4].line, few.top_line - 1)
 
-	later, more := _snap_until(id, "MORE3", history = 100, since = first.top_line)
+	later, more := snap_until(id, "MORE3", history = 100, since = first.top_line)
 	testing.expect(t, more)
 	testing.expect(t, !later.history_truncated)
 	testing.expect_value(t, i64(len(later.history)), later.top_line - first.top_line)
@@ -164,7 +163,7 @@ test_settle_waits_for_quiet_output :: proc(t: ^testing.T) {
 	id := view_attached(v, s)
 	defer { view_close(v); tiers_stop(tiers) }
 
-	snap, ok := _snap_until(id, "READY")
+	snap, ok := snap_until(id, "READY")
 	testing.expect(t, ok)
 	start := time.tick_now()
 	res, _, settled := cli_settle({id = id, since = snap.gen, quiet_ms = 100, timeout_ms = 3000})

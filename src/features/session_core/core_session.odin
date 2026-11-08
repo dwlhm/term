@@ -199,6 +199,8 @@ core_session_kill :: proc(c: ^Core, s: ^Core_Session) {
 core_session_free :: proc(c: ^Core, s: ^Core_Session) {
 	core_stitch_free(s)
 	delete(s.lease.held) // a lease still open when the session goes
+	for r in s.ref_table do delete(r.text)
+	delete(s.ref_table)
 	if s.sess != nil do session.session_destroy(s.sess)
 	s^ = {}
 }

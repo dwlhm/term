@@ -21,7 +21,10 @@ terminal_cmd_output :: proc(t: ^Terminal, b: ^strings.Builder, to_cursor := fals
 	if from < -g.history_count {
 		from, head_lost = -g.history_count, true
 	}
-	terminal_text_rows(t, g, b, from, clamp(to, from, g.row_count))
+	end_col := -1
+	if o.ended && !to_cursor && o.end_col > 0 do end_col = o.end_col
+	else if to_cursor && cur_col > 0 do end_col = cur_col
+	terminal_text_rows(t, g, b, from, clamp(to, from, g.row_count), end_col)
 	return true, head_lost
 }
 

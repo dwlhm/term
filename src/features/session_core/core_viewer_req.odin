@@ -4,6 +4,7 @@ package feature_session_core
 // (a body that does not decode is answered Bad_Request by the package) and
 // answers exactly once, now or later from a record that keeps the Request.
 
+import "core:fmt"
 import "core:strings"
 import terminal "../../core/terminal"
 import proto "../session_proto"
@@ -32,6 +33,7 @@ core_viewer_request :: proc(c: ^Core, req: ^ipc.Request) {
 	case proto.MSG_LEASE:          core_viewer_lease(c, req)
 	case proto.MSG_LEASE_RELEASE:  core_viewer_lease_release(c, req)
 	case proto.MSG_LEASE_MODE:     core_viewer_lease_mode(c, req)
+	case proto.MSG_ELEMENTS:       core_viewer_elements(c, req)
 	case proto.MSG_SESSION_SIGNAL: core_viewer_signal(c, req)
 	case proto.MSG_SESSION_SIZE:   core_viewer_resize(c, req)
 	case: // the package lets only catalog kinds through
@@ -64,8 +66,7 @@ _attach :: proc(c: ^Core, req: ^ipc.Request) {
 }
 
 // _read answers the plain text of a session's screen (agents: `term session
-// read`). A full-screen program keeps its history itself: asking for history
-// starts a stitch, and MSG_TEXT follows when the core has scrolled it.
+// read`). Invariant S1: read never alters session, size, scroll or focus.
 @(private = "file")
 _read :: proc(c: ^Core, req: ^ipc.Request) {
 	m: proto.Read_Request
@@ -75,22 +76,54 @@ _read :: proc(c: ^Core, req: ^ipc.Request) {
 		core_viewer_fail(c, req, .Not_Found, "no such session")
 		return
 	}
-	if m.history > 0 && terminal.terminal_in_alt_screen(&s.sess.term) && core_lease_fail(c, s, req) do return
-	start := core_stitch_begin(c, s, req, int(m.history))
-	switch start {
-	case .Started:
-		return // MSG_TEXT comes from the stitch
-	case .Busy:
-		core_viewer_fail(c, req, .Busy, "this session's history is already being read")
+
+	defer free_all(context.temp_allocator)
+
+	if m.last {
+		if !s.sess.term.parser.saw_osc133 {
+			core_viewer_fail(c, req, .Bad_Request, fmt.tprintf("session %d does not mark commands (OSC 133)", s.id))
+			return
+		}
+		if !s.sess.term.parser.cmd_out.started {
+			core_viewer_fail(c, req, .Bad_Request, "no command has run yet")
+			return
+		}
+		clear(&c.text)
+		b := strings.Builder{buf = c.text}
+		to_cursor := !s.sess.term.parser.cmd_out.ended
+		_, head_lost := terminal.terminal_cmd_output(&s.sess.term, &b, to_cursor)
+		if head_lost {
+			g := &s.sess.term.grid
+			from := int(s.sess.term.parser.cmd_out.start - g.scrolled)
+			truncated := -g.history_count - from
+			if truncated > 0 {
+				prefix := fmt.tprintf("[truncated %d lines]\n", truncated)
+				temp := strings.clone(string(b.buf[:]), context.temp_allocator)
+				clear(&b.buf)
+				strings.write_string(&b, prefix)
+				strings.write_string(&b, temp)
+			}
+		}
+		if to_cursor {
+			if len(b.buf) > 0 && b.buf[len(b.buf) - 1] != '\n' do strings.write_byte(&b, '\n')
+			strings.write_string(&b, "[running]\n")
+		} else {
+			if len(b.buf) > 0 && b.buf[len(b.buf) - 1] != '\n' do strings.write_byte(&b, '\n')
+			exit_code := s.sess.term.parser.last_cmd_exit if s.sess.term.parser.has_cmd_exit else 0
+			fmt.sbprintf(&b, "[exit %d]\n", exit_code)
+		}
+		c.text = b.buf
+		core_reply_text(c, req)
 		return
-	case .Screen, .Screen_Marked:
 	}
+
 	clear(&c.text)
 	b := strings.Builder{buf = c.text}
 	terminal.terminal_text(&s.sess.term, &b, int(min(m.history, CORE_PAINT_HISTORY_MAX)))
-	// A full-screen program that does not report the mouse cannot be scrolled:
-	// say so instead of pretending the screen is its history.
-	if start == .Screen_Marked do strings.write_string(&b, CORE_READ_ALT_NOTE)
+	if s.exited {
+		if len(b.buf) > 0 && b.buf[len(b.buf) - 1] != '\n' do strings.write_byte(&b, '\n')
+		fmt.sbprintf(&b, "[exited %d]\n", s.exit.code)
+	}
 	c.text = b.buf
 	core_reply_text(c, req)
 }

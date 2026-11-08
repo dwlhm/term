@@ -40,7 +40,7 @@ core_viewer_snapshot :: proc(c: ^Core, req: ^ipc.Request) {
 	}
 }
 
-@(private = "file")
+@(private)
 _snap_write :: proc(c: ^Core, s: ^Core_Session, w: ^ipc.Wire_Writer, since: i64, history: int) {
 	t := &s.sess.term
 	g := &t.grid

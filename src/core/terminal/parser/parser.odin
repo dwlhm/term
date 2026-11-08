@@ -165,6 +165,7 @@ _parser_clear_prompt_rows :: proc(g: ^grid.Grid, from_row, to_row: int) {
 
 _parser_handle_osc_133 :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, payload: string) {
 	if p == nil || g == nil || p.in_alt_screen || len(payload) == 0 do return
+	p.saw_osc133 = true
 	switch payload[0] {
 	case 'A':
 		if p.prompt_state != .None {

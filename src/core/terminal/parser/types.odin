@@ -111,6 +111,7 @@ Parser :: struct {
 	esc_charset_slot: u8,
 
 	in_alt_screen:    bool,
+	saw_osc133:       bool,
 	prompt_state:     Prompt_State,
 	has_cmd_exit:     bool,
 	last_cmd_exit:    i32,

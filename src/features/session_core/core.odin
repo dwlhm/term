@@ -67,6 +67,12 @@ Core_Link :: struct {
 	id:   u32,
 }
 
+Ref_Entry :: struct {
+	id:   u32,
+	role: u8,
+	text: string,
+}
+
 Core_Session :: struct {
 	used:              bool,
 	exited:            bool,
@@ -92,6 +98,8 @@ Core_Session :: struct {
 	prompt_gen:        u64, // screen generation when OSC 133 prompt was last observed
 	status_gen:        u64, // screen generation when OSC 7501 status last changed
 	endpoint:          Core_Endpoint, // a virtual session (core_endpoint.odin)
+	ref_table:         [dynamic]Ref_Entry,
+	next_ref_id:       u32,
 }
 
 // Core_Viewer: one peer of the session Server (a window or a CLI), from

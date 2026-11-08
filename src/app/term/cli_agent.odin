@@ -35,15 +35,15 @@ app_cli_agent :: proc(args: []string) -> (handled: bool, code: int) {
 		return true, app_cli_session_help([]string{args[0]})
 	}
 	switch args[0] {
-	case "ls":   return true, app_cli_session_ls(args[1:])
-	case "new":  return true, app_cli_agent_new(args[1:])
+	case "ls":     return true, app_cli_session_ls(args[1:])
+	case "new":    return true, app_cli_agent_new(args[1:])
 	case "whoami": return true, _agent_whoami(args[1:])
 	case "next":   return true, app_cli_agent_next(args[1:])
-	case "read", "observe", "tell", "cancel", "result", "answer", "progress", "watch", "run", "send", "wait", "kill", "signal", "resize":
+	case "read":   return true, app_cli_session_read(args[1:])
+	case "observe", "tell", "cancel", "result", "answer", "progress", "watch", "run", "send", "wait", "kill", "signal", "resize":
 		id, rest, ok := _agent_target(args)
 		if !ok do return true, 1
 		switch args[0] {
-		case "read":    return true, _agent_read(id, rest)
 		case "observe": return true, app_cli_agent_observe(id, rest)
 		case "tell":    return true, app_cli_agent_tell(id, rest)
 		case "cancel":  return true, app_cli_agent_cancel(id, rest)
@@ -175,7 +175,7 @@ _agent_read :: proc(id: u32, args: []string) -> int {
 	}
 	b: [8]u8
 	w := plat_ipc.wire_writer(b[:])
-	proto.enc_read_req(&w, {id, lines})
+	proto.enc_read_req(&w, {id, lines, false})
 	text, code := app_agent_call(proto.MSG_READ, b[:])
 	if code == 0 do os.write(os.stdout, text)
 	return code

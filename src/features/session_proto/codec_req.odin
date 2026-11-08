@@ -23,8 +23,17 @@ dec_create :: proc(r: ^ipc.Wire_Reader) -> (m: Create_Request) {
 enc_observe_req :: proc(w: ^ipc.Wire_Writer, m: Observe_Request) { ipc.ww_u32(w, m.id); ipc.ww_u32(w, m.lines) }
 dec_observe_req :: proc(r: ^ipc.Wire_Reader) -> Observe_Request { return {ipc.wr_u32(r), ipc.wr_u32(r)} }
 
-enc_read_req :: proc(w: ^ipc.Wire_Writer, m: Read_Request) { ipc.ww_u32(w, m.id); ipc.ww_u32(w, m.history) }
-dec_read_req :: proc(r: ^ipc.Wire_Reader) -> Read_Request { return {ipc.wr_u32(r), ipc.wr_u32(r)} }
+enc_read_req :: proc(w: ^ipc.Wire_Writer, m: Read_Request) {
+	ipc.ww_u32(w, m.id)
+	ipc.ww_u32(w, m.history)
+	ipc.ww_bool(w, m.last)
+}
+dec_read_req :: proc(r: ^ipc.Wire_Reader) -> (m: Read_Request) {
+	m.id = ipc.wr_u32(r)
+	m.history = ipc.wr_u32(r)
+	if !ipc.wr_done(r) do m.last = ipc.wr_bool(r)
+	return
+}
 
 // The bytes are the rest of the body, without a length.
 enc_send_req :: proc(w: ^ipc.Wire_Writer, m: Send_Request) {

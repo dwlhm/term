@@ -15,8 +15,22 @@ MSG_LEASE_RELEASE   :: u8(107) // u32 session + bool flush (held input reaches t
 MSG_LEASE_MODE      :: u8(108) // u32 session + bool pass (a person's input goes through: a handoff) → MSG_OK | MSG_FAIL
 MSG_LEASE_EVENT     :: u8(95)  // Lease_Event, core → the lease owner, whenever it happens
 MSG_V_TAKEOVER      :: u8(109) // viewer → core on an attach channel: the person took the session back
+MSG_ELEMENTS        :: u8(110) // u32 session → MSG_ELEMENTS_RESULT | MSG_FAIL
+MSG_ELEMENTS_RESULT :: u8(97)  // u32 n + n Element_Report
 
 SNAPSHOT_HISTORY_MAX :: 10_000 // history lines one snapshot may carry
+
+Element_Report :: struct {
+	ref:     u32,
+	role:    u8,
+	row:     u16,
+	col:     u16,
+	width:   u16,
+	height:  u16,
+	state:   u8, // bitfield: 1 focused, 2 selected, 4 checked
+	name:    string,
+	text:    string,
+}
 
 // Snapshot_Request: history = at most that many scrollback lines above the
 // screen; since >= 0 limits them to lines >= since (a line number is

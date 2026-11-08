@@ -17,7 +17,8 @@ Observe_Request :: struct {
 }
 
 Read_Request :: struct {
-	id, history: u32, // history: scrollback lines (a full-screen program's are stitched)
+	id, history: u32, // history: scrollback lines
+	last:        bool,
 }
 
 Send_Request :: struct {
