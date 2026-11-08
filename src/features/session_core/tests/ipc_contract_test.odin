@@ -1,14 +1,13 @@
 package feature_session_core_tests
 
-// P33, P34: term on top of the IPC package (IPC spec section 8, slice T3),
-// written against the new API before term uses it. They stay red until M2
-// (P33) and M3 (P34), so they only build with -define:IPC_CONTRACT=true,
-// which `make test-ipc-contract` passes; `make test` never runs them.
+// P34: a worker whose NEXT times out just as it sends ANSWER (the runner
+// serve race of IPC spec G2). Over one ipc.Client on the session link 0.1.0,
+// ANSWER gets its own OK and NEXT's FAIL Timeout arrives as a Late_Answer
+// for NEXT's ticket. Red until M3, so it only builds with
+// -define:IPC_CONTRACT=true, which `make test-ipc-contract` passes; `make
+// test` never runs it.
 
-import "core:fmt"
-import "core:sys/posix"
 import "core:testing"
-import "core:thread"
 import "core:time"
 import proto "../../session_proto"
 import ipc "../../../platform/ipc"
@@ -17,139 +16,86 @@ IPC_CONTRACT :: #config(IPC_CONTRACT, false)
 
 when IPC_CONTRACT {
 
-// A fake holder socket next to the real one: a starting core dials every
-// h.*.sock, so it says HELLO here too. The first frame is kept, then the
-// connection closes and the core carries on with the real holder.
 @(private = "file")
-_Capture :: struct {
-	lfd:   posix.FD,
-	frame: [512]u8,
-	n:     int,
+_Late :: struct {
+	ticket: ipc.Ticket,
+	seen:   bool,
+	err:    ipc.Error,
 }
 
 @(private = "file")
-_capture :: proc(cp: ^_Capture) {
-	pfd := posix.pollfd{fd = cp.lfd, events = {.IN}}
-	if posix.poll(&pfd, 1, 5000) <= 0 do return
-	fd := posix.accept(cp.lfd, nil, nil)
-	if fd < 0 do return
-	defer posix.close(fd)
-	for !_whole_frame(cp.frame[:cp.n]) && cp.n < len(cp.frame) {
-		pfd = {fd = fd, events = {.IN}}
-		if posix.poll(&pfd, 1, 2000) <= 0 do return
-		got := posix.recv(fd, &cp.frame[cp.n], uint(len(cp.frame) - cp.n), {})
-		if got <= 0 do return
-		cp.n += int(got)
-	}
+_late :: proc(data: rawptr, ev: ipc.Client_Event) -> ipc.Event_Action {
+	l := (^_Late)(data)
+	if e, ok := ev.(ipc.Late_Answer); ok && e.ticket == l.ticket do l.seen, l.err = true, e.err
+	return .Continue
 }
 
 @(private = "file")
-_listen_unix :: proc(path: string) -> posix.FD {
-	addr: posix.sockaddr_un
-	if !ipc.ipc_fill_sockaddr(path, &addr) do return -1
-	fd := posix.socket(.UNIX, .STREAM)
-	if fd < 0 do return -1
-	if posix.bind(fd, (^posix.sockaddr)(&addr), size_of(addr)) != .OK || posix.listen(fd, 4) != .OK {
-		posix.close(fd)
-		return -1
-	}
-	return fd
+_next :: proc(c: ^ipc.Client, sid: u32, timeout_ms: u32) -> (ipc.Ticket, ipc.Error) {
+	b: [8]u8
+	w := ipc.wire_writer(b[:])
+	ipc.ww_u32(&w, sid)
+	ipc.ww_u32(&w, timeout_ms)
+	return ipc.client_start(c, ipc.MSG_NEXT, ipc.wire_bytes_written(&w))
 }
 
+// _take waits for the request that the NEXT with ticket tk took.
 @(private = "file")
-_whole_frame :: proc(b: []u8) -> bool {
-	if len(b) < 9 do return false
-	r := ipc.wire_reader(b[5:9])
-	return len(b) >= 9 + int(ipc.wr_u32(&r))
+_take :: proc(c: ^ipc.Client, tk: ipc.Ticket) -> (req: ipc.Next_Result, ok: bool) {
+	ev, err := ipc.client_poll(c, 3 * time.Second)
+	la, is_late := ev.(ipc.Late_Answer)
+	if err.kind != .None || !is_late || la.ticket != tk || la.answer.kind != ipc.MSG_REQUEST do return
+	r := ipc.wire_reader(la.answer.body)
+	req = ipc.dec_next_result(&r)
+	return req, r.ok
 }
 
-// _hello_0_0_2: the core's HELLO to a holder as term sends it today: kind 10,
-// channel 0, version 2 (= 0.0.2), role Core (1), caps 0, build id.
-@(private = "file")
-_hello_0_0_2 :: proc(buf: []u8) -> []u8 {
-	bb: [64]u8
-	build := ipc.ipc_build_id(bb[:])
-	w := ipc.wire_writer(buf)
-	ipc.ww_u8(&w, 10)
-	ipc.ww_u32(&w, 0)
-	ipc.ww_u32(&w, u32(4 + 1 + 8 + 4 + len(build)))
-	ipc.ww_u32(&w, 2)
-	ipc.ww_u8(&w, 1)
-	ipc.ww_u64(&w, 0)
-	ipc.ww_str(&w, build)
-	return ipc.wire_bytes_written(&w)
-}
-
-@(private = "file")
-_listed :: proc(id: u32) -> bool {
-	rows: [16]ipc.Session_Row
-	for r in cli_wait_rows(rows[:]) do if r.id == id do return true
-	return false
-}
-
-// _background_session starts a program and leaves it to the holder.
-@(private = "file")
-_background_session :: proc() -> u32 {
+@(test)
+test_P34_next_timing_out_during_answer_is_a_late_answer :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, 60 * time.Second)
+	tiers := tiers_start()
 	v := view_open()
-	defer view_close(v)
-	return view_attached(v, view_sh(v, "sleep 30"))
-}
-
-@(test)
-test_P33_core_hello_to_a_holder_is_0_0_2_byte_for_byte :: proc(t: ^testing.T) {
-	testing.set_fail_timeout(t, 60 * time.Second)
-	tiers := tiers_start()
-	id := _background_session()
-	path := fmt.tprintf("%s/h.fffffffe.sock", tiers.dir)
-	cp := _Capture{lfd = _listen_unix(path)}
-	testing.expect(t, cp.lfd >= 0, "cannot place a fake holder socket")
-	th := thread.create_and_start_with_poly_data(&cp, _capture)
-	tiers_core_restart_stop(tiers)
-	tiers_core_start(tiers)
-	thread.join(th)
-	thread.destroy(th)
-	posix.close(cp.lfd)
-	posix.unlink(fmt.ctprintf("%s", path))
-	want: [256]u8
-	testing.expect(t, string(cp.frame[:cp.n]) == string(_hello_0_0_2(want[:])), "the core's HELLO to a holder is not 0.0.2 byte for byte")
-	testing.expect(t, _listed(id), "the session did not live through the restart")
+	w := view_attached(v, view_sh(v, "sleep 30")) // the worker's session
+	c: ipc.Client
+	err := ipc.client_open(&c, {tiers.dir, "core.sock"}, proto.session(), {role = u8(ipc.Stream_Role.Cli)})
+	if testing.expectf(t, err.kind == .None, "client_open: %v %q", err.kind, err.reason) do _answer_as_next_times_out(t, &c, v, w)
+	ipc.client_close(&c)
+	view_close(v)
 	testing.expect(t, tiers_stop(tiers), "tiers end and remove the dir")
 }
 
-@(test)
-test_P33_a_link_dial_is_taken_by_the_holder :: proc(t: ^testing.T) {
-	testing.set_fail_timeout(t, 60 * time.Second)
-	tiers := tiers_start()
-	id := _background_session()
-	tiers_core_restart_stop(tiers) // the holder keeps the session with no core
-	testing.expect(t, _dial_holder(t, tiers), "the holder did not take a Link with proto.holder()")
-	tiers_core_start(tiers)
-	testing.expect(t, _listed(id), "the session did not live through the restart")
-	testing.expect(t, tiers_stop(tiers), "tiers end and remove the dir")
-}
-
-// _dial_holder links to the real holder as a core would; true = Link_Up.
 @(private = "file")
-_dial_holder :: proc(t: ^testing.T, tiers: ^Tiers) -> (up: bool) {
-	set: ipc.Poll_Set
-	if err := ipc.poll_set_init(&set, 8); err.kind != .None {
-		testing.expectf(t, false, "poll_set_init: %v", err.kind)
-		return
+_answer_as_next_times_out :: proc(t: ^testing.T, c: ^ipc.Client, v: ^View, w: u32) {
+	first, err := _next(c, w, 0)
+	if !testing.expectf(t, err.kind == .None, "NEXT: %v", err.kind) do return
+	for i := 0; i < 100; i += 1 {
+		obs, _, _ := cli_observe(w)
+		if obs.row.request.listening > 0 do break
+		view_pump(v, 5)
 	}
-	defer ipc.poll_set_destroy(&set)
-	l: ipc.Link
-	defer ipc.link_close(&l)
-	at := ipc.Endpoint{tiers.dir, tiers.hsock[len(tiers.dir) + 1:]}
-	if err := ipc.link_dial(&l, at, proto.holder(), u8(ipc.Stream_Role.Core), &set); err.kind != .None {
-		testing.expectf(t, false, "link_dial: %v %q", err.kind, err.reason)
-		return
+	sc: ipc.Stream_Conn
+	defer ipc.stream_conn_destroy(&sc)
+	res, _ := tell_send(&sc, {to = w, body = "job"})
+	if !testing.expect(t, res.phase == .Accepted, "the waiting worker did not accept the request") do return
+	req, took := _take(c, first)
+	if !testing.expect(t, took, "the first NEXT's REQUEST did not come as its Late_Answer") do return
+	second: ipc.Ticket
+	second, err = _next(c, w, 200)
+	if !testing.expectf(t, err.kind == .None, "second NEXT: %v", err.kind) do return
+	time.sleep(200 * time.Millisecond) // the second NEXT times out about now
+	b: [128]u8
+	aw := ipc.wire_writer(b[:])
+	ipc.enc_answer(&aw, {by = w, id = req.id, text = "done"})
+	late := _Late{ticket = second}
+	a: ipc.Answer
+	a, err = ipc.client_call(c, ipc.MSG_ANSWER, ipc.wire_bytes_written(&aw), {on_event = _late, data = &late})
+	testing.expect(t, err.kind == .None && a.kind == ipc.MSG_OK, "ANSWER did not get its own OK")
+	for i := 0; i < 10 && !late.seen; i += 1 {
+		ev, _ := ipc.client_poll(c, 100 * time.Millisecond)
+		_late(&late, ev)
 	}
-	due := time.tick_now()._nsec + 3 * 1_000_000_000
-	for !up && time.tick_now()._nsec < due {
-		ipc.poll_set_wait(&set, due)
-		for ev in ipc.link_next(&l) do if _, is_up := ev.(ipc.Link_Up); is_up do up = true
-	}
-	return
+	testing.expect(t, late.seen, "NEXT's FAIL Timeout never came as its Late_Answer")
+	testing.expectf(t, late.err.kind == .Failed && late.err.code == ipc.FAIL_TIMEOUT, "NEXT ended with %v code %d", late.err.kind, late.err.code)
 }
 
 } // when IPC_CONTRACT

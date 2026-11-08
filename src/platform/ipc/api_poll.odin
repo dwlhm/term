@@ -6,7 +6,6 @@ package platform_ipc
 // State: poll_impl.odin.
 
 import "core:sys/posix"
-import "core:time"
 
 Poll_Set :: struct {
 	_impl: rawptr,
@@ -64,11 +63,7 @@ _poll_free :: proc(p: ^_Poll) {
 // caller's due_ns (time.tick_now()._nsec; -1 = none) or one of a registered
 // Server/Link.
 poll_set_wait :: proc(set: ^Poll_Set, due_ns: i64) {
-	p := _poll(set)
-	if p == nil do return
-	timeout_ms := -1
-	if due_ns >= 0 do timeout_ms = int(max(0, (due_ns - time.tick_now()._nsec + 999_999) / 1_000_000))
-	_poll_round(p, timeout_ms)
+	if p := _poll(set); p != nil do _poll_round(p, due_ns)
 }
 
 // poll_set_poke wakes poll_set_wait; safe from a signal handler or another thread.

@@ -38,14 +38,42 @@ Stream_Conn :: struct {
 // ctl_cap bounds queued control frames (the holder link uses it as its backlog).
 stream_conn_init :: proc(s: ^Stream_Conn, fd: posix.FD, ctl_cap: int, allocator := context.allocator) -> bool {
 	s^ = {}
-	if !ipc_set_nonblocking_cloexec(fd) {
+	stream_conn_reserve(s, ctl_cap, allocator)
+	if stream_conn_attach(s, fd) do return true
+	_conn_free(s)
+	return false
+}
+
+// stream_conn_reserve allocates the buffers of a conn that has no fd yet, so
+// an owner that swaps peers (a Link) attaches and detaches without ever
+// allocating again. s must be zero.
+stream_conn_reserve :: proc(s: ^Stream_Conn, ctl_cap: int, allocator := context.allocator) {
+	s.allocator = allocator
+	s.in_buf = make([]u8, STREAM_HEADER + STREAM_MAX_PAYLOAD, allocator)
+	s.ctl.buf = make([]u8, max(ctl_cap, STREAM_HEADER + STREAM_MAX_PAYLOAD), allocator)
+}
+
+// stream_conn_attach gives a reserved, detached conn its fd (made
+// O_NONBLOCK|FD_CLOEXEC) and the bytes already read from it, if any; on
+// failure fd is closed and s stays detached.
+stream_conn_attach :: proc(s: ^Stream_Conn, fd: posix.FD, read_ahead: []u8 = nil) -> bool {
+	if s.open || len(read_ahead) > len(s.in_buf) || !ipc_set_nonblocking_cloexec(fd) {
 		posix.close(fd)
 		return false
 	}
-	s.open, s.fd, s.allocator = true, fd, allocator
-	s.in_buf = make([]u8, STREAM_HEADER + STREAM_MAX_PAYLOAD, allocator)
-	s.ctl.buf = make([]u8, max(ctl_cap, STREAM_HEADER + STREAM_MAX_PAYLOAD), allocator)
+	s.open, s.fd = true, fd
+	s.in_len = copy(s.in_buf, read_ahead)
 	return true
+}
+
+// stream_conn_detach closes the fd and forgets everything queued or half
+// read, keeping the buffers for the next stream_conn_attach.
+stream_conn_detach :: proc(s: ^Stream_Conn) {
+	if s.open do posix.close(s.fd)
+	for &ch in s.chans do if ch.used do delete(ch.pending.buf, s.allocator)
+	s.chans = {}
+	s.open, s.fd, s.in_len, s.in_used, s.out_len, s.out_off, s.turn, s.err = false, 0, 0, 0, 0, 0, 0, .None
+	ring_clear(&s.ctl)
 }
 
 // stream_conn_destroy closes the fd only when s owns one; safe on a zero

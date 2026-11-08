@@ -72,12 +72,12 @@ now_ns :: proc() -> i64 { return time.tick_now()._nsec }
 
 ms_since :: proc(start: time.Tick) -> f64 { return time.duration_milliseconds(time.tick_since(start)) }
 
-// cpu_ms: user + system time this process has used so far.
+// cpu_ms: CPU time of the calling thread so far. Process time would count
+// the test runner's main thread, which polls with a 1 µs sleep (≈ 1/3 CPU).
 cpu_ms :: proc() -> f64 {
-	ru: posix.rusage
-	posix.getrusage(.SELF, &ru)
-	us := i64(ru.ru_utime.tv_sec + ru.ru_stime.tv_sec) * 1_000_000 + i64(ru.ru_utime.tv_usec + ru.ru_stime.tv_usec)
-	return f64(us) / 1000
+	ts: posix.timespec
+	posix.clock_gettime(.THREAD_CPUTIME_ID, &ts)
+	return f64(ts.tv_sec) * 1000 + f64(ts.tv_nsec) / 1e6
 }
 
 expect_ok :: proc(t: ^testing.T, err: ipc.Error, what: string, loc := #caller_location) -> bool {

@@ -216,7 +216,7 @@ ipc-example:
 	$(ODIN) build src/platform/ipc/example $(CHECK_FLAGS) -out:$(IPC_EXAMPLE)
 
 # Contract tests that are green (whole IDs only) run in `make test` too.
-IPC_GREEN_TESTS := test_P7_unsafe_dirs_are_refused,test_P7_private_dir_is_made_0700_and_validated,test_P27_watched_fd_closed_under_the_set,test_P28_ten_thousand_pokes_from_a_signal_handler
+IPC_GREEN_TESTS := test_P7_unsafe_dirs_are_refused,test_P7_private_dir_is_made_0700_and_validated,test_P27_watched_fd_closed_under_the_set,test_P28_ten_thousand_pokes_from_a_signal_handler,test_P32_garbage_is_closed,test_P32_slow_hello_is_closed_at_hello_ms,test_P32_oldest_pending_hello_yields,test_P32_newest_peer_replaces_the_old
 
 test-ipc: ipc-example
 	$(ODIN) test src/platform/ipc/tests $(CHECK_FLAGS) $(TEST_FLAGS)
@@ -225,10 +225,10 @@ test-ipc: ipc-example
 
 # Contract tests of the IPC package that are still red (IPC spec, section 10).
 # Not part of `test`: once every test of an ID passes, its tests join
-# IPC_GREEN_TESTS (or leave the IPC_CONTRACT block in session_core/tests). The tier tests
-# P33/P34 need the session_core test build (about 4.5 min).
+# IPC_GREEN_TESTS (or leave the IPC_CONTRACT block in session_core/tests).
+# The tier test P34 needs the session_core test build (about 4.5 min).
 # Prints each failure summary and the red IDs (a list that must never grow).
-IPC_TIER_TESTS := test_P33_core_hello_to_a_holder_is_0_0_2_byte_for_byte,test_P33_a_link_dial_is_taken_by_the_holder,test_P34_next_timing_out_during_answer_is_a_late_answer
+IPC_TIER_TESTS := test_P34_next_timing_out_during_answer_is_a_late_answer
 
 test-ipc-contract: ipc-example $(LUA_LIB)
 	@$(ODIN) test src/platform/ipc/contract $(CHECK_FLAGS) $(TEST_FLAGS) -define:ODIN_TEST_FANCY=false -out:build/ipc-contract \

@@ -54,6 +54,7 @@ Error_Kind :: enum u8 {
 	Bad_Opts,        // a limit out of its range
 	No_Server,       // nothing listens and the client was not asked to start one
 	Start_Failed,    // a started server did not accept in time
+	Already_Running, // another live server listens at the endpoint
 	Busy,            // every connection slot is in use
 	Version,         // reason names both versions
 	Handshake,       // no valid HELLO in time
@@ -82,6 +83,7 @@ error_message :: proc(e: Error) -> string {
 	case .Bad_Opts:        return "an option is out of range"
 	case .No_Server:       return "nothing is listening"
 	case .Start_Failed:    return "the server could not be started"
+	case .Already_Running: return "another server already listens there"
 	case .Busy:            return "the server is busy"
 	case .Version:         return "the two sides speak different protocol versions"
 	case .Handshake:       return "the handshake did not complete"
