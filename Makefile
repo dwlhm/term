@@ -219,15 +219,21 @@ test-ipc: ipc-example
 	$(ODIN) test src/platform/ipc/tests $(CHECK_FLAGS) $(TEST_FLAGS)
 
 # Contract tests of the IPC package that are still red (IPC spec, section 10).
-# Not part of `test`: a test moves to src/platform/ipc/tests once it passes.
-# Prints the failure summary and the red IDs (a list that must never grow).
-test-ipc-contract: ipc-example
+# Not part of `test`: a test moves to src/platform/ipc/tests (or out of the
+# IPC_CONTRACT block in session_core/tests) once it passes. The tier tests
+# P33/P34 need the session_core test build (about 4.5 min).
+# Prints each failure summary and the red IDs (a list that must never grow).
+IPC_TIER_TESTS := test_P33_core_hello_to_a_holder_is_0_0_2_byte_for_byte,test_P33_a_link_dial_is_taken_by_the_holder,test_P34_next_timing_out_during_answer_is_a_late_answer
+
+test-ipc-contract: ipc-example $(LUA_LIB)
 	@$(ODIN) test src/platform/ipc/contract $(CHECK_FLAGS) $(TEST_FLAGS) -define:ODIN_TEST_FANCY=false -out:build/ipc-contract \
-		-define:IPC_EXAMPLE=$(CURDIR)/$(IPC_EXAMPLE) > build/ipc-contract.log 2>&1; status=$$?; \
-	if grep -q '^Finished' build/ipc-contract.log; then sed -n '/^Finished/,$$p' build/ipc-contract.log; \
+		-define:IPC_EXAMPLE=$(CURDIR)/$(IPC_EXAMPLE) > build/ipc-contract.log 2>&1; lib=$$?; \
+	$(ODIN) test src/features/session_core/tests $(CHECK_FLAGS) $(TEST_FLAGS) -define:ODIN_TEST_FANCY=false -out:build/ipc-contract-tiers \
+		-define:IPC_CONTRACT=true -define:ODIN_TEST_NAMES=$(IPC_TIER_TESTS) >> build/ipc-contract.log 2>&1; tiers=$$?; \
+	if grep -q '^Finished' build/ipc-contract.log; then sed -n '/^Finished/,/^$$/p' build/ipc-contract.log; \
 	else tail -n 40 build/ipc-contract.log; fi; \
-	echo "red: $$(sed -n 's/^ - platform_ipc_contract\.test_\(P[0-9]*\)_.*/\1/p' build/ipc-contract.log | sort -u | sort -k1.2n | tr '\n' ' ')"; \
-	exit $$status
+	echo "red: $$(sed -n 's/^ - [a-z_]*\.test_\(P[0-9]*\)_.*/\1/p' build/ipc-contract.log | sort -u | sort -k1.2n | tr '\n' ' ')"; \
+	test $$lib -eq 0 -a $$tiers -eq 0
 
 test-poller:
 	$(ODIN) test src/platform/poller/tests $(CHECK_FLAGS) $(TEST_FLAGS)
@@ -328,6 +334,7 @@ check: $(LUA_LIB)
 	$(ODIN) check src/features/control $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/features/holder $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/features/session_core $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/features/session_proto $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/features/session_core/tests $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/platform/pty $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/platform/font $(CHECK_FLAGS) -no-entry-point
