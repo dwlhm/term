@@ -20,7 +20,7 @@ Stream_Channel :: struct {
 Stream_Conn :: struct {
 	open:      bool,     // init took fd; the zero value is closed and owns no fd
 	fd:        posix.FD, // meaningful only while open
-	in_buf:    []u8, // STREAM_HEADER + STREAM_MAX_PAYLOAD
+	in_buf:    []u8, // STREAM_HEADER + the largest payload it takes in (STREAM_MAX_PAYLOAD by default)
 	in_len:    int,
 	in_used:   int, // bytes of in_buf consumed by the last stream_next
 	ctl:       Byte_Ring,
@@ -46,10 +46,10 @@ stream_conn_init :: proc(s: ^Stream_Conn, fd: posix.FD, ctl_cap: int, allocator 
 
 // stream_conn_reserve allocates the buffers of a conn that has no fd yet, so
 // an owner that swaps peers (a Link) attaches and detaches without ever
-// allocating again. s must be zero.
-stream_conn_reserve :: proc(s: ^Stream_Conn, ctl_cap: int, allocator := context.allocator) {
+// allocating again. max_payload bounds incoming frames. s must be zero.
+stream_conn_reserve :: proc(s: ^Stream_Conn, ctl_cap: int, allocator := context.allocator, max_payload := STREAM_MAX_PAYLOAD) {
 	s.allocator = allocator
-	s.in_buf = make([]u8, STREAM_HEADER + STREAM_MAX_PAYLOAD, allocator)
+	s.in_buf = make([]u8, STREAM_HEADER + max_payload, allocator)
 	s.ctl.buf = make([]u8, max(ctl_cap, STREAM_HEADER + STREAM_MAX_PAYLOAD), allocator)
 }
 

@@ -1,8 +1,9 @@
 package platform_ipc_contract
 
 // P29–P31: listeners. Closed from outside → Listener_Broken within 1 s and no
-// spin; EMFILE → a 100 ms backoff, then accept again; a socket path that
-// another process took over is never unlinked.
+// spin; EMFILE → a 100 ms backoff with no polling, then new connections are
+// accepted again; a socket path that another process took over is never
+// unlinked.
 
 import "core:sys/posix"
 import "core:testing"
@@ -102,7 +103,6 @@ test_P30_emfile_backs_off_then_accepts :: proc(t: ^testing.T) {
 	}
 	if !testing.expect(t, ready, "the child never served") do return
 	b := inline_dial(at) // waits in the backlog: accepting it hits EMFILE
-	defer posix.close(b)
 	time.sleep(300 * time.Millisecond)
 	w1, e1 := child_ask(&a, CHILD_ASK_WAKES)
 	time.sleep(500 * time.Millisecond)
@@ -110,8 +110,15 @@ test_P30_emfile_backs_off_then_accepts :: proc(t: ^testing.T) {
 	if !expect_ok(t, e1, "ask") || !expect_ok(t, e2, "ask") do return
 	testing.expectf(t, w2 - w1 <= 12, "%d wakes in 500 ms under EMFILE, want about 5 (100 ms backoff)", w2 - w1)
 	ipc.client_close(&a) // frees the child's one fd
+	// The connection that met EMFILE never hangs: macOS drops it in accept
+	// (verified 2026-11-08: the client reads EOF), Linux accepts it later.
+	testing.expect(t, raw_wait(b, 1000), "the connection that met EMFILE was left hanging")
+	posix.close(b)
+	time.sleep(100 * time.Millisecond) // a late-accepted b leaves; its fd is free again
+	c := inline_dial(at)
+	defer posix.close(c)
 	start := time.tick_now()
-	testing.expect(t, inline_take_hello(b), "the waiting connection was never accepted")
+	testing.expect(t, inline_take_hello(c), "a new connection was not accepted once an fd was free")
 	testing.expectf(t, ms_since(start) <= 400, "accepted %.0f ms after an fd was free", ms_since(start))
 }
 

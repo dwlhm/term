@@ -215,8 +215,56 @@ ipc-example:
 	@mkdir -p build
 	$(ODIN) build src/platform/ipc/example $(CHECK_FLAGS) -out:$(IPC_EXAMPLE)
 
+COMMA := ,
 # Contract tests that are green (whole IDs only) run in `make test` too.
-IPC_GREEN_TESTS := test_P7_unsafe_dirs_are_refused,test_P7_private_dir_is_made_0700_and_validated,test_P27_watched_fd_closed_under_the_set,test_P28_ten_thousand_pokes_from_a_signal_handler,test_P32_garbage_is_closed,test_P32_slow_hello_is_closed_at_hello_ms,test_P32_oldest_pending_hello_yields,test_P32_newest_peer_replaces_the_old
+IPC_GREEN_LIST := \
+	test_P5_client_closes_twice \
+	test_P5_link_closes_twice \
+	test_P5_poll_set_closes_twice \
+	test_P5_server_closes_twice \
+	test_P6_bad_catalog_is_refused \
+	test_P6_limits_out_of_range_are_refused \
+	test_P7_private_dir_is_made_0700_and_validated \
+	test_P7_unsafe_dirs_are_refused \
+	test_P8_call_gets_its_answer \
+	test_P9_application_fail_code_reaches_the_client \
+	test_P9_fail_with_reserved_code_3_asserts \
+	test_P9_fail_with_reserved_code_5_asserts \
+	test_P9_fail_with_reserved_code_6_asserts \
+	test_P9_fail_with_reserved_code_7_asserts \
+	test_P10_unanswered_call_times_out_at_5s \
+	test_P11_server_gone_ends_a_forever_wait \
+	test_P12_notice_before_the_answer \
+	test_P13_interrupt_from_a_signal_handler \
+	test_P13_on_event_stop_interrupts_the_call \
+	test_P14_late_answer_while_another_call_waits \
+	test_P15_answer_kind_outside_the_catalog \
+	test_P16_reply_to_a_peer_that_left_reaches_nobody \
+	test_P16_second_reply_asserts \
+	test_P17_bad_req_numbers_and_too_many_open \
+	test_P18_bodies_that_do_not_decode \
+	test_P19_peer_that_stops_reading_is_dropped \
+	test_P20_refusal_is_hello_then_fail_version \
+	test_P20_versions_that_match_and_that_do_not \
+	test_P21_connection_without_hello_is_dropped \
+	test_P22_one_peer_too_many_gets_busy \
+	test_P23_no_server_and_no_start \
+	test_P23_start_that_never_listens \
+	test_P23_two_clients_race_to_start_one_server \
+	test_P24_fuzzed_frames_hurt_only_their_peer \
+	test_P27_watched_fd_closed_under_the_set \
+	test_P28_ten_thousand_pokes_from_a_signal_handler \
+	test_P29_link_listener_closed_from_outside \
+	test_P29_server_listener_closed_from_outside \
+	test_P30_emfile_backs_off_then_accepts \
+	test_P31_replaced_socket_path_is_not_unlinked \
+	test_P32_garbage_is_closed \
+	test_P32_newest_peer_replaces_the_old \
+	test_P32_oldest_pending_hello_yields \
+	test_P32_slow_hello_is_closed_at_hello_ms \
+	test_P36_no_allocation_after_open \
+	test_P37_echo_example_runs
+IPC_GREEN_TESTS := $(subst $(eval) ,$(COMMA),$(strip $(IPC_GREEN_LIST)))
 
 test-ipc: ipc-example
 	$(ODIN) test src/platform/ipc/tests $(CHECK_FLAGS) $(TEST_FLAGS)

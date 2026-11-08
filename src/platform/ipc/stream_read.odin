@@ -31,7 +31,7 @@ stream_next :: proc(s: ^Stream_Conn) -> (frame: Stream_Frame, ok: bool) {
 	for {
 		avail := s.in_buf[s.in_used:s.in_len]
 		if len(avail) < STREAM_HEADER do return
-		kind, channel, length, valid := stream_parse_header(avail)
+		kind, channel, length, valid := stream_parse_header(avail, len(s.in_buf) - STREAM_HEADER)
 		if !valid {
 			s.err = .Bad_Frame
 			return

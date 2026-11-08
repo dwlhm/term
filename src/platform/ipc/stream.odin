@@ -98,10 +98,10 @@ stream_put_header :: proc(dst: []u8, kind: u8, channel: u32, length: int) {
 	_put_u32(dst[5:], u32(length))
 }
 
-stream_parse_header :: proc(src: []u8) -> (kind: u8, channel: u32, length: int, ok: bool) {
+stream_parse_header :: proc(src: []u8, max_payload := STREAM_MAX_PAYLOAD) -> (kind: u8, channel: u32, length: int, ok: bool) {
 	if len(src) < STREAM_HEADER do return
 	length = int(_get_u32(src[5:]))
-	if length > STREAM_MAX_PAYLOAD do return
+	if length > max_payload do return
 	return src[0], _get_u32(src[1:]), length, true
 }
 

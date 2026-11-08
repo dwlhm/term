@@ -7,8 +7,8 @@ package platform_ipc_contract
 //
 // The child serves test_protocol at the endpoint it is given and answers
 // PING(CHILD_ASK_PID) with its pid and PING(CHILD_ASK_WAKES) with how often
-// poll_set_wait returned. "serve" exits when its last peer leaves; both modes
-// exit after CHILD_LIFE_MS at the latest. Exit 3 = the server did not open.
+// poll_set_wait returned. "serve" exits CHILD_IDLE_MS after its last peer
+// left; both modes exit after CHILD_LIFE_MS at the latest. Exit 3 = the server did not open.
 
 import "base:runtime"
 import "core:c"
@@ -18,6 +18,7 @@ import ipc "../"
 
 CHILD_FLAG      :: "--ipc-contract-child"
 CHILD_LIFE_MS   :: 10_000
+CHILD_IDLE_MS   :: 500 // "serve" exits this long after its last peer left
 CHILD_ASK_PID   :: u32(0)
 CHILD_ASK_WAKES :: u32(1)
 
@@ -78,18 +79,21 @@ _child_serve :: proc(at: ipc.Endpoint, emfile: bool) -> c.int {
 	defer ipc.server_close(&srv)
 	if emfile do _leave_one_fd()
 	due := now_ns() + CHILD_LIFE_MS * 1_000_000
-	wakes, joined, live: u32
+	idle := i64(-1) // "serve": when the last peer left; a newcomer may still be saying HELLO
+	wakes, live: u32
+	seen := false
 	for now_ns() < due {
-		ipc.poll_set_wait(&set, due)
+		ipc.poll_set_wait(&set, due if idle < 0 else min(due, idle + CHILD_IDLE_MS * 1_000_000))
 		wakes += 1
 		for ev in ipc.server_next(&srv) {
 			#partial switch e in ev {
-			case ipc.Peer_Joined: joined, live = joined + 1, live + 1
+			case ipc.Peer_Joined: live, idle, seen = live + 1, -1, true
 			case ipc.Peer_Left:   live -= 1
 			case ipc.Request:     _child_answer(&srv, e, wakes)
 			}
 		}
-		if !emfile && joined > 0 && live == 0 do break
+		if !emfile && seen && live == 0 && idle < 0 do idle = now_ns()
+		if idle >= 0 && now_ns() >= idle + CHILD_IDLE_MS * 1_000_000 do break
 	}
 	return 0
 }

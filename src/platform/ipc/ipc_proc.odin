@@ -86,22 +86,32 @@ ipc_build_id :: proc(buf: []u8) -> string {
 
 IPC_SPAWN_MAX_ARGS :: 8
 
-// ipc_spawn_self_detached starts this binary with args in a new session
-// (double fork + setsid, reparented to init), stdin from /dev/null and
-// stdout/stderr appended to log_path. Everything the child touches between
-// fork and exec is prepared up front (the caller may be multi-threaded).
+// ipc_spawn_self_detached starts this binary with args, as _spawn_detached.
 ipc_spawn_self_detached :: proc(args: []string, log_path: string) -> bool {
-	if len(args) + 2 > IPC_SPAWN_MAX_ARGS do return false
+	if len(args) + 1 > IPC_SPAWN_MAX_ARGS do return false
+	argv: [IPC_SPAWN_MAX_ARGS]string
+	copy(argv[1:], args)
+	return _spawn_detached(argv[:len(args) + 1], log_path)
+}
+
+// _spawn_detached starts argv ("" in argv[0] = this binary) in a new
+// session (double fork + setsid, reparented to init), stdin from /dev/null
+// and stdout/stderr appended to log_path ("" = /dev/null). Everything the
+// child touches between fork and exec is prepared up front (the caller may
+// be multi-threaded).
+@(private)
+_spawn_detached :: proc(argv_in: []string, log_path: string) -> bool {
+	if len(argv_in) == 0 || len(argv_in) > IPC_SPAWN_MAX_ARGS do return false
 	exe_buf: [1024]u8
-	exe := ipc_self_exe(exe_buf[:])
+	exe := argv_in[0] if argv_in[0] != "" else ipc_self_exe(exe_buf[:])
 	if len(exe) == 0 do return false
 	store: [IPC_SPAWN_MAX_ARGS][512]u8
 	argv: [IPC_SPAWN_MAX_ARGS + 1]cstring
 	ok: bool
 	if argv[0], ok = cstring_from(store[0][:], exe); !ok do return false
-	for a, i in args do if argv[i + 1], ok = cstring_from(store[i + 1][:], a); !ok do return false
+	for a, i in argv_in[1:] do if argv[i + 1], ok = cstring_from(store[i + 1][:], a); !ok do return false
 	log_buf: [512]u8
-	log_c, log_ok := cstring_from(log_buf[:], log_path)
+	log_c, log_ok := cstring_from(log_buf[:], log_path if log_path != "" else "/dev/null")
 	if !log_ok do return false
 	pid := posix.fork()
 	if pid < 0 do return false

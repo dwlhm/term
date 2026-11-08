@@ -4,6 +4,7 @@ package platform_ipc
 // the owner as Request values and takes exactly one final answer per request.
 // .Frames: binary, many requests per connection, correlated by req.
 // .Line: one line in, one answer out, then close (the control socket).
+// State: server_impl.odin, server_req.odin.
 
 Server :: struct {
 	_impl: rawptr,
@@ -41,10 +42,11 @@ Peer_Left :: struct {
 // Request: one request on channel 0. Keep it to answer later; answering a
 // request whose peer left does nothing.
 Request :: struct {
-	peer: Peer,
-	kind: u8,
-	_req: u32,
-	_body: []u8,
+	peer:  Peer,
+	kind:  u8,
+	_req:  u32,
+	_body: []u8,   // view: valid until the next server_next after a poll_set_wait
+	_srv:  rawptr, // the Server it came from
 }
 
 Stream_Input :: struct {
@@ -77,8 +79,14 @@ Notify_To :: union {
 
 server_open :: proc(s: ^Server, at: Endpoint, proto: Protocol, set: ^Poll_Set, opts := Server_Opts{}) -> Error {
 	path_buf: [_SUN_PATH]u8
-	if _, err := _endpoint_path(at, path_buf[:]); err.kind != .None do return err
-	return _not_implemented()
+	k, path, err := _server_new(s, at, proto, set, opts, path_buf[:])
+	if err.kind != .None do return err
+	if err = _listener_open(&k.listener, k.set, path, _server_accept, _server_broken, k); err.kind != .None {
+		_server_free(k)
+		return err
+	}
+	s._impl = k
+	return {}
 }
 
 // server_open_thread runs the IO on a thread of its own, for an owner whose
@@ -91,44 +99,110 @@ server_open_thread :: proc(s: ^Server, at: Endpoint, proto: Protocol, on_wake: p
 }
 
 // server_close drops every peer and unlinks the socket while its inode is still ours.
-server_close :: proc(s: ^Server) {}
+server_close :: proc(s: ^Server) {
+	if k := _server(s); k != nil do _server_free(k)
+	s^ = {}
+}
 
 // server_next: call until false after each poll_set_wait (or on_wake).
+// Joined/Left/Down come first, then requests and stream input, round-robin
+// over peers.
 server_next :: proc(s: ^Server) -> (Server_Event, bool) {
-	return nil, false
+	k := _server(s)
+	if k == nil do return nil, false
+	if ev, ok := _server_pop(k); ok do return ev, true
+	if k.down do return nil, false
+	for i in 0 ..< len(k.peers) {
+		idx := (k.turn + i) % len(k.peers)
+		if ev, ok := _peer_next(k, &k.peers[idx]); ok {
+			k.turn = idx
+			return ev, true
+		}
+	}
+	return _server_pop(k)
 }
 
 // request_decode is the only way to read a request body. false = the body did
 // not decode to its end, and FAIL Bad_Request has been sent.
 request_decode :: proc(req: ^Request, out: ^$T, decode: proc(r: ^Wire_Reader) -> T) -> bool {
+	r := wire_reader(req._body)
+	v := decode(&r)
+	if wr_done(&r) {
+		out^ = v
+		return true
+	}
+	k := (^_Server)(req._srv)
+	if slot := _peer_of(k, req.peer); slot != nil && _take_open(slot, req^) {
+		_send_fail(slot, req._req, FAIL_BAD_REQUEST, "the request body does not decode")
+	}
 	return false
 }
 
 // request_line: a .Line request without its '\n'.
 request_line :: proc(req: ^Request) -> string {
-	return ""
+	return string(req._body)
 }
 
 // reply sends the final answer; its kind comes from the catalog.
-reply :: proc(s: ^Server, req: Request, body: ..[]u8) {}
+reply :: proc(s: ^Server, req: Request, body: ..[]u8) {
+	k := _server(s)
+	if k == nil do return
+	row, _ := _row(k.proto, req.kind)
+	_server_reply(k, req, true, row.answer, ..body)
+}
 
-fail :: proc(s: ^Server, req: Request, code: u8, reason: string) {}
+fail :: proc(s: ^Server, req: Request, code: u8, reason: string) {
+	when ODIN_TEST do assert(code != FAIL_BAD_REQUEST && code != FAIL_BUSY && code != FAIL_VERSION && code != FAIL_TIMEOUT, _ASSERT_RESERVED_FAIL)
+	k := _server(s)
+	if k == nil do return
+	fb: [512]u8
+	_server_reply(k, req, true, k.proto.fail_kind, _fail_body(fb[:], 0, code, reason)[4:])
+}
 
 // progress: only for a request whose catalog row has a progress kind.
-progress :: proc(s: ^Server, req: Request, body: ..[]u8) {}
+progress :: proc(s: ^Server, req: Request, body: ..[]u8) {
+	k := _server(s)
+	if k == nil do return
+	row, _ := _row(k.proto, req.kind)
+	if row.progress == 0 {
+		when ODIN_TEST do assert(false, _ASSERT_NO_PROGRESS)
+		return
+	}
+	_server_reply(k, req, false, row.progress, ..body)
+}
 
 // notify: only for kinds the catalog marks as notices.
-notify :: proc(s: ^Server, to: Notify_To, kind: u8, body: ..[]u8) {}
+notify :: proc(s: ^Server, to: Notify_To, kind: u8, body: ..[]u8) {
+	if k := _server(s); k != nil do _server_notify(k, to, kind, ..body)
+}
 
 server_stream_open :: proc(s: ^Server, peer: Peer, credited: bool) -> (channel: u32, ok: bool) {
-	return 0, false
+	slot := _peer_of(_server(s), peer)
+	if slot == nil do return 0, false
+	slot.next_channel = max(slot.next_channel + 1, 1)
+	if !stream_channel_open(&slot.conn, slot.next_channel, credited) do return 0, false
+	return slot.next_channel, true
 }
 
 // server_stream_data: false = the reader is too far behind; send a repaint.
 server_stream_data :: proc(s: ^Server, peer: Peer, channel: u32, bytes: []u8) -> bool {
-	return false
+	slot := _peer_of(_server(s), peer)
+	if slot == nil do return true
+	ok := stream_data(&slot.conn, channel, bytes)
+	_peer_flush(slot)
+	return ok
 }
 
-server_stream_finish :: proc(s: ^Server, peer: Peer, channel: u32) {}
+server_stream_finish :: proc(s: ^Server, peer: Peer, channel: u32) {
+	if slot := _peer_of(_server(s), peer); slot != nil {
+		stream_channel_finish(&slot.conn, channel)
+		_peer_flush(slot)
+	}
+}
 
-server_stream_close :: proc(s: ^Server, peer: Peer, channel: u32, reason := "") {}
+server_stream_close :: proc(s: ^Server, peer: Peer, channel: u32, reason := "") {
+	if slot := _peer_of(_server(s), peer); slot != nil {
+		stream_channel_close(&slot.conn, channel, reason)
+		_peer_flush(slot)
+	}
+}
