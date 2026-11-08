@@ -16,6 +16,9 @@ Link_Opts :: struct {
 
 Link_Up :: struct {}
 
+// Link_Down: the peer went away, or (listening side, err.kind =
+// .Listener_Broken) the link can no longer accept; that one comes once and
+// link_next returns false afterwards.
 Link_Down :: struct {
 	err: Error,
 }

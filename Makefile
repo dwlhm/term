@@ -31,7 +31,7 @@ ifeq ($(UNAME_S),Darwin)
 LUA_CFLAGS += -mmacosx-version-min=$(MIN_OS_VERSION)
 endif
 
-.PHONY: all lua test-automation test-ipc-contract term release run term-debug harness-features run-harness-features harness-render-chrome run-harness-render-chrome harness-render-terminal run-harness-render-terminal harness-render-composer run-harness-composer test test-app test-holder test-session-core test-font test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-gpu check esctest clean help bench bench-quick bundle dmg portable dist install uninstall test-unicode-width gen-unicode bench-parser bench-session bench-throughput test-poller
+.PHONY: all lua test-automation test-ipc-contract ipc-example term release run term-debug harness-features run-harness-features harness-render-chrome run-harness-render-chrome harness-render-terminal run-harness-render-terminal harness-render-composer run-harness-composer test test-app test-holder test-session-core test-font test-composer test-composer-frame test-composer-scheduler test-composer-transition test-chrome test-render-contract test-gpu check esctest clean help bench bench-quick bundle dmg portable dist install uninstall test-unicode-width gen-unicode bench-parser bench-session bench-throughput test-poller
 
 all: term harness-features harness-render-chrome harness-render-terminal harness-composer
 
@@ -207,13 +207,27 @@ test-session:
 test-control:
 	$(ODIN) test src/features/control/tests $(TEST_FLAGS)
 
-test-ipc:
+# The echo example proves the IPC package stands alone (spec 7.1); test-ipc
+# builds it, test-ipc-contract runs it (P37).
+IPC_EXAMPLE := build/ipc-echo
+
+ipc-example:
+	@mkdir -p build
+	$(ODIN) build src/platform/ipc/example $(CHECK_FLAGS) -out:$(IPC_EXAMPLE)
+
+test-ipc: ipc-example
 	$(ODIN) test src/platform/ipc/tests $(CHECK_FLAGS) $(TEST_FLAGS)
 
 # Contract tests of the IPC package that are still red (IPC spec, section 10).
 # Not part of `test`: a test moves to src/platform/ipc/tests once it passes.
-test-ipc-contract:
-	$(ODIN) test src/platform/ipc/contract $(CHECK_FLAGS) $(TEST_FLAGS) -define:ODIN_TEST_FANCY=false
+# Prints the failure summary and the red IDs (a list that must never grow).
+test-ipc-contract: ipc-example
+	@$(ODIN) test src/platform/ipc/contract $(CHECK_FLAGS) $(TEST_FLAGS) -define:ODIN_TEST_FANCY=false -out:build/ipc-contract \
+		-define:IPC_EXAMPLE=$(CURDIR)/$(IPC_EXAMPLE) > build/ipc-contract.log 2>&1; status=$$?; \
+	if grep -q '^Finished' build/ipc-contract.log; then sed -n '/^Finished/,$$p' build/ipc-contract.log; \
+	else tail -n 40 build/ipc-contract.log; fi; \
+	echo "red: $$(sed -n 's/^ - platform_ipc_contract\.test_\(P[0-9]*\)_.*/\1/p' build/ipc-contract.log | sort -u | sort -k1.2n | tr '\n' ' ')"; \
+	exit $$status
 
 test-poller:
 	$(ODIN) test src/platform/poller/tests $(CHECK_FLAGS) $(TEST_FLAGS)
@@ -310,6 +324,7 @@ check: $(LUA_LIB)
 	$(ODIN) check src/platform/window $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/platform/clipboard $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/platform/ipc $(CHECK_FLAGS) -no-entry-point
+	$(ODIN) check src/platform/ipc/example $(CHECK_FLAGS)
 	$(ODIN) check src/features/control $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/features/holder $(CHECK_FLAGS) -no-entry-point
 	$(ODIN) check src/features/session_core $(CHECK_FLAGS) -no-entry-point

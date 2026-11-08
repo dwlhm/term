@@ -1,0 +1,69 @@
+package platform_ipc_contract
+
+// P27, P28: Poll_Set. A watched fd closed under the set ends once and is
+// forgotten; pokes from a signal handler never block and wake exactly once.
+
+import "core:sys/posix"
+import "core:testing"
+import "core:time"
+import ipc "../"
+
+@(private = "file")
+_Ready :: struct {
+	ended, other: int,
+}
+
+@(private = "file")
+_count :: proc(data: rawptr, ev: ipc.Fd_Event) {
+	r := (^_Ready)(data)
+	if ev == .Ended do r.ended += 1
+	else do r.other += 1
+}
+
+@(test)
+test_P27_watched_fd_closed_under_the_set :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, 10 * time.Second)
+	set: ipc.Poll_Set
+	if !expect_ok(t, ipc.poll_set_init(&set, 8), "poll_set_init") do return
+	defer ipc.poll_set_destroy(&set)
+	p: [2]posix.FD
+	posix.pipe(&p)
+	defer posix.close(p[1])
+	r: _Ready
+	_, err := ipc.poll_set_watch(&set, p[0], _count, &r)
+	if !expect_ok(t, err, "poll_set_watch") do return
+	posix.close(p[0])
+	ipc.poll_set_wait(&set, now_ns() + 1_000_000_000)
+	testing.expect_value(t, r.ended, 1)
+	testing.expect_value(t, r.other, 0)
+	start := time.tick_now()
+	ipc.poll_set_wait(&set, now_ns() + 200_000_000)
+	testing.expectf(t, ms_since(start) >= 180, "poll_set_wait returned after %.0f ms with nothing to do", ms_since(start))
+	testing.expect_value(t, r.ended, 1)
+}
+
+@(private = "file")
+_poked: ^ipc.Poll_Set
+
+@(private = "file")
+_poke :: proc "c" (sig: posix.Signal) { ipc.poll_set_poke(_poked) }
+
+@(test)
+test_P28_ten_thousand_pokes_from_a_signal_handler :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, 10 * time.Second)
+	set: ipc.Poll_Set
+	if !expect_ok(t, ipc.poll_set_init(&set, 8), "poll_set_init") do return
+	defer ipc.poll_set_destroy(&set)
+	_poked = &set
+	old := posix.signal(.SIGUSR1, _poke)
+	defer posix.signal(.SIGUSR1, old)
+	for _ in 0 ..< 10_000 do posix.raise(.SIGUSR1)
+	start := time.tick_now()
+	ipc.poll_set_wait(&set, now_ns() + 1_000_000_000)
+	testing.expectf(t, ms_since(start) < 100, "a poked set waited %.0f ms", ms_since(start))
+	testing.expect(t, ipc.poll_set_woken(&set), "poll_set_woken is false after pokes")
+	testing.expect(t, !ipc.poll_set_woken(&set), "poll_set_woken is true twice")
+	start = time.tick_now()
+	ipc.poll_set_wait(&set, now_ns() + 200_000_000)
+	testing.expectf(t, ms_since(start) >= 180, "the wake was not drained: waited %.0f ms", ms_since(start))
+}

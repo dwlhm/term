@@ -54,11 +54,19 @@ Stream_Input :: struct {
 	body:    []u8,
 }
 
+// Server_Down: the server can no longer accept (err.kind = .Listener_Broken).
+// It comes once; afterwards server_next returns false and the Server holds no
+// fd in the Poll_Set. server_close is still the owner's to call.
+Server_Down :: struct {
+	err: Error,
+}
+
 Server_Event :: union {
 	Peer_Joined,
 	Peer_Left,
 	Request,
 	Stream_Input,
+	Server_Down,
 }
 
 Notify_All :: struct {}
