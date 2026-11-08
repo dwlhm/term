@@ -14,6 +14,7 @@ HELLO, CREATE, ATTACH = 10, 61, 63
 V_INPUT = 70
 ATTACHED, FAIL = 82, 84
 ROLE_VIEWER = 3
+PROTO_VERSION = 2  # STREAM_PROTO_VERSION (platform/ipc/stream.odin)
 PAINT = b"\x18\x1b[!p"  # every first paint / repaint starts with CAN + soft reset
 
 
@@ -41,7 +42,7 @@ class Link:
         self.buf = bytearray()
         self.held = collections.deque()  # frames that arrived while waiting for an answer
         self.token = 0
-        self.send(HELLO, 0, struct.pack("<IBQ", 1, ROLE_VIEWER, 0) + _str(b"stress"))
+        self.send(HELLO, 0, struct.pack("<IBQ", PROTO_VERSION, ROLE_VIEWER, 0) + _str(b"stress"))
         f = self.next(5)
         if f is None or f[0] != HELLO:
             raise RuntimeError("no HELLO from the core")
