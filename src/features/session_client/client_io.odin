@@ -61,7 +61,7 @@ _io_turn :: proc(c: ^Client) -> bool {
 // (their KILL/DETACH), so nothing a released pane started is left behind.
 @(private)
 _io_settle :: proc(c: ^Client, deadline_ns: i64) {
-	for c.conn.fd >= 0 && c.conn.err == .None && time.tick_now()._nsec < deadline_ns {
+	for c.conn.open && c.conn.err == .None && time.tick_now()._nsec < deadline_ns {
 		cancelled := false
 		for &l in c.links do cancelled ||= l.cancelled
 		if !cancelled && !ipc.stream_wants_write(&c.conn) do return

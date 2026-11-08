@@ -59,7 +59,6 @@ Client :: struct {
 // something for client_poll or a session inbox.
 client_connect :: proc(c: ^Client, wake: Client_Wake, wake_data: rawptr) -> bool {
 	c^ = {wake = wake, wake_data = wake_data, wake_pipe = {-1, -1}}
-	c.conn.fd = -1
 	if posix.pipe(&c.wake_pipe) != .OK do return false
 	ipc.ipc_set_nonblocking_cloexec(c.wake_pipe[0])
 	ipc.ipc_set_nonblocking_cloexec(c.wake_pipe[1])
@@ -134,25 +133,23 @@ client_dial :: proc(role: ipc.Stream_Role, start: bool) -> (fd: posix.FD, ok: bo
 		}
 		if err != .None do return -1, false
 	}
-	return fd, _hello(fd, role)
+	return _hello(fd, role)
 }
 
+// _hello owns fd: it comes back open after a good HELLO exchange, else it is closed.
 @(private = "file")
-_hello :: proc(fd: posix.FD, role: ipc.Stream_Role) -> bool {
+_hello :: proc(fd: posix.FD, role: ipc.Stream_Role) -> (posix.FD, bool) {
 	conn: ipc.Stream_Conn
-	if !ipc.stream_conn_init(&conn, fd, 0) do return false
-	defer {
-		conn.fd = -1 // the fd outlives this temporary conn
-		ipc.stream_conn_destroy(&conn)
-	}
+	if !ipc.stream_conn_init(&conn, fd, 0) do return -1, false
+	defer ipc.stream_conn_destroy(&conn)
 	build_buf, msg: [128]u8
 	w := ipc.wire_writer(msg[:])
 	ipc.enc_hello(&w, {version = ipc.STREAM_PROTO_VERSION, role = role, build = ipc.ipc_build_id(build_buf[:])})
 	ipc.stream_send(&conn, ipc.MSG_HELLO, 0, ipc.wire_bytes_written(&w))
 	f, got := client_wait_frame(&conn, 2000)
-	if !got || f.kind != ipc.MSG_HELLO do return false
-	_, _, ok := ipc.stream_hello_check(f.payload, {.Core})
-	return ok
+	if !got || f.kind != ipc.MSG_HELLO do return -1, false
+	if _, _, ok := ipc.stream_hello_check(f.payload, {.Core}); !ok do return -1, false
+	return ipc.stream_conn_release(&conn), true
 }
 
 // client_wait_frame flushes and waits for the next frame (CLI / handshake only).

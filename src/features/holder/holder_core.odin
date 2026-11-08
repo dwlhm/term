@@ -68,10 +68,7 @@ _core_link :: proc(h: ^Holder, p: ^Pending, hello_end: int, now: i64) {
 	_core_destroy(h) // an older core loses the holder (previous stays crash)
 	fd := p.fd
 	p.fd = -1
-	if !ipc.stream_conn_init(&h.core, fd, HOLDER_CTL_CAP) {
-		ipc.stream_conn_destroy(&h.core)
-		return
-	}
+	if !ipc.stream_conn_init(&h.core, fd, HOLDER_CTL_CAP) do return
 	rest := p.buf[hello_end:p.len]
 	copy(h.core.in_buf, rest) // frames the core pipelined behind its HELLO
 	h.core.in_len = len(rest)

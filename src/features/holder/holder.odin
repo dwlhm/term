@@ -151,7 +151,6 @@ holder_run :: proc(socket_path: string) -> int {
 _holder_open :: proc(h: ^Holder, socket_path: string) -> bool {
 	h.listen_fd = -1
 	for &p in h.pending do p.fd = -1
-	h.core.fd = -1
 	if !poller.poller_init(&h.poller, HOLDER_MAX_POLL) {
 		fmt.eprintfln("holder: cannot create its poller: %v", posix.errno())
 		return false

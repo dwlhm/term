@@ -98,10 +98,7 @@ _accept_viewers :: proc(c: ^Core) {
 		v := &c.viewers[slot]
 		c.viewer_seq += 1
 		v^ = {used = true, seq = c.viewer_seq}
-		if !ipc.stream_conn_init(&v.conn, fd, CORE_VIEWER_CTL) {
-			ipc.stream_conn_destroy(&v.conn)
-			v^ = {}
-		}
+		if !ipc.stream_conn_init(&v.conn, fd, CORE_VIEWER_CTL) do v^ = {}
 	}
 }
 

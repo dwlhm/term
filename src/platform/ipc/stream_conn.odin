@@ -18,7 +18,8 @@ Stream_Channel :: struct {
 }
 
 Stream_Conn :: struct {
-	fd:        posix.FD,
+	open:      bool,     // init took fd; the zero value is closed and owns no fd
+	fd:        posix.FD, // meaningful only while open
 	in_buf:    []u8, // STREAM_HEADER + STREAM_MAX_PAYLOAD
 	in_len:    int,
 	in_used:   int, // bytes of in_buf consumed by the last stream_next
@@ -32,23 +33,42 @@ Stream_Conn :: struct {
 	allocator: runtime.Allocator,
 }
 
-// stream_conn_init takes ownership of fd (made O_NONBLOCK|FD_CLOEXEC).
+// stream_conn_init takes ownership of fd (made O_NONBLOCK|FD_CLOEXEC), also
+// when it fails: fd is closed then and s stays zero.
 // ctl_cap bounds queued control frames (the holder link uses it as its backlog).
 stream_conn_init :: proc(s: ^Stream_Conn, fd: posix.FD, ctl_cap: int, allocator := context.allocator) -> bool {
 	s^ = {}
-	s.fd, s.allocator = fd, allocator
-	if !ipc_set_nonblocking_cloexec(fd) do return false
+	if !ipc_set_nonblocking_cloexec(fd) {
+		posix.close(fd)
+		return false
+	}
+	s.open, s.fd, s.allocator = true, fd, allocator
 	s.in_buf = make([]u8, STREAM_HEADER + STREAM_MAX_PAYLOAD, allocator)
 	s.ctl.buf = make([]u8, max(ctl_cap, STREAM_HEADER + STREAM_MAX_PAYLOAD), allocator)
 	return true
 }
 
+// stream_conn_destroy closes the fd only when s owns one; safe on a zero
+// value and when called again.
 stream_conn_destroy :: proc(s: ^Stream_Conn) {
-	if s.fd >= 0 do posix.close(s.fd)
+	if s.open do posix.close(s.fd)
+	_conn_free(s)
+}
+
+// stream_conn_release frees the buffers and hands the open fd back without
+// closing it (-1 when s owns none); s is zero afterwards.
+stream_conn_release :: proc(s: ^Stream_Conn) -> posix.FD {
+	fd := s.fd if s.open else -1
+	_conn_free(s)
+	return fd
+}
+
+@(private = "file")
+_conn_free :: proc(s: ^Stream_Conn) {
 	for &ch in s.chans do if ch.used do delete(ch.pending.buf, s.allocator)
 	delete(s.in_buf, s.allocator)
 	delete(s.ctl.buf, s.allocator)
-	s^ = {fd = -1}
+	s^ = {}
 }
 
 // stream_send queues one whole control frame. false = control queue full
