@@ -40,7 +40,7 @@ Term_App :: struct {
 	role:          Instance_Role,
 	quit_requested: bool, // atomic; set by the signal thread, consumed by app_run
 	signals:       Signal_Router,
-	control:       ^plat_ipc.Ipc_Server, // nil unless Primary with a bound control socket
+	control:       plat_ipc.Server, // zero value = closed; Primary only
 	time_elapsed:  f32,
 	start_time:    time.Time,
 
@@ -426,7 +426,7 @@ app_run :: proc(app: ^Term_App) {
 		app_quit_tick(app)
 		if !app.running do break
 
-		if app.control != nil && app_control_poll(app) do term_dirty = true
+		if app_control_poll(app) do term_dirty = true
 
 		now_ns := u64(time.duration_nanoseconds(time.diff(app.start_time, now)))
 		cursor_damaged := app_sync_cursor_layer(app, now_ns)
@@ -464,16 +464,22 @@ main :: proc() {
 
 	app.role = app_resolve_role(opts)
 	if app.role == .Primary {
-		#partial switch err := app_control_start(app); err {
+		err := app_control_start(app)
+		#partial switch err.kind {
 		case .None:
 		case .Already_Running:
 			buf: [256]u8
-			path, _ := proto.ctl_socket_path(buf[:])
-			reply_buf: [512]u8
-			_, cerr := app_control_request(path, "show", reply_buf[:])
-			os.exit(0 if cerr == .None else 1)
+			at, aerr := proto.control_endpoint(buf[:])
+			if aerr.kind != .None {
+				fmt.eprintf("term: control socket unavailable (%s)\n", plat_ipc.error_message(aerr))
+				os.exit(1)
+			}
+			reply_buf: [proto.CONTROL_MAX_REPLY]u8
+			_, cerr := app_control_request(at, "show", reply_buf[:])
+			os.exit(0 if cerr.kind == .None else 1)
 		case:
-			fmt.eprintf("term: control socket unavailable (%s); running standalone\n", plat_ipc.ipc_error_message(err))
+			reason := err.reason if len(err.reason) > 0 else plat_ipc.error_message(err)
+			fmt.eprintf("term: control socket unavailable (%s); running standalone\n", reason)
 			app.role = .Standalone
 		}
 	}

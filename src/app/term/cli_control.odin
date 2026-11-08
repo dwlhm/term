@@ -15,11 +15,11 @@ import ctrl_feat "../../features/control"
 
 // app_run_control_cli: handled = false when args[1] is not "session",
 // "show" or "quit" (normal GUI startup continues). Core verbs go to
-// app_cli_agent; attach/show/quit go to the GUI's
-// control socket with ipc_client_request and print nothing on success:
+// app_cli_agent; attach/show/quit go to the GUI's control socket with
+// ipc.line_call and print nothing on success:
 //   err reply → stderr "term: <message or code>", exit 1
-//   Not_Running → stderr "term: Term is not running", exit 2
-//   Timeout/Busy/other → stderr "term: control socket <reason>", exit 1
+//   No_Server → stderr "term: Term is not running", exit 2
+//   Timeout/Busy/other → stderr "term: control socket: <reason>", exit 1
 //   usage error (unknown/missing args) → stderr usage text, exit 1
 app_run_control_cli :: proc(args: []string) -> (handled: bool, exit_code: int) {
 	if len(args) < 2 do return false, 0
@@ -39,13 +39,13 @@ app_run_control_cli :: proc(args: []string) -> (handled: bool, exit_code: int) {
 		fmt.eprintln(APP_CLI_USAGE)
 		return true, 1
 	}
-	path_buf: [256]u8
-	path, path_err := proto.ctl_socket_path(path_buf[:])
-	if path_err != .None do return true, _cli_fail(path_err)
+	at_buf: [256]u8
+	at, aerr := proto.control_endpoint(at_buf[:])
+	if aerr.kind != .None do return true, _cli_fail(aerr)
 	req_buf: [64]u8
-	reply_buf: [plat_ipc.IPC_MAX_REPLY]u8
-	reply, err := app_control_request(path, ctrl_feat.control_format_request(req, req_buf[:]), reply_buf[:])
-	if err != .None do return true, _cli_fail(err)
+	reply_buf: [proto.CONTROL_MAX_REPLY]u8
+	reply, err := app_control_request(at, ctrl_feat.control_format_request(req, req_buf[:]), reply_buf[:])
+	if err.kind != .None do return true, _cli_fail(err)
 	ok, code, message, _, well_formed := ctrl_feat.control_split_reply(reply)
 	if !well_formed || !ok {
 		fmt.eprintf("term: %s\n", message if len(message) > 0 else (code if len(code) > 0 else "malformed reply"))
@@ -54,13 +54,13 @@ app_run_control_cli :: proc(args: []string) -> (handled: bool, exit_code: int) {
 	return true, 0
 }
 
-// app_control_request is ipc_client_request with a short backoff on Busy
-// (the server sheds load beyond IPC_MAILBOX_CAP instead of queueing it).
-app_control_request :: proc(path, line: string, out: []u8) -> (reply: string, err: plat_ipc.Ipc_Error) {
+// app_control_request is ipc.line_call with a short backoff while the .Line
+// server sheds load: it answers overload in-band as "err busy\n".
+app_control_request :: proc(at: plat_ipc.Endpoint, line: string, out: []u8) -> (reply: string, err: plat_ipc.Error) {
 	backoff := 25 * time.Millisecond
 	for attempt in 0..<5 {
-		reply, err = plat_ipc.ipc_client_request(path, line, out)
-		if err != .Busy || attempt == 4 do return
+		reply, err = plat_ipc.line_call(at, line, out)
+		if err.kind != .None || reply != "err busy\n" || attempt == 4 do return
 		time.sleep(backoff)
 		backoff *= 2
 	}
@@ -68,11 +68,12 @@ app_control_request :: proc(path, line: string, out: []u8) -> (reply: string, er
 }
 
 @(private = "file")
-_cli_fail :: proc(err: plat_ipc.Ipc_Error) -> int {
-	if err == .Not_Running {
+_cli_fail :: proc(err: plat_ipc.Error) -> int {
+	if err.kind == .No_Server {
 		fmt.eprintln("term: Term is not running")
 		return 2
 	}
-	fmt.eprintf("term: %s\n", plat_ipc.ipc_error_message(err))
+	reason := err.reason if len(err.reason) > 0 else plat_ipc.error_message(err)
+	fmt.eprintf("term: control socket: %s\n", reason)
 	return 1
 }
