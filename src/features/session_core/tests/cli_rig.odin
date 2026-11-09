@@ -76,6 +76,14 @@ cli_fail_code :: proc(payload: []u8) -> proto.Fail_Code {
 	return proto.Fail_Code(ipc.wr_u8(&r))
 }
 
+// cli_fail_reason reads a FAIL frame's reason text.
+cli_fail_reason :: proc(payload: []u8) -> string {
+	r := ipc.wire_reader(payload)
+	_ = ipc.wr_u32(&r)
+	_ = ipc.wr_u8(&r)
+	return ipc.wr_str(&r)
+}
+
 // cli_list returns the SESSIONS payload reader (positioned after the count).
 cli_list :: proc(conn: ^Cli) -> (r: ipc.Wire_Reader, count: int, ok: bool) {
 	cli_send(conn, proto.MSG_LIST)

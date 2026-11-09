@@ -190,3 +190,102 @@ dec_element_report :: proc(r: ^ipc.Wire_Reader) -> (m: Element_Report) {
 	m.text = ipc.wr_str(r)
 	return
 }
+
+enc_act_batch :: proc(
+	w: ^ipc.Wire_Writer,
+	id: u32,
+	items: []Act_Batch_Item,
+) {
+	ipc.ww_u32(w, id)
+	ipc.ww_u8(w, u8(Act_Kind.Batch))
+	ipc.ww_u32(w, u32(len(items)))
+	for &item in items {
+		enc_act_batch_item(w, item)
+	}
+}
+
+enc_act_target :: proc(w: ^ipc.Wire_Writer, t: Act_Target) {
+	ipc.ww_u8(w, u8(t.kind))
+	switch t.kind {
+	case .Pos:
+		ipc.ww_u16(w, t.row)
+		ipc.ww_u16(w, t.col)
+	case .Ref:
+		ipc.ww_u32(w, t.ref)
+	case .Text:
+		ipc.ww_str(w, t.text)
+	}
+}
+
+dec_act_target :: proc(r: ^ipc.Wire_Reader) -> (t: Act_Target) {
+	t.kind = Target_Kind(ipc.wr_u8(r))
+	switch t.kind {
+	case .Pos:
+		t.row = ipc.wr_u16(r)
+		t.col = ipc.wr_u16(r)
+	case .Ref:
+		t.ref = ipc.wr_u32(r)
+	case .Text:
+		t.text = ipc.wr_str(r)
+	}
+	return
+}
+
+enc_act_batch_item :: proc(w: ^ipc.Wire_Writer, item: Act_Batch_Item) {
+	ipc.ww_u8(w, u8(item.kind))
+	switch item.kind {
+	case .Keys:
+		n := min(item.n_keys, ACT_KEYS_MAX)
+		ipc.ww_u32(w, u32(n))
+		for i in 0 ..< n {
+			ipc.ww_u8(w, item.keys[i].key)
+			ipc.ww_u32(w, item.keys[i].char)
+			ipc.ww_u8(w, item.keys[i].mods)
+		}
+	case .Text:
+		ipc.ww_bool(w, item.paste)
+		ipc.ww_str(w, item.text)
+	case .Raw:
+		ipc.ww_str(w, item.text)
+	case .Click:
+		enc_act_target(w, item.target)
+		ipc.ww_u8(w, item.button)
+		ipc.ww_bool(w, item.double)
+	case .Scroll:
+		enc_act_target(w, item.target)
+		ipc.ww_u8(w, item.dir)
+		ipc.ww_u16(w, item.count)
+	case .Drag:
+		enc_act_target(w, item.target)
+		enc_act_target(w, item.to_target)
+	}
+}
+
+dec_act_batch_item :: proc(r: ^ipc.Wire_Reader) -> (item: Act_Batch_Item) {
+	item.kind = Act_Item_Kind(ipc.wr_u8(r))
+	switch item.kind {
+	case .Keys:
+		n := int(ipc.wr_u32(r))
+		item.n_keys = min(n, ACT_KEYS_MAX)
+		for i in 0 ..< item.n_keys {
+			item.keys[i] = dec_act_key(r)
+		}
+	case .Text:
+		item.paste = ipc.wr_bool(r)
+		item.text = ipc.wr_str(r)
+	case .Raw:
+		item.text = ipc.wr_str(r)
+	case .Click:
+		item.target = dec_act_target(r)
+		item.button = ipc.wr_u8(r)
+		item.double = ipc.wr_bool(r)
+	case .Scroll:
+		item.target = dec_act_target(r)
+		item.dir = ipc.wr_u8(r)
+		item.count = ipc.wr_u16(r)
+	case .Drag:
+		item.target = dec_act_target(r)
+		item.to_target = dec_act_target(r)
+	}
+	return
+}

@@ -59,11 +59,13 @@ Lease_Flag_Request :: struct {
 }
 
 Act_Request :: struct {
-	id:     u32,
-	kind:   Act_Kind,
-	n_keys: int,
-	keys:   [ACT_KEYS_MAX]Act_Key,
-	paste:  bool,
-	text:   string,
-	mouse:  Act_Mouse,
+	id:      u32,
+	kind:    Act_Kind,
+	n_keys:  int,
+	keys:    [ACT_KEYS_MAX]Act_Key,
+	paste:   bool,
+	text:    string,
+	mouse:   Act_Mouse,
+	n_items: int,
+	items:   [ACT_ITEMS_MAX]Act_Batch_Item,
 }

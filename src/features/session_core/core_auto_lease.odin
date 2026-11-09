@@ -7,6 +7,7 @@ package feature_session_core
 // connection closes (held input is dropped), on a takeover from a window, or
 // when the session ends.
 
+import "core:fmt"
 import proto "../session_proto"
 import ipc "../../platform/ipc"
 
@@ -31,7 +32,12 @@ core_lease_blocks :: proc(s: ^Core_Session, peer: ipc.Peer) -> bool {
 // core_lease_fail answers FAIL Busy when s is leased by someone else.
 core_lease_fail :: proc(c: ^Core, s: ^Core_Session, req: ^ipc.Request) -> bool {
 	if !core_lease_blocks(s, req.peer) do return false
-	core_viewer_fail(c, req, .Busy, "an automation holds this session")
+	owner := core_lease_owner(s)
+	msg := "an automation holds this session"
+	if len(owner) > 0 {
+		msg = fmt.tprintf("held by %s", owner)
+	}
+	core_viewer_fail(c, req, .Busy, msg)
 	return true
 }
 

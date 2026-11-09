@@ -40,7 +40,8 @@ app_cli_agent :: proc(args: []string) -> (handled: bool, code: int) {
 	case "whoami": return true, _agent_whoami(args[1:])
 	case "next":   return true, app_cli_agent_next(args[1:])
 	case "read":   return true, app_cli_session_read(args[1:])
-	case "observe", "tell", "cancel", "result", "answer", "progress", "watch", "run", "send", "wait", "kill", "signal", "resize":
+	case "send":   return true, app_cli_session_send(args[1:])
+	case "observe", "tell", "cancel", "result", "answer", "progress", "watch", "run", "wait", "kill", "signal", "resize":
 		id, rest, ok := _agent_target(args)
 		if !ok do return true, 1
 		switch args[0] {
@@ -52,7 +53,6 @@ app_cli_agent :: proc(args: []string) -> (handled: bool, code: int) {
 		case "progress": return true, app_cli_agent_answer(id, rest, false)
 		case "watch":   return true, app_cli_agent_watch(id, rest)
 		case "run":     return true, app_cli_agent_run(id, rest)
-		case "send":    return true, _agent_send(id, rest)
 		case "kill":    return true, _agent_kill(id, rest)
 		case "wait":    return true, app_cli_agent_wait(id, rest)
 		case "signal":  return true, app_cli_agent_signal(id, rest)
@@ -179,30 +179,4 @@ _agent_read :: proc(id: u32, args: []string) -> int {
 	text, code := app_agent_call(proto.MSG_READ, b[:])
 	if code == 0 do os.write(os.stdout, text)
 	return code
-}
-
-@(private = "file")
-_agent_send :: proc(id: u32, args: []string) -> int {
-	if len(args) != 1 {
-		fmt.eprintln(APP_CLI_USAGE)
-		return 1
-	}
-	msg: [16 * 1024]u8
-	payload, ok := app_agent_send_payload(msg[:], id, args[0], "")
-	if !ok do return 1
-	return app_agent_request_ok(proto.MSG_SEND, payload)
-}
-
-// app_agent_send_payload encodes a SEND (Send_Request) of text (escapes
-// decoded) + suffix.
-app_agent_send_payload :: proc(buf: []u8, id: u32, text, suffix: string) -> ([]u8, bool) {
-	w := plat_ipc.wire_writer(buf)
-	plat_ipc.ww_u32(&w, id)
-	n := app_cli_unescape(text, buf[w.n:])
-	if n < 0 || w.n + n + len(suffix) > len(buf) {
-		fmt.eprintln("term: text too long or bad escape")
-		return nil, false
-	}
-	n += copy(buf[w.n + n:], suffix)
-	return buf[:w.n + n], true
 }

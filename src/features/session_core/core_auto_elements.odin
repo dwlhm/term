@@ -28,7 +28,6 @@ core_viewer_elements :: proc(c: ^Core, req: ^ipc.Request) {
 	_elements_encode_reply(c, req, elements, ref_ids)
 }
 
-@(private = "file")
 _elements_snapshot :: proc(
 	c: ^Core,
 	s: ^Core_Session,

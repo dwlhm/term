@@ -139,13 +139,51 @@ Settle_Result :: struct {
 // mods its Mods bits (1 Shift, 2 Alt, 4 Ctrl, 8 Super).
 Act_Kind :: enum u8 {
 	Keys  = 1, // u32 n + n Act_Key
-	Text  = 2, // bool paste + str. Typed: every character is a key tap (\n Enter, \t Tab);
-	           // paste: one bracketed paste when the program enabled ?2004, else typed
+	Text  = 2, // bool paste + str
 	Mouse = 3, // Act_Mouse
+	Batch = 4, // u32 n + n Act_Batch_Item
 }
 
-ACT_KEYS_MAX :: 64
-ACT_TEXT_MAX :: 64 * 1024
+ACT_KEYS_MAX  :: 64
+ACT_TEXT_MAX  :: 64 * 1024
+ACT_ITEMS_MAX :: 128
+
+Target_Kind :: enum u8 {
+	Pos  = 0, // row, col
+	Ref  = 1, // ref_id
+	Text = 2, // text
+}
+
+Act_Target :: struct {
+	kind: Target_Kind,
+	row:  u16,
+	col:  u16,
+	ref:  u32,
+	text: string,
+}
+
+Act_Item_Kind :: enum u8 {
+	Keys   = 1,
+	Text   = 2,
+	Raw    = 3,
+	Click  = 4,
+	Scroll = 5,
+	Drag   = 6,
+}
+
+Act_Batch_Item :: struct {
+	kind:      Act_Item_Kind,
+	n_keys:    int,
+	keys:      [ACT_KEYS_MAX]Act_Key,
+	paste:     bool,
+	text:      string,
+	target:    Act_Target,
+	to_target: Act_Target,
+	button:    u8, // 0 left, 1 right, 2 middle
+	double:    bool,
+	dir:       u8, // 0 up, 1 down
+	count:     u16,
+}
 
 Act_Key :: struct {
 	key:  u8,

@@ -74,7 +74,7 @@ dec_lease_flag :: proc(r: ^ipc.Wire_Reader) -> Lease_Flag_Request { return {ipc.
 dec_act :: proc(r: ^ipc.Wire_Reader) -> (m: Act_Request) {
 	m.id = ipc.wr_u32(r)
 	kind := ipc.wr_u8(r)
-	if kind < u8(Act_Kind.Keys) || kind > u8(Act_Kind.Mouse) {
+	if kind < u8(Act_Kind.Keys) || kind > u8(Act_Kind.Batch) {
 		r.ok = false
 		return
 	}
@@ -93,6 +93,16 @@ dec_act :: proc(r: ^ipc.Wire_Reader) -> (m: Act_Request) {
 		m.text = ipc.wr_str(r)
 	case .Mouse:
 		m.mouse = dec_act_mouse(r)
+	case .Batch:
+		n := ipc.wr_u32(r)
+		if n == 0 || n > ACT_ITEMS_MAX {
+			r.ok = false
+			return
+		}
+		m.n_items = int(n)
+		for i in 0 ..< m.n_items {
+			m.items[i] = dec_act_batch_item(r)
+		}
 	}
 	return
 }
