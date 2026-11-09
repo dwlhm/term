@@ -11,15 +11,17 @@ The CLI documents itself, so this file only says where to look:
 |---|---|
 | Commands | `term --help` |
 | One session verb | `term session <verb> --help` |
+| Lua Scripting (`term run`) | [`docs/SCRIPTING.md`](SCRIPTING.md) |
 | Guide for AI agents | `term skill show` (installed by `term skill setup`) |
 | The socket protocol (any program can use it) | [`docs/PROTOCOL.md`](PROTOCOL.md) |
 
-Work in another session goes through requests: `run` types a command at a
-shell prompt and returns its output, `tell` asks whatever waits in `next`
-(an agent, a script, an app behind a `new --endpoint` session) and returns its
-`answer`. One request, one result, no queue.
+Interacting with another session uses non-invasive reading and atomic sending:
+- `term session read [id] --tail --prompt` waits reactively for command completion.
+- `term session read [id] --last` retrieves clean command output.
+- `term session send [id] "command" --key Enter` sends input directly to the PTY.
+- `term split <right|down> [id]` and `term tab [id]` control GUI window layout.
+- `term run <script.lua>` executes Effect-style Fiber automation scripts.
 
 Every program in a session gets `TERM_SESSION_ID=<id>`; `observe` and `read`
-default to it, and requests are sent and taken as it. Exit codes: 0 ok ·
-1 error · 2 no session core · 3 timed out · 4 the session ended first ·
-5 rejected.
+default to it. Exit codes: 0 ok · 1 error · 2 no session core · 3 timed out ·
+4 the session ended first · 5 rejected.

@@ -65,77 +65,16 @@ FAIL codes: 1 Not_Found · 2 Exited (a request ended) · 3 Bad_Request ·
 ask for that input: mouse reports, a key it has no encoding for). 6 is the
 handshake's alone.
 
-## Requests (the broker)
-
-A request asks a session to process some text and ends with exactly one
-result. It is taken by a worker of that session waiting in `NEXT`, or by the
-session's shell adapter (a shell at its OSC 133 prompt: the text is typed as a
-command, and its output and exit status are the result). There is no queue: a
-target that cannot take it rejects it at once.
-
-| kind | request payload | answer |
-|---|---|---|
-| `TELL` (74) | u32 to · u32 from · u32 timeout_ms · u64 parent · bool wait · bool shell · str body | `TELL_RESULT` Accepted or Rejected; with `wait`: `TELL_PROGRESS` Accepted, Progress…, then `TELL_RESULT` Finished (or Rejected) |
-| `CANCEL` (75) | u64 request | `OK` / `FAIL` 1 |
-| `NEXT` (76) | u32 session · u32 timeout_ms (0 = no limit) | `REQUEST` when one comes / `FAIL` 7 |
-| `ANSWER` (79) | u32 by · u64 request · bool failed · str text | `OK` / `FAIL` 1, 2 or 3 |
-| `PROGRESS` (100) | same as `ANSWER` (failed ignored) | `OK` / `FAIL` |
-| `RESULT` (101) | u32 caller · bool wait · bool follow · u32 timeout_ms · u32 n · n × u64 request (n = 1..8) | `TELL_RESULT` Running or Finished (follow: `TELL_PROGRESS` Progress… first) / `FAIL` 1 or 7 |
-| `ENDPOINT` (102) | str name (1..64 bytes) · bool owned | `OK` + u32 session id |
-
-The fields:
-- **`from`** is the sender's own session, or 0 from outside term.
-- **`parent`** names the request the sender is working on that this one
-  serves. 0 means: the only request the sender works on, if there is exactly
-  one.
-- **`shell`** means only the shell adapter may take it (legacy command run).
-- **`by`** is the worker's session. Only the session a request went to may
-  report on it.
-- **`caller`** is the reader's session. A sender that reads its own finished
-  result takes it, and the result is freed.
-- An **owned** endpoint ends when this connection closes. One made without
-  `owned` lives until `KILL` (62, payload `u32 session`).
-
-`TELL_RESULT` (89) and `TELL_PROGRESS` (96): u64 id · u8 phase · u8 reject · u8 status · i32 exit_code ·
-u32 from · u32 to · str progress · str text.
-
-| enum | values |
-|---|---|
-| phase | 1 Accepted · 2 Rejected · 3 Running · 4 Progress · 5 Finished |
-| reject | 0 None · 1 Empty · 2 Too_Large (body > 16 KiB) · 3 Busy · 4 Not_Listening · 5 Multi_Line (a shell takes one line) · 6 Full · 7 Leased (an automation holds it) |
-| status | 0 Done · 1 Failed · 2 Cancelled · 3 Interrupted (a person typed into the shell) · 4 Timeout · 5 Error (a side went away) |
-
-`REQUEST` (91): u64 id · u32 from · u64 parent · str body.
-
-### Lifecycle rules
-
-- **Who takes a request.** A free worker (one `NEXT` waiting) takes it, and each
-  waiting `NEXT` is one slot. If no worker waits, a shell at its prompt takes
-  it. A session still starting (no prompt and no worker yet, for up to 10 s)
-  gives it to whichever of the two is ready first.
-- **When it is rejected.** Busy: every slot is taken, or the shell runs
-  something. Not_Listening: nothing can take it.
-- **When it ends.** A request ends on `ANSWER`, when its command finishes, on
-  `CANCEL`, at its timeout (default 30 min), when its sender's or target's
-  session goes away, or when a sender waiting with `wait` closes its
-  connection.
-- **Children.** Ending a request ends the requests sent while working on it
-  (its children, by parent).
-- **Ending a shell command.** It is interrupted with SIGINT, repeated until the
-  command ends (at most 5 s). The shell is busy until then.
-- **Results.** A result waits for its sender for 10 minutes, then it is freed.
-  After that, `RESULT` and `ANSWER` get `FAIL` 1.
-
 ## Sessions
 
-`LIST` (60) answers `SESSIONS` (80): u32 count, then one row per session. A row
-is:
-u32 id · u8 state (1 Idle, 2 Busy, 3 Exited) · bool active · bool attached ·
-u32 pid · u32 elapsed_s · u32 quiet_s (since its program last printed) ·
-i32 exit_code · bool endpoint · u32 serving · u64 serving_id · u32 awaiting ·
-u32 listening · str process · str cwd · str title · str status · str controller
-(the automation holding its lease, empty when none) · bool controller_pass (its
-lease passes a person's input through: a handoff).
+`LIST` (60) answers `SESSIONS` (80): u32 count, then one row per session. A row is:
+`u32 id · u8 state (1 Idle, 2 Busy, 3 Exited) · bool active · bool attached · u32 pid · u32 elapsed_s · u32 quiet_s · i32 exit_code · u32 cmd_seq · i32 last_cmd_exit · bool has_cmd_exit · str process · str cwd · str title · str name`
+
+### Reactive Command Tracking
+Each session tracks command execution sequence and completion:
+- `cmd_seq`: Monotonically incrementing command sequence number (from OSC 133 prompt markers).
+- `has_cmd_exit`: True when the previous command has finished with an exit status.
+- `last_cmd_exit`: The exit status of the previous command.
 
 `CREATE` (61, a Spawn_Msg) and `ATTACH` (63, an Attach_Msg) answer `ATTACHED`
 (82): u32 session · u32 channel. The screen then streams as `DATA` (0) on that
@@ -211,7 +150,7 @@ in `codec_auto.odin`.
   attributes. fg 7 / bg 0 are also the defaults: the grid does not tell them
   apart. A snapshot that does not fit in one frame drops history first.
 
-## Example: a worker in Python
+## Example: list sessions in Python
 
 ```python
 import itertools, os, socket, struct
@@ -237,15 +176,10 @@ def call(sock, kind, payload):
 path = os.path.join(os.environ.get("TERM_SESSION_DIR") or
                     f"{os.environ.get('TMPDIR', '/tmp').rstrip('/')}/term-{os.getuid()}", "core.sock")
 sock = socket.socket(socket.AF_UNIX); sock.connect(path)
-sock.sendall(frame(10, struct.pack("<IBQ", 0x000100, 4, 0) + s("example")))
+sock.sendall(frame(10, struct.pack("<IBQ", 0x000200, 4, 0) + s("example")))
 assert read_frame(sock)[0] == 10                        # the core's HELLO
 
-_, payload = call(sock, 102, s("echo-app") + b"\x01")    # an owned endpoint
-me = struct.unpack("<I", payload)[0]
-print("endpoint", me)
-while True:
-    kind, payload = call(sock, 76, struct.pack("<II", me, 0))  # NEXT → REQUEST (91)
-    rid, sender, parent, n = struct.unpack_from("<QIQI", payload)
-    body = payload[24:24 + n].decode()
-    call(sock, 79, struct.pack("<IQB", me, rid, 0) + s(body.upper()))  # ANSWER → OK
+kind, payload = call(sock, 60, b"")  # LIST (60) → SESSIONS (80)
+count = struct.unpack_from("<I", payload)[0]
+print(f"Term has {count} active session(s)")
 ```
