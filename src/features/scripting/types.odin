@@ -4,6 +4,7 @@ package feature_scripting
 // Fibers represent green threads (Lua coroutines) with structured
 // concurrency and LIFO resource scopes.
 
+import "base:runtime"
 import "core:time"
 import ipc "../../platform/ipc"
 import lua "../../platform/lua"
@@ -63,6 +64,7 @@ Fiber :: struct {
 }
 
 Scheduler :: struct {
+	allocator:   runtime.Allocator,
 	main_L:      ^lua.State,
 	fibers:      map[Fiber_Id]^Fiber,
 	next_id:     u64,

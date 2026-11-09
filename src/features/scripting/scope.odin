@@ -3,8 +3,8 @@ package feature_scripting
 // Resource Scope and AcquireRelease management.
 // Finalizers are executed in strict LIFO order on fiber exit or interruption.
 
-scope_init :: proc(s: ^Scope) {
-	s.finalizers = make([dynamic]Finalizer)
+scope_init :: proc(s: ^Scope, allocator := context.allocator) {
+	s.finalizers = make([dynamic]Finalizer, allocator)
 	s.closed = false
 }
 

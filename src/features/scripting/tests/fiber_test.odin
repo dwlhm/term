@@ -167,3 +167,53 @@ test_fiber_lua_coroutine_execution :: proc(t: ^testing.T) {
 	testing.expect(t, !step2) // no more pending work
 	testing.expect_value(t, fiber.state, scripting.Fiber_State.Done)
 }
+
+@(test)
+test_script_runtime_program_execution :: proc(t: ^testing.T) {
+	vm := scripting.script_vm_create()
+	testing.expect(t, vm != nil)
+	defer scripting.script_vm_destroy(vm)
+
+	script := `
+		local term = require "term"
+		local task = term.task
+
+		return term.program {
+			name = "test-fibers",
+			main = function()
+				local step = 0
+				task.fork(function()
+					task.sleep(0.001)
+					step = 1
+				end)
+				task.sleep(0.005)
+				assert(step == 1, "child fiber should have run")
+			end,
+		}
+	`
+
+	err := lua.luaL_loadbufferx(vm.L, raw_data(script), len(script), "test", "t")
+	testing.expect_value(t, err, lua.OK)
+
+	// Call chunk to get manifest table
+	pcall_err := lua.pcall(vm.L, 0, 1, 0)
+	testing.expect_value(t, pcall_err, lua.OK)
+	testing.expect(t, lua.type(vm.L, -1) == .Table)
+
+	// Extract main
+	lua.getfield(vm.L, -1, "main")
+	testing.expect(t, lua.type(vm.L, -1) == .Function)
+
+	root_co := lua.newthread(vm.L)
+	lua.insert(vm.L, -2)
+	lua.xmove(vm.L, root_co, 1)
+	lua.pop(vm.L, 2)
+
+	_ = scripting.scheduler_spawn_co(&vm.sched, 0, root_co)
+
+	ok, err_msg := scripting.scheduler_run(&vm.sched)
+	if !ok {
+		testing.fail_now(t, err_msg)
+	}
+	testing.expect(t, ok)
+}

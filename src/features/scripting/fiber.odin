@@ -8,14 +8,14 @@ import lua "../../platform/lua"
 
 fiber_create :: proc(sched: ^Scheduler, parent_id: Fiber_Id, co: ^lua.State) -> ^Fiber {
 	sched.next_id += 1
-	f := new(Fiber)
+	f := new(Fiber, sched.allocator)
 	f.id = Fiber_Id(sched.next_id)
 	f.parent_id = parent_id
 	f.co = co
 	f.state = .Ready
-	f.children = make([dynamic]Fiber_Id)
-	f.group = make([dynamic]Fiber_Id)
-	scope_init(&f.scope)
+	f.children = make([dynamic]Fiber_Id, sched.allocator)
+	f.group = make([dynamic]Fiber_Id, sched.allocator)
+	scope_init(&f.scope, sched.allocator)
 
 	sched.fibers[f.id] = f
 
@@ -28,14 +28,14 @@ fiber_create :: proc(sched: ^Scheduler, parent_id: Fiber_Id, co: ^lua.State) -> 
 	return f
 }
 
-fiber_destroy :: proc(f: ^Fiber) {
+fiber_destroy :: proc(sched: ^Scheduler, f: ^Fiber) {
 	scope_destroy(&f.scope)
 	delete(f.children)
 	delete(f.group)
 	if len(f.error_msg) > 0 {
-		delete(f.error_msg)
+		delete(f.error_msg, sched.allocator)
 	}
-	free(f)
+	free(f, sched.allocator)
 }
 
 // fiber_interrupt marks a fiber as interrupted, closes its scope, and
@@ -77,7 +77,7 @@ fiber_resume :: proc(sched: ^Scheduler, f: ^Fiber, nargs: int) -> int {
 	case: // lua.ERRRUN, lua.ERRMEM, etc.
 		f.state = .Failed
 		msg := lua.tostring(f.co, -1)
-		f.error_msg = strings.clone(msg)
+		f.error_msg = strings.clone(msg, sched.allocator)
 		scope_close(&f.scope)
 	}
 	return int(status)

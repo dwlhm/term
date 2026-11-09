@@ -8,9 +8,10 @@ import "core:time"
 import ipc "../../platform/ipc"
 import lua "../../platform/lua"
 
-scheduler_init :: proc(sched: ^Scheduler, main_L: ^lua.State, ipc_client: ^ipc.Client = nil) {
+scheduler_init :: proc(sched: ^Scheduler, main_L: ^lua.State, ipc_client: ^ipc.Client = nil, allocator := context.allocator) {
+	sched.allocator = allocator
 	sched.main_L = main_L
-	sched.fibers = make(map[Fiber_Id]^Fiber)
+	sched.fibers = make(map[Fiber_Id]^Fiber, allocator = allocator)
 	sched.next_id = 0
 	sched.current = nil
 	sched.root_id = 0
@@ -20,7 +21,7 @@ scheduler_init :: proc(sched: ^Scheduler, main_L: ^lua.State, ipc_client: ^ipc.C
 
 scheduler_destroy :: proc(sched: ^Scheduler) {
 	for id, f in sched.fibers {
-		fiber_destroy(f)
+		fiber_destroy(sched, f)
 	}
 	delete(sched.fibers)
 }
