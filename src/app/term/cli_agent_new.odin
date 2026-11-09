@@ -19,18 +19,42 @@ NEW_DEFAULT_SIZE :: proto.Size_Msg{cols = 120, rows = 36}
 @(private = "file")
 NEW_MSG_BYTES :: 64 * 1024
 
+@(private = "file")
+_parse_new_dir :: proc(raw: string) -> (dir: string, ok: bool) {
+	dir = raw
+	if strings.has_prefix(dir, "~/") {
+		home := os.get_env("HOME", context.temp_allocator)
+		if len(home) > 0 {
+			dir = strings.concatenate({home, dir[1:]}, context.temp_allocator)
+		}
+	}
+	if !os.is_dir(dir) {
+		fmt.eprintln("no such directory")
+		return "", false
+	}
+	return dir, true
+}
+
 // app_cli_parse_new fills spec from the `new` arguments; false on bad usage.
 app_cli_parse_new :: proc(args: []string, spec: ^proto.Spawn_Msg) -> bool {
-	spec^ = {cwd = os.get_env("PWD", context.temp_allocator), size = NEW_DEFAULT_SIZE}
+	spec^ = {
+		cwd = os.get_env("PWD", context.temp_allocator),
+		size = NEW_DEFAULT_SIZE,
+	}
 	rest := args
 	for len(rest) > 0 && rest[0] != "--" {
 		if len(rest) < 2 do return false
 		switch rest[0] {
-		case "-d": spec.cwd = rest[1]
+		case "-d":
+			spec.cwd = _parse_new_dir(rest[1]) or_return
 		case "-s":
 			spec.size = app_cli_parse_size(rest[1]) or_return
 		case "-e":
-			if strings.index_byte(rest[1], '=') <= 0 || spec.envc == proto.STREAM_MAX_ENV do return false
+			if strings.index_byte(rest[1], '=') <= 0 {
+				fmt.eprintln("-e takes K=V")
+				return false
+			}
+			if spec.envc == proto.STREAM_MAX_ENV do return false
 			spec.env[spec.envc] = rest[1]
 			spec.envc += 1
 		case: return false
@@ -43,18 +67,20 @@ app_cli_parse_new :: proc(args: []string, spec: ^proto.Spawn_Msg) -> bool {
 		for i in 0..<spec.argc do spec.argv[i] = rest[i + 1]
 	} else {
 		shell := os.get_env("SHELL", context.temp_allocator)
-		spec.argv[0], spec.argv[1], spec.argc = shell if len(shell) > 0 else "/bin/sh", "-l", 2 // a login shell
+		spec.argv[0] = shell if len(shell) > 0 else "/bin/sh"
+		spec.argv[1] = "-l"
+		spec.argc = 2
 	}
 	return true
 }
 
-// app_cli_parse_size parses COLSxROWS (each 1..9999).
+// app_cli_parse_size parses COLSxROWS within 2x1..1000x500 (spec 4.5, N7, R3).
 app_cli_parse_size :: proc(s: string) -> (size: proto.Size_Msg, ok: bool) {
 	x := strings.index_byte(s, 'x')
 	if x <= 0 do return {}, false
 	cols := strconv.parse_uint(s[:x], 10) or_return
 	rows := strconv.parse_uint(s[x + 1:], 10) or_return
-	if cols < 1 || cols > 9999 || rows < 1 || rows > 9999 do return {}, false
+	if cols < 2 || cols > 1000 || rows < 1 || rows > 500 do return {}, false
 	return {cols = u16(cols), rows = u16(rows)}, true
 }
 

@@ -30,6 +30,8 @@ core_row_get :: proc(c: ^Core, s: ^Core_Session, title_buf: []u8) -> proto.Sessi
 		elapsed_s = u32(max(i64(0), _now_unix() - s.started_unix)) if s.started_unix > 0 else 0,
 		quiet_s   = u32(max(i64(0), _now() - s.output_ns) / 1_000_000_000),
 		exit_code = s.exit.code,
+		cols      = u16(sess.term.grid.col_count) if sess != nil else 0,
+		rows      = u16(sess.term.grid.row_count) if sess != nil else 0,
 		request   = broker_row(&c.broker, s.id),
 		endpoint  = s.endpoint.used,
 		process   = process,

@@ -21,17 +21,20 @@ import "core:fmt"
 import "core:os"
 import "core:slice"
 import "core:strconv"
+import "core:time"
 import proto "../../features/session_proto"
 import plat_ipc "../../platform/ipc"
 
 
+_is_help :: proc(s: string) -> bool {
+	return s == "--help" || s == "-h" || s == "help"
+}
+
 // app_cli_agent: handled = false when args[0] is not an agent verb.
 app_cli_agent :: proc(args: []string) -> (handled: bool, code: int) {
 	if len(args) == 0 do return false, 0
-	if args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
-		return true, app_cli_session_help(args[1:])
-	}
-	if len(args) >= 2 && (args[1] == "--help" || args[1] == "-h" || args[1] == "help") {
+	if _is_help(args[0]) do return true, app_cli_session_help(args[1:])
+	if len(args) >= 2 && _is_help(args[1]) {
 		return true, app_cli_session_help([]string{args[0]})
 	}
 	switch args[0] {
@@ -41,23 +44,39 @@ app_cli_agent :: proc(args: []string) -> (handled: bool, code: int) {
 	case "next":   return true, app_cli_agent_next(args[1:])
 	case "read":   return true, app_cli_session_read(args[1:])
 	case "send":   return true, app_cli_session_send(args[1:])
-	case "observe", "tell", "cancel", "result", "answer", "progress", "watch", "run", "wait", "kill", "signal", "resize":
-		id, rest, ok := _agent_target(args)
-		if !ok do return true, 1
-		switch args[0] {
-		case "observe": return true, app_cli_agent_observe(id, rest)
-		case "tell":    return true, app_cli_agent_tell(id, rest)
-		case "cancel":  return true, app_cli_session_cancel(id, rest)
-		case "result":  return true, app_cli_agent_result(id, rest)
-		case "answer":  return true, app_cli_agent_answer(id, rest, true)
-		case "progress": return true, app_cli_agent_answer(id, rest, false)
-		case "watch":   return true, app_cli_agent_watch(id, rest)
-		case "run":     return true, app_cli_agent_run(id, rest)
-		case "kill":    return true, _agent_kill(id, rest)
-		case "wait":    return true, app_cli_agent_wait(id, rest)
-		case "signal":  return true, app_cli_agent_signal(id, rest)
-		case "resize":  return true, app_cli_agent_resize(id, rest)
+	case "observe", "tell", "cancel", "result", "answer", "progress",
+	     "watch", "run", "wait", "kill", "signal", "resize":
+		return _agent_dispatch_target(args)
+	case:
+		if args[0] != "attach" {
+			fmt.eprintfln("unknown session verb %q", args[0])
+			fmt.eprintln(
+				"verbs: new, kill, ls, attach, resize, " +
+				"whoami, read, send, signal, cancel",
+			)
+			return true, 1
 		}
+	}
+	return false, 0
+}
+
+@(private = "file")
+_agent_dispatch_target :: proc(args: []string) -> (bool, int) {
+	id, rest, ok := _agent_target(args)
+	if !ok do return true, 1
+	switch args[0] {
+	case "observe":  return true, app_cli_agent_observe(id, rest)
+	case "tell":     return true, app_cli_agent_tell(id, rest)
+	case "cancel":   return true, app_cli_session_cancel(id, rest)
+	case "result":   return true, app_cli_agent_result(id, rest)
+	case "answer":   return true, app_cli_agent_answer(id, rest, true)
+	case "progress": return true, app_cli_agent_answer(id, rest, false)
+	case "watch":    return true, app_cli_agent_watch(id, rest)
+	case "run":      return true, app_cli_agent_run(id, rest)
+	case "kill":     return true, _agent_kill(id, rest)
+	case "wait":     return true, app_cli_agent_wait(id, rest)
+	case "signal":   return true, app_cli_agent_signal(id, rest)
+	case "resize":   return true, app_cli_agent_resize(id, rest)
 	}
 	return false, 0
 }
@@ -65,17 +84,23 @@ app_cli_agent :: proc(args: []string) -> (handled: bool, code: int) {
 // _agent_target: the session a verb acts on. Verbs that only look at a session
 // (read, observe) default to the caller's own ($TERM_SESSION_ID); verbs
 // that change one always need an explicit id.
-@(private = "file")
 _agent_target :: proc(args: []string) -> (id: u32, rest: []string, ok: bool) {
 	if len(args) >= 2 {
-		if v, is_id := _parse_id(args[1]); is_id do return v, args[2:], true
+		if v, is_id := _parse_id(args[1]); is_id {
+			return v, args[2:], true
+		} else {
+			fmt.eprintln("not a session id")
+			return 0, nil, false
+		}
 	}
 	switch args[0] {
 	case "read", "observe":
-		if self, inside := app_agent_self_id(); inside do return self, args[1:], true
-		fmt.eprintfln("term: %s needs a session id: term session %s <id> (inside a term session it defaults to $%s)", args[0], args[0], proto.SESSION_ID_ENV)
+		if self, inside := app_agent_self_id(); inside {
+			return self, args[1:], true
+		}
+		fmt.eprintfln("which session? %s <id>", args[0])
 	case:
-		fmt.eprintfln("term: %s needs a session id: term session %s <id> … (see term session %s --help)", args[0], args[0], args[0])
+		fmt.eprintfln("usage: term session %s <id>", args[0])
 	}
 	return 0, nil, false
 }
@@ -86,6 +111,31 @@ app_agent_self_id :: proc() -> (u32, bool) {
 }
 
 @(private = "file")
+_agent_verify_session :: proc(id: u32) -> int {
+	c: plat_ipc.Client
+	if err := proto.session_open(&c, .Cli, false); err.kind != .None {
+		if err.kind == .No_Server {
+			fmt.eprintln("no term session is running")
+			return 2
+		}
+		return 1
+	}
+	defer plat_ipc.client_close(&c)
+
+	buf: [32]u8
+	w := plat_ipc.wire_writer(buf[:])
+	proto.enc_snapshot_req(&w, {id = id, history = 0, since = -1})
+	_, err := plat_ipc.client_call(
+		&c, proto.MSG_SNAPSHOT,
+		plat_ipc.wire_bytes_written(&w), {timeout = 2 * time.Second},
+	)
+	if err.kind == .Failed && proto.Fail_Code(err.code) == .Not_Found {
+		fmt.eprintfln("no session %d", id)
+		return 1
+	}
+	return 0
+}
+
 _agent_whoami :: proc(args: []string) -> int {
 	if len(args) != 0 {
 		fmt.eprintln(APP_CLI_USAGE)
@@ -93,8 +143,11 @@ _agent_whoami :: proc(args: []string) -> int {
 	}
 	id, inside := app_agent_self_id()
 	if !inside {
-		fmt.eprintfln("term: not inside a term session ($%s is not set)", proto.SESSION_ID_ENV)
+		fmt.eprintln("not inside a term session")
 		return 1
+	}
+	if code := _agent_verify_session(id); code != 0 {
+		return code
 	}
 	fmt.println(id)
 	return 0

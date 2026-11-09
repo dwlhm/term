@@ -48,7 +48,14 @@ app_run_control_cli :: proc(args: []string) -> (handled: bool, exit_code: int) {
 	if err.kind != .None do return true, _cli_fail(err)
 	ok, code, message, _, well_formed := ctrl_feat.control_split_reply(reply)
 	if !well_formed || !ok {
-		fmt.eprintf("term: %s\n", message if len(message) > 0 else (code if len(code) > 0 else "malformed reply"))
+		msg := message
+		if len(msg) == 0 {
+			msg = code if len(code) > 0 else "malformed reply"
+		}
+		fmt.eprintfln("term: %s", msg)
+		if code == "exited" || strings.contains(msg, "has exited") {
+			return true, 4
+		}
 		return true, 1
 	}
 	return true, 0
@@ -70,10 +77,10 @@ app_control_request :: proc(at: plat_ipc.Endpoint, line: string, out: []u8) -> (
 @(private = "file")
 _cli_fail :: proc(err: plat_ipc.Error) -> int {
 	if err.kind == .No_Server {
-		fmt.eprintln("term: Term is not running")
-		return 2
+		fmt.eprintln("no window is open: run term")
+		return 1
 	}
 	reason := err.reason if len(err.reason) > 0 else plat_ipc.error_message(err)
-	fmt.eprintf("term: control socket: %s\n", reason)
+	fmt.eprintfln("term: control socket: %s", reason)
 	return 1
 }

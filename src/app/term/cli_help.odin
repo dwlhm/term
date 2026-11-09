@@ -13,7 +13,12 @@ Verb_Help :: struct {
 }
 
 SESSION_VERBS := [?]Verb_Help{
-	{"ls", "[--json]", "List sessions (state, pid, cwd, request, title)", ""},
+	{
+		"ls",
+		"[--output text|json]",
+		"List sessions (state, pid, cwd, size, held-by, title)",
+		"",
+	},
 	{"new", "[-d dir] [-s COLSxROWS] [-e K=V]… [-- prog args…] | --endpoint <name>", "Start a background session (or a virtual endpoint); prints its id",
 		"The program keeps running after the CLI exits. Its environment has\nTERM_SESSION_ID=<id> (and TERM_PROGRAM=term). --endpoint makes a session with no\nprogram, for an app that takes its requests (`next --as <id>`); it lives until killed."},
 	{"whoami", "", "Print the id of the session this shell runs in ($TERM_SESSION_ID)", ""},
@@ -27,7 +32,12 @@ SESSION_VERBS := [?]Verb_Help{
 		"A worker waiting in `next` takes it, or the shell adapter types it at a shell\nprompt (OSC 133) and returns the command's output and exit. Otherwise it is\nrejected at once (exit 5): no queue. Waits and prints progress (stderr) and the\nresult; --async prints the request id instead (read it with `result`). A\nrequest sent while working on another one is its child and ends with it."},
 	{"result", "<request>… [--wait [-t sec]] [--follow] [--json]", "Read a request's result, or wait until one of several ends",
 		"Without --wait: the state now (running + progress, or the result). The sender\nreading its own finished result takes it; unfetched results expire after 10 min."},
-	{"cancel", "<request>", "Cancel a running request and the requests its work sent", ""},
+	{
+		"cancel",
+		"<id> [-t sec]",
+		"Interrupt a running command (SIGINT) and wait for the prompt",
+		"",
+	},
 	{"next", "[-t sec] [--as session] [--json]", "Worker: wait for the next request to this session",
 		"Prints \"#<id> from <session>\" and the request. Each waiting `next` is one free\nslot: run several to take several requests at once."},
 	{"progress", "<request> <text|-> [--as session]", "Worker: report progress on a request it took", ""},

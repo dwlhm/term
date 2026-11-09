@@ -155,6 +155,8 @@ Session_Row :: struct {
 	quiet_s:      u32, // seconds since its program last printed
 	endpoint:     bool, // a virtual session: no program, a name, requests only
 	exit_code:    i32,
+	cols:         u16,
+	rows:         u16,
 	request:      Row_Request,
 	process:      string,
 	cwd:          string,

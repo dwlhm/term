@@ -3,6 +3,7 @@ package feature_session_core
 // Channel-0 requests that act on one session by id without attaching
 // (agents: `term session kill|send|signal|resize|observe`). Each answers OK, FAIL or a result.
 
+import "core:fmt"
 import "core:strings"
 import "core:time"
 import proto "../session_proto"
@@ -71,7 +72,8 @@ core_viewer_resize :: proc(c: ^Core, req: ^ipc.Request) {
 		return
 	}
 	for &a in s.attaches do if a.used && !a.observe {
-		core_viewer_fail(c, req, .Busy, "shown in a window: its size follows that window")
+		msg := fmt.tprintf("a window shows session %d: resize the pane", s.id)
+		core_viewer_fail(c, req, .Busy, msg)
 		return
 	}
 	session.session_resize(s.sess, size.cols, size.rows, size.xpixel, size.ypixel)
@@ -80,38 +82,21 @@ core_viewer_resize :: proc(c: ^Core, req: ^ipc.Request) {
 	_ok(c, req)
 }
 
-// core_viewer_observe pulls an atomic, zero-side-effect snapshot of another session.
-core_viewer_observe :: proc(c: ^Core, req: ^ipc.Request) {
-	m: proto.Observe_Request
-	if !ipc.request_decode(req, &m, proto.dec_observe_req) do return
-	s := _target(c, req, m.id, false)
-	if s == nil do return
-	lines := m.lines
-
-	clear(&c.text)
-	b := strings.Builder{buf = c.text}
-	terminal.terminal_text(&s.sess.term, &b, int(min(lines, CORE_PAINT_HISTORY_MAX)))
-	c.text = b.buf
-
+@(private = "file")
+_observe_pack_result :: proc(
+	c: ^Core,
+	s: ^Core_Session,
+	title_buf: []u8,
+) -> proto.Observe_Result {
 	cols := u16(s.sess.term.grid.col_count)
 	rows := u16(s.sess.term.grid.row_count)
 	is_alt := terminal.terminal_in_alt_screen(&s.sess.term)
-
-	ps: proto.Prompt_State = .None
-	switch s.sess.term.parser.prompt_state {
-	case .Prompt:    ps = .Prompt
-	case .Input:     ps = .Input
-	case .Executing: ps = .Executing
-	case .None:      ps = .None
-	}
-
-	title_buf: [256]u8
-	row := core_row_get(c, s, title_buf[:])
-	max_text_len := max(0, CORE_ANSWER_MAX - 4096)
-	text_len := min(len(c.text), max_text_len)
+	ps := proto.Prompt_State(s.sess.term.parser.prompt_state)
+	row := core_row_get(c, s, title_buf)
+	max_len := max(0, CORE_ANSWER_MAX - 4096)
+	text_len := min(len(c.text), max_len)
 	text_slice := c.text[len(c.text) - text_len:]
-
-	res := proto.Observe_Result{
+	return {
 		row           = row,
 		cols          = cols,
 		rows          = rows,
@@ -122,7 +107,23 @@ core_viewer_observe :: proc(c: ^Core, req: ^ipc.Request) {
 		cmd_seq       = s.sess.term.parser.cmd_seq,
 		text          = string(text_slice),
 	}
+}
 
+// core_viewer_observe pulls an atomic, zero-side-effect snapshot of session.
+core_viewer_observe :: proc(c: ^Core, req: ^ipc.Request) {
+	m: proto.Observe_Request
+	if !ipc.request_decode(req, &m, proto.dec_observe_req) do return
+	s := _target(c, req, m.id, false)
+	if s == nil do return
+
+	clear(&c.text)
+	b := strings.Builder{buf = c.text}
+	h_max := int(min(m.lines, CORE_PAINT_HISTORY_MAX))
+	terminal.terminal_text(&s.sess.term, &b, h_max)
+	c.text = b.buf
+
+	title_buf: [256]u8
+	res := _observe_pack_result(c, s, title_buf[:])
 	w := ipc.wire_writer(c.msg)
 	proto.enc_observe_result(&w, res)
 	ipc.reply(&c.srv, req^, ipc.wire_bytes_written(&w))

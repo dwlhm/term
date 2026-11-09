@@ -28,7 +28,7 @@ app_cli_agent_signal :: proc(id: u32, args: []string) -> int {
 app_cli_agent_resize :: proc(id: u32, args: []string) -> int {
 	size, ok := app_cli_parse_size(args[0] if len(args) == 1 else "")
 	if !ok {
-		fmt.eprintln(APP_CLI_USAGE)
+		fmt.eprintln("size is COLSxROWS within 2x1..1000x500")
 		return 1
 	}
 	b: [12]u8
