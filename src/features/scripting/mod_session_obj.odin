@@ -136,73 +136,69 @@ _session_obj_read :: proc "c" (L: ^lua.State) -> c.int {
 }
 
 @(private = "file")
+_parse_wait_opts :: proc(L: ^lua.State) -> (pattern: string, prompt, exit: bool, timeout_sec: f64) {
+	timeout_sec = 10.0
+	if lua.type(L, 2) != .Table do return
+	lua.getfield(L, 2, "text")
+	if lua.type(L, -1) == .String do pattern = lua.tostring(L, -1)
+	lua.pop(L, 1)
+
+	lua.getfield(L, 2, "prompt")
+	if lua.type(L, -1) == .Boolean do prompt = lua.toboolean(L, -1) != 0
+	lua.pop(L, 1)
+
+	lua.getfield(L, 2, "exit")
+	if lua.type(L, -1) == .Boolean do exit = lua.toboolean(L, -1) != 0
+	lua.pop(L, 1)
+
+	lua.getfield(L, 2, "timeout")
+	if lua.type(L, -1) == .Number do timeout_sec = lua.tonumberx(L, -1, nil)
+	lua.pop(L, 1)
+	return
+}
+
+@(private = "file")
+_check_wait_match :: proc(
+	snap: proto.Snapshot, pattern: string, prompt, exit: bool, base_seq: u32,
+) -> (matched: bool, code: i32, has_code: bool) {
+	if exit && snap.exited do return true, snap.exit_code, true
+	if prompt && (snap.cmd_seq > base_seq || snap.prompt_state == .Prompt) {
+		return true, snap.cmd_exit_code if snap.has_cmd_exit else 0, true
+	}
+	if len(pattern) == 0 do return false, 0, false
+	for row in snap.screen {
+		for run in row.runs {
+			if strings.contains(run.text, pattern) do return true, 0, false
+		}
+	}
+	return false, 0, false
+}
+
+@(private = "file")
 _session_obj_wait :: proc "c" (L: ^lua.State) -> c.int {
 	context = runtime.default_context()
 	vm := script_vm_of(L)
 	if vm == nil || vm.sched.ipc_client == nil do return 0
-
 	id, ok := _session_from_userdata(L, 1)
 	if !ok do return 0
 
-	pattern := ""
-	wait_prompt := false
-	wait_exit := false
-	timeout_sec := 10.0
-	if lua.type(L, 2) == .Table {
-		lua.getfield(L, 2, "text")
-		if lua.type(L, -1) == .String do pattern = lua.tostring(L, -1)
-		lua.pop(L, 1)
-
-		lua.getfield(L, 2, "prompt")
-		if lua.type(L, -1) == .Boolean do wait_prompt = lua.toboolean(L, -1) != 0
-		lua.pop(L, 1)
-
-		lua.getfield(L, 2, "exit")
-		if lua.type(L, -1) == .Boolean do wait_exit = lua.toboolean(L, -1) != 0
-		lua.pop(L, 1)
-
-		lua.getfield(L, 2, "timeout")
-		if lua.type(L, -1) == .Number do timeout_sec = lua.tonumberx(L, -1, nil)
-		lua.pop(L, 1)
-	}
-
-	baseline_snap, base_err := api.api_snapshot(vm.sched.ipc_client, id, 0, -1, context.temp_allocator)
-	baseline_seq := baseline_snap.cmd_seq if base_err.kind == .None else 0
+	pattern, prompt, exit, timeout_sec := _parse_wait_opts(L)
+	base_snap, base_err := api.api_snapshot(vm.sched.ipc_client, id, 0, -1, context.temp_allocator)
+	base_seq := base_snap.cmd_seq if base_err.kind == .None else 0
 
 	deadline := time.time_add(time.now(), time.Duration(timeout_sec * f64(time.Second)))
 	for time.diff(deadline, time.now()) < 0 {
 		snap, err := api.api_snapshot(vm.sched.ipc_client, id, 0, -1, context.temp_allocator)
 		if err.kind != .None do break
 
-		if wait_exit && snap.exited {
+		if matched, code, has_code := _check_wait_match(snap, pattern, prompt, exit, base_seq); matched {
 			lua.pushboolean(L, 1)
-			lua.pushinteger(L, lua.Integer(snap.exit_code))
-			return 2
-		}
-
-		if wait_prompt && (snap.cmd_seq > baseline_seq || snap.prompt_state == .Prompt) {
-			lua.pushboolean(L, 1)
-			lua.pushinteger(L, lua.Integer(snap.cmd_exit_code if snap.has_cmd_exit else 0))
-			return 2
-		}
-
-		if len(pattern) > 0 {
-			found := false
-			for row in snap.screen {
-				for run in row.runs {
-					if strings.contains(run.text, pattern) {
-						found = true
-						break
-					}
-				}
-				if found do break
+			if has_code {
+				lua.pushinteger(L, lua.Integer(code))
+				return 2
 			}
-			if found {
-				lua.pushboolean(L, 1)
-				return 1
-			}
+			return 1
 		}
-
 		time.sleep(20 * time.Millisecond)
 	}
 
@@ -234,10 +230,8 @@ _session_obj_cancel :: proc "c" (L: ^lua.State) -> c.int {
 	context = runtime.default_context()
 	vm := script_vm_of(L)
 	if vm == nil || vm.sched.ipc_client == nil do return 0
-
 	id, ok := _session_from_userdata(L, 1)
 	if !ok do return 0
-
 	err := api.api_signal(vm.sched.ipc_client, id, 2)
 	lua.pushboolean(L, 1 if err.kind == .None else 0)
 	return 1
@@ -248,10 +242,8 @@ _session_obj_kill :: proc "c" (L: ^lua.State) -> c.int {
 	context = runtime.default_context()
 	vm := script_vm_of(L)
 	if vm == nil || vm.sched.ipc_client == nil do return 0
-
 	id, ok := _session_from_userdata(L, 1)
 	if !ok do return 0
-
 	err := api.api_kill(vm.sched.ipc_client, id)
 	lua.pushboolean(L, 1 if err.kind == .None else 0)
 	return 1

@@ -10,6 +10,40 @@ import api "../session_api"
 import ipc "../../platform/ipc"
 import lua "../../platform/lua"
 
+@(private = "file")
+_load_script_main :: proc(L: ^lua.State, path: string, content: []u8) -> (ok: bool, err_msg: string) {
+	cpath := strings.clone_to_cstring(path, context.temp_allocator)
+	if lua.luaL_loadbufferx(L, raw_data(content), c.size_t(len(content)), cpath, "t") != lua.OK {
+		return false, lua.tostring(L, -1)
+	}
+	if lua.pcall(L, 0, 1, 0) != lua.OK {
+		return false, lua.tostring(L, -1)
+	}
+	if lua.type(L, -1) != .Table {
+		return false, "script must return term.program { ... } or term.script { ... }"
+	}
+	lua.getfield(L, -1, "main")
+	if lua.type(L, -1) != .Function {
+		return false, "script manifest missing 'main' function"
+	}
+	return true, ""
+}
+
+@(private = "file")
+_spawn_script_root :: proc(vm: ^Script_Vm, args: []string) -> ^Fiber {
+	root_co := lua.newthread(vm.L)
+	lua.insert(vm.L, -2)
+	lua.xmove(vm.L, root_co, 1)
+	lua.pop(vm.L, 2)
+
+	lua.newtable(root_co)
+	for arg, i in args {
+		lua.pushstring(root_co, arg)
+		lua.rawseti(root_co, -2, lua.Integer(i + 1))
+	}
+	return scheduler_spawn_co(&vm.sched, 0, root_co)
+}
+
 run_script :: proc(path: string, args: []string, trust := false) -> int {
 	content, read_err := os.read_entire_file(path, context.temp_allocator)
 	if read_err != nil {
@@ -30,58 +64,18 @@ run_script :: proc(path: string, args: []string, trust := false) -> int {
 		return 1
 	}
 	defer script_vm_destroy(vm)
-
 	vm.sched.ipc_client = &ipc_cli
 
-	// Load script file
-	cpath := strings.clone_to_cstring(path, context.temp_allocator)
-	if lua.luaL_loadbufferx(vm.L, raw_data(content), c.size_t(len(content)), cpath, "t") != lua.OK {
-		fmt.eprintfln("term: %s", lua.tostring(vm.L, -1))
+	if ok, err_msg := _load_script_main(vm.L, path, content); !ok {
+		fmt.eprintfln("term: %s", err_msg)
 		return 1
 	}
 
-	// Execute top-level to obtain manifest
-	if lua.pcall(vm.L, 0, 1, 0) != lua.OK {
-		fmt.eprintfln("term: %s", lua.tostring(vm.L, -1))
-		return 1
-	}
-
-	if lua.type(vm.L, -1) != .Table {
-		fmt.eprintln("term: script must return term.program { ... } or term.script { ... }")
-		return 1
-	}
-
-	// Extract main function
-	lua.getfield(vm.L, -1, "main")
-	if lua.type(vm.L, -1) != .Function {
-		fmt.eprintln("term: script manifest missing 'main' function")
-		return 1
-	}
-
-	// Create root fiber coroutine
-	root_co := lua.newthread(vm.L)
-	lua.insert(vm.L, -2) // put thread below function
-	lua.xmove(vm.L, root_co, 1) // move main function to root_co
-	lua.pop(vm.L, 2) // pop thread and manifest
-
-	// Push argv to root_co as arguments
-	lua.newtable(root_co)
-	for arg, i in args {
-		lua.pushstring(root_co, arg)
-		lua.rawseti(root_co, -2, lua.Integer(i + 1))
-	}
-
-	root_fiber := scheduler_spawn_co(&vm.sched, 0, root_co)
-
-	// Run scheduler
+	root_fiber := _spawn_script_root(vm, args)
 	ok, err_msg := scheduler_run(&vm.sched)
 	if !ok {
-		if len(err_msg) > 0 {
-			fmt.eprintfln("term: %s", err_msg)
-		}
-		if root_fiber.interrupted do return 130
-		return 1
+		if len(err_msg) > 0 do fmt.eprintfln("term: %s", err_msg)
+		return 130 if root_fiber.interrupted else 1
 	}
-
 	return 0
 }

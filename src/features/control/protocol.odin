@@ -71,6 +71,23 @@ _PARSE_MESSAGES := [Control_Parse_Error]string{
 	.Extra_Args        = "too many arguments",
 }
 
+@(private = "file")
+_parse_split_args :: proc(s: string, pos: ^int, req: ^Control_Request) -> Control_Parse_Error {
+	dir_token, has_dir := _next_token(s, pos)
+	if !has_dir do return .Missing_Direction
+	switch dir_token {
+	case "right", "horizontal", "h": req.split_dir = .Right
+	case "down", "vertical", "v":     req.split_dir = .Down
+	case: return .Bad_Direction
+	}
+	if id_token, has_id := _next_token(s, pos); has_id {
+		id, id_ok := _parse_id(id_token)
+		if !id_ok do return .Bad_Id
+		req.id = id
+	}
+	return .None
+}
+
 // control_parse_request parses one request line (no trailing '\n').
 // Leading/trailing ASCII whitespace is trimmed; tokens are split on runs of ' '.
 control_parse_request :: proc(line: string) -> (req: Control_Request, err: Control_Parse_Error) {
@@ -90,20 +107,8 @@ control_parse_request :: proc(line: string) -> (req: Control_Request, err: Contr
 		if !id_ok do return {}, .Bad_Id
 		req.id = id
 	} else if verb == .Split {
-		dir_token, has_dir := _next_token(s, &pos)
-		if !has_dir do return {}, .Missing_Direction
-		switch dir_token {
-		case "right", "horizontal", "h":
-			req.split_dir = .Right
-		case "down", "vertical", "v":
-			req.split_dir = .Down
-		case:
-			return {}, .Bad_Direction
-		}
-		if id_token, has_id := _next_token(s, &pos); has_id {
-			id, id_ok := _parse_id(id_token)
-			if !id_ok do return {}, .Bad_Id
-			req.id = id
+		if split_err := _parse_split_args(s, &pos, &req); split_err != .None {
+			return {}, split_err
 		}
 	} else if verb == .Tab {
 		if id_token, has_id := _next_token(s, &pos); has_id {
