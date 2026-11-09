@@ -76,52 +76,72 @@ _read :: proc(c: ^Core, req: ^ipc.Request) {
 		core_viewer_fail(c, req, .Not_Found, "no such session")
 		return
 	}
-
 	defer free_all(context.temp_allocator)
 
 	if m.last {
-		if !s.sess.term.parser.saw_osc133 {
-			core_viewer_fail(c, req, .Bad_Request, fmt.tprintf("session %d does not mark commands (OSC 133)", s.id))
-			return
-		}
-		if !s.sess.term.parser.cmd_out.started {
-			core_viewer_fail(c, req, .Bad_Request, "no command has run yet")
-			return
-		}
-		clear(&c.text)
-		b := strings.Builder{buf = c.text}
-		to_cursor := !s.sess.term.parser.cmd_out.ended
-		_, head_lost := terminal.terminal_cmd_output(&s.sess.term, &b, to_cursor)
-		if head_lost {
-			g := &s.sess.term.grid
-			from := int(s.sess.term.parser.cmd_out.start - g.scrolled)
-			truncated := -g.history_count - from
-			if truncated > 0 {
-				prefix := fmt.tprintf("[truncated %d lines]\n", truncated)
-				temp := strings.clone(string(b.buf[:]), context.temp_allocator)
-				clear(&b.buf)
-				strings.write_string(&b, prefix)
-				strings.write_string(&b, temp)
-			}
-		}
-		if to_cursor {
-			if len(b.buf) > 0 && b.buf[len(b.buf) - 1] != '\n' do strings.write_byte(&b, '\n')
-			strings.write_string(&b, "[running]\n")
-		} else {
-			if len(b.buf) > 0 && b.buf[len(b.buf) - 1] != '\n' do strings.write_byte(&b, '\n')
-			exit_code := s.sess.term.parser.last_cmd_exit if s.sess.term.parser.has_cmd_exit else 0
-			fmt.sbprintf(&b, "[exit %d]\n", exit_code)
-		}
-		c.text = b.buf
-		core_reply_text(c, req)
+		_read_last(c, s, req)
+	} else {
+		_read_screen(c, s, req, m.history)
+	}
+}
+
+@(private = "file")
+_read_last :: proc(c: ^Core, s: ^Core_Session, req: ^ipc.Request) {
+	p := &s.sess.term.parser
+	if !p.saw_osc133 {
+		msg := fmt.tprintf("session %d does not mark commands (OSC 133)", s.id)
+		core_viewer_fail(c, req, .Bad_Request, msg)
+		return
+	}
+	if !p.cmd_out.started {
+		core_viewer_fail(c, req, .Bad_Request, "no command has run yet")
 		return
 	}
 
 	clear(&c.text)
 	b := strings.Builder{buf = c.text}
-	terminal.terminal_text(&s.sess.term, &b, int(min(m.history, CORE_PAINT_HISTORY_MAX)))
+	to_cursor := !p.cmd_out.ended
+	_, head_lost := terminal.terminal_cmd_output(&s.sess.term, &b, to_cursor)
+	if head_lost {
+		g := &s.sess.term.grid
+		from := int(p.cmd_out.start - g.scrolled)
+		truncated := -g.history_count - from
+		if truncated > 0 {
+			prefix := fmt.tprintf("[truncated %d lines]\n", truncated)
+			temp := strings.clone(string(b.buf[:]), context.temp_allocator)
+			clear(&b.buf)
+			strings.write_string(&b, prefix)
+			strings.write_string(&b, temp)
+		}
+	}
+	if len(b.buf) > 0 && b.buf[len(b.buf) - 1] != '\n' {
+		strings.write_byte(&b, '\n')
+	}
+	if to_cursor {
+		strings.write_string(&b, "[running]\n")
+	} else {
+		exit_code := p.last_cmd_exit if p.has_cmd_exit else 0
+		fmt.sbprintf(&b, "[exit %d]\n", exit_code)
+	}
+	c.text = b.buf
+	core_reply_text(c, req)
+}
+
+@(private = "file")
+_read_screen :: proc(
+	c: ^Core,
+	s: ^Core_Session,
+	req: ^ipc.Request,
+	history: u32,
+) {
+	clear(&c.text)
+	b := strings.Builder{buf = c.text}
+	n := int(min(history, CORE_PAINT_HISTORY_MAX))
+	terminal.terminal_text(&s.sess.term, &b, n)
 	if s.exited {
-		if len(b.buf) > 0 && b.buf[len(b.buf) - 1] != '\n' do strings.write_byte(&b, '\n')
+		if len(b.buf) > 0 && b.buf[len(b.buf) - 1] != '\n' {
+			strings.write_byte(&b, '\n')
+		}
 		fmt.sbprintf(&b, "[exited %d]\n", s.exit.code)
 	}
 	c.text = b.buf
