@@ -5,13 +5,18 @@ import proto "../../features/session_proto"
 
 @(test)
 test_cli_unescape :: proc(t: ^testing.T) {
-	buf: [32]u8
-	n := app_cli_unescape(`ls -l\r\e[A\x41\\`, buf[:])
-	testing.expect_value(t, string(buf[:n]), "ls -l\r\x1b[AA\\")
-	testing.expect_value(t, app_cli_unescape(`bad\q`, buf[:]), -1)
-	testing.expect_value(t, app_cli_unescape(`\x4`, buf[:]), -1)
-	testing.expect_value(t, app_cli_unescape("trailing\\", buf[:]), -1)
-	testing.expect_value(t, app_cli_unescape("0123456789012345678901234567890123", buf[:]), -1)
+	s1, _, ok1 := app_cli_unescape_raw(`ls -l\r\e[A\x41\\`)
+	testing.expect(t, ok1)
+	testing.expect_value(t, s1, "ls -l\r\x1b[AA\\")
+
+	_, _, ok2 := app_cli_unescape_raw(`bad\q`)
+	testing.expect(t, !ok2)
+
+	_, _, ok3 := app_cli_unescape_raw(`\x4`)
+	testing.expect(t, !ok3)
+
+	_, _, ok4 := app_cli_unescape_raw("trailing\\")
+	testing.expect(t, !ok4)
 }
 
 @(test)

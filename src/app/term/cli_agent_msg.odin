@@ -15,6 +15,8 @@ import plat_ipc "../../platform/ipc"
 
 AGENT_EXIT_REJECTED :: 5
 TELL_DEFAULT_S      :: 30 * 60.0
+WATCH_DEFAULT_S     :: 600.0
+WATCH_GRACE_MS      :: 5000
 
 Tell_Args :: struct {
 	body:      string,

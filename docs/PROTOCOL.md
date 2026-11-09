@@ -88,7 +88,7 @@ The fields:
 - **`parent`** names the request the sender is working on that this one
   serves. 0 means: the only request the sender works on, if there is exactly
   one.
-- **`shell`** means only the shell adapter may take it. This is `term session run`.
+- **`shell`** means only the shell adapter may take it (legacy command run).
 - **`by`** is the worker's session. Only the session a request went to may
   report on it.
 - **`caller`** is the reader's session. A sender that reads its own finished

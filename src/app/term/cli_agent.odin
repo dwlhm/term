@@ -1,21 +1,9 @@
 package term
 
 // Agent-facing session commands (served by the session core, no GUI needed):
-//   term session new [-d dir] [-s CxR] [-e K=V]… [-- prog args…] → prints the new id
-//   term session read <id> [-n <history lines>]          → plain text: history + screen
-//   term session send <id> <text>                        → types text (\n \r \t \e \\ \xHH)
-//   term session wait <id> [-t s] [--exit|--text <substr>] → see cli_agent_wait.odin
-//   term session signal <id> <name|number>               → to the foreground job, like ^C
-//   term session resize <id> <COLSxROWS>                 → only while no window shows it
-// Exit codes: 0 ok · 1 error · 2 no session core running · 3 wait timed out ·
-// 4 wait --text: the session ended first.
-//
-// `read -n N` of a windowed program that keeps its own history (alternate
-// screen) scrolls it: the core sends mouse-wheel notches the way the program
-// asked for them, waits for each page to settle and glues the pages, then puts
-// the view back where it was. That takes up to a few seconds. A program that
-// does not report mouse input cannot be scrolled: its visible screen is
-// answered with a note saying so.
+//   term session new, kill, ls, attach, resize, whoami, read, send,
+//   signal, cancel.
+// Exit codes: 0 ok · 1 error · 2 no session core running · 3 timed out.
 
 import "core:fmt"
 import "core:os"
@@ -30,6 +18,28 @@ _is_help :: proc(s: string) -> bool {
 	return s == "--help" || s == "-h" || s == "help"
 }
 
+@(private = "file")
+_deprecated_message :: proc(verb: string) -> (string, bool) {
+	switch verb {
+	case "observe":
+		return "observe was removed: use read (--output json)", true
+	case "watch", "wait":
+		return fmt.tprintf(
+			"%s was removed: use read --tail --until/--prompt/--exit/--idle",
+			verb,
+		), true
+	case "run":
+		return "run was removed: send … --key Enter, " +
+			"then read --tail --prompt and read --last", true
+	case "tell", "result", "next", "progress", "answer":
+		return fmt.tprintf(
+			"%s was removed: term session no longer carries requests",
+			verb,
+		), true
+	}
+	return "", false
+}
+
 // app_cli_agent: handled = false when args[0] is not an agent verb.
 app_cli_agent :: proc(args: []string) -> (handled: bool, code: int) {
 	if len(args) == 0 do return false, 0
@@ -37,15 +47,17 @@ app_cli_agent :: proc(args: []string) -> (handled: bool, code: int) {
 	if len(args) >= 2 && _is_help(args[1]) {
 		return true, app_cli_session_help([]string{args[0]})
 	}
+	if msg, is_dep := _deprecated_message(args[0]); is_dep {
+		fmt.eprintln(msg)
+		return true, 1
+	}
 	switch args[0] {
 	case "ls":     return true, app_cli_session_ls(args[1:])
 	case "new":    return true, app_cli_agent_new(args[1:])
 	case "whoami": return true, _agent_whoami(args[1:])
-	case "next":   return true, app_cli_agent_next(args[1:])
 	case "read":   return true, app_cli_session_read(args[1:])
 	case "send":   return true, app_cli_session_send(args[1:])
-	case "observe", "tell", "cancel", "result", "answer", "progress",
-	     "watch", "run", "wait", "kill", "signal", "resize":
+	case "cancel", "kill", "signal", "resize":
 		return _agent_dispatch_target(args)
 	case:
 		if args[0] != "attach" {
@@ -65,18 +77,10 @@ _agent_dispatch_target :: proc(args: []string) -> (bool, int) {
 	id, rest, ok := _agent_target(args)
 	if !ok do return true, 1
 	switch args[0] {
-	case "observe":  return true, app_cli_agent_observe(id, rest)
-	case "tell":     return true, app_cli_agent_tell(id, rest)
-	case "cancel":   return true, app_cli_session_cancel(id, rest)
-	case "result":   return true, app_cli_agent_result(id, rest)
-	case "answer":   return true, app_cli_agent_answer(id, rest, true)
-	case "progress": return true, app_cli_agent_answer(id, rest, false)
-	case "watch":    return true, app_cli_agent_watch(id, rest)
-	case "run":      return true, app_cli_agent_run(id, rest)
-	case "kill":     return true, _agent_kill(id, rest)
-	case "wait":     return true, app_cli_agent_wait(id, rest)
-	case "signal":   return true, app_cli_agent_signal(id, rest)
-	case "resize":   return true, app_cli_agent_resize(id, rest)
+	case "cancel": return true, app_cli_session_cancel(id, rest)
+	case "kill":   return true, _agent_kill(id, rest)
+	case "signal": return true, app_cli_agent_signal(id, rest)
+	case "resize": return true, app_cli_agent_resize(id, rest)
 	}
 	return false, 0
 }
@@ -94,7 +98,7 @@ _agent_target :: proc(args: []string) -> (id: u32, rest: []string, ok: bool) {
 		}
 	}
 	switch args[0] {
-	case "read", "observe":
+	case "read":
 		if self, inside := app_agent_self_id(); inside {
 			return self, args[1:], true
 		}
@@ -179,7 +183,15 @@ app_agent_open :: proc(c: ^plat_ipc.Client, start: bool) -> int {
 
 // app_agent_call opens a connection, sends one request and closes; the
 // answer body is copied to the temp allocator. code is the exit code.
-app_agent_call :: proc(kind: u8, body: []u8, opts := plat_ipc.Call_Opts{}, start := false) -> (answer: []u8, code: int) {
+app_agent_call :: proc(
+	kind: u8,
+	body: []u8,
+	opts := plat_ipc.Call_Opts{},
+	start := false,
+) -> (
+	answer: []u8,
+	code: int,
+) {
 	c: plat_ipc.Client
 	if code = app_agent_open(&c, start); code != 0 do return
 	defer plat_ipc.client_close(&c)
@@ -206,30 +218,10 @@ app_fail :: proc(err: plat_ipc.Error) -> int {
 	}
 	fmt.eprintfln("term: %s", proto.error_text(err))
 	#partial switch err.kind {
-	case .No_Server: return 2
-	case .Failed:    if err.code == plat_ipc.FAIL_TIMEOUT do return AGENT_EXIT_TIMEOUT
+	case .No_Server:
+		return 2
+	case .Failed:
+		if err.code == plat_ipc.FAIL_TIMEOUT do return AGENT_EXIT_TIMEOUT
 	}
 	return 1
-}
-
-@(private = "file")
-_agent_read :: proc(id: u32, args: []string) -> int {
-	lines := u32(0)
-	if len(args) == 2 && args[0] == "-n" {
-		v, ok := strconv.parse_uint(args[1], 10)
-		if !ok {
-			fmt.eprintln(APP_CLI_USAGE)
-			return 1
-		}
-		lines = u32(min(v, uint(max(u32))))
-	} else if len(args) != 0 {
-		fmt.eprintln(APP_CLI_USAGE)
-		return 1
-	}
-	b: [8]u8
-	w := plat_ipc.wire_writer(b[:])
-	proto.enc_read_req(&w, {id, lines, false})
-	text, code := app_agent_call(proto.MSG_READ, b[:])
-	if code == 0 do os.write(os.stdout, text)
-	return code
 }

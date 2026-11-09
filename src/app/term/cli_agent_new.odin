@@ -85,7 +85,12 @@ app_cli_parse_size :: proc(s: string) -> (size: proto.Size_Msg, ok: bool) {
 }
 
 app_cli_agent_new :: proc(args: []string) -> int {
-	if len(args) > 0 && args[0] == "--endpoint" do return _new_endpoint(args[1:])
+	if len(args) > 0 && args[0] == "--endpoint" {
+		fmt.eprintln(
+			"--endpoint was removed: term session no longer carries requests",
+		)
+		return 1
+	}
 	spec: proto.Spawn_Msg
 	if !app_cli_parse_new(args, &spec) {
 		fmt.eprintln(APP_CLI_USAGE)
@@ -98,25 +103,11 @@ app_cli_agent_new :: proc(args: []string) -> int {
 		fmt.eprintln("term: command line and environment too long")
 		return 1
 	}
-	answer, code := app_agent_call(proto.MSG_CREATE, plat_ipc.wire_bytes_written(&w), start = true)
+	answer, code := app_agent_call(
+		proto.MSG_CREATE, plat_ipc.wire_bytes_written(&w), start = true,
+	)
 	if code != 0 do return code
 	r := plat_ipc.wire_reader(answer)
-	fmt.println(plat_ipc.wr_u32(&r)) // closing the connection detaches: the program keeps running
-	return 0
-}
-
-@(private = "file")
-_new_endpoint :: proc(args: []string) -> int {
-	if len(args) != 1 || len(args[0]) == 0 || len(args[0]) > 64 {
-		fmt.eprintln("usage: term session new --endpoint <name (1..64 bytes)>")
-		return 1
-	}
-	b: [96]u8
-	w := plat_ipc.wire_writer(b[:])
-	proto.enc_endpoint_req(&w, {name = args[0], owned = false}) // outlives this CLI: until killed
-	answer, code := app_agent_call(proto.MSG_ENDPOINT, plat_ipc.wire_bytes_written(&w), start = true)
-	if code != 0 do return code
-	r := plat_ipc.wire_reader(answer)
-	fmt.println(plat_ipc.wr_i32(&r))
+	fmt.println(plat_ipc.wr_u32(&r))
 	return 0
 }

@@ -157,7 +157,7 @@ assert(lg.detect(s))
 ## Serving agent TUIs
 
 `term auto serve` turns an agent TUI into a broker taker, so
-`term session tell <id> '<task>'` gets its answer back. The runner waits in
+a broker request to `<id>` gets its answer back. The runner waits in
 `next` **as the agent's session**. Each request is:
 
 1. refused while the agent reports `working` or `blocked`;
