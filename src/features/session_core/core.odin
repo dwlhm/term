@@ -92,6 +92,7 @@ Core_Session :: struct {
 	last_status_state: u8,
 	last_cmd_seq:      u32,
 	output_ns:         i64, // when its program last printed (or the session began)
+	last_sigint_ns:    i64, // last SIGINT sent (cancel throttle C7)
 	lease:             Core_Lease, // an automation holding its input (core_auto_lease.odin)
 	gen:               u64, // screen generation: +1 per output chunk or resize (MSG_SNAPSHOT / MSG_SETTLE)
 	input_gen:         u64, // screen generation when input was last received (ACT, send, window typing)

@@ -47,7 +47,7 @@ app_cli_agent :: proc(args: []string) -> (handled: bool, code: int) {
 		switch args[0] {
 		case "observe": return true, app_cli_agent_observe(id, rest)
 		case "tell":    return true, app_cli_agent_tell(id, rest)
-		case "cancel":  return true, app_cli_agent_cancel(id, rest)
+		case "cancel":  return true, app_cli_session_cancel(id, rest)
 		case "result":  return true, app_cli_agent_result(id, rest)
 		case "answer":  return true, app_cli_agent_answer(id, rest, true)
 		case "progress": return true, app_cli_agent_answer(id, rest, false)

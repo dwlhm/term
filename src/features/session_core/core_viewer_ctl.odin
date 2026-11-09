@@ -4,6 +4,7 @@ package feature_session_core
 // (agents: `term session kill|send|signal|resize|observe`). Each answers OK, FAIL or a result.
 
 import "core:strings"
+import "core:time"
 import proto "../session_proto"
 import ipc "../../platform/ipc"
 import session "../session"
@@ -39,6 +40,14 @@ core_viewer_signal :: proc(c: ^Core, req: ^ipc.Request) {
 	if m.signal < 1 || m.signal > 64 {
 		core_viewer_fail(c, req, .Bad_Request, "bad signal number")
 		return
+	}
+	now := time.now()._nsec
+	if m.signal == 2 {
+		if s.last_sigint_ns != 0 && (now - s.last_sigint_ns) < 400 * 1_000_000 {
+			_ok(c, req)
+			return
+		}
+		s.last_sigint_ns = now
 	}
 	b := _i32_bytes(m.signal)
 	core_holder_send(c, s.holder, proto.MSG_SIGNAL, s.id, b[:])
