@@ -30,6 +30,8 @@ _custom_require :: proc "c" (L: ^lua.State) -> c.int {
 		return open_mod_task(L)
 	case "term.io":
 		return open_mod_io(L)
+	case "term.window":
+		return open_mod_window(L)
 	case:
 		lua.pushstring(L, strings.concatenate({"unknown module '", name, "'"}, context.temp_allocator))
 		return lua.error(L)
@@ -49,6 +51,9 @@ _open_mod_term :: proc "c" (L: ^lua.State) -> c.int {
 
 	open_mod_io(L)
 	lua.setfield(L, -2, "io")
+
+	open_mod_window(L)
+	lua.setfield(L, -2, "window")
 
 	// Program manifest constructors (term.program / term.script)
 	lua.pushcfunction(L, _term_program)

@@ -5,10 +5,11 @@ import "core:testing"
 import control ".."
 
 Parse_Case :: struct {
-	line:  string,
-	verb:  control.Control_Verb,
-	id:    u32,
-	force: bool,
+	line:      string,
+	verb:      control.Control_Verb,
+	id:        u32,
+	split_dir: control.Split_Dir,
+	force:     bool,
 }
 
 Parse_Error_Case :: struct {
@@ -17,9 +18,10 @@ Parse_Error_Case :: struct {
 }
 
 Format_Case :: struct {
-	verb:  control.Control_Verb,
-	id:    u32,
-	force: bool,
+	verb:      control.Control_Verb,
+	id:        u32,
+	split_dir: control.Split_Dir,
+	force:     bool,
 }
 
 Split_Case :: struct {
@@ -34,23 +36,30 @@ Split_Case :: struct {
 @test
 test_parse_valid :: proc(t: ^testing.T) {
 	cases := []Parse_Case{
-		{"ping", .Ping, 0, false},
-		{"show", .Show, 0, false},
-		{"quit", .Quit, 0, false},
-		{"quit --force", .Quit, 0, true},
-		{"quit -f", .Quit, 0, true},
-		{"quit force", .Quit, 0, true},
-		{"quit --all", .Quit, 0, true},
-		{"quit -a", .Quit, 0, true},
-		{"ls", .List, 0, false},
-		{"  attach 42  ", .Attach, 42, false},
-		{"kill   7", .Kill, 7, false},
+		{"ping", .Ping, 0, .Right, false},
+		{"show", .Show, 0, .Right, false},
+		{"quit", .Quit, 0, .Right, false},
+		{"quit --force", .Quit, 0, .Right, true},
+		{"quit -f", .Quit, 0, .Right, true},
+		{"quit force", .Quit, 0, .Right, true},
+		{"quit --all", .Quit, 0, .Right, true},
+		{"quit -a", .Quit, 0, .Right, true},
+		{"ls", .List, 0, .Right, false},
+		{"  attach 42  ", .Attach, 42, .Right, false},
+		{"kill   7", .Kill, 7, .Right, false},
+		{"split right", .Split, 0, .Right, false},
+		{"split down", .Split, 0, .Down, false},
+		{"split horizontal 12", .Split, 12, .Right, false},
+		{"split vertical 99", .Split, 99, .Down, false},
+		{"tab", .Tab, 0, .Right, false},
+		{"tab 55", .Tab, 55, .Right, false},
 	}
 	for c in cases {
 		req, err := control.control_parse_request(c.line)
 		testing.expectf(t, err == .None, "%q: expected no error, got %v", c.line, err)
 		testing.expectf(t, req.verb == c.verb, "%q: expected verb %v, got %v", c.line, c.verb, req.verb)
 		testing.expectf(t, req.id == c.id, "%q: expected id %d, got %d", c.line, c.id, req.id)
+		testing.expectf(t, req.split_dir == c.split_dir, "%q: expected dir %v, got %v", c.line, c.split_dir, req.split_dir)
 		testing.expectf(t, req.force == c.force, "%q: expected force %v, got %v", c.line, c.force, req.force)
 	}
 }
@@ -66,6 +75,13 @@ test_parse_errors :: proc(t: ^testing.T) {
 		{"attach 0", .Bad_Id},
 		{"attach 4294967296", .Bad_Id},
 		{"attach -1", .Bad_Id},
+		{"split", .Missing_Direction},
+		{"split sideways", .Bad_Direction},
+		{"split right x", .Bad_Id},
+		{"split down 0", .Bad_Id},
+		{"split right 1 extra", .Extra_Args},
+		{"tab x", .Bad_Id},
+		{"tab 1 extra", .Extra_Args},
 		{"ls extra", .Extra_Args},
 		{"kill 1 2", .Extra_Args},
 		{"ATTACH 1", .Unknown_Verb},
@@ -79,16 +95,22 @@ test_parse_errors :: proc(t: ^testing.T) {
 @test
 test_format_roundtrip :: proc(t: ^testing.T) {
 	cases := []Format_Case{
-		{.Ping, 0, false},
-		{.Show, 0, false},
-		{.Quit, 0, false},
-		{.Quit, 0, true},
-		{.List, 0, false},
-		{.Attach, 7, false},
-		{.Kill, 42, false},
+		{.Ping, 0, .Right, false},
+		{.Show, 0, .Right, false},
+		{.Quit, 0, .Right, false},
+		{.Quit, 0, .Right, true},
+		{.List, 0, .Right, false},
+		{.Attach, 7, .Right, false},
+		{.Kill, 42, .Right, false},
+		{.Split, 0, .Right, false},
+		{.Split, 0, .Down, false},
+		{.Split, 12, .Right, false},
+		{.Split, 99, .Down, false},
+		{.Tab, 0, .Right, false},
+		{.Tab, 55, .Right, false},
 	}
 	for c in cases {
-		req := control.Control_Request{verb = c.verb, id = c.id, force = c.force}
+		req := control.Control_Request{verb = c.verb, id = c.id, split_dir = c.split_dir, force = c.force}
 		buf: [64]u8
 		line := control.control_format_request(req, buf[:])
 		parsed, err := control.control_parse_request(line)

@@ -25,7 +25,7 @@ _session_from_userdata :: proc(L: ^lua.State, idx: c.int) -> (u32, bool) {
 
 _init_session_metatable :: proc(L: ^lua.State) {
 	lua.createtable(L, 0, 8) // mt
-	lua.createtable(L, 0, 7) // methods
+	lua.createtable(L, 0, 9) // methods
 
 	methods := [?]struct {
 		name: cstring,
@@ -38,6 +38,8 @@ _init_session_metatable :: proc(L: ^lua.State) {
 		{"cancel", _session_obj_cancel},
 		{"kill", _session_obj_kill},
 		{"id", _session_obj_id},
+		{"split", session_obj_split},
+		{"attach", session_obj_attach},
 	}
 
 	for m in methods {

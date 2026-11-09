@@ -16,6 +16,11 @@ import "core:fmt"
 import "core:strconv"
 import "core:strings"
 
+Split_Dir :: enum u8 {
+	Right,
+	Down,
+}
+
 Control_Verb :: enum u8 {
 	Ping,
 	Show,
@@ -23,12 +28,15 @@ Control_Verb :: enum u8 {
 	List,
 	Attach,
 	Kill,
+	Split,
+	Tab,
 }
 
 Control_Request :: struct {
-	verb:  Control_Verb,
-	id:    u32,  // only for .Attach / .Kill
-	force: bool, // only for .Quit
+	verb:      Control_Verb,
+	id:        u32,       // .Attach / .Kill / .Split / .Tab
+	split_dir: Split_Dir, // only for .Split
+	force:     bool,      // only for .Quit
 }
 
 Control_Parse_Error :: enum u8 {
@@ -37,6 +45,8 @@ Control_Parse_Error :: enum u8 {
 	Unknown_Verb,
 	Missing_Id,
 	Bad_Id,     // not decimal, 0, or overflows u32
+	Missing_Direction,
+	Bad_Direction,
 	Extra_Args,
 }
 
@@ -51,12 +61,14 @@ Control_Err_Code :: enum u8 {
 _ERR_CODES := [Control_Err_Code]string{.Bad_Request = "bad_request", .Not_Found = "not_found", .Exited = "exited", .Internal = "internal"}
 @(private = "file")
 _PARSE_MESSAGES := [Control_Parse_Error]string{
-	.None         = "",
-	.Empty        = "empty request",
-	.Unknown_Verb = "unknown command",
-	.Missing_Id   = "missing session id",
-	.Bad_Id       = "invalid session id",
-	.Extra_Args   = "too many arguments",
+	.None              = "",
+	.Empty             = "empty request",
+	.Unknown_Verb      = "unknown command",
+	.Missing_Id        = "missing session id",
+	.Bad_Id            = "invalid session id",
+	.Missing_Direction = "missing split direction (right|down)",
+	.Bad_Direction     = "invalid split direction (expected right|down)",
+	.Extra_Args        = "too many arguments",
 }
 
 // control_parse_request parses one request line (no trailing '\n').
@@ -77,6 +89,28 @@ control_parse_request :: proc(line: string) -> (req: Control_Request, err: Contr
 		id, id_ok := _parse_id(id_token)
 		if !id_ok do return {}, .Bad_Id
 		req.id = id
+	} else if verb == .Split {
+		dir_token, has_dir := _next_token(s, &pos)
+		if !has_dir do return {}, .Missing_Direction
+		switch dir_token {
+		case "right", "horizontal", "h":
+			req.split_dir = .Right
+		case "down", "vertical", "v":
+			req.split_dir = .Down
+		case:
+			return {}, .Bad_Direction
+		}
+		if id_token, has_id := _next_token(s, &pos); has_id {
+			id, id_ok := _parse_id(id_token)
+			if !id_ok do return {}, .Bad_Id
+			req.id = id
+		}
+	} else if verb == .Tab {
+		if id_token, has_id := _next_token(s, &pos); has_id {
+			id, id_ok := _parse_id(id_token)
+			if !id_ok do return {}, .Bad_Id
+			req.id = id
+		}
 	} else if verb == .Quit {
 		if opt_token, has_opt := _next_token(s, &pos); has_opt {
 			switch opt_token {
@@ -102,6 +136,13 @@ control_format_request :: proc(req: Control_Request, buf: []u8) -> string {
 	case .List:   return fmt.bprintf(buf, "ls")
 	case .Attach: return fmt.bprintf(buf, "attach %d", req.id)
 	case .Kill:   return fmt.bprintf(buf, "kill %d", req.id)
+	case .Split:
+		dir_str := "right" if req.split_dir == .Right else "down"
+		if req.id > 0 do return fmt.bprintf(buf, "split %s %d", dir_str, req.id)
+		return fmt.bprintf(buf, "split %s", dir_str)
+	case .Tab:
+		if req.id > 0 do return fmt.bprintf(buf, "tab %d", req.id)
+		return fmt.bprintf(buf, "tab")
 	}
 	return ""
 }
@@ -167,6 +208,8 @@ _parse_verb :: proc(token: string) -> (verb: Control_Verb, needs_id: bool, ok: b
 	case "ls":     return .List, false, true
 	case "attach": return .Attach, true, true
 	case "kill":   return .Kill, true, true
+	case "split":  return .Split, false, true
+	case "tab":    return .Tab, false, true
 	}
 	return {}, false, false
 }

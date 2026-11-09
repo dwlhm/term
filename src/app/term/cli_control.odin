@@ -26,14 +26,29 @@ app_run_control_cli :: proc(args: []string) -> (handled: bool, exit_code: int) {
 	case "run":                  return true, app_cli_run(args[2:])
 	case "auto":                 return true, app_cli_auto(args[2:])
 	case "quit", "kill":         return true, app_cli_quit(args[1:])
-	case "show":                 line = strings.join(args[1:], " ", context.temp_allocator)
+	case "show", "split", "tab":
+		if len(args) > 2 && (args[2] == "--help" || args[2] == "-h") {
+			if args[1] == "split" {
+				fmt.println("usage: term split <right|down> [session_id]\n\nSplit the active window pane and optionally attach a session.")
+			} else if args[1] == "tab" {
+				fmt.println("usage: term tab [session_id]\n\nOpen a new tab and optionally attach a session.")
+			} else {
+				fmt.println("usage: term show\n\nBring the term window to the front.")
+			}
+			return true, 0
+		}
+		line = strings.join(args[1:], " ", context.temp_allocator)
 	case "session":
 		if handled, code := app_cli_agent(args[2:]); handled do return true, code
 		line = strings.join(args[2:], " ", context.temp_allocator)
 	case:                        return false, 0
 	}
 	req, perr := ctrl_feat.control_parse_request(line)
-	if perr != .None || (args[1] == "session") != (req.verb == .Attach) {
+	if perr != .None {
+		fmt.eprintfln("term: %s", ctrl_feat.control_parse_error_message(perr))
+		return true, 1
+	}
+	if (args[1] == "session") != (req.verb == .Attach) {
 		fmt.eprintln(APP_CLI_USAGE)
 		return true, 1
 	}

@@ -15,6 +15,12 @@ import proto "../../features/session_proto"
 import plat_ipc "../../platform/ipc"
 import ctrl_feat "../../features/control"
 import sess_feat "../../features/session"
+import client_feat "../../features/session_client"
+import mux_feat "../../features/multiplexer"
+import tabs_feat "../../features/tabs"
+import damage "../../core/terminal/damage"
+import chrome_splits "../../core/chrome/splits"
+import chrome_render "../../core/render/chrome"
 
 // app_control_start (Primary only, called from main() BEFORE app_init):
 // resolve proto.control_endpoint and open app.control as a .Line Server whose
@@ -94,8 +100,88 @@ _control_dispatch :: proc(app: ^Term_App, req: ctrl_feat.Control_Request, b: ^st
 		ctrl_feat.control_write_err(b, .Bad_Request, "served by the session core: term session ls|kill")
 	case .Attach:
 		dirty = _control_attach(app, req.id, b)
+	case .Split:
+		dirty = _control_split(app, req.split_dir, req.id, b)
+	case .Tab:
+		dirty = _control_tab(app, req.id, b)
 	}
 	return
+}
+
+@(private = "file")
+_control_split :: proc(app: ^Term_App, dir: ctrl_feat.Split_Dir, id: u32, b: ^strings.Builder) -> bool {
+	kind: chrome_splits.Split_Kind = .Horizontal if dir == .Right else .Vertical
+	pane_id: u32
+	sess: ^sess_feat.Terminal_Session = nil
+
+	if id > 0 {
+		entry := sess_feat.session_registry_find(&app.session_reg, id)
+		if entry != nil && entry.state == .Exited {
+			ctrl_feat.control_write_err(b, .Exited, "session has exited")
+			return false
+		}
+		if entry == nil {
+			ctrl_feat.control_write_err(b, .Not_Found, "no such session")
+			return false
+		}
+		size := proto.Size_Msg{cols = 80, rows = 24}
+		sess = client_feat.client_attach(&app.client, {id = id, size = size, history = APP_ATTACH_HISTORY})
+		if sess == nil {
+			ctrl_feat.control_write_err(b, .Internal, "failed to attach session")
+			return false
+		}
+		sess_feat.session_set_clipboard_sink(sess, _app_osc_52_sink, rawptr(&app.clipboard))
+		pane_id = mux_feat.multiplexer_add_terminal_pane(&app.mux, sess)
+		_ = sess_feat.session_registry_remove(&app.session_reg, id)
+	} else {
+		new_p, ok := app_spawn_terminal_pane(app, 24, 80)
+		if !ok {
+			ctrl_feat.control_write_err(b, .Internal, "failed to spawn terminal pane")
+			return false
+		}
+		pane_id = new_p
+	}
+
+	_, active_tab := tabs_feat.tabs_manager_get_active(&app.tabs_mgr)
+	if active_tab == nil || active_tab.split_tree == nil {
+		ctrl_feat.control_write_err(b, .Internal, "no active tab")
+		return false
+	}
+
+	target_leaf := chrome_splits.split_tree_find_leaf(active_tab.split_tree, app.mux.focused_pane_id)
+	if target_leaf == nil {
+		target_leaf = active_tab.split_tree
+	}
+	chrome_splits.split_node_split(target_leaf, kind, 0.5, pane_id, app.tabs_mgr.allocator)
+	mux_feat.multiplexer_focus_pane(&app.mux, pane_id)
+	active_tab.active_pane_id = pane_id
+	app.last_title_sync = {}
+	app_sync_layout_and_winsize(app, true)
+
+	if sess != nil {
+		damage.damage_mark_all(&sess.term.damage)
+	}
+	chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
+	app_show_window(app)
+	ctrl_feat.control_write_ok(b)
+	return true
+}
+
+@(private = "file")
+_control_tab :: proc(app: ^Term_App, id: u32, b: ^strings.Builder) -> bool {
+	if id > 0 {
+		return _control_attach(app, id, b)
+	}
+	new_p, ok := app_spawn_terminal_pane(app, 24, 80)
+	if !ok {
+		ctrl_feat.control_write_err(b, .Internal, "failed to spawn terminal pane")
+		return false
+	}
+	_, new_tab_idx := tabs_feat.tabs_manager_create_tab(&app.tabs_mgr, "Shell", new_p)
+	if new_tab_idx >= 0 do app_select_tab(app, new_tab_idx)
+	app_show_window(app)
+	ctrl_feat.control_write_ok(b)
+	return true
 }
 
 @(private = "file")
