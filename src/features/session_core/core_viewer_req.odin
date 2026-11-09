@@ -16,6 +16,7 @@ core_viewer_request :: proc(c: ^Core, req: ^ipc.Request) {
 	case proto.MSG_CREATE:         _create(c, req)
 	case proto.MSG_ATTACH:         _attach(c, req)
 	case proto.MSG_KILL:           core_viewer_kill(c, req)
+	case proto.MSG_SHUTDOWN:       core_viewer_shutdown(c, req)
 	case proto.MSG_OBSERVE:        core_viewer_observe(c, req)
 	case proto.MSG_READ:           _read(c, req)
 	case proto.MSG_SEND:           core_viewer_send(c, req)

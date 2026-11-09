@@ -33,6 +33,7 @@ MSG_LIST   :: u8(60) // → MSG_SESSIONS
 MSG_CREATE :: u8(61) // Spawn_Msg → MSG_ATTACHED (the creator is attached) | MSG_FAIL
 MSG_KILL   :: u8(62) // u32 id → MSG_OK | MSG_FAIL
 MSG_ATTACH :: u8(63) // Attach_Msg → MSG_ATTACHED | MSG_FAIL; detach = CLOSE on the attach channel
+MSG_SHUTDOWN :: u8(64) // channel 0, no body → MSG_OK
 MSG_OBSERVE :: u8(65) // Observe_Request → MSG_OBSERVE_RESULT | MSG_FAIL
 MSG_READ   :: u8(66) // Read_Request → MSG_TEXT (plain screen text) | MSG_FAIL
 MSG_SEND   :: u8(67) // Send_Request → MSG_OK | MSG_FAIL

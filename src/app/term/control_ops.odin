@@ -48,9 +48,12 @@ app_control_poll :: proc(app: ^Term_App) -> (dirty: bool) {
 			reason := e.err.reason if len(e.err.reason) > 0 else plat_ipc.error_message(e.err)
 			fmt.eprintf("term: control socket closed (%s)\n", reason)
 		case plat_ipc.Request:
-			quit, changed := _control_answer(app, e)
+			quit, force, changed := _control_answer(app, e)
 			dirty = dirty || changed
-			if quit do app_request_quit_flow(app) // the reply is queued already, so the client gets "ok"
+			if quit {
+				if force do app_quit_finish(app)
+				else do app_request_quit_flow(app)
+			}
 		}
 	}
 	return dirty
@@ -58,14 +61,14 @@ app_control_poll :: proc(app: ^Term_App) -> (dirty: bool) {
 
 // _control_answer writes and queues the reply for one request.
 @(private = "file")
-_control_answer :: proc(app: ^Term_App, req: plat_ipc.Request) -> (quit, dirty: bool) {
+_control_answer :: proc(app: ^Term_App, req: plat_ipc.Request) -> (quit, force, dirty: bool) {
 	req := req
 	b := strings.builder_make(context.temp_allocator)
 	parsed, perr := ctrl_feat.control_parse_request(plat_ipc.request_line(&req))
 	if perr != .None {
 		ctrl_feat.control_write_err(&b, .Bad_Request, ctrl_feat.control_parse_error_message(perr))
 	} else {
-		dirty, quit = _control_dispatch(app, parsed, &b)
+		dirty, quit, force = _control_dispatch(app, parsed, &b)
 	}
 	text := strings.to_string(b)
 	plat_ipc.reply(&app.control, req, transmute([]u8)text)
@@ -74,7 +77,7 @@ _control_answer :: proc(app: ^Term_App, req: plat_ipc.Request) -> (quit, dirty: 
 
 // _control_dispatch writes the reply for one parsed request.
 @(private = "file")
-_control_dispatch :: proc(app: ^Term_App, req: ctrl_feat.Control_Request, b: ^strings.Builder) -> (dirty, quit: bool) {
+_control_dispatch :: proc(app: ^Term_App, req: ctrl_feat.Control_Request, b: ^strings.Builder) -> (dirty, quit, force: bool) {
 	switch req.verb {
 	case .Ping:
 		ctrl_feat.control_write_ok(b)
@@ -86,6 +89,7 @@ _control_dispatch :: proc(app: ^Term_App, req: ctrl_feat.Control_Request, b: ^st
 	case .Quit:
 		ctrl_feat.control_write_ok(b)
 		quit = true
+		force = req.force
 	case .List, .Kill:
 		ctrl_feat.control_write_err(b, .Bad_Request, "served by the session core: term session ls|kill")
 	case .Attach:

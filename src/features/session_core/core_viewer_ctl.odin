@@ -20,6 +20,15 @@ core_viewer_kill :: proc(c: ^Core, req: ^ipc.Request) {
 	_ok(c, req)
 }
 
+// core_viewer_shutdown ends every session and asks the core to exit.
+core_viewer_shutdown :: proc(c: ^Core, req: ^ipc.Request) {
+	for &s in c.sessions {
+		if s.used do core_session_kill(c, &s)
+	}
+	_ok(c, req)
+	core_request_shutdown()
+}
+
 // core_viewer_send types bytes into a session: like a person typing.
 core_viewer_send :: proc(c: ^Core, req: ^ipc.Request) {
 	m: proto.Send_Request

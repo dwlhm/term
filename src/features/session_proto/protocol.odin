@@ -21,6 +21,7 @@ session_catalog := [?]ipc.Msg_Spec{
 	{request = MSG_LIST, answer = MSG_SESSIONS},
 	{request = MSG_CREATE, answer = MSG_ATTACHED},
 	{request = MSG_KILL, answer = MSG_OK},
+	{request = MSG_SHUTDOWN, answer = MSG_OK},
 	{request = MSG_ATTACH, answer = MSG_ATTACHED},
 	{request = MSG_OBSERVE, answer = MSG_OBSERVE_RESULT},
 	{request = MSG_READ, answer = MSG_TEXT},

@@ -26,8 +26,9 @@ Control_Verb :: enum u8 {
 }
 
 Control_Request :: struct {
-	verb: Control_Verb,
-	id:   u32, // only for .Attach / .Kill
+	verb:  Control_Verb,
+	id:    u32,  // only for .Attach / .Kill
+	force: bool, // only for .Quit
 }
 
 Control_Parse_Error :: enum u8 {
@@ -76,6 +77,15 @@ control_parse_request :: proc(line: string) -> (req: Control_Request, err: Contr
 		id, id_ok := _parse_id(id_token)
 		if !id_ok do return {}, .Bad_Id
 		req.id = id
+	} else if verb == .Quit {
+		if opt_token, has_opt := _next_token(s, &pos); has_opt {
+			switch opt_token {
+			case "--force", "-f", "force", "--all", "-a":
+				req.force = true
+			case:
+				return {}, .Extra_Args
+			}
+		}
 	}
 	if _, extra := _next_token(s, &pos); extra do return {}, .Extra_Args
 	return req, .None
@@ -86,7 +96,9 @@ control_format_request :: proc(req: Control_Request, buf: []u8) -> string {
 	switch req.verb {
 	case .Ping:   return fmt.bprintf(buf, "ping")
 	case .Show:   return fmt.bprintf(buf, "show")
-	case .Quit:   return fmt.bprintf(buf, "quit")
+	case .Quit:
+		if req.force do return fmt.bprintf(buf, "quit --force")
+		return fmt.bprintf(buf, "quit")
 	case .List:   return fmt.bprintf(buf, "ls")
 	case .Attach: return fmt.bprintf(buf, "attach %d", req.id)
 	case .Kill:   return fmt.bprintf(buf, "kill %d", req.id)

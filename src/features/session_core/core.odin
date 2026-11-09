@@ -192,7 +192,7 @@ core_run :: proc() -> int {
 	core_adopt_holders(c)
 	if core_current_holder(c) < 0 && !core_start_holder(c) do return 1
 	c.empty_since = _now()
-	for !_stop_is_requested() && !_core_done(c) do _core_step(c)
+	for !_stop_is_requested() && !_shutdown_is_requested() && !_core_done(c) do _core_step(c)
 	if _stop_is_requested() {
 		core_handover(c)
 	} else {

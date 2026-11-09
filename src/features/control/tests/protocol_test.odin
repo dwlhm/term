@@ -5,9 +5,10 @@ import "core:testing"
 import control ".."
 
 Parse_Case :: struct {
-	line: string,
-	verb: control.Control_Verb,
-	id:   u32,
+	line:  string,
+	verb:  control.Control_Verb,
+	id:    u32,
+	force: bool,
 }
 
 Parse_Error_Case :: struct {
@@ -16,8 +17,9 @@ Parse_Error_Case :: struct {
 }
 
 Format_Case :: struct {
-	verb: control.Control_Verb,
-	id:   u32,
+	verb:  control.Control_Verb,
+	id:    u32,
+	force: bool,
 }
 
 Split_Case :: struct {
@@ -32,18 +34,24 @@ Split_Case :: struct {
 @test
 test_parse_valid :: proc(t: ^testing.T) {
 	cases := []Parse_Case{
-		{"ping", .Ping, 0},
-		{"show", .Show, 0},
-		{"quit", .Quit, 0},
-		{"ls", .List, 0},
-		{"  attach 42  ", .Attach, 42},
-		{"kill   7", .Kill, 7},
+		{"ping", .Ping, 0, false},
+		{"show", .Show, 0, false},
+		{"quit", .Quit, 0, false},
+		{"quit --force", .Quit, 0, true},
+		{"quit -f", .Quit, 0, true},
+		{"quit force", .Quit, 0, true},
+		{"quit --all", .Quit, 0, true},
+		{"quit -a", .Quit, 0, true},
+		{"ls", .List, 0, false},
+		{"  attach 42  ", .Attach, 42, false},
+		{"kill   7", .Kill, 7, false},
 	}
 	for c in cases {
 		req, err := control.control_parse_request(c.line)
 		testing.expectf(t, err == .None, "%q: expected no error, got %v", c.line, err)
 		testing.expectf(t, req.verb == c.verb, "%q: expected verb %v, got %v", c.line, c.verb, req.verb)
 		testing.expectf(t, req.id == c.id, "%q: expected id %d, got %d", c.line, c.id, req.id)
+		testing.expectf(t, req.force == c.force, "%q: expected force %v, got %v", c.line, c.force, req.force)
 	}
 }
 
@@ -71,15 +79,16 @@ test_parse_errors :: proc(t: ^testing.T) {
 @test
 test_format_roundtrip :: proc(t: ^testing.T) {
 	cases := []Format_Case{
-		{.Ping, 0},
-		{.Show, 0},
-		{.Quit, 0},
-		{.List, 0},
-		{.Attach, 7},
-		{.Kill, 42},
+		{.Ping, 0, false},
+		{.Show, 0, false},
+		{.Quit, 0, false},
+		{.Quit, 0, true},
+		{.List, 0, false},
+		{.Attach, 7, false},
+		{.Kill, 42, false},
 	}
 	for c in cases {
-		req := control.Control_Request{verb = c.verb, id = c.id}
+		req := control.Control_Request{verb = c.verb, id = c.id, force = c.force}
 		buf: [64]u8
 		line := control.control_format_request(req, buf[:])
 		parsed, err := control.control_parse_request(line)

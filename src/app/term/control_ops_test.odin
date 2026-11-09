@@ -194,6 +194,24 @@ test_control_quit_replies_then_quits :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_control_quit_force_replies_then_quits :: proc(t: ^testing.T) {
+	s: Ctl_Socket
+	if !ctl_socket_open(&s, t) do return
+	defer ctl_socket_close(&s)
+
+	app, at, ok := _ctl_test_app(t, &s)
+	if !ok do return
+	defer _ctl_test_app_close(app)
+	app.running = true
+
+	reply_buf: [proto.CONTROL_MAX_REPLY]u8
+	reply, cerr := run_client(app, at, "quit --force", reply_buf[:])
+	testing.expect_value(t, cerr.kind, plat_ipc.Error_Kind.None)
+	testing.expect_value(t, reply, "ok\n")
+	testing.expect_value(t, app.running, false)
+}
+
+@(test)
 test_cli_not_handled_for_gui_args :: proc(t: ^testing.T) {
 	handled, code := app_run_control_cli([]string{"term"})
 	testing.expect_value(t, handled, false)

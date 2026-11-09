@@ -12,6 +12,9 @@ import ipc "../../platform/ipc"
 @(private = "file")
 _stop_requested: bool
 
+@(private = "file")
+_shutdown_requested: bool
+
 // _stop_set: the running core's Poll_Set, nil when none runs.
 @(private = "file")
 _stop_set: ^ipc.Poll_Set
@@ -22,12 +25,22 @@ core_request_stop :: proc "contextless" () {
 	if set := sync.atomic_load(&_stop_set); set != nil do ipc.poll_set_poke(set)
 }
 
+// core_request_shutdown asks the running core to shut down completely (no handover).
+core_request_shutdown :: proc "contextless" () {
+	sync.atomic_store(&_shutdown_requested, true)
+	if set := sync.atomic_load(&_stop_set); set != nil do ipc.poll_set_poke(set)
+}
+
 @(private)
 _stop_is_requested :: proc() -> bool { return sync.atomic_load(&_stop_requested) }
 
 @(private)
+_shutdown_is_requested :: proc() -> bool { return sync.atomic_load(&_shutdown_requested) }
+
+@(private)
 _stop_open :: proc(c: ^Core) {
 	sync.atomic_store(&_stop_requested, false)
+	sync.atomic_store(&_shutdown_requested, false)
 	sync.atomic_store(&_stop_set, &c.set)
 }
 

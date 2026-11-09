@@ -90,7 +90,7 @@ app_cli_help :: proc() -> int {
 	fmt.println("  term session <verb> …        sessions (below)")
 	fmt.println("  term auto <check|snapshot> …          automation contracts (term auto --help)")
 	fmt.println("  term skill <setup|status|show|remove>   agent skill for AI coding agents")
-	fmt.println("  term show | term quit\n")
+	fmt.println("  term show | term quit [-f] | term kill\n")
 	fmt.println("SESSION VERBS:")
 	for v in SESSION_VERBS do fmt.printfln("  %-8s %s", v.name, v.summary)
 	fmt.println("\nInside a term session, $TERM_SESSION_ID is your own id (term session whoami).")

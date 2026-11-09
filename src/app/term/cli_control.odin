@@ -6,6 +6,7 @@ package term
 // Exit codes: 0 ok · 1 error reply / bad usage · 2 Term is not running.
 
 import "core:fmt"
+import "core:os"
 import "core:strings"
 import "core:time"
 
@@ -14,13 +15,8 @@ import plat_ipc "../../platform/ipc"
 import ctrl_feat "../../features/control"
 
 // app_run_control_cli: handled = false when args[1] is not "session",
-// "show" or "quit" (normal GUI startup continues). Core verbs go to
-// app_cli_agent; attach/show/quit go to the GUI's control socket with
-// ipc.line_call and print nothing on success:
-//   err reply → stderr "term: <message or code>", exit 1
-//   No_Server → stderr "term: Term is not running", exit 2
-//   Timeout/Busy/other → stderr "term: control socket: <reason>", exit 1
-//   usage error (unknown/missing args) → stderr usage text, exit 1
+// "show", "quit" or "kill" (normal GUI startup continues). Core verbs go to
+// app_cli_agent; attach/show/quit/kill go to the control sockets.
 app_run_control_cli :: proc(args: []string) -> (handled: bool, exit_code: int) {
 	if len(args) < 2 do return false, 0
 	line: string
@@ -28,11 +24,12 @@ app_run_control_cli :: proc(args: []string) -> (handled: bool, exit_code: int) {
 	case "--help", "-h", "help": return true, app_cli_help()
 	case "skill":                return true, app_cli_skill(args[2:])
 	case "auto":                 return true, app_cli_auto(args[2:])
-	case "show", "quit": line = strings.join(args[1:], " ", context.temp_allocator)
+	case "quit", "kill":         return true, app_cli_quit(args[1:])
+	case "show":                 line = strings.join(args[1:], " ", context.temp_allocator)
 	case "session":
 		if handled, code := app_cli_agent(args[2:]); handled do return true, code
 		line = strings.join(args[2:], " ", context.temp_allocator)
-	case:                return false, 0
+	case:                        return false, 0
 	}
 	req, perr := ctrl_feat.control_parse_request(line)
 	if perr != .None || (args[1] == "session") != (req.verb == .Attach) {
@@ -59,6 +56,101 @@ app_run_control_cli :: proc(args: []string) -> (handled: bool, exit_code: int) {
 		return true, 1
 	}
 	return true, 0
+}
+
+// app_cli_quit stops GUI windows, Core, Holder and background sessions.
+app_cli_quit :: proc(args: []string) -> int {
+	force := false
+	if len(args) > 0 && args[0] == "kill" {
+		force = true
+	}
+	for a in args {
+		switch a {
+		case "-h", "--help":
+			fmt.println("usage: term quit [-f|--force]")
+			fmt.println("       term kill")
+			fmt.println("\nEnd all Term windows, background sessions, and tiers.")
+			fmt.println("Options:")
+			fmt.println("  -f, --force, -y    Skip confirmation prompt even if programs are running")
+			return 0
+		case "-f", "--force", "-y", "--all", "-a":
+			force = true
+		}
+	}
+
+	core_client: plat_ipc.Client
+	core_running := false
+	if err := proto.session_open(&core_client, .Cli, false); err.kind == .None {
+		core_running = true
+	}
+
+	at_buf: [256]u8
+	at, aerr := proto.control_endpoint(at_buf[:])
+	gui_running := false
+	if aerr.kind == .None {
+		reply_buf: [proto.CONTROL_MAX_REPLY]u8
+		reply, rerr := app_control_request(at, "ping", reply_buf[:])
+		if rerr.kind == .None && strings.has_prefix(reply, "ok") {
+			gui_running = true
+		}
+	}
+
+	if !core_running && !gui_running {
+		fmt.println("term: not running")
+		return 0
+	}
+
+	if core_running && !force {
+		a, lerr := plat_ipc.client_call(&core_client, proto.MSG_LIST, nil, {timeout = 1000 * time.Millisecond})
+		if lerr.kind == .None {
+			r := plat_ipc.wire_reader(a.body)
+			count := int(plat_ipc.wr_u32(&r))
+			active_count := 0
+			active_desc := make([dynamic]string, context.temp_allocator)
+			for _ in 0..<count {
+				row := proto.dec_row(&r)
+				if !r.ok do break
+				if row.active {
+					active_count += 1
+					proc_name := row.process if len(row.process) > 0 else "unknown"
+					append(&active_desc, fmt.tprintf("  • [%d] %s (pid %d)", row.id, proc_name, row.pid))
+				}
+			}
+			if active_count > 0 {
+				fmt.printfln("Term has %d running program(s):", active_count)
+				for line in active_desc {
+					fmt.println(line)
+				}
+				fmt.print("Quit Term and terminate all? [y/N]: ")
+				buf: [64]u8
+				n, nerr := os.read(os.stdin, buf[:])
+				if nerr != nil || n <= 0 {
+					fmt.println("\nCancelled.")
+					plat_ipc.client_close(&core_client)
+					return 0
+				}
+				ans := strings.to_lower(strings.trim_space(string(buf[:n])))
+				if ans != "y" && ans != "yes" {
+					fmt.println("Cancelled.")
+					plat_ipc.client_close(&core_client)
+					return 0
+				}
+			}
+		}
+	}
+
+	if gui_running {
+		reply_buf: [proto.CONTROL_MAX_REPLY]u8
+		_, _ = app_control_request(at, "quit --force", reply_buf[:])
+	}
+
+	if core_running {
+		_, _ = plat_ipc.client_call(&core_client, proto.MSG_SHUTDOWN, nil, {timeout = 2000 * time.Millisecond})
+		plat_ipc.client_close(&core_client)
+	}
+
+	fmt.println("term stopped.")
+	return 0
 }
 
 // app_control_request is ipc.line_call with a short backoff while the .Line
