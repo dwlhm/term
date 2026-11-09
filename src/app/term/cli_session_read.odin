@@ -13,111 +13,6 @@ import model "../../features/screen_model"
 import proto "../../features/session_proto"
 import plat_ipc "../../platform/ipc"
 
-Cli_Read_Options :: struct {
-	id:       u32,
-	lines:    u32,
-	last:     bool,
-	clean:    bool,
-	elements: bool,
-	as_json:  bool,
-	err_msg:  string,
-}
-
-app_cli_parse_read :: proc(
-	args: []string,
-) -> (opts: Cli_Read_Options, ok: bool) {
-	i := 0
-	has_id := false
-	for i < len(args) {
-		a := args[i]
-		if strings.has_prefix(a, "-") {
-			if !_parse_read_flag(args, &i, &opts) do return opts, false
-		} else {
-			if !_parse_read_target(a, &opts, &has_id) do return opts, false
-		}
-		i += 1
-	}
-
-	if !has_id {
-		self_id, inside := app_agent_self_id()
-		if !inside {
-			opts.err_msg = "which session? read <id>"
-			return opts, false
-		}
-		opts.id = self_id
-	}
-	return opts, true
-}
-
-@(private = "file")
-_parse_read_flag :: proc(
-	args: []string,
-	i: ^int,
-	opts: ^Cli_Read_Options,
-) -> bool {
-	a := args[i^]
-	switch {
-	case a == "-n":
-		return _parse_lines(args, i, opts)
-	case a == "--last":
-		opts.last = true
-	case a == "--clean":
-		opts.clean = true
-	case a == "--elements":
-		opts.elements = true
-	case a == "--output":
-		return _parse_output_arg(args, i, opts)
-	case strings.has_prefix(a, "--output="):
-		return _parse_output_val(a[len("--output="):], opts)
-	case:
-		opts.err_msg = fmt.tprintf("unknown option '%s'", a)
-		return false
-	}
-	return true
-}
-
-@(private = "file")
-_parse_lines :: proc(args: []string, i: ^int, opts: ^Cli_Read_Options) -> bool {
-	i^ += 1
-	if i^ >= len(args) {
-		opts.err_msg = "-n takes a number of lines"
-		return false
-	}
-	val, ok := strconv.parse_int(args[i^])
-	if !ok || val < 0 {
-		opts.err_msg = "-n takes a number of lines"
-		return false
-	}
-	opts.lines = u32(val)
-	return true
-}
-
-@(private = "file")
-_parse_output_arg :: proc(
-	args: []string,
-	i: ^int,
-	opts: ^Cli_Read_Options,
-) -> bool {
-	i^ += 1
-	if i^ >= len(args) || (args[i^] != "json" && args[i^] != "text") {
-		opts.err_msg = "--output takes text or json"
-		return false
-	}
-	opts.as_json = args[i^] == "json"
-	return true
-}
-
-@(private = "file")
-_parse_output_val :: proc(val: string, opts: ^Cli_Read_Options) -> bool {
-	if val != "json" && val != "text" {
-		opts.err_msg = "--output takes text or json"
-		return false
-	}
-	opts.as_json = val == "json"
-	return true
-}
-
-@(private = "file")
 _parse_read_target :: proc(
 	a: string,
 	opts: ^Cli_Read_Options,
@@ -150,6 +45,9 @@ app_cli_session_read :: proc(args: []string) -> int {
 	}
 	defer plat_ipc.client_close(&c)
 
+	if opts.tail {
+		return _cli_read_tail(&c, opts)
+	}
 	if opts.elements {
 		return _cli_read_elements(&c, opts.id, opts.as_json)
 	}
