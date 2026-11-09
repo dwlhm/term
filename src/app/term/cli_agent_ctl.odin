@@ -10,6 +10,7 @@ import "core:reflect"
 import "core:strconv"
 import "core:strings"
 import "core:sys/posix"
+import api "../../features/session_api"
 import proto "../../features/session_proto"
 import plat_ipc "../../platform/ipc"
 
@@ -19,10 +20,12 @@ app_cli_agent_signal :: proc(id: u32, args: []string) -> int {
 		fmt.eprintln("unknown signal")
 		return 1
 	}
-	b: [8]u8
-	w := plat_ipc.wire_writer(b[:])
-	proto.enc_signal_req(&w, {id, sig})
-	return app_agent_request_ok(proto.MSG_SESSION_SIGNAL, b[:])
+	c: plat_ipc.Client
+	if err := api.api_open(&c, false); err.kind != .None {
+		return app_fail(err)
+	}
+	defer plat_ipc.client_close(&c)
+	return app_fail(api.api_signal(&c, id, sig))
 }
 
 app_cli_agent_resize :: proc(id: u32, args: []string) -> int {
@@ -31,13 +34,12 @@ app_cli_agent_resize :: proc(id: u32, args: []string) -> int {
 		fmt.eprintln("size is COLSxROWS within 2x1..1000x500")
 		return 1
 	}
-	b: [12]u8
-	w := plat_ipc.wire_writer(b[:])
-	proto.enc_size_req(&w, {id, size})
-	return app_agent_request_ok(
-		proto.MSG_SESSION_SIZE,
-		plat_ipc.wire_bytes_written(&w),
-	)
+	c: plat_ipc.Client
+	if err := api.api_open(&c, false); err.kind != .None {
+		return app_fail(err)
+	}
+	defer plat_ipc.client_close(&c)
+	return app_fail(api.api_resize(&c, id, size))
 }
 
 // app_cli_parse_signal accepts a number (1..64) or a name with or without

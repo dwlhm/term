@@ -7,14 +7,12 @@ import "core:fmt"
 import "core:os"
 import "core:strings"
 import "core:time"
+import api "../../features/session_api"
 import proto "../../features/session_proto"
 import plat_ipc "../../platform/ipc"
 
 @(private = "file")
 CLI_COLUMNS :: 8
-
-@(private = "file")
-CLI_WAIT :: 3 * time.Second
 
 Ls_Json_Row :: struct {
 	id:        u32,
@@ -35,7 +33,7 @@ app_cli_session_ls :: proc(args: []string) -> int {
 	if !ok do return 1
 
 	c: plat_ipc.Client
-	if err := proto.session_open(&c, .Cli, false); err.kind == .No_Server {
+	if err := api.api_open(&c, false); err.kind == .No_Server {
 		if as_json do fmt.println("[]")
 		else do _print_empty_header()
 		return 0
@@ -44,11 +42,11 @@ app_cli_session_ls :: proc(args: []string) -> int {
 	}
 	defer plat_ipc.client_close(&c)
 
-	a, err := plat_ipc.client_call(&c, proto.MSG_LIST, nil, {timeout = CLI_WAIT})
+	rows, err := api.api_ls(&c, context.temp_allocator)
 	if err.kind != .None do return app_fail(err)
 
-	if as_json do _cli_print_json(a.body)
-	else do _cli_print_sessions(a.body)
+	if as_json do _cli_print_json(rows)
+	else do _cli_print_sessions(rows)
 	return 0
 }
 
@@ -95,20 +93,16 @@ _print_empty_header :: proc() {
 }
 
 @(private = "file")
-_cli_print_json :: proc(payload: []u8) {
-	r := plat_ipc.wire_reader(payload)
-	count := int(plat_ipc.wr_u32(&r))
-	rows := make([dynamic]Ls_Json_Row, context.temp_allocator)
-	for _ in 0..<count {
-		row := proto.dec_row(&r)
-		if !r.ok do break
+_cli_print_json :: proc(rows: []proto.Session_Row) {
+	json_rows := make([dynamic]Ls_Json_Row, context.temp_allocator)
+	for row in rows {
 		state_str := "idle"
 		switch row.state {
 		case .Busy: state_str = "busy"
 		case .Exited: state_str = fmt.tprintf("exited %d", row.exit_code)
 		case .Idle: state_str = "idle"
 		}
-		append(&rows, Ls_Json_Row{
+		append(&json_rows, Ls_Json_Row{
 			id        = row.id,
 			state     = state_str,
 			exit_code = row.exit_code,
@@ -122,22 +116,18 @@ _cli_print_json :: proc(payload: []u8) {
 			title     = row.title,
 		})
 	}
-	bytes, err := json.marshal(rows[:], {pretty = false}, context.temp_allocator)
+	bytes, err := json.marshal(json_rows[:], {pretty = false}, context.temp_allocator)
 	if err == nil do fmt.println(string(bytes))
 	else do fmt.println("[]")
 }
 
 @(private = "file")
-_cli_print_sessions :: proc(payload: []u8) {
-	r := plat_ipc.wire_reader(payload)
-	count := int(plat_ipc.wr_u32(&r))
+_cli_print_sessions :: proc(rows: []proto.Session_Row) {
 	table := make([dynamic][CLI_COLUMNS]string, context.temp_allocator)
 	append(&table, [CLI_COLUMNS]string{
 		"ID", "STATE", "PID", "PROCESS", "CWD", "SIZE", "HELD-BY", "TITLE",
 	})
-	for _ in 0..<count {
-		row := proto.dec_row(&r)
-		if !r.ok do break
+	for row in rows {
 		append(&table, _cli_cells(row))
 	}
 	widths: [CLI_COLUMNS]int

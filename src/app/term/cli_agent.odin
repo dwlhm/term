@@ -10,6 +10,7 @@ import "core:os"
 import "core:slice"
 import "core:strconv"
 import "core:time"
+import api "../../features/session_api"
 import proto "../../features/session_proto"
 import plat_ipc "../../platform/ipc"
 
@@ -163,10 +164,12 @@ _agent_kill :: proc(id: u32, args: []string) -> int {
 		fmt.eprintln(APP_CLI_USAGE)
 		return 1
 	}
-	b: [4]u8
-	w := plat_ipc.wire_writer(b[:])
-	plat_ipc.ww_u32(&w, id)
-	return app_agent_request_ok(proto.MSG_KILL, b[:])
+	c: plat_ipc.Client
+	if err := api.api_open(&c, false); err.kind != .None {
+		return app_fail(err)
+	}
+	defer plat_ipc.client_close(&c)
+	return app_fail(api.api_kill(&c, id))
 }
 
 @(private = "file")

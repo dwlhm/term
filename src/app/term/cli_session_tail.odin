@@ -6,6 +6,7 @@ package term
 import "core:fmt"
 import "core:strings"
 import "core:time"
+import api "../../features/session_api"
 import proto "../../features/session_proto"
 import plat_ipc "../../platform/ipc"
 
@@ -56,16 +57,7 @@ _fetch_snap :: proc(
 	history: u32,
 	since: i64,
 ) -> (snap: proto.Snapshot, err: plat_ipc.Error) {
-	buf: [64]u8
-	w := plat_ipc.wire_writer(buf[:])
-	proto.enc_snapshot_req(&w, {id = id, history = history, since = since})
-	a, call_err := plat_ipc.client_call(
-		c, proto.MSG_SNAPSHOT, plat_ipc.wire_bytes_written(&w),
-		{timeout = 5 * time.Second},
-	)
-	if call_err.kind != .None do return snap, call_err
-	r := plat_ipc.wire_reader(a.body)
-	return proto.dec_snapshot(&r, context.temp_allocator), {}
+	return api.api_snapshot(c, id, history, since, context.temp_allocator, 5 * time.Second)
 }
 
 @(private = "file")
@@ -135,16 +127,7 @@ _settle_poll :: proc(
 		to_ms = min(to_ms, rem_ms)
 	}
 
-	buf: [64]u8
-	w := plat_ipc.wire_writer(buf[:])
-	proto.enc_settle_req(&w, {opts.id, last_gen, quiet_ms, to_ms})
-	a, err := plat_ipc.client_call(
-		c, proto.MSG_SETTLE, plat_ipc.wire_bytes_written(&w),
-		{timeout = time.Duration(to_ms + 2000) * time.Millisecond},
-	)
-	if err.kind != .None do return {}, err
-	r := plat_ipc.wire_reader(a.body)
-	return proto.dec_settle_result(&r), {}
+	return api.api_settle(c, opts.id, last_gen, quiet_ms, to_ms, time.Duration(to_ms + 2000) * time.Millisecond)
 }
 
 @(private = "file")

@@ -9,6 +9,7 @@ import "core:os"
 import "core:strconv"
 import "core:strings"
 import "core:time"
+import api "../../features/session_api"
 import model "../../features/screen_model"
 import proto "../../features/session_proto"
 import plat_ipc "../../platform/ipc"
@@ -60,22 +61,10 @@ _cli_read_elements :: proc(
 	id: u32,
 	as_json: bool,
 ) -> int {
-	buf: [16]u8
-	w := plat_ipc.wire_writer(buf[:])
-	plat_ipc.ww_u32(&w, id)
-	bytes := plat_ipc.wire_bytes_written(&w)
-	a, err := plat_ipc.client_call(
-		c,
-		proto.MSG_ELEMENTS,
-		bytes,
-		{timeout = 3 * time.Second},
-	)
+	elems, err := api.api_elements(c, id, context.temp_allocator)
 	if err.kind != .None do return app_fail(err)
 
-	r := plat_ipc.wire_reader(a.body)
-	count := int(plat_ipc.wr_u32(&r))
-	for _ in 0 ..< count {
-		e := proto.dec_element_report(&r)
+	for e in elems {
 		role := _role_name(e.role)
 		name := e.name if len(e.name) > 0 else e.text
 		state := _state_str(e.state)
@@ -99,24 +88,9 @@ _cli_read_text :: proc(
 	c: ^plat_ipc.Client,
 	opts: Cli_Read_Options,
 ) -> int {
-	buf: [16]u8
-	w := plat_ipc.wire_writer(buf[:])
-	req := proto.Read_Request{
-		id      = opts.id,
-		history = opts.lines,
-		last    = opts.last,
-	}
-	proto.enc_read_req(&w, req)
-	bytes := plat_ipc.wire_bytes_written(&w)
-	a, err := plat_ipc.client_call(
-		c,
-		proto.MSG_READ,
-		bytes,
-		{timeout = 4 * time.Second},
-	)
+	text, err := api.api_read(c, opts.id, opts.lines, opts.last, context.temp_allocator)
 	if err.kind != .None do return app_fail(err)
 
-	text := string(a.body)
 	if opts.clean {
 		text = app_clean_text(text, context.temp_allocator)
 	}
@@ -140,28 +114,8 @@ _print_json :: proc(id: u32, text: string) {
 }
 
 @(private = "file")
-_ROLE_NAMES := [model.Role]string{
-	.Panel     = "panel",
-	.Dialog    = "dialog",
-	.Button    = "button",
-	.Checkbox  = "checkbox",
-	.Radio     = "radio",
-	.Input     = "input",
-	.Listitem  = "listitem",
-	.Tab       = "tab",
-	.Scrollbar = "scrollbar",
-	.Statusbar = "statusbar",
-	.Link      = "link",
-	.Prompt    = "prompt",
-	.Output    = "output",
-}
-
-@(private = "file")
 _role_name :: proc(r: u8) -> string {
-	if int(r) < len(_ROLE_NAMES) {
-		return _ROLE_NAMES[model.Role(r)]
-	}
-	return "element"
+	return model.role_name(model.Role(r))
 }
 
 @(private = "file")

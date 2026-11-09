@@ -5,6 +5,7 @@ package term
 import "core:fmt"
 import "core:strconv"
 import "core:time"
+import api "../../features/session_api"
 import proto "../../features/session_proto"
 import plat_ipc "../../platform/ipc"
 
@@ -114,15 +115,7 @@ _cancel_send_sigint :: proc(
 	cli: ^plat_ipc.Client,
 	id: u32,
 ) -> (code: int, ok: bool) {
-	buf: [32]u8
-	w := plat_ipc.wire_writer(buf[:])
-	proto.enc_signal_req(&w, {id = id, signal = 2})
-	_, err := plat_ipc.client_call(
-		cli,
-		proto.MSG_SESSION_SIGNAL,
-		plat_ipc.wire_bytes_written(&w),
-		{timeout = 2 * time.Second},
-	)
+	err := api.api_signal(cli, id, 2, 2 * time.Second)
 	if err.kind != .None {
 		return _cancel_fail_exit(err, id), false
 	}
@@ -134,20 +127,12 @@ _cancel_snapshot :: proc(
 	cli: ^plat_ipc.Client,
 	id: u32,
 ) -> (snap: proto.Snapshot, code: int, ok: bool) {
-	buf: [32]u8
-	w := plat_ipc.wire_writer(buf[:])
-	proto.enc_snapshot_req(&w, {id = id, history = 0, since = -1})
-	a, err := plat_ipc.client_call(
-		cli,
-		proto.MSG_SNAPSHOT,
-		plat_ipc.wire_bytes_written(&w),
-		{timeout = 2 * time.Second},
-	)
+	err: plat_ipc.Error
+	snap, err = api.api_snapshot(cli, id, 0, -1, context.temp_allocator, 2 * time.Second)
 	if err.kind != .None {
 		return {}, _cancel_fail_exit(err, id), false
 	}
-	r := plat_ipc.wire_reader(a.body)
-	return proto.dec_snapshot(&r, context.temp_allocator), 0, true
+	return snap, 0, true
 }
 
 @(private = "file")

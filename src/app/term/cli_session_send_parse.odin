@@ -7,7 +7,6 @@ package term
 import "core:fmt"
 import "core:strconv"
 import "core:strings"
-import auto "../../features/automation"
 import proto "../../features/session_proto"
 
 Cli_Send_Options :: struct {
@@ -114,7 +113,7 @@ _parse_key_flag :: proc(
 	}
 	name := args[i^ + 1]
 	i^ += 1
-	k, k_ok := auto.parse_key(name)
+	k, k_ok := proto.parse_key(name)
 	if !k_ok {
 		opts.err_msg = fmt.tprintf("unknown key %s", name)
 		return false

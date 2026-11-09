@@ -10,6 +10,7 @@ import "core:fmt"
 import "core:os"
 import "core:strconv"
 import "core:strings"
+import api "../../features/session_api"
 import proto "../../features/session_proto"
 import plat_ipc "../../platform/ipc"
 
@@ -96,18 +97,14 @@ app_cli_agent_new :: proc(args: []string) -> int {
 		fmt.eprintln(APP_CLI_USAGE)
 		return 1
 	}
-	msg := make([]u8, NEW_MSG_BYTES, context.temp_allocator)
-	w := plat_ipc.wire_writer(msg)
-	proto.enc_spawn(&w, &spec)
-	if !w.ok {
-		fmt.eprintln("term: command line and environment too long")
-		return 1
+	c: plat_ipc.Client
+	if err := api.api_open(&c, start = true); err.kind != .None {
+		return app_fail(err)
 	}
-	answer, code := app_agent_call(
-		proto.MSG_CREATE, plat_ipc.wire_bytes_written(&w), start = true,
-	)
-	if code != 0 do return code
-	r := plat_ipc.wire_reader(answer)
-	fmt.println(plat_ipc.wr_u32(&r))
+	defer plat_ipc.client_close(&c)
+
+	id, err := api.api_new(&c, &spec)
+	if err.kind != .None do return app_fail(err)
+	fmt.println(id)
 	return 0
 }

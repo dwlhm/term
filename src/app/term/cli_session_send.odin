@@ -7,6 +7,7 @@ import "core:fmt"
 import "core:strconv"
 import "core:strings"
 import "core:time"
+import api "../../features/session_api"
 import proto "../../features/session_proto"
 import plat_ipc "../../platform/ipc"
 
@@ -22,23 +23,15 @@ app_cli_session_send :: proc(args: []string) -> int {
 	}
 
 	c: plat_ipc.Client
-	if err := proto.session_open(&c, .Cli, false); err.kind != .None {
+	if err := api.api_open(&c, false); err.kind != .None {
 		return _fail_exit(err)
 	}
 	defer plat_ipc.client_close(&c)
 
-	buf: [4096]u8
-	w := plat_ipc.wire_writer(buf[:])
-	proto.enc_act_batch(&w, opts.id, opts.items[:])
-	a, err := plat_ipc.client_call(
-		&c, proto.MSG_ACT, plat_ipc.wire_bytes_written(&w),
-		{timeout = 5 * time.Second},
-	)
+	gen, err := api.api_act_batch(&c, opts.id, opts.items[:], 5 * time.Second)
 	if err.kind != .None do return _fail_exit(err)
 
 	if opts.as_json {
-		r := plat_ipc.wire_reader(a.body)
-		gen := plat_ipc.wr_u64(&r)
 		fmt.printfln("{{\"session\":%d,\"gen\":%d}}", opts.id, gen)
 	}
 	return 0

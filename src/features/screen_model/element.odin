@@ -12,6 +12,29 @@ Role :: enum u8 {
 	Link, Prompt, Output,
 }
 
+ROLE_NAMES := [Role]string{
+	.Panel     = "panel",
+	.Dialog    = "dialog",
+	.Button    = "button",
+	.Checkbox  = "checkbox",
+	.Radio     = "radio",
+	.Input     = "input",
+	.Listitem  = "listitem",
+	.Tab       = "tab",
+	.Scrollbar = "scrollbar",
+	.Statusbar = "statusbar",
+	.Link      = "link",
+	.Prompt    = "prompt",
+	.Output    = "output",
+}
+
+role_name :: proc(r: Role) -> string {
+	if int(r) < len(ROLE_NAMES) {
+		return ROLE_NAMES[r]
+	}
+	return "element"
+}
+
 Source :: enum u8 {
 	Inferred,
 	Osc133, // shell integration
