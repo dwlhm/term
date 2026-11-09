@@ -60,6 +60,12 @@ core_session_create :: proc(c: ^Core, spec_payload: []u8, size: proto.Size_Msg) 
 	if hi < 0 do return nil
 	s := _session_new(c, c.next_id, hi, size)
 	if s == nil do return nil
+	r := ipc.wire_reader(spec_payload)
+	spec: proto.Spawn_Msg
+	proto.dec_spawn(&r, &spec)
+	if r.ok && len(spec.name) > 0 {
+		s.name_len = copy(s.name_buf[:], spec.name)
+	}
 	core_holder_send(c, hi, proto.MSG_SPAWN, s.id, spec_payload)
 	core_broadcast_row(c, s)
 	return s
@@ -134,7 +140,6 @@ core_session_output :: proc(c: ^Core, s: ^Core_Session, bytes: []u8) {
 		s.status_gen = s.gen
 	}
 	core_watch_output(c, s, edges)
-	core_broker_shell_edges(c, s, edges)
 	core_row_changed(c, s)
 }
 
@@ -168,7 +173,6 @@ core_session_exited :: proc(c: ^Core, s: ^Core_Session, exit: proto.Exit_Msg, re
 		a = {}
 	}
 	core_watch_trigger(c, s, .Exit)
-	core_broker_session_gone(c, s.id, exit.code)
 	core_lease_session_ended(c, s, false)
 	core_broadcast_row(c, s)
 }
@@ -189,7 +193,6 @@ core_session_kill :: proc(c: ^Core, s: ^Core_Session) {
 	for &a in s.attaches do if a.used do ipc.server_stream_close(&c.srv, a.peer, a.channel, "killed")
 	id := s.id
 	core_watch_target_gone(c, s)
-	core_broker_session_gone(c, id, s.exit.code)
 	core_lease_session_ended(c, s, true)
 	core_session_free(c, s)
 	b := _i32_bytes(i32(id))

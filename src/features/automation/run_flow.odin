@@ -6,6 +6,7 @@ import "core:c"
 import "core:fmt"
 import "core:strconv"
 import "core:strings"
+import "core:sys/posix"
 import "core:time"
 import lua "../../platform/lua"
 import proto "../session_proto"
@@ -112,12 +113,11 @@ run_handoff :: proc(r: ^Runner) {
 	reason := _str_field(L, "reason")
 	if !run_lease_pass(r, true) do return
 	defer run_lease_pass(r, false)
-	if !run_ensure_endpoint(r) do return
-	fmt.printfln(`{{"handoff":%q,"reply":"term auto reply %d done"}}`, reason, r.endpoint)
+	if r.stdin == 0 && posix.isatty(0) do r.stdin = posix.dup(0)
+	fmt.printfln(`{{"handoff":%q}}`, reason)
 	run_trace(r, "handoff", "")
 	has_until := lua.getfield(L, -1, "until") != .Nil
 	defer lua.pop(L, 1)
-	run_listen(r)
 	r.asking, r.replied = true, false
 	defer r.asking = false
 	for run_running(r) && !r.replied {

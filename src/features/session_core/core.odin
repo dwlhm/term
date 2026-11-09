@@ -33,7 +33,6 @@ CORE_SETTLE_MS :: 250 // output quiet this long → refresh the foreground proce
 CORE_HOLDER_CTL   :: 2 << 20
 CORE_ANSWER_MAX   :: ipc.STREAM_MAX_PAYLOAD - 4 // a channel 0 answer also carries its u32 req
 CORE_MAX_LISTS    :: 32  // LISTs waiting for foreground info at once
-CORE_MAX_WAITS    :: 256 // requests the broker answers later, across all viewers
 CORE_BUSY_REASON  :: "the session core already serves its maximum of windows and commands"
 CORE_POISON_CRASHES :: 3 // recent core crashes after which tails are not replayed
 
@@ -98,9 +97,14 @@ Core_Session :: struct {
 	input_gen:         u64, // screen generation when input was last received (ACT, send, window typing)
 	prompt_gen:        u64, // screen generation when OSC 133 prompt was last observed
 	status_gen:        u64, // screen generation when OSC 7501 status last changed
-	endpoint:          Core_Endpoint, // a virtual session (core_endpoint.odin)
+	name_buf:          [64]u8,
+	name_len:          int,
 	ref_table:         [dynamic]Ref_Entry,
 	next_ref_id:       u32,
+}
+
+core_session_name :: proc(s: ^Core_Session) -> string {
+	return string(s.name_buf[:s.name_len])
 }
 
 // Core_Viewer: one peer of the session Server (a window or a CLI), from
@@ -118,13 +122,6 @@ Core_List :: struct {
 	due_ns: i64,
 }
 
-// Core_Wait: a request the broker answers later (`next`, a waiting tell,
-// `result --wait`). Its index is the broker's waiter key.
-Core_Wait :: struct {
-	used: bool,
-	req:  ipc.Request,
-}
-
 Core :: struct {
 	dir_buf:     [256]u8,
 	dir:         string,
@@ -140,12 +137,8 @@ Core :: struct {
 	sessions:    [CORE_MAX_SESSIONS]Core_Session,
 	viewers:     [CORE_MAX_VIEWERS]Core_Viewer,
 	lists:       [CORE_MAX_LISTS]Core_List,
-	waits:       [CORE_MAX_WAITS]Core_Wait,
 	watchers:    [CORE_MAX_WATCHERS]Core_Watcher,
 	settles:     [CORE_MAX_SETTLES]Core_Settle,
-	broker:      Broker,
-	broker_due_ns: i64, // next request deadline (0 = none)
-	typed:       [dynamic]u8, // input the broker types into a session
 	viewer_out:  [dynamic]u8,
 	replies:     [dynamic]u8,
 	paint:       [dynamic]u8,
@@ -175,8 +168,6 @@ core_new :: proc() -> ^Core {
 	reserve(&c.viewer_out, 256 * 1024)
 	reserve(&c.replies, 4096)
 	reserve(&c.paint, 1 << 20)
-	reserve(&c.typed, BROKER_TEXT_CAP + 1024)
-	broker_init(&c.broker, _now)
 	return c
 }
 
@@ -222,9 +213,7 @@ core_destroy :: proc(c: ^Core) {
 	delete(c.snap_spans)
 	delete(c.snap_links)
 	delete(c.act)
-	delete(c.typed)
 	delete(c.msg)
-	broker_destroy(&c.broker)
 	ipc.poll_set_destroy(&c.set)
 	free(c)
 }

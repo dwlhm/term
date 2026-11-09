@@ -14,19 +14,16 @@ import proto "../session_proto"
 import ipc "../../platform/ipc"
 
 CORE_SNAPSHOT_HISTORY :: 10_000 // scrollback lines kept across a planned restart
-CORE_BROKER_SNAPSHOT  :: "snap.broker"
 
 core_handover :: proc(c: ^Core) {
 	for &s in c.sessions {
-		if !s.used || s.exited || s.endpoint.used do continue
+		if !s.used || s.exited do continue
 		terminal.relay_flush(&s.relay, &s.sess.term)
 		terminal.terminal_paint(&s.sess.term, &c.paint, CORE_SNAPSHOT_HISTORY)
 		extension.osc_7501_encode(&s.sess.program_status, &c.paint)
 		path_buf: [256]u8
 		if path, ok := _snapshot_path(c, path_buf[:], s.id); ok do _write_atomic(path, c.paint[:])
 	}
-	core_endpoints_save(c)
-	_save_broker(c)
 	core_holders_goodbye(c, .Handover)
 }
 
@@ -92,46 +89,4 @@ _write_atomic :: proc(path: string, data: []u8) {
 	os.close(f)
 	if werr == nil do _ = os.rename(tmp, path)
 	else do os.remove(tmp)
-}
-
-@(private = "file")
-_save_broker :: proc(c: ^Core) {
-	path_buf: [256]u8
-	path, ok := proto.session_path(path_buf[:], c.dir, CORE_BROKER_SNAPSHOT)
-	if !ok do return
-	buf := make([]u8, CORE_MAX_REQUESTS * (BROKER_BODY_CAP + BROKER_TEXT_CAP + 128) + CORE_MAX_SESSIONS * 16 + 64)
-	defer delete(buf)
-	w := ipc.wire_writer(buf)
-	broker_encode(&c.broker, &w)
-	if w.ok do _write_atomic(path, ipc.wire_bytes_written(&w))
-}
-
-// core_restore_broker picks up the requests the last core left (once every
-// holder's sessions are adopted): sides whose session is gone end, and
-// blocking tells lost their connection with the old core.
-core_restore_broker :: proc(c: ^Core) {
-	path_buf: [256]u8
-	path, ok := proto.session_path(path_buf[:], c.dir, CORE_BROKER_SNAPSHOT)
-	if !ok do return
-	data, err := os.read_entire_file_from_path(path, context.allocator)
-	if err != nil do return
-	defer delete(data)
-	os.remove(path)
-	r := ipc.wire_reader(data)
-	if !broker_decode(&c.broker, &r) {
-		broker_destroy(&c.broker)
-		broker_init(&c.broker, _now)
-		return
-	}
-	for &q in c.broker.reqs {
-		if q.phase == .Free || q.phase == .Spent do continue
-		for sid in ([2]u32{q.to, q.from}) do if sid != 0 && core_session_find(c, sid) == nil do core_broker_session_gone(c, sid, 0)
-	}
-	for &p in c.broker.parties {
-		if p.sid != 0 && core_session_find(c, p.sid) == nil do core_broker_session_gone(c, p.sid, 0)
-	}
-	for key in 0..<CORE_MAX_WAITS { // the waiters of the last core went with it
-		broker_viewer_gone(&c.broker, key)
-		core_broker_apply(c)
-	}
 }

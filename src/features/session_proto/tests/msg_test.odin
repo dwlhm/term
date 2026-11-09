@@ -101,7 +101,10 @@ test_msg_observe_roundtrip :: proc(t: ^testing.T) {
 			elapsed_s = 42,
 			exit_code = 0,
 			quiet_s   = 7,
-			request   = {serving = 2, serving_id = 9, awaiting = 4, listening = 1},
+			cmd_seq   = 5,
+			last_cmd_exit = 0,
+			has_cmd_exit = true,
+			name      = "test-session",
 			process   = "zsh",
 			cwd       = "/home/dev",
 			title     = "Terminal",
@@ -125,7 +128,8 @@ test_msg_observe_roundtrip :: proc(t: ^testing.T) {
 	testing.expect(t, ipc.wr_done(&r), "dec_observe_result wr_done")
 	testing.expect(t, got.row.id == orig.row.id, "id matches")
 	testing.expect(t, got.row.state == orig.row.state, "state matches")
-	testing.expect(t, got.row.request == orig.row.request && got.row.quiet_s == 7, "request and quiet_s match")
+	testing.expect(t, got.row.name == orig.row.name && got.row.quiet_s == 7, "name and quiet_s match")
+	testing.expect(t, got.row.cmd_seq == orig.row.cmd_seq, "row cmd_seq matches")
 	testing.expect(t, got.row.process == orig.row.process, "process matches")
 	testing.expect(t, got.cols == orig.cols && got.rows == orig.rows, "dimensions match")
 	testing.expect(t, got.is_alt == orig.is_alt, "is_alt matches")
@@ -133,53 +137,6 @@ test_msg_observe_roundtrip :: proc(t: ^testing.T) {
 	testing.expect(t, got.has_cmd_exit == orig.has_cmd_exit && got.cmd_exit_code == orig.cmd_exit_code, "cmd_exit matches")
 	testing.expect(t, got.cmd_seq == orig.cmd_seq, "cmd_seq matches")
 	testing.expect(t, got.text == orig.text, "text matches")
-}
-
-@(test)
-test_msg_tell_roundtrip :: proc(t: ^testing.T) {
-	buf: [256]u8
-	w := ipc.wire_writer(buf[:])
-	req := proto.Tell_Request{to = 4, from = 2, timeout_ms = 9000, parent = 3, wait = true, shell = true, body = "review src/foo.odin"}
-	proto.enc_tell_req(&w, req)
-	r := ipc.wire_reader(ipc.wire_bytes_written(&w))
-	got_req := proto.dec_tell_req(&r)
-	testing.expect(t, ipc.wr_done(&r) && got_req == req, "tell request round-trips")
-
-	res := proto.Tell_Result{id = 7, phase = .Finished, reject = .Busy, status = .Failed, exit_code = 2, from = 2, to = 4, progress = "half", text = "boom"}
-	w = ipc.wire_writer(buf[:])
-	proto.enc_tell_result(&w, res)
-	r = ipc.wire_reader(ipc.wire_bytes_written(&w))
-	got := proto.dec_tell_result(&r)
-	testing.expect(t, ipc.wr_done(&r) && got == res, "tell result round-trips")
-	bad := ipc.wire_bytes_written(&w)
-	bad[8] = 9 // phase out of range
-	r = ipc.wire_reader(bad)
-	_ = proto.dec_tell_result(&r)
-	testing.expect(t, !r.ok, "bad phase rejected")
-
-	nx := proto.Next_Result{id = 7, from = 2, parent = 5, body = "task"}
-	w = ipc.wire_writer(buf[:])
-	proto.enc_next_result(&w, nx)
-	r = ipc.wire_reader(ipc.wire_bytes_written(&w))
-	testing.expect(t, proto.dec_next_result(&r) == nx && ipc.wr_done(&r), "next result round-trips")
-
-	an := proto.Answer_Msg{by = 4, id = 7, failed = true, text = "no"}
-	w = ipc.wire_writer(buf[:])
-	proto.enc_answer(&w, an)
-	r = ipc.wire_reader(ipc.wire_bytes_written(&w))
-	testing.expect(t, proto.dec_answer(&r) == an && ipc.wr_done(&r), "answer round-trips")
-
-	rr := proto.Result_Request{caller = 1, wait = true, follow = false, timeout_ms = 500, ids = {0 = 7, 1 = 9}, n_ids = 2}
-	w = ipc.wire_writer(buf[:])
-	proto.enc_result_req(&w, rr)
-	r = ipc.wire_reader(ipc.wire_bytes_written(&w))
-	testing.expect(t, proto.dec_result_req(&r) == rr && ipc.wr_done(&r), "result request round-trips")
-	zero := proto.Result_Request{n_ids = 0}
-	w = ipc.wire_writer(buf[:])
-	proto.enc_result_req(&w, zero)
-	r = ipc.wire_reader(ipc.wire_bytes_written(&w))
-	_ = proto.dec_result_req(&r)
-	testing.expect(t, !r.ok, "no ids refused")
 }
 
 @(test)

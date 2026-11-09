@@ -1,7 +1,7 @@
 package feature_session_proto
 
 // Bodies of the channel 0 requests that have no struct of their own
-// elsewhere (msg.odin, msg_auto.odin, msg_broker.odin). The core reads each
+// elsewhere (msg.odin, msg_auto.odin). The core reads each
 // with ipc.request_decode and the matching dec_* of codec_req.odin.
 
 Empty_Request :: struct {} // LIST

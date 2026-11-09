@@ -128,17 +128,23 @@ _session_ls :: proc "c" (L: ^lua.State) -> c.int {
 
 	lua.createtable(L, c.int(len(rows)), 0)
 	for r, i in rows {
-		lua.createtable(L, 0, 7)
+		lua.createtable(L, 0, 11)
 		lua.pushinteger(L, lua.Integer(r.id))
 		lua.setfield(L, -2, "id")
 		lua.pushinteger(L, lua.Integer(r.pid))
 		lua.setfield(L, -2, "pid")
+		lua.pushstring(L, r.name)
+		lua.setfield(L, -2, "name")
 		lua.pushstring(L, r.process)
 		lua.setfield(L, -2, "process")
 		lua.pushstring(L, r.cwd)
 		lua.setfield(L, -2, "cwd")
 		lua.pushstring(L, r.title)
 		lua.setfield(L, -2, "title")
+		lua.pushstring(L, r.status)
+		lua.setfield(L, -2, "status")
+		lua.pushinteger(L, lua.Integer(r.cmd_seq))
+		lua.setfield(L, -2, "cmd_seq")
 		lua.pushboolean(L, 1 if r.attached else 0)
 		lua.setfield(L, -2, "attached")
 
@@ -164,6 +170,12 @@ _parse_spawn_table :: proc(L: ^lua.State, idx: c.int, spec: ^proto.Spawn_Msg) ->
 	lua.getfield(L, idx, "dir")
 	if lua.type(L, -1) == .String {
 		spec.cwd = strings.clone(lua.tostring(L, -1), context.temp_allocator)
+	}
+	lua.pop(L, 1)
+
+	lua.getfield(L, idx, "name")
+	if lua.type(L, -1) == .String {
+		spec.name = strings.clone(lua.tostring(L, -1), context.temp_allocator)
 	}
 	lua.pop(L, 1)
 

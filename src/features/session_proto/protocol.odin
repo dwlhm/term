@@ -12,7 +12,7 @@ package feature_session_proto
 import ipc "../../platform/ipc"
 
 HOLDER_VERSION  :: ipc.Version{0, 0, 2}
-SESSION_VERSION :: ipc.Version{0, 1, 0}
+SESSION_VERSION :: ipc.Version{0, 2, 0}
 
 STREAM_PROTO_VERSION :: 2 // WELCOME's version on the holder link (HOLDER_VERSION packed)
 
@@ -25,17 +25,10 @@ session_catalog := [?]ipc.Msg_Spec{
 	{request = MSG_ATTACH, answer = MSG_ATTACHED},
 	{request = MSG_OBSERVE, answer = MSG_OBSERVE_RESULT},
 	{request = MSG_READ, answer = MSG_TEXT},
+	{request = MSG_WATCH, answer = MSG_WATCH_RESULT},
 	{request = MSG_SEND, answer = MSG_OK},
 	{request = MSG_SESSION_SIGNAL, answer = MSG_OK},
 	{request = MSG_SESSION_SIZE, answer = MSG_OK},
-	{request = MSG_TELL, answer = MSG_TELL_RESULT, progress = MSG_TELL_PROGRESS},
-	{request = MSG_RESULT, answer = MSG_TELL_RESULT, progress = MSG_TELL_PROGRESS},
-	{request = MSG_WATCH, answer = MSG_WATCH_RESULT},
-	{request = MSG_CANCEL, answer = MSG_OK},
-	{request = MSG_NEXT, answer = MSG_REQUEST},
-	{request = MSG_ANSWER, answer = MSG_OK},
-	{request = MSG_PROGRESS, answer = MSG_OK},
-	{request = MSG_ENDPOINT, answer = MSG_OK},
 	{request = MSG_SNAPSHOT, answer = MSG_SNAPSHOT_RESULT},
 	{request = MSG_SETTLE, answer = MSG_SETTLE_RESULT},
 	{request = MSG_ACT, answer = MSG_ACT_RESULT},

@@ -15,7 +15,7 @@ Verb_Help :: struct {
 SESSION_VERBS := [?]Verb_Help{
 	{
 		"new",
-		"[-d dir] [-s COLSxROWS] [-e K=V]… [-- prog args…]",
+		"[-d dir] [-s COLSxROWS] [-e K=V]… [--name name] [-- prog args…]",
 		"Start a background session; prints its id",
 		"The program keeps running after the CLI exits. " +
 			"Its environment has\nTERM_SESSION_ID=<id> " +

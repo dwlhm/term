@@ -18,7 +18,6 @@ _core_step :: proc(c: ^Core) {
 	core_lists_due(c)
 	core_settle_due(c, _now())
 	core_stitch_tick(c)
-	if c.broker_due_ns > 0 && _now() >= c.broker_due_ns do core_broker_tick(c, _now())
 	core_watchers_due(c, _now())
 	core_settles_due(c, _now())
 }
@@ -29,7 +28,6 @@ _core_step :: proc(c: ^Core) {
 _due_ns :: proc(c: ^Core) -> i64 {
 	due := i64(-1)
 	for &l in c.lists do if l.used do due = _earliest(due, l.due_ns)
-	if c.broker_due_ns > 0 do due = _earliest(due, c.broker_due_ns)
 	for &w in c.watchers {
 		if w.used && w.due_ns > 0 do due = _earliest(due, w.due_ns)
 	}

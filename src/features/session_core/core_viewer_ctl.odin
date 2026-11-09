@@ -34,9 +34,8 @@ core_viewer_send :: proc(c: ^Core, req: ^ipc.Request) {
 	m: proto.Send_Request
 	if !ipc.request_decode(req, &m, proto.dec_send_req) do return
 	s := _target(c, req, m.id, true)
-	if s == nil || _no_program(c, req, s) || core_lease_fail(c, s, req) do return
+	if s == nil || core_lease_fail(c, s, req) do return
 	s.input_gen = s.gen
-	core_broker_human_input(c, s, m.bytes)
 	core_holder_send(c, s.holder, proto.MSG_INPUT, s.id, m.bytes)
 	_ok(c, req)
 }
@@ -46,7 +45,7 @@ core_viewer_signal :: proc(c: ^Core, req: ^ipc.Request) {
 	m: proto.Signal_Request
 	if !ipc.request_decode(req, &m, proto.dec_signal_req) do return
 	s := _target(c, req, m.id, true)
-	if s == nil || _no_program(c, req, s) || core_lease_fail(c, s, req) do return
+	if s == nil || core_lease_fail(c, s, req) do return
 	if m.signal < 1 || m.signal > 64 {
 		core_viewer_fail(c, req, .Bad_Request, "bad signal number")
 		return
@@ -149,12 +148,4 @@ _target :: proc(c: ^Core, req: ^ipc.Request, id: u32, live: bool) -> ^Core_Sessi
 	case:                     return s
 	}
 	return nil
-}
-
-// _no_program fails a request that needs a program when s is an endpoint.
-@(private)
-_no_program :: proc(c: ^Core, req: ^ipc.Request, s: ^Core_Session) -> bool {
-	if !s.endpoint.used do return false
-	core_viewer_fail(c, req, .Bad_Request, "an endpoint runs no program: talk to it with tell")
-	return true
 }

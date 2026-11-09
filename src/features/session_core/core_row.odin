@@ -20,25 +20,30 @@ core_row_get :: proc(c: ^Core, s: ^Core_Session, title_buf: []u8) -> proto.Sessi
 	for &a in s.attaches do attached ||= a.used && !a.observe
 	process := session.session_process_name(sess)
 	if len(process) == 0 && sess.program_status.app_len > 0 do process = extension.program_status_app(&sess.program_status)
-	if s.endpoint.used do process, title = core_endpoint_name(s), core_endpoint_name(s)
+	p := &sess.term.parser if sess != nil else nil
+	cmd_seq := p.cmd_seq if p != nil else 0
+	last_cmd_exit := p.last_cmd_exit if p != nil else 0
+	has_cmd_exit := p.has_cmd_exit if p != nil else false
 	return {
-		id        = s.id,
-		state     = state,
-		active    = active,
-		attached  = attached,
-		pid       = u32(max(sess.info.pid, 0)),
-		elapsed_s = u32(max(i64(0), _now_unix() - s.started_unix)) if s.started_unix > 0 else 0,
-		quiet_s   = u32(max(i64(0), _now() - s.output_ns) / 1_000_000_000),
-		exit_code = s.exit.code,
-		cols      = u16(sess.term.grid.col_count) if sess != nil else 0,
-		rows      = u16(sess.term.grid.row_count) if sess != nil else 0,
-		request   = broker_row(&c.broker, s.id),
-		endpoint  = s.endpoint.used,
-		process   = process,
-		cwd       = session.session_get_cwd_path(sess) if sess.cwd_len > 0 else session.session_process_cwd(sess),
-		title     = title,
-		status    = extension.program_status_msg(&sess.program_status),
-		controller = core_lease_owner(s),
+		id              = s.id,
+		state           = state,
+		active          = active,
+		attached        = attached,
+		pid             = u32(max(sess.info.pid, 0)),
+		elapsed_s       = u32(max(i64(0), _now_unix() - s.started_unix)) if s.started_unix > 0 else 0,
+		quiet_s         = u32(max(i64(0), _now() - s.output_ns) / 1_000_000_000),
+		exit_code       = s.exit.code,
+		cols            = u16(sess.term.grid.col_count) if sess != nil else 0,
+		rows            = u16(sess.term.grid.row_count) if sess != nil else 0,
+		cmd_seq         = cmd_seq,
+		last_cmd_exit   = last_cmd_exit,
+		has_cmd_exit    = has_cmd_exit,
+		name            = core_session_name(s),
+		process         = process,
+		cwd             = session.session_get_cwd_path(sess) if sess.cwd_len > 0 else session.session_process_cwd(sess),
+		title           = title,
+		status          = extension.program_status_msg(&sess.program_status),
+		controller      = core_lease_owner(s),
 		controller_pass = s.lease.used && s.lease.pass,
 	}
 }

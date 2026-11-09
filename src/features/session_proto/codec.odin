@@ -32,6 +32,7 @@ dec_size :: proc(r: ^ipc.Wire_Reader) -> (m: Size_Msg) {
 }
 
 enc_spawn :: proc(w: ^ipc.Wire_Writer, m: ^Spawn_Msg) {
+	ipc.ww_str(w, m.name)
 	ipc.ww_u32(w, u32(m.argc))
 	for s in m.argv[:m.argc] do ipc.ww_str(w, s)
 	ipc.ww_u32(w, u32(m.envc))
@@ -42,6 +43,7 @@ enc_spawn :: proc(w: ^ipc.Wire_Writer, m: ^Spawn_Msg) {
 
 dec_spawn :: proc(r: ^ipc.Wire_Reader, m: ^Spawn_Msg) {
 	m^ = {}
+	m.name = ipc.wr_str(r)
 	m.argc = int(ipc.wr_u32(r))
 	if m.argc < 1 || m.argc > STREAM_MAX_ARGV {
 		r.ok = false
@@ -122,8 +124,8 @@ enc_row :: proc(w: ^ipc.Wire_Writer, m: Session_Row) {
 	ipc.ww_bool(w, m.attached); ipc.ww_u32(w, m.pid); ipc.ww_u32(w, m.elapsed_s)
 	ipc.ww_u32(w, m.quiet_s); ipc.ww_i32(w, m.exit_code)
 	ipc.ww_u16(w, m.cols); ipc.ww_u16(w, m.rows)
-	ipc.ww_bool(w, m.endpoint)
-	enc_row_request(w, m.request)
+	ipc.ww_u32(w, m.cmd_seq); ipc.ww_i32(w, m.last_cmd_exit); ipc.ww_bool(w, m.has_cmd_exit)
+	ipc.ww_str(w, m.name)
 	ipc.ww_str(w, m.process); ipc.ww_str(w, m.cwd); ipc.ww_str(w, m.title)
 	ipc.ww_str(w, m.status); ipc.ww_str(w, m.controller)
 	ipc.ww_bool(w, m.controller_pass)
@@ -140,8 +142,10 @@ dec_row :: proc(r: ^ipc.Wire_Reader) -> (m: Session_Row) {
 	m.pid, m.elapsed_s = ipc.wr_u32(r), ipc.wr_u32(r)
 	m.quiet_s, m.exit_code = ipc.wr_u32(r), ipc.wr_i32(r)
 	m.cols, m.rows = ipc.wr_u16(r), ipc.wr_u16(r)
-	m.endpoint = ipc.wr_bool(r)
-	m.request = dec_row_request(r)
+	m.cmd_seq = ipc.wr_u32(r)
+	m.last_cmd_exit = ipc.wr_i32(r)
+	m.has_cmd_exit = ipc.wr_bool(r)
+	m.name = ipc.wr_str(r)
 	m.process, m.cwd = ipc.wr_str(r), ipc.wr_str(r)
 	m.title, m.status = ipc.wr_str(r), ipc.wr_str(r)
 	m.controller = ipc.wr_str(r)

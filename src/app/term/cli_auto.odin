@@ -197,30 +197,15 @@ _auto_run :: proc(args: []string) -> int {
 
 @(private = "file")
 _auto_serve :: proc(args: []string) -> int {
-	opts, rest, ok := _run_options(args)
-	switch {
-	case ok && len(rest) == 2 && rest[0] == "--adapter": opts.adapter, opts.contract = rest[1], rest[1]
-	case ok && len(rest) == 1:                         opts.contract = rest[0]
-	case:
-		fmt.eprintln("usage: term auto serve [--session id] [--trace file] <contract.lua | --adapter name>")
-		return 1
-	}
-	return auto.run_exit_code(auto.run_serve(opts))
+	fmt.eprintln("term auto serve was removed along with the request broker. Use 'term run' for Lua scripts.")
+	return 1
 }
 
-// _auto_reply answers a question: a broker request to the run's endpoint.
+// _auto_reply answers a question.
 @(private = "file")
 _auto_reply :: proc(args: []string) -> int {
-	if len(args) != 2 {
-		fmt.eprintln("usage: term auto reply <id> <answer>")
-		return 1
-	}
-	id, ok := strconv.parse_uint(args[0], 10)
-	if !ok {
-		fmt.eprintln("usage: term auto reply <id> <answer>")
-		return 1
-	}
-	return app_cli_agent_tell(u32(id), {args[1], "-t", "30"})
+	fmt.eprintln("term auto reply was removed along with the request broker.")
+	return 1
 }
 
 @(private = "file")

@@ -57,16 +57,7 @@ Runner :: struct {
 	evidence: string, // the screen when it failed
 	done:     bool,
 	result:   string,
-	// term auto serve: the request being served; ended once it finished
-	// elsewhere (answered by the agent, cancelled by its sender)
-	serving_id: u64,
-	watch:      ipc.Ticket, // the RESULT wait that says when it ended (0 = none)
-	ended:      bool,
-	end_status: proto.Tell_Status,
-	// t.ask / t.handoff replies: the run's endpoint and a terminal stdin
-	endpoint:  u32,
-	listen:    ipc.Ticket, // a `next` that waits on the endpoint (0 = none)
-	reply_id:  u64,  // the broker request a reply came in (0: stdin)
+	// t.ask / t.handoff: terminal stdin
 	asking:    bool,
 	replied:   bool,
 	reply:     string,
@@ -74,7 +65,7 @@ Runner :: struct {
 }
 
 // run_running: the run goes on (not stopped, its request not ended).
-run_running :: proc(r: ^Runner) -> bool { return r.stop == .Ok && !r.ended }
+run_running :: proc(r: ^Runner) -> bool { return r.stop == .Ok }
 
 // run_stop ends the run with code (the first reason wins).
 run_stop :: proc(r: ^Runner, code: Run_Code, msg: string) {

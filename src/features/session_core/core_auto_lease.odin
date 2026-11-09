@@ -8,6 +8,7 @@ package feature_session_core
 // when the session ends.
 
 import "core:fmt"
+import "core:strings"
 import proto "../session_proto"
 import ipc "../../platform/ipc"
 
@@ -45,14 +46,12 @@ core_viewer_lease :: proc(c: ^Core, req: ^ipc.Request) {
 	m: proto.Lease_Request
 	if !ipc.request_decode(req, &m, proto.dec_lease_req) do return
 	s := _target(c, req, m.id, true)
-	if s == nil || _no_program(c, req, s) do return
+	if s == nil do return
 	switch {
 	case len(m.owner) == 0 || len(m.owner) > proto.LEASE_OWNER_MAX:
 		core_viewer_fail(c, req, .Bad_Request, "a lease owner is 1 to 64 bytes")
 	case s.lease.used:
 		core_viewer_fail(c, req, .Busy, "an automation holds this session")
-	case broker_types_into(&c.broker, s.id):
-		core_viewer_fail(c, req, .Busy, "a shell request runs in this session")
 	case:
 		s.lease = {used = true, owner = req.peer, owner_len = len(m.owner)}
 		copy(s.lease.owner_buf[:], m.owner)
@@ -90,6 +89,18 @@ _owned_lease :: proc(c: ^Core, req: ^ipc.Request) -> (s: ^Core_Session, m: proto
 	return
 }
 
+// core_is_interrupt: ^C or Esc stops what runs.
+core_is_interrupt :: proc(typed: []u8) -> bool {
+	s := string(typed)
+	switch {
+	case strings.index_byte(s, 0x03) >= 0, s == "\x1b", strings.has_prefix(s, "\x1b[27;5;99~"):
+		return true
+	case strings.has_prefix(s, "\x1b[99;5u"), strings.has_prefix(s, "\x1b[27u"):
+		return true
+	}
+	return false
+}
+
 // core_lease_human_input takes what a person typed into a leased session:
 // reported to the owner, and held unless the lease passes it through.
 // true = held (the caller must not deliver it).
@@ -97,7 +108,7 @@ core_lease_human_input :: proc(c: ^Core, s: ^Core_Session, typed: []u8) -> bool 
 	if !s.lease.used do return false
 	l := &s.lease
 	if !l.pass do append(&l.held, ..typed[:min(len(typed), max(0, proto.LEASE_HELD_MAX - len(l.held)))])
-	_lease_event(c, s, {kind = .Human, interrupt = core_human_kind(typed) == .Interrupt, held = u32(len(l.held)), bytes = string(typed)})
+	_lease_event(c, s, {kind = .Human, interrupt = core_is_interrupt(typed), held = u32(len(l.held)), bytes = string(typed)})
 	return !l.pass
 }
 

@@ -3,6 +3,7 @@ package feature_session_proto_tests
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import "core:sync"
 import "core:sys/posix"
 import "core:testing"
 import ipc "../../../platform/ipc"
@@ -44,8 +45,8 @@ unique_dir :: proc(t: ^testing.T) -> string {
 	if len(tmp) == 0 {
 		tmp = "/tmp"
 	}
-	dir_counter += 1
-	path := fmt.tprintf("%s/ipct-%d-%d", tmp, int(posix.getpid()), dir_counter)
+	cnt := sync.atomic_add(&dir_counter, 1)
+	path := fmt.tprintf("%s/ipct-%d-%d", tmp, int(posix.getpid()), cnt)
 	if err := os.make_directory(path, perms_0700()); err != os.ERROR_NONE {
 		testing.fail_now(t, "cannot create test dir")
 	}

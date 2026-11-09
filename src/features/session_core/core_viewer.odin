@@ -56,13 +56,6 @@ _viewer_drop :: proc(c: ^Core, peer: ipc.Peer) {
 	core_watchers_cancel_viewer(c, peer)
 	core_settles_cancel_viewer(c, peer)
 	core_leases_viewer_gone(c, peer)
-	for &w, key in c.waits {
-		if !w.used || w.req.peer != peer do continue
-		broker_viewer_gone(&c.broker, key)
-		w = {}
-	}
-	core_broker_apply(c)
-	core_endpoints_owner_gone(c, peer)
 	if c.owned && was_viewer && !_any_viewer(c) do for &s in c.sessions do if s.used do core_session_kill(c, &s)
 }
 
@@ -75,16 +68,4 @@ _any_viewer :: proc(c: ^Core) -> bool {
 // core_viewer_fail answers req with FAIL.
 core_viewer_fail :: proc(c: ^Core, req: ^ipc.Request, code: proto.Fail_Code, reason: string) {
 	ipc.fail(&c.srv, req^, u8(code), reason)
-}
-
-// core_wait_new keeps req for the broker to answer later; its key, or -1
-// (answered Busy) when too many requests wait.
-core_wait_new :: proc(c: ^Core, req: ^ipc.Request) -> int {
-	for &w, key in c.waits {
-		if w.used do continue
-		w = {used = true, req = req^}
-		return key
-	}
-	core_viewer_fail(c, req, .Busy, "too many requests wait in the session core")
-	return -1
 }

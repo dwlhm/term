@@ -92,25 +92,9 @@ _on_event :: proc(data: rawptr, ev: ipc.Client_Event) -> ipc.Event_Action {
 		rd := ipc.wire_reader(e.body)
 		if e.kind == proto.MSG_LEASE_EVENT do _lease_event(r, proto.dec_lease_event(&rd))
 	case ipc.Late_Answer:
-		_late_answer(r, e)
+		// Late answer not expected
 	}
 	return .Continue if run_running(r) else .Stop
-}
-
-// _late_answer: a reply that reached the run's endpoint (its `next`), or the
-// end of the request being served (answered by the agent, cancelled by its sender).
-@(private = "file")
-_late_answer :: proc(r: ^Runner, e: ipc.Late_Answer) {
-	rd := ipc.wire_reader(e.answer.body)
-	switch {
-	case e.ticket == r.listen && r.listen != 0:
-		r.listen = 0
-		if e.err.kind == .None do run_reply_request(r, proto.dec_next_result(&rd))
-	case e.ticket == r.watch && r.watch != 0:
-		r.watch = 0
-		res := proto.dec_tell_result(&rd)
-		if e.err.kind == .None && res.id == r.serving_id && res.phase == .Finished do r.ended, r.end_status = true, res.status
-	}
 }
 
 @(private = "file")

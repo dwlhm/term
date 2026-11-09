@@ -73,7 +73,9 @@ hostile_link :: proc(hello: bool) -> (fd: posix.FD, ok: bool) {
 	if !hello do return fd, true
 	hb: [9 + 64]u8
 	w := ipc.wire_writer(hb[9:])
-	proto.enc_hello(&w, {version = 0x000100, role = .Viewer, build = "hostile"})
+	v := proto.SESSION_VERSION
+	v_u32 := u32(v.major) << 16 | u32(v.minor) << 8 | u32(v.patch)
+	proto.enc_hello(&w, {version = v_u32, role = .Viewer, build = "hostile"})
 	_raw_header(hb[:], proto.MSG_HELLO, 0, u32(w.n))
 	posix.send(fd, raw_data(hb[:]), uint(9 + w.n), {.NOSIGNAL})
 	return fd, true

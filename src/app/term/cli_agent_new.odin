@@ -58,6 +58,8 @@ app_cli_parse_new :: proc(args: []string, spec: ^proto.Spawn_Msg) -> bool {
 			if spec.envc == proto.STREAM_MAX_ENV do return false
 			spec.env[spec.envc] = rest[1]
 			spec.envc += 1
+		case "--name":
+			spec.name = rest[1]
 		case: return false
 		}
 		rest = rest[2:]

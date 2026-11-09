@@ -89,6 +89,7 @@ STREAM_MAX_ARGV :: 64
 STREAM_MAX_ENV  :: 256
 
 Spawn_Msg :: struct {
+	name:       string,
 	argv:       [STREAM_MAX_ARGV]string,
 	argc:       int,
 	env:        [STREAM_MAX_ENV]string,
@@ -147,24 +148,26 @@ Facts_Msg :: struct {
 Session_State :: enum u8 { Idle = 1, Busy, Exited }
 
 Session_Row :: struct {
-	id:           u32,
-	state:        Session_State,
-	active:       bool, // a CLI/TUI runs (quit asks before killing it)
-	attached:     bool,
-	pid:          u32,
-	elapsed_s:    u32,
-	quiet_s:      u32, // seconds since its program last printed
-	endpoint:     bool, // a virtual session: no program, a name, requests only
-	exit_code:    i32,
-	cols:         u16,
-	rows:         u16,
-	request:      Row_Request,
-	process:      string,
-	cwd:          string,
-	title:        string,
-	status:       string, // OSC 7501 message
-	controller:   string, // the automation that holds its lease ("" = none)
-	controller_pass: bool, // its lease passes a person's input through (a handoff)
+	id:              u32,
+	state:           Session_State,
+	active:          bool, // a CLI/TUI runs (quit asks before killing it)
+	attached:        bool,
+	pid:             u32,
+	elapsed_s:       u32,
+	quiet_s:         u32, // seconds since its program last printed
+	exit_code:       i32,
+	cols:            u16,
+	rows:            u16,
+	cmd_seq:         u32, // count of 133;D command completions
+	last_cmd_exit:   i32,
+	has_cmd_exit:    bool,
+	name:            string,
+	process:         string,
+	cwd:             string,
+	title:           string,
+	status:          string, // OSC 7501 message
+	controller:      string, // the automation that holds its lease ("" = none)
+	controller_pass: bool,   // its lease passes a person's input through (a handoff)
 }
 
 Prompt_State :: enum u8 { None = 0, Prompt = 1, Input = 2, Executing = 3 }

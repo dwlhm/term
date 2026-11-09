@@ -79,7 +79,7 @@ _live_sessions :: proc(r: ^Runner) -> []u32 {
 	for _ in 0 ..< n {
 		row := proto.dec_row(&rd)
 		if !rd.ok do break
-		if row.state != .Exited && !row.endpoint do append(&ids, row.id)
+		if row.state != .Exited do append(&ids, row.id)
 	}
 	return ids[:]
 }

@@ -35,7 +35,6 @@ core_viewer_act :: proc(c: ^Core, req: ^ipc.Request) {
 
 	gen := s.gen
 	s.input_gen = gen
-	core_broker_human_input(c, s, c.act[:])
 	core_holder_send(c, s.holder, proto.MSG_INPUT, s.id, c.act[:])
 	w := ipc.wire_writer(c.msg)
 	ipc.ww_u32(&w, s.id)
@@ -57,7 +56,7 @@ _act_validate :: proc(
 		core_viewer_fail(c, req, .Exited, "session has exited")
 		return false
 	}
-	if _no_program(c, req, s) || core_lease_fail(c, s, req) do return false
+	if core_lease_fail(c, s, req) do return false
 	if s.stitch != nil && s.stitch.active {
 		core_viewer_fail(c, req, .Busy, "a read is scrolling this session")
 		return false

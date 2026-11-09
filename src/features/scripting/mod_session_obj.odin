@@ -143,10 +143,20 @@ _session_obj_wait :: proc "c" (L: ^lua.State) -> c.int {
 	if !ok do return 0
 
 	pattern := ""
+	wait_prompt := false
+	wait_exit := false
 	timeout_sec := 10.0
 	if lua.type(L, 2) == .Table {
 		lua.getfield(L, 2, "text")
 		if lua.type(L, -1) == .String do pattern = lua.tostring(L, -1)
+		lua.pop(L, 1)
+
+		lua.getfield(L, 2, "prompt")
+		if lua.type(L, -1) == .Boolean do wait_prompt = lua.toboolean(L, -1) != 0
+		lua.pop(L, 1)
+
+		lua.getfield(L, 2, "exit")
+		if lua.type(L, -1) == .Boolean do wait_exit = lua.toboolean(L, -1) != 0
 		lua.pop(L, 1)
 
 		lua.getfield(L, 2, "timeout")
@@ -154,30 +164,48 @@ _session_obj_wait :: proc "c" (L: ^lua.State) -> c.int {
 		lua.pop(L, 1)
 	}
 
+	baseline_snap, base_err := api.api_snapshot(vm.sched.ipc_client, id, 0, -1, context.temp_allocator)
+	baseline_seq := baseline_snap.cmd_seq if base_err.kind == .None else 0
+
 	deadline := time.time_add(time.now(), time.Duration(timeout_sec * f64(time.Second)))
 	for time.diff(deadline, time.now()) < 0 {
 		snap, err := api.api_snapshot(vm.sched.ipc_client, id, 0, -1, context.temp_allocator)
 		if err.kind != .None do break
 
-		found := false
-		for row in snap.screen {
-			for run in row.runs {
-				if strings.contains(run.text, pattern) {
-					found = true
-					break
-				}
-			}
-			if found do break
-		}
-		if found {
+		if wait_exit && snap.exited {
 			lua.pushboolean(L, 1)
-			return 1
+			lua.pushinteger(L, lua.Integer(snap.exit_code))
+			return 2
 		}
+
+		if wait_prompt && (snap.cmd_seq > baseline_seq || snap.prompt_state == .Prompt) {
+			lua.pushboolean(L, 1)
+			lua.pushinteger(L, lua.Integer(snap.cmd_exit_code if snap.has_cmd_exit else 0))
+			return 2
+		}
+
+		if len(pattern) > 0 {
+			found := false
+			for row in snap.screen {
+				for run in row.runs {
+					if strings.contains(run.text, pattern) {
+						found = true
+						break
+					}
+				}
+				if found do break
+			}
+			if found {
+				lua.pushboolean(L, 1)
+				return 1
+			}
+		}
+
 		time.sleep(20 * time.Millisecond)
 	}
 
 	lua.pushboolean(L, 0)
-	lua.pushstring(L, "timeout waiting for text")
+	lua.pushstring(L, "timeout waiting for condition")
 	return 2
 }
 
