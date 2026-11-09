@@ -74,10 +74,18 @@ foreign lua {
 	sethook      :: proc(L: ^State, f: Hook, mask, count: c.int) ---
 	rawequal     :: proc(L: ^State, idx1, idx2: c.int) -> c.int ---
 	getlocal     :: proc(L: ^State, ar: rawptr, n: c.int) -> cstring --- // ar nil: parameter names of the function on top
+	newthread    :: proc(L: ^State) -> ^State ---
+	closethread  :: proc(L: ^State, from: ^State) -> c.int ---
+	yieldk       :: proc(L: ^State, nresults: c.int, ctx: c.intptr_t, k: rawptr) -> c.int ---
+	resume       :: proc(L: ^State, from: ^State, narg: c.int, nres: ^c.int) -> c.int ---
+	status       :: proc(L: ^State) -> c.int ---
+	isyieldable  :: proc(L: ^State) -> c.int ---
+	xmove        :: proc(from, to: ^State, n: c.int) ---
 }
 
 @(default_calling_convention = "c")
 foreign lua {
+	luaL_newstate    :: proc() -> ^State ---
 	luaL_loadbufferx :: proc(L: ^State, buff: [^]u8, sz: c.size_t, name, mode: cstring) -> c.int ---
 	luaL_requiref    :: proc(L: ^State, modname: cstring, openf: CFunction, glb: c.int) ---
 	luaL_traceback   :: proc(L: ^State, L1: ^State, msg: cstring, level: c.int) ---
@@ -86,6 +94,7 @@ foreign lua {
 	luaopen_table    :: proc(L: ^State) -> c.int ---
 	luaopen_math     :: proc(L: ^State) -> c.int ---
 	luaopen_utf8     :: proc(L: ^State) -> c.int ---
+	luaopen_coroutine :: proc(L: ^State) -> c.int ---
 }
 
 // The C API's macros.
@@ -95,6 +104,7 @@ pcall :: proc "c" (L: ^State, nargs, nresults, errfunc: c.int) -> c.int { return
 pushcfunction :: proc "c" (L: ^State, fn: CFunction) { pushcclosure(L, fn, 0) }
 insert :: proc "c" (L: ^State, idx: c.int) { rotate(L, idx, 1) }
 upvalueindex :: proc "c" (i: c.int) -> c.int { return REGISTRYINDEX - i }
+yield :: proc "c" (L: ^State, n: c.int) -> c.int { return yieldk(L, n, 0, nil) }
 
 pushstring :: proc "c" (L: ^State, s: string) { pushlstring(L, raw_data(s), c.size_t(len(s))) }
 
