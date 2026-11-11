@@ -77,6 +77,42 @@ test_cursor_blink_deadline_drift_free_and_inactive_parked :: proc(t: ^testing.T)
 }
 
 @test
+test_cursor_shapes_and_geometry_sync :: proc(t: ^testing.T) {
+	c: Cursor_State
+	cursor_init(&c)
+	testing.expect_value(t, c.shape, Cursor_Shape.Block)
+
+	pane_r := [4]f32{100, 200, 800, 600}
+	cell_w: f32 = 10.0
+	cell_h: f32 = 20.0
+	pad_x: f32 = 12.0
+	pad_y: f32 = 8.0
+
+	// 1. Block: fills entire cell (10 x 20)
+	rect_block := cursor_compute_rect(2, 3, pane_r, cell_w, cell_h, pad_x, pad_y, .Block)
+	testing.expect_value(t, rect_block[0], 100 + 12 + 20.0) // 132.0
+	testing.expect_value(t, rect_block[1], 200 + 8 + 60.0)  // 268.0
+	testing.expect_value(t, rect_block[2], cell_w)          // 10.0
+	testing.expect_value(t, rect_block[3], cell_h)          // 20.0
+
+	// 2. Beam: vertical line width 2.0, full height
+	c.shape = .Beam
+	rect_beam := cursor_compute_rect(2, 3, pane_r, cell_w, cell_h, pad_x, pad_y, c.shape)
+	testing.expect_value(t, rect_beam[0], 132.0)
+	testing.expect_value(t, rect_beam[1], 268.0)
+	testing.expect_value(t, rect_beam[2], f32(2.0))
+	testing.expect_value(t, rect_beam[3], cell_h)
+
+	// 3. Underline: horizontal line height 2.0 at bottom of cell
+	c.shape = .Underline
+	rect_under := cursor_compute_rect(2, 3, pane_r, cell_w, cell_h, pad_x, pad_y, c.shape)
+	testing.expect_value(t, rect_under[0], 132.0)
+	testing.expect_value(t, rect_under[1], 268.0 + cell_h - 2.0) // 286.0
+	testing.expect_value(t, rect_under[2], cell_w)
+	testing.expect_value(t, rect_under[3], f32(2.0))
+}
+
+@test
 test_wait_timeout_parked_when_idle_and_wakes_on_pty :: proc(t: ^testing.T) {
 	app := new(Term_App)
 	defer free(app)

@@ -92,6 +92,8 @@ _kitty_handle_put :: proc(state: ^Kitty_Extension, term: rawptr, img_id: u32) {
 
 	img.is_active = true
 	img.gpu_dirty = true
+	state.lru_counter += 1
+	img.last_used = state.lru_counter
 	if img.is_virtual do return
 
 	cols, rows := _kitty_calculate_span(state, img, term)
@@ -221,6 +223,7 @@ _kitty_delete_image_slot :: proc(state: ^Kitty_Extension, img: ^Kitty_Image) {
 	img.gpu_dirty = true
 	img.is_active = false
 	img.is_virtual = false
+	img.last_used = 0
 	img.id = 0
 }
 

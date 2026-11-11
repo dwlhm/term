@@ -256,8 +256,9 @@ _cursor_eval_state :: proc(
 	}
 
 	content_dirty = cur_c != app.cursor.last_col || cur_r != app.cursor.last_row ||
-	                cur_ch != app.cursor.last_char || cur_shape != app.cursor.last_shape ||
+	                cur_ch != app.cursor.last_char || cur_shape != app.cursor.shape ||
 	                app.window_focused != app.cursor.last_focused || p.id != app.cursor.last_pane_id
+	app.cursor.shape = cur_shape
 	if content_dirty {
 		app.cursor.last_col = cur_c
 		app.cursor.last_row = cur_r

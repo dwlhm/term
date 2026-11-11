@@ -23,6 +23,7 @@ Kitty_Image :: struct {
 	is_virtual:         bool,
 	is_active:          bool,
 	screen:             Kitty_Screen,
+	last_used:          u64,
 	gpu_texture:        rawptr,
 	gpu_view:           rawptr,
 	gpu_group:          rawptr,
@@ -41,6 +42,7 @@ Kitty_Screen_Provider    :: #type proc(term: rawptr) -> Kitty_Screen
 Kitty_Extension :: struct {
 	images:              [MAX_KITTY_IMAGES]Kitty_Image,
 	image_count:         int,
+	lru_counter:         u64,
 	placements:          [dynamic]Kitty_Placement,
 	chunk_buf:           [dynamic]u8,
 	in_chunk_transmission: bool,
@@ -135,6 +137,30 @@ _kitty_reclaim_pixels :: proc(state: ^Kitty_Extension, needed: int) -> bool {
 	return state.total_pixel_bytes + needed <= KITTY_MAX_TOTAL_PIXEL_BYTES
 }
 
+@(private = "file")
+_kitty_find_lru_slot :: proc(state: ^Kitty_Extension) -> int {
+	oldest_lru: u64 = max(u64)
+	slot := -1
+	for i in 0..<MAX_KITTY_IMAGES {
+		img := &state.images[i]
+		if !img.is_active && img.last_used < oldest_lru {
+			oldest_lru = img.last_used
+			slot = i
+		}
+	}
+	if slot != -1 do return slot
+
+	oldest_lru = max(u64)
+	for i in 0..<MAX_KITTY_IMAGES {
+		img := &state.images[i]
+		if img.last_used < oldest_lru {
+			oldest_lru = img.last_used
+			slot = i
+		}
+	}
+	return slot if slot != -1 else 0
+}
+
 _kitty_store_image :: proc(state: ^Kitty_Extension, img_id: u32, w, h: int, px: []u8, term: rawptr, place: bool) -> bool {
 	if state == nil do return false
 	if !kitty_dims_valid(w, h) do return false
@@ -153,7 +179,7 @@ _kitty_store_image :: proc(state: ^Kitty_Extension, img_id: u32, w, h: int, px: 
 			slot = i
 		}
 	}
-	if slot == -1 do slot = 0
+	if slot == -1 do slot = _kitty_find_lru_slot(state)
 
 	target := &state.images[slot]
 	if target.id != 0 do _kitty_handle_delete(state, target.id, 'i', 0, 0, 0, 0)
@@ -165,6 +191,8 @@ _kitty_store_image :: proc(state: ^Kitty_Extension, img_id: u32, w, h: int, px: 
 	target.is_active = place || target.is_virtual
 	target.cols = state.current_cols
 	target.rows = state.current_rows
+	state.lru_counter += 1
+	target.last_used = state.lru_counter
 
 	if place && !target.is_virtual {
 		_kitty_handle_put(state, term, img_id)
