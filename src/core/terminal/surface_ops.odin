@@ -105,7 +105,7 @@ terminal_surfaces_relayout :: proc(t: ^Terminal, emit_events: bool = true) {
 	t.surfaces_dirty = true
 }
 
-_surface_handle_split :: proc(t: ^Terminal, msg: ^extension.Osc_7502_Command) -> bool {
+_surface_handle_split :: proc(t: ^Terminal, msg: ^extension.Osc_Surface_Command) -> bool {
 	if s := terminal_surface_find(t, msg.id); s != nil {
 		if s.kind != .Split do return false
 		s.parent_id = msg.parent
@@ -144,7 +144,7 @@ _surface_handle_split :: proc(t: ^Terminal, msg: ^extension.Osc_7502_Command) ->
 	return true
 }
 
-_surface_handle_popup :: proc(t: ^Terminal, msg: ^extension.Osc_7502_Command) -> bool {
+_surface_handle_popup :: proc(t: ^Terminal, msg: ^extension.Osc_Surface_Command) -> bool {
 	w := clamp(msg.w, 1, max(1, t.cols))
 	h := clamp(msg.h, 1, max(1, t.rows))
 	if s := terminal_surface_find(t, msg.id); s != nil {
@@ -209,11 +209,11 @@ terminal_surface_close :: proc(t: ^Terminal, id: u16) -> bool {
 	return true
 }
 
-_terminal_handle_osc_7502 :: proc(t: ^Terminal, payload: string) -> bool {
-	msg, ok := extension.osc_7502_parse(payload)
+_terminal_handle_osc_surface :: proc(t: ^Terminal, payload: string) -> bool {
+	msg, ok := extension.osc_surface_parse(payload)
 	if !ok do return false
 	if msg.is_probe {
-		return parser.parser_emit_response(&t.parser, transmute([]u8)string(OSC_7502_SUPPORTED))
+		return parser.parser_emit_response(&t.parser, transmute([]u8)string(OSC_SURFACE_SUPPORTED))
 	}
 	#partial switch msg.op {
 	case .Reset:

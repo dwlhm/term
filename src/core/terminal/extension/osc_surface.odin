@@ -1,13 +1,13 @@
 package terminal_extension
 
-// OSC 7502 — Term Surface & Layer Protocol.
+// OSC 8400 — Term Surface & Layer Protocol (Famili 84xx).
 // Allows a single CLI/TUI process inside one PTY to multiplex its viewport into
 // isolated VT surfaces (splits and floating popups) backed by the GPU compositor.
 
 import "core:strconv"
 import "core:strings"
 
-OSC_SURFACE_LAYER :: 7502
+OSC_SURFACE_LAYER :: 8400
 
 Surface_Op :: enum u8 {
 	Reset        = 0,
@@ -43,7 +43,7 @@ Surface_Chrome :: enum u8 {
 
 MAX_SURFACE_TITLE :: 128
 
-Osc_7502_Command :: struct {
+Osc_Surface_Command :: struct {
 	is_probe:  bool,
 	op:        Surface_Op,
 	id:        u16,
@@ -97,7 +97,7 @@ _parse_req_u16 :: proc(rest: ^string, allow_zero: bool) -> (val: u16, ok: bool) 
 }
 
 @(private = "file")
-_parse_split_params :: proc(cmd: ^Osc_7502_Command, rest: ^string) -> bool {
+_parse_split_params :: proc(cmd: ^Osc_Surface_Command, rest: ^string) -> bool {
 	id, ok := _parse_req_u16(rest, false)
 	if !ok do return false
 	cmd.id = id
@@ -112,7 +112,7 @@ _parse_split_params :: proc(cmd: ^Osc_7502_Command, rest: ^string) -> bool {
 }
 
 @(private = "file")
-_parse_popup_params :: proc(cmd: ^Osc_7502_Command, rest: ^string) -> bool {
+_parse_popup_params :: proc(cmd: ^Osc_Surface_Command, rest: ^string) -> bool {
 	id, ok := _parse_req_u16(rest, false)
 	if !ok do return false
 	cmd.id = id
@@ -160,11 +160,11 @@ _decode_b64_into :: proc(src: string, dst: []u8) -> int {
 	return out
 }
 
-// osc_7502_parse parses an OSC 7502 payload into `Osc_7502_Command` with zero allocations.
-osc_7502_parse :: proc(payload: string) -> (cmd: Osc_7502_Command, ok: bool) {
+// osc_surface_parse parses an OSC 8400 payload into `Osc_Surface_Command` with zero allocations.
+osc_surface_parse :: proc(payload: string) -> (cmd: Osc_Surface_Command, ok: bool) {
 	if len(payload) == 0 do return {}, false
 	if payload == "?" {
-		return Osc_7502_Command{is_probe = true}, true
+		return Osc_Surface_Command{is_probe = true}, true
 	}
 	rest := payload
 	op_tok, has_op := _next_semi_field(&rest)

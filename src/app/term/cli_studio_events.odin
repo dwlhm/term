@@ -1,6 +1,6 @@
 package term
 
-// Event extraction & OSC 7502 stream demuxer for `term studio`.
+// Event extraction & OSC 8400 stream demuxer for `term studio`.
 
 import "core:strconv"
 import "core:strings"
@@ -79,6 +79,28 @@ studio_parse_osc_body :: proc(body: string, alloc := context.temp_allocator) -> 
 	return {}, false
 }
 
+@(private = "file")
+_find_osc_tag :: proc(raw: string, pos: int) -> (tag_start: int, payload_start: int) {
+	i8400 := strings.index(raw[pos:], "\x1b]8400;")
+	i7502 := strings.index(raw[pos:], "\x1b]7502;")
+	if i8400 < 0 && i7502 < 0 do return -1, -1
+	if i8400 >= 0 && (i7502 < 0 || i8400 < i7502) {
+		return pos + i8400, pos + i8400 + 7
+	}
+	return pos + i7502, pos + i7502 + 7
+}
+
+@(private = "file")
+_find_osc_end :: proc(raw: string, start: int) -> (end: int, next_pos: int) {
+	for i := start; i < len(raw); i += 1 {
+		if raw[i] == 0x07 do return i, i + 1
+		if raw[i] == 0x1b && i + 1 < len(raw) && raw[i + 1] == '\\' {
+			return i, i + 2
+		}
+	}
+	return -1, -1
+}
+
 studio_demux_chunk :: proc(
 	raw: string,
 	events: ^[dynamic]Studio_Event,
@@ -86,39 +108,20 @@ studio_demux_chunk :: proc(
 ) {
 	pos := 0
 	for pos < len(raw) {
-		idx := strings.index(raw[pos:], "\x1b]7502;")
-		if idx < 0 {
-			rem := raw[pos:]
-			if len(rem) > 0 {
-				append(events, Studio_Event{kind = .Raw_Key, data = rem})
-			}
+		abs_idx, payload_start := _find_osc_tag(raw, pos)
+		if abs_idx < 0 {
+			if len(raw[pos:]) > 0 do append(events, Studio_Event{kind = .Raw_Key, data = raw[pos:]})
 			break
 		}
-		abs_idx := pos + idx
-		if abs_idx > pos {
-			append(events, Studio_Event{kind = .Raw_Key, data = raw[pos:abs_idx]})
-		}
-		body_start := abs_idx + 7
-		body_end := -1
-		// Check for ST (\x1b\) or BEL (\x07)
-		for i := body_start; i < len(raw); i += 1 {
-			if raw[i] == 0x07 {
-				body_end = i
-				pos = i + 1
-				break
-			}
-			if raw[i] == 0x1b && i + 1 < len(raw) && raw[i + 1] == '\\' {
-				body_end = i
-				pos = i + 2
-				break
-			}
-		}
+		if abs_idx > pos do append(events, Studio_Event{kind = .Raw_Key, data = raw[pos:abs_idx]})
+
+		body_end, next_pos := _find_osc_end(raw, payload_start)
 		if body_end < 0 {
-			// Incomplete sequence, emit remainder as raw
 			append(events, Studio_Event{kind = .Raw_Key, data = raw[abs_idx:]})
 			break
 		}
-		body := raw[body_start:body_end]
+		pos = next_pos
+		body := raw[payload_start:body_end]
 		if ev, ok := studio_parse_osc_body(body, alloc); ok {
 			append(events, ev)
 		}

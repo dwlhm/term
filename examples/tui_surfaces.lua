@@ -1,5 +1,5 @@
 -- examples/tui_surfaces.lua
--- Single-PTY Multi-Surface & Native Popup TUI Showcase powered by OSC 7502 (`term.ui`).
+-- Single-PTY Multi-Surface & Native Popup TUI Showcase powered by OSC 8400 (`term.ui`).
 -- Run interactively:  ./build/term run examples/tui_surfaces.lua
 -- Run automated demo: ./build/term run examples/tui_surfaces.lua --demo
 
@@ -11,7 +11,7 @@ local io   = require "term.io"
 local function paint_editor()
 	ui.write(ui.target(0, table.concat({
 		"\x1b[2J\x1b[H",
-		"\x1b[1;38;2;120;200;255m  TERM OSC 7502 — SINGLE-PTY COMPOSITOR TUI\x1b[0m\r\n",
+		"\x1b[1;38;2;120;200;255m  TERM OSC 8400 — SINGLE-PTY COMPOSITOR TUI\x1b[0m\r\n",
 		"\x1b[38;2;140;148;165m  ──────────────────────────────────────────────────\x1b[0m\r\n",
 		"\r\n",
 		"  \x1b[38;2;180;140;255m1\x1b[0m  local ui = require \x1b[38;2;150;220;140m\"term.ui\"\x1b[0m\r\n",
@@ -65,7 +65,7 @@ end
 
 return term.program {
 	name = "tui-surfaces",
-	description = "Single-PTY Multi-Surface & Popup TUI Showcase (OSC 7502)",
+	description = "Single-PTY Multi-Surface & Popup TUI Showcase (OSC 8400)",
 	main = function(args)
 		local is_demo = false
 		for _, a in ipairs(args or {}) do
@@ -98,7 +98,7 @@ return term.program {
 		-- Spawn centered Modal Popup (#10) with native SDF frame & title
 		ui.write(ui.popup {
 			id = 10, w = 44, h = 8, anchor = "center",
-			chrome = "modal", focus = true, title = "Command Palette (OSC 7502)"
+			chrome = "modal", focus = true, title = "Command Palette (OSC 8400)"
 		})
 		paint_popup()
 		paint_inspector(true, log_count)

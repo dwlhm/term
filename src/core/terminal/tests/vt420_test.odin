@@ -167,15 +167,15 @@ test_vt420_paint_roundtrip :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_osc_7502_interrupted_escape_does_not_leak :: proc(t: ^testing.T) {
+test_osc_surface_interrupted_escape_does_not_leak :: proc(t: ^testing.T) {
 	term: terminal.Terminal
 	terminal.terminal_init(&term, 10, 80)
 	defer terminal.terminal_destroy(&term)
 
-	// Create split surface 10, then simulate an incomplete ESC or CSI right before OSC 7502;1;0
-	terminal.terminal_feed_string(&term, "\x1b]7502;2;10;dir=right;ratio=40\x07")
-	terminal.terminal_feed_string(&term, "\x1b]7502;1;10\x07OK\x1b\x1b]7502;1;0\x07")
-	terminal.terminal_feed_string(&term, "\x1b]7502;1;10\x07!\x1b[3\x1b]7502;1;0\x07")
+	// Create split surface 10, then simulate an incomplete ESC or CSI right before OSC 8400;1;0
+	terminal.terminal_feed_string(&term, "\x1b]8400;2;10;0;0;40;1\x1b\\")
+	terminal.terminal_feed_string(&term, "\x1b]8400;1;10\x07OK\x1b\x1b]8400;1;0\x07")
+	terminal.terminal_feed_string(&term, "\x1b]8400;1;10\x07!\x1b[3\x1b]8400;1;0\x07")
 
 	testing.expect_value(t, term.active_surface_id, u16(0))
 	s10 := terminal.terminal_surface_find(&term, 10)

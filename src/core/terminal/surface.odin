@@ -7,7 +7,7 @@ import parser "parser"
 
 MAX_SURFACES            :: 256
 MAX_SURFACE_CELL_BUDGET :: 1_048_576
-OSC_7502_SUPPORTED      :: "\x1b]7502;?1\x1b\\"
+OSC_SURFACE_SUPPORTED   :: "\x1b]8400;?1\x1b\\"
 
 Surface_Kind :: enum u8 {
 	Split,
@@ -15,7 +15,7 @@ Surface_Kind :: enum u8 {
 }
 
 // Terminal_Surface is an independent sub-surface (Split or Popup) owned by a
-// single Terminal instance and addressed via OSC 7502. Each surface owns its
+// single Terminal instance and addressed via OSC 8400. Each surface owns its
 // own Grid, Damage_Tracker, Parser, and scroll offset.
 Terminal_Surface :: struct {
 	id:            u16,

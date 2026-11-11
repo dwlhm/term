@@ -1,6 +1,6 @@
 package term
 
-// Multi-Surface (OSC 7502) Native Split_Node & Pane_Entry Synchronizer.
+// Multi-Surface (OSC 8400) Native Split_Node & Pane_Entry Synchronizer.
 // Part of Tier 3 Application Shell (src/app/term/*).
 
 import chrome_splits "../../core/chrome/splits"
@@ -97,7 +97,7 @@ surface_prune_stale_panes :: proc(app: ^Term_App, active_tab: ^tabs_feat.Tab_Ent
 	return changed
 }
 
-// surface_sync_split_tree reconciles OSC 7502 .Split and .Popup surfaces with
+// surface_sync_split_tree reconciles OSC 8400 .Split and .Popup surfaces with
 // native Split_Node leaves and Pane_Entry items in the active tab.
 surface_sync_split_tree :: proc(app: ^Term_App) -> (changed: bool) {
 	if app == nil do return false

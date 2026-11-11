@@ -20,8 +20,8 @@ Pane_Entry :: struct {
 	id:          u32,
 	kind:        Pane_Kind,
 	session:     ^session.Terminal_Session, // Nil if Three_D
-	surface_id:  u16,                       // 0 = Root session pane, >0 = OSC 7502 surface
-	is_floating: bool,                      // true for floating/popup panes (OSC 7502;3)
+	surface_id:  u16,                       // 0 = Root session pane, >0 = OSC 8400 surface
+	is_floating: bool,                      // true for floating/popup panes (OSC 8400;3)
 	z:           int,                       // stacking order for floating panes
 	interactor:  three_d.Three_D_Interactor, // For 3D camera/orbit
 	rect:        [4]f32,

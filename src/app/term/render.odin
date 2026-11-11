@@ -100,7 +100,7 @@ app_sync_layout_and_winsize :: proc(app: ^Term_App, sync_titles: bool = true) ->
 		}
 	}
 
-	// Sync OSC 7502 splits with active tab split tree
+	// Sync OSC 8400 splits with active tab split tree
 	if surface_sync_split_tree(app) do dirty = true
 
 	// Sync active tab split tree with uniform margin == pane gap

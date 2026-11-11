@@ -150,7 +150,7 @@ test_surface_popup_body_rect_centering :: proc(t: ^testing.T) {
 	terminal.terminal_init(&tm, 24, 80)
 	defer terminal.terminal_destroy(&tm)
 
-	terminal.terminal_feed_string(&tm, "\x1b]7502;3;2;20;6;0;0;0;10;2;1;\x1b\\")
+	terminal.terminal_feed_string(&tm, "\x1b]8400;3;2;20;6;0;0;0;10;2;1;\x1b\\")
 	s := terminal.terminal_surface_find(&tm, 2)
 	testing.expect(t, s != nil, "popup 2 should exist")
 	if s != nil {

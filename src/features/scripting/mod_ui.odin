@@ -1,6 +1,6 @@
 package feature_scripting
 
-// `term.ui` Lua module: ergonomic OSC 7502 (Surface & Layer Protocol) builders,
+// `term.ui` Lua module: ergonomic OSC 8400 (Surface & Layer Protocol) builders,
 // direct stdout writer, and event parser for single-PTY TUI applications.
 import "base:runtime"
 import "core:c"
@@ -52,13 +52,13 @@ _ui_opt_str :: proc(L: ^lua.State, idx: c.int, field: cstring) -> string {
 
 @(private = "file")
 _ui_probe :: proc "c" (L: ^lua.State) -> c.int {
-	lua.pushstring(L, "\x1b]7502;?\x1b\\")
+	lua.pushstring(L, "\x1b]8400;?\x1b\\")
 	return 1
 }
 
 @(private = "file")
 _ui_reset :: proc "c" (L: ^lua.State) -> c.int {
-	lua.pushstring(L, "\x1b]7502;0\x1b\\")
+	lua.pushstring(L, "\x1b]8400;0\x1b\\")
 	return 1
 }
 
@@ -67,7 +67,7 @@ _ui_target :: proc "c" (L: ^lua.State) -> c.int {
 	context = runtime.default_context()
 	id := int(lua.tointegerx(L, 1, nil)) if lua.type(L, 1) == .Number else 0
 	text := lua.tostring(L, 2) if lua.type(L, 2) == .String else ""
-	res := fmt.tprintf("\x1b]7502;1;%d\x07%s", max(0, id), text)
+	res := fmt.tprintf("\x1b]8400;1;%d\x07%s", max(0, id), text)
 	lua.pushstring(L, res)
 	free_all(context.temp_allocator)
 	return 1
@@ -91,7 +91,7 @@ _ui_split :: proc "c" (L: ^lua.State) -> c.int {
 	case "left":  dir = 2
 	case "up":    dir = 3
 	}
-	return _ui_push_osc_fmt(L, "\x1b]7502;2;%d;%d;%d;%d;%d\x1b\\", id, parent, dir, ratio, foc)
+	return _ui_push_osc_fmt(L, "\x1b]8400;2;%d;%d;%d;%d;%d\x1b\\", id, parent, dir, ratio, foc)
 }
 
 @(private = "file")
@@ -107,7 +107,7 @@ _ui_popup :: proc "c" (L: ^lua.State) -> c.int {
 	anchor, chrome := _ui_popup_enums(L)
 	title := _ui_opt_str(L, 1, "title")
 	b64 := base64.encode(transmute([]u8)title, base64.ENC_TABLE, context.temp_allocator) if len(title) > 0 else ""
-	res := fmt.tprintf("\x1b]7502;3;%d;%d;%d;%d;%d;%d;%d;%d;%d;%s\x1b\\", id, w, h, anchor, x, y, z, chrome, foc, b64)
+	res := fmt.tprintf("\x1b]8400;3;%d;%d;%d;%d;%d;%d;%d;%d;%d;%s\x1b\\", id, w, h, anchor, x, y, z, chrome, foc, b64)
 	lua.pushstring(L, res)
 	free_all(context.temp_allocator)
 	return 1
@@ -140,25 +140,25 @@ _ui_push_osc_fmt :: proc(L: ^lua.State, fmt_str: string, args: ..any) -> c.int {
 @(private = "file")
 _ui_focus :: proc "c" (L: ^lua.State) -> c.int {
 	context = runtime.default_context()
-	return _ui_push_osc_fmt(L, "\x1b]7502;4;%d\x1b\\", max(0, int(lua.tointegerx(L, 1, nil))))
+	return _ui_push_osc_fmt(L, "\x1b]8400;4;%d\x1b\\", max(0, int(lua.tointegerx(L, 1, nil))))
 }
 
 @(private = "file")
 _ui_show :: proc "c" (L: ^lua.State) -> c.int {
 	context = runtime.default_context()
-	return _ui_push_osc_fmt(L, "\x1b]7502;5;%d;1\x1b\\", max(1, int(lua.tointegerx(L, 1, nil))))
+	return _ui_push_osc_fmt(L, "\x1b]8400;5;%d;1\x1b\\", max(1, int(lua.tointegerx(L, 1, nil))))
 }
 
 @(private = "file")
 _ui_hide :: proc "c" (L: ^lua.State) -> c.int {
 	context = runtime.default_context()
-	return _ui_push_osc_fmt(L, "\x1b]7502;5;%d;0\x1b\\", max(1, int(lua.tointegerx(L, 1, nil))))
+	return _ui_push_osc_fmt(L, "\x1b]8400;5;%d;0\x1b\\", max(1, int(lua.tointegerx(L, 1, nil))))
 }
 
 @(private = "file")
 _ui_close :: proc "c" (L: ^lua.State) -> c.int {
 	context = runtime.default_context()
-	return _ui_push_osc_fmt(L, "\x1b]7502;6;%d\x1b\\", max(1, int(lua.tointegerx(L, 1, nil))))
+	return _ui_push_osc_fmt(L, "\x1b]8400;6;%d\x1b\\", max(1, int(lua.tointegerx(L, 1, nil))))
 }
 
 @(private = "file")

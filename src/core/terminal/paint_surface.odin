@@ -62,7 +62,7 @@ _paint_surfaces_splits_init :: proc(t: ^Terminal, out: ^[dynamic]u8) {
 	for i in 0 ..< len(t.surfaces) {
 		s := &t.surfaces[i]
 		if s.kind != .Split do continue
-		_paint_str(out, "\x1b]7502;2;")
+		_paint_str(out, "\x1b]8400;2;")
 		_paint_int(out, int(s.id))
 		_paint_str(out, ";")
 		_paint_int(out, int(s.parent_id))
@@ -72,16 +72,16 @@ _paint_surfaces_splits_init :: proc(t: ^Terminal, out: ^[dynamic]u8) {
 		_paint_int(out, s.split_ratio)
 		_paint_str(out, ";0\x1b\\")
 		if !s.visible {
-			_paint_str(out, "\x1b]7502;5;")
+			_paint_str(out, "\x1b]8400;5;")
 			_paint_int(out, int(s.id))
 			_paint_str(out, ";0\x1b\\")
 		}
 	}
-	_paint_str(out, "\x1b]7502;1;0\x07\x1b[H")
+	_paint_str(out, "\x1b]8400;1;0\x07\x1b[H")
 }
 
 _paint_popup_init :: proc(s: ^Terminal_Surface, out: ^[dynamic]u8) {
-	_paint_str(out, "\x1b]7502;3;")
+	_paint_str(out, "\x1b]8400;3;")
 	_paint_int(out, int(s.id))
 	_paint_str(out, ";")
 	_paint_int(out, s.req_w)
@@ -103,7 +103,7 @@ _paint_popup_init :: proc(s: ^Terminal_Surface, out: ^[dynamic]u8) {
 	}
 	_paint_str(out, "\x1b\\")
 	if !s.visible {
-		_paint_str(out, "\x1b]7502;5;")
+		_paint_str(out, "\x1b]8400;5;")
 		_paint_int(out, int(s.id))
 		_paint_str(out, ";0\x1b\\")
 	}
@@ -114,7 +114,7 @@ _paint_surfaces_content :: proc(t: ^Terminal, out: ^[dynamic]u8, pen: ^Paint_Pen
 	for i in 0 ..< len(t.surfaces) {
 		s := &t.surfaces[i]
 		if s.kind == .Popup do _paint_popup_init(s, out)
-		_paint_str(out, "\x1b]7502;1;")
+		_paint_str(out, "\x1b]8400;1;")
 		_paint_int(out, int(s.id))
 		_paint_str(out, "\x07\x1b[H")
 		_paint_set_pen(t, out, pen, PAINT_PEN_DEFAULT)
@@ -126,11 +126,11 @@ _paint_surfaces_content :: proc(t: ^Terminal, out: ^[dynamic]u8, pen: ^Paint_Pen
 		_paint_charsets(&s.parser, out)
 	}
 	if t.focused_surface_id != 0 {
-		_paint_str(out, "\x1b]7502;4;")
+		_paint_str(out, "\x1b]8400;4;")
 		_paint_int(out, int(t.focused_surface_id))
 		_paint_str(out, "\x1b\\")
 	}
-	_paint_str(out, "\x1b]7502;1;")
+	_paint_str(out, "\x1b]8400;1;")
 	_paint_int(out, int(t.active_surface_id))
 	_paint_str(out, "\x07")
 	_, _, active_p := terminal_surface_parts(t, t.active_surface_id)

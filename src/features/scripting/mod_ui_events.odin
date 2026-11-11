@@ -1,6 +1,6 @@
 package feature_scripting
 
-// Event parser & hex decoder for OSC 7502 (Surface & Layer Protocol).
+// Event parser & hex decoder for OSC 8400 (Surface & Layer Protocol).
 
 import "base:runtime"
 import "core:c"
@@ -53,7 +53,7 @@ _hex_decode :: proc(hex: string) -> string {
 
 @(private)
 _ui_extract_osc_body :: proc(raw: string) -> (body: string, ok: bool) {
-	idx := strings.index(raw, "\x1b]7502;")
+	idx := strings.index(raw, "\x1b]8400;")
 	if idx < 0 do return "", false
 	body = raw[idx + 7:]
 	end := strings.index(body, "\x1b\\")

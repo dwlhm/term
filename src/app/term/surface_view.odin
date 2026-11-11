@@ -1,6 +1,6 @@
 package term
 
-// Multi-Surface (OSC 7502) Floating Pane Geometry & Modal Chrome.
+// Multi-Surface (OSC 8400) Floating Pane Geometry & Modal Chrome.
 // Part of Tier 3 Application Shell (src/app/term/*).
 
 import chrome_dl "../../core/chrome/draw_list"

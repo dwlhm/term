@@ -130,8 +130,8 @@ _terminal_on_osc :: proc(user_data: rawptr, osc_id: int, payload: string) -> boo
 	if osc_id == extension.OSC_PROGRAM_STATUS && len(payload) > 0 && payload[0] == '?' {
 		return parser.parser_emit_response(&t.parser, transmute([]u8)string(OSC_7501_SUPPORTED))
 	}
-	if osc_id == extension.OSC_SURFACE_LAYER {
-		return _terminal_handle_osc_7502(t, payload)
+	if osc_id == extension.OSC_SURFACE_LAYER || osc_id == 7502 {
+		return _terminal_handle_osc_surface(t, payload)
 	}
 	return extension.registry_dispatch_osc(&t.extensions, osc_id, payload, user_data)
 }

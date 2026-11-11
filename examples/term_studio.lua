@@ -1,5 +1,5 @@
 -- examples/term_studio.lua
--- Production-Ready Multi-Surface & GPU Compositor TUI Cockpit powered by OSC 7502 (`term.ui`).
+-- Production-Ready Multi-Surface & GPU Compositor TUI Cockpit powered by OSC 8400 (`term.ui`).
 --
 -- Features:
 --   • Single-PTY Multi-Surface Architecture: 1 Process -> 3 Independent VT Splits + Modals.
@@ -63,7 +63,7 @@ local state = {
 		{ key = "toggle-stream", label = "Toggle Live Log Stream", desc = "Pause or resume real-time event logs" },
 		{ key = "inspect-row",   label = "Inspect Selected Workload", desc = "Open detailed property inspector dialog" },
 		{ key = "burst-flood",   label = "Simulate High-Throughput Burst", desc = "Send 100 log lines to verify hardware scroll" },
-		{ key = "reset-surfaces",label = "Reset All Child Surfaces", desc = "Trigger OSC 7502;0 surface lifecycle reset" },
+		{ key = "reset-surfaces",label = "Reset All Child Surfaces", desc = "Trigger OSC 8400;0 surface lifecycle reset" },
 		{ key = "show-help",     label = "Show Keyboard & OSC Guide", desc = "Display full shortcut and architecture cheatsheet" },
 		{ key = "quit-app",      label = "Quit Term Studio", desc = "Clean teardown and restore terminal" },
 	},
@@ -99,7 +99,7 @@ local function paint_root()
 	local time_str = get_time_str()
 
 	-- Header Bar
-	out[#out + 1] = C.blue .. C.bold .. "  TERM STUDIO " .. C.gray .. "— OSC 7502 MULTI-SURFACE COCKPIT" ..
+	out[#out + 1] = C.blue .. C.bold .. "  TERM STUDIO " .. C.gray .. "— OSC 8400 MULTI-SURFACE COCKPIT" ..
 		C.rst .. string.format("\x1b[1;62H%s%s%s\r\n", C.cyan, time_str, C.rst)
 	out[#out + 1] = C.border .. "  ────────────────────────────────────────────────────────────────────────\x1b[0m\r\n"
 
@@ -252,7 +252,7 @@ local function paint_inspector()
 	out[#out + 1] = string.format(" Bound Surfaces  : %s%d isolated splits\x1b[0m\r\n", C.yellow, w.splits)
 	out[#out + 1] = string.format(" Total Uptime    : %s%s\x1b[0m\r\n", C.rst, w.uptime)
 	out[#out + 1] = C.border .. "──────────────────────────────────────────────────\x1b[0m\r\n"
-	out[#out + 1] = C.gray .. " Rendered via OSC 7502;3 (Zero Background Repaint)\x1b[0m\r\n"
+	out[#out + 1] = C.gray .. " Rendered via OSC 8400;3 (Zero Background Repaint)\x1b[0m\r\n"
 	out[#out + 1] = C.gray .. " Press [Esc] or [i] to close inspector\x1b[0m"
 	ui.write(ui.target(11, table.concat(out)))
 end
@@ -260,7 +260,7 @@ end
 -- Surface 12: Help Modal Dialog
 local function paint_help()
 	local out = { "\x1b[H\x1b[2J" }
-	out[#out + 1] = C.green .. C.bold .. " TERM STUDIO — OSC 7502 SHORTCUTS & ARCHITECTURE\x1b[0m\r\n"
+	out[#out + 1] = C.green .. C.bold .. " TERM STUDIO — OSC 8400 SHORTCUTS & ARCHITECTURE\x1b[0m\r\n"
 	out[#out + 1] = C.border .. "────────────────────────────────────────────────────\x1b[0m\r\n"
 	out[#out + 1] = C.bold .. " Keyboard Controls:\x1b[0m\r\n"
 	out[#out + 1] = "  j / ↓, k / ↑   Navigate workload rows\r\n"
@@ -284,7 +284,7 @@ local function open_modal(kind)
 		state.palette_sel = 1
 		ui.write(ui.popup {
 			id = 10, w = 46, h = 10, anchor = "center",
-			chrome = "modal", focus = true, title = "Command Palette (OSC 7502)"
+			chrome = "modal", focus = true, title = "Command Palette (OSC 8400)"
 		})
 		paint_palette()
 	elseif kind == "inspect" then
@@ -296,7 +296,7 @@ local function open_modal(kind)
 	elseif kind == "help" then
 		ui.write(ui.popup {
 			id = 12, w = 54, h = 13, anchor = "center",
-			chrome = "modal", focus = true, title = "OSC 7502 Architecture Guide"
+			chrome = "modal", focus = true, title = "OSC 8400 Architecture Guide"
 		})
 		paint_help()
 	end
@@ -318,9 +318,9 @@ local function extract_events(raw)
 	local events = {}
 	local pos = 1
 	while pos <= #raw do
-		local s, e, payload = raw:find("\x1b%]7502;([^\x1b\x07]*)\x1b\\", pos)
+		local s, e, payload = raw:find("\x1b%]8400;([^\x1b\x07]*)\x1b\\", pos)
 		if not s then
-			s, e, payload = raw:find("\x1b%]7502;([^\x1b\x07]*)\x07", pos)
+			s, e, payload = raw:find("\x1b%]8400;([^\x1b\x07]*)\x07", pos)
 		end
 		if not s then
 			local rem = raw:sub(pos)
@@ -332,7 +332,7 @@ local function extract_events(raw)
 		if s > pos then
 			events[#events + 1] = { kind = "raw", data = raw:sub(pos, s - 1) }
 		end
-		local ev = ui.parse_event("\x1b]7502;" .. payload)
+		local ev = ui.parse_event("\x1b]8400;" .. payload)
 		if ev then
 			events[#events + 1] = ev
 		end
@@ -357,7 +357,7 @@ local function execute_palette_action(key)
 		end
 	elseif key == "reset-surfaces" then
 		close_modal()
-		append_log_entry("WARN", "OSC 7502 lifecycle reset emitted")
+		append_log_entry("WARN", "OSC 8400 lifecycle reset emitted")
 	elseif key == "show-help" then
 		close_modal()
 		open_modal("help")
@@ -369,7 +369,7 @@ end
 -- Main Program Declaration
 return term.program {
 	name = "term-studio",
-	description = "Production-Ready Multi-Surface & GPU Compositor TUI Cockpit (OSC 7502)",
+	description = "Production-Ready Multi-Surface & GPU Compositor TUI Cockpit (OSC 8400)",
 	main = function(args)
 		local is_demo = false
 		for _, a in ipairs(args or {}) do
@@ -386,7 +386,7 @@ return term.program {
 			ui.write(ui.reset() .. "\x1b[?25h\x1b[?1049l")
 		end
 
-		-- Initialize OSC 7502 Multi-Surface Layout:
+		-- Initialize OSC 8400 Multi-Surface Layout:
 		--   Split #1: Right side, 42% width (Telemetry)
 		--   Split #2: Under Split #1, 50% height (Event Streamer)
 		ui.write(ui.split { id = 1, parent = 0, dir = "right", ratio = 42, focus = false })
