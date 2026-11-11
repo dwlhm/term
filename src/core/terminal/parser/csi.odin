@@ -85,6 +85,55 @@ _sgr_set_underline :: proc(p: ^Parser, style: cell.Underline_Style) {
 	_sgr_sync_underline_flag(p)
 }
 
+_parser_emit_cpr :: proc(p: ^Parser, extended: bool) {
+	buf: [32]u8
+	r_buf: [16]u8
+	c_buf: [16]u8
+
+	r := p.cursor.row + 1
+	c := p.cursor.col + 1
+	if p.origin_mode {
+		r = p.cursor.row - p.scroll_top + 1
+		c = p.cursor.col - _parser_eff_left(p) + 1
+	}
+
+	r_str := strconv.write_int(r_buf[:], i64(r), 10)
+	c_str := strconv.write_int(c_buf[:], i64(c), 10)
+
+	idx := 0
+	buf[idx] = 0x1b; idx += 1
+	buf[idx] = '['; idx += 1
+	if extended {
+		buf[idx] = '?'; idx += 1
+	}
+	copy(buf[idx:], r_str); idx += len(r_str)
+	buf[idx] = ';'; idx += 1
+	copy(buf[idx:], c_str); idx += len(c_str)
+	if extended {
+		buf[idx] = ';'; idx += 1
+		buf[idx] = '1'; idx += 1
+	}
+	buf[idx] = 'R'; idx += 1
+	parser_emit_response(p, buf[:idx])
+}
+
+_parser_handle_dsr :: proc(p: ^Parser) {
+	param0_val := p.csi_params[0] if p.csi_count > 0 else 0
+	if p.csi_prefix == 0 {
+		switch param0_val {
+		case 5: // Status report -> \x1b[0n (OK)
+			parser_emit_response(p, []u8{0x1b, '[', '0', 'n'})
+		case 6: // Cursor position report (CPR) -> \x1b[<row>;<col>R (1-indexed)
+			_parser_emit_cpr(p, false)
+		}
+	} else if p.csi_prefix == '?' {
+		switch param0_val {
+		case 6: // DECXCPR - Extended Cursor Position Report -> \x1b[?<row>;<col>;1R
+			_parser_emit_cpr(p, true)
+		}
+	}
+}
+
 _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, cmd: u8) {
 	if g == nil do return
 
@@ -96,12 +145,12 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 		p.cursor.row = max(min_row, p.cursor.row - param0)
 		p.cursor.pending_wrap = false
 
-	case 'B': // CUD - Cursor Down
+	case 'B', 'e': // CUD / VPR - Cursor Down / Vertical Position Relative
 		max_row := p.scroll_bottom if (p.origin_mode || p.cursor.row <= p.scroll_bottom) else g.row_count - 1
 		p.cursor.row = min(max_row, p.cursor.row + param0)
 		p.cursor.pending_wrap = false
 
-	case 'C': // CUF - Cursor Forward
+	case 'C', 'a': // CUF / HPR - Cursor Forward / Horizontal Position Relative
 		max_col := _parser_eff_right(p, g) if (p.declrmm && (p.origin_mode || p.cursor.col <= _parser_eff_right(p, g))) else g.col_count - 1
 		p.cursor.col = min(max_col, p.cursor.col + param0)
 		p.cursor.pending_wrap = false
@@ -152,7 +201,7 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 		}
 		p.cursor.pending_wrap = false
 
-	case 'G': // CHA - Cursor Horizontal Absolute (1-indexed)
+	case 'G', '`': // CHA / HPA - Cursor Horizontal Absolute (1-indexed)
 		c := 1
 		if p.csi_count >= 1 && p.csi_params[0] > 0 do c = p.csi_params[0]
 		if p.origin_mode {
@@ -600,28 +649,7 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 		}
 
 	case 'n': // DSR - Device Status Report
-		param0_val := p.csi_params[0] if p.csi_count > 0 else 0
-		if p.csi_prefix == 0 {
-			switch param0_val {
-			case 5: // Status report -> \x1b[0n (OK)
-				parser_emit_response(p, []u8{0x1b, '[', '0', 'n'})
-			case 6: // Cursor position report (CPR) -> \x1b[<row>;<col>R (1-indexed)
-				buf: [32]u8
-				r_buf: [16]u8
-				c_buf: [16]u8
-				r_str := strconv.write_int(r_buf[:], i64(p.cursor.row + 1), 10)
-				c_str := strconv.write_int(c_buf[:], i64(p.cursor.col + 1), 10)
-				buf[0] = 0x1b
-				buf[1] = '['
-				copy(buf[2:], r_str)
-				r_len := len(r_str)
-				buf[2 + r_len] = ';'
-				copy(buf[3 + r_len:], c_str)
-				c_len := len(c_str)
-				buf[3 + r_len + c_len] = 'R'
-				parser_emit_response(p, buf[:4 + r_len + c_len])
-			}
-		}
+		_parser_handle_dsr(p)
 
 	case 'v': // DECCRA - Copy Rectangular Area (intermediate '$')
 		if p.csi_prefix == 0 && p.csi_intermediate == '$' {
