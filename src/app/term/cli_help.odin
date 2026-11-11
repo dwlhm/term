@@ -87,6 +87,7 @@ APP_CLI_USAGE :: "usage: term session <verb> … (term session --help lists the 
 app_cli_help :: proc() -> int {
 	fmt.println("term — GPU terminal emulator with persistent sessions\n")
 	fmt.println("  term                         open a window (or show the running one)")
+	fmt.println("  term studio [--demo]         native multi-surface GPU compositor TUI cockpit")
 	fmt.println("  term session <verb> …        sessions (below)")
 	fmt.println("  term run <script.lua> …      run a term Lua script")
 	fmt.println("  term auto <check|snapshot> …          automation contracts (term auto --help)")

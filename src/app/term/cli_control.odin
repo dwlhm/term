@@ -57,6 +57,7 @@ app_run_control_cli :: proc(args: []string) -> (handled: bool, exit_code: int) {
 	switch args[1] {
 	case "--help", "-h", "help": return true, app_cli_help()
 	case "skill":                return true, app_cli_skill(args[2:])
+	case "studio", "top":        return true, app_cli_studio(args[2:])
 	case "run":                  return true, app_cli_run(args[2:])
 	case "auto":                 return true, app_cli_auto(args[2:])
 	case "quit", "kill":         return true, app_cli_quit(args[1:])
