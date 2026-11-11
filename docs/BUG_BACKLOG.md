@@ -40,6 +40,10 @@ Status terakhir diperbarui pada hardening v2.1.1. Dokumen ini **hanya berisi ite
 - Chrome text rendering verified on screen (tab titles, command palette)
 - Synchronized output `CSI ? 2026` (hold present + safety valve 150 ms)
 - Command/aksi UI: zoom font, fullscreen, select-all, close pane, cycle focus
+- DEC VT420/VT520 rectangular area operations (`DECCRA`, `DECERA`, `DECFRA`, `DECSERA`) & margins (`DECSLRM` + `DECLRMM ?69`, `DECRQM ?69`)
+- Origin-Relative Cursor Position Report (`CPR` `CSI 6 n` & `DECXCPR` `CSI ? 6 n` di bawah `DECOM ?6` origin mode)
+- ECMA-48 cursor positioning: `HPA` (`CSI Ps \``), `HPR` (`CSI Ps a`), `VPR` (`CSI Ps e`)
+- Desktop notifications: OSC 9 (iTerm2 / ConEmu) & OSC 777 (urxvt notify) dengan sanitasi payload & zero-alloc parsing
 - Resize reflow + scrollback preservation; riwayat alt-screen terpisah
 
 ---
@@ -63,12 +67,8 @@ README sudah dikoreksi untuk tidak mengklaim fitur ini. Jangan tambahkan klaim s
 
 ## C. Technical debt
 
-1. `app.cursor` (`Cursor_State`) belum disinkronkan penuh dengan `parser.cursor.shape`.
-2. Param `is_focused` di `terminal_view_render_pane` tidak dipakai.
-3. `make test` selalu rebuild semua harness (lambat); pertimbangkan target incremental.
-4. `Kitty_Extension.images` masih array 32 slot; belum ada eviction LRU eksplisit
-   (saat ini: slot bebas dulu, lalu slot 0 + delete placement).
-5. Terminal menyimpan pointer ke dirinya sendiri (`parser.user_data`), sehingga struct
+1. `make test` selalu rebuild semua harness (lambat); pertimbangkan target incremental.
+2. Terminal menyimpan pointer ke dirinya sendiri (`parser.user_data`), sehingga struct
    `Terminal` **tidak boleh di-copy setelah `terminal_init`**. Saat ini aman karena
    session selalu dialokasikan di heap (`session_create`) — jangan pernah menaruh
    `Terminal` di dalam `[dynamic]` yang bisa realloc.
@@ -78,21 +78,11 @@ README sudah dikoreksi untuk tidak mengklaim fitur ini. Jangan tambahkan klaim s
 Daftar urutan perbaikan berdasarkan spesifikasi resmi terminal (ECMA-48 dan DEC VT100–VT520).
 Dikerjakan per-sub-protokol secara utuh (kontrak root di parser/grid), bukan tambal per-sequence:
 
-1. **Rectangular Area Operations** (`DECCRA` copy, `DECERA` erase, `DECFRA` fill, `DECSERA` selective erase)
-   — standar DEC VT400. Butuh satu primitif manipulasi rectangle di `grid/` yang dipakai bersama oleh keempat sequence.
-2. **Horizontal Scrolling Region** (`DECSLRM` + `DECLRMM ?69`) — standar DEC VT420.
-   Menambahkan `scroll_left` & `scroll_right` pada `Parser`, dan dihormati oleh `CR`, `BS`, `CUB`, `CUF`, `ICH`, `DCH`, `ECH`, dan autowrap.
-3. **Origin-Relative Cursor Position Report** (`DSR 6n` di bawah `DECOM ?6`) — standar DEC VT100.
-   CPR harus melaporkan koordinat relatif terhadap `scroll_top` saat mode origin aktif.
-4. **ECMA-48 Cursor Positioning**:
-   - `HPA` (`CSI Ps \``) — Horizontal Position Absolute
-   - `HPR` (`CSI Ps a`) — Horizontal Position Relative
-   - `VPR` (`CSI Ps e`) — Vertical Position Relative
-5. **Standard Mode Queries & Device Reports**:
+1. **Standard Mode Queries & Device Reports**:
    - `DECRQSS` (`DCS $ q`) — Request Status String (VT420)
    - `DECRQM` (`CSI Ps $ p`) — konsistensi pelaporan mode ANSI (mis. IRM 4) dan DEC
    - `DA1` / `DA2` — kelengkapan atribut perangkat standar VT220/VT420
-6. **Character Protection & Selective Erase** (`DECSCA`, `DECSED`, `DECSEL`) — standar DEC VT220.
+2. **Character Protection & Selective Erase** (`DECSCA`, `DECSED`, `DECSEL`) — standar DEC VT220.
    Atribut proteksi sel yang dihormati saat operasi erase selektif.
 
 ## Prioritas yang disarankan

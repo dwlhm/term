@@ -53,6 +53,9 @@ Terminal_Session :: struct {
 	scroll_accum:        f32,
 	program_status:      extension.Program_Status,
 	osc_7501_ctx:        extension.Osc_7501_Context,
+	last_notification:   extension.Terminal_Notification,
+	has_notification:    bool,
+	osc_notify_ctx:      extension.Osc_Notify_Context,
 	command_start_time:  time.Time,
 	osc_52_ctx:          extension.Osc_52_Context,
 	osc_color_cfg:       extension.Osc_Color_Config,
@@ -164,6 +167,20 @@ _osc_7501_sink :: proc(user_data: rawptr, status: extension.Program_Status) -> b
 	return true
 }
 
+_osc_notify_sink :: proc(user_data: rawptr, notif: extension.Terminal_Notification) -> bool {
+	sess := (^Terminal_Session)(user_data)
+	if sess == nil do return false
+	sess.last_notification = notif
+	sess.has_notification = true
+	return true
+}
+
+session_take_notification :: proc(sess: ^Terminal_Session) -> (notif: extension.Terminal_Notification, ok: bool) {
+	if sess == nil || !sess.has_notification do return {}, false
+	sess.has_notification = false
+	return sess.last_notification, true
+}
+
 _osc_22_handler :: proc(user_data: rawptr, osc_id: int, payload: string, term_ptr: rawptr) -> bool {
 	sess := (^Terminal_Session)(user_data)
 	if sess == nil do return false
@@ -222,6 +239,13 @@ session_create :: proc(size: proto.Size_Msg, link: Session_Link, allocator: runt
 		user_data = rawptr(sess),
 	}
 	terminal.terminal_register_osc(&sess.term, extension.OSC_PROGRAM_STATUS, extension.osc_7501_handler, rawptr(&sess.osc_7501_ctx))
+
+	sess.osc_notify_ctx = extension.Osc_Notify_Context{
+		sink      = _osc_notify_sink,
+		user_data = rawptr(sess),
+	}
+	terminal.terminal_register_osc(&sess.term, extension.OSC_NOTIFY_9, extension.osc_9_handler, rawptr(&sess.osc_notify_ctx))
+	terminal.terminal_register_osc(&sess.term, extension.OSC_NOTIFY_777, extension.osc_777_handler, rawptr(&sess.osc_notify_ctx))
 
 	sess.osc_color_cfg.responder = _session_emit_responder
 	sess.osc_color_cfg.user_data = rawptr(sess)

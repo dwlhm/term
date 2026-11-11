@@ -106,6 +106,18 @@ test_session_osc_extensions :: proc(t: ^testing.T) {
 	feed(sess, "\x1b]22;pointer\x07\x1b]1337;ScrollSpeed=0.75\x07")
 	testing.expect_value(t, session.session_get_pointer_shape(sess), "pointer")
 	testing.expect_value(t, sess.custom_scroll_speed, 0.75)
+
+	// Notifications: OSC 9 and OSC 777
+	feed(sess, "\x1b]9;Build Finished\x07")
+	notif9, ok9 := session.session_take_notification(sess)
+	testing.expect(t, ok9, "Expected notification from OSC 9")
+	testing.expect_value(t, extension.terminal_notification_body(&notif9), "Build Finished")
+
+	feed(sess, "\x1b]777;notify;Cargo;Done in 3s\x07")
+	notif777, ok777 := session.session_take_notification(sess)
+	testing.expect(t, ok777, "Expected notification from OSC 777")
+	testing.expect_value(t, extension.terminal_notification_title(&notif777), "Cargo")
+	testing.expect_value(t, extension.terminal_notification_body(&notif777), "Done in 3s")
 }
 
 @test
