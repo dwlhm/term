@@ -102,11 +102,13 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 		p.cursor.pending_wrap = false
 
 	case 'C': // CUF - Cursor Forward
-		p.cursor.col = min(g.col_count - 1, p.cursor.col + param0)
+		max_col := _parser_eff_right(p, g) if (p.declrmm && (p.origin_mode || p.cursor.col <= _parser_eff_right(p, g))) else g.col_count - 1
+		p.cursor.col = min(max_col, p.cursor.col + param0)
 		p.cursor.pending_wrap = false
 
 	case 'D': // CUB - Cursor Back
-		p.cursor.col = max(0, p.cursor.col - param0)
+		min_col := p.scroll_left if (p.declrmm && (p.origin_mode || p.cursor.col >= p.scroll_left)) else 0
+		p.cursor.col = max(min_col, p.cursor.col - param0)
 		p.cursor.pending_wrap = false
 
 	case 'H', 'f': // CUP - Cursor Position
@@ -117,24 +119,29 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 		if p.origin_mode {
 			top := p.scroll_top
 			bot := p.scroll_bottom
+			left := _parser_eff_left(p)
+			right := _parser_eff_right(p, g)
 			p.cursor.row = clamp(top + r - 1, top, bot)
+			p.cursor.col = clamp(left + c - 1, left, right)
 		} else {
 			p.cursor.row = clamp(r - 1, 0, g.row_count - 1)
+			p.cursor.col = clamp(c - 1, 0, g.col_count - 1)
 		}
-		p.cursor.col = clamp(c - 1, 0, g.col_count - 1)
 		p.cursor.pending_wrap = false
 
 	case 'I': // CHT - Cursor Forward Tabulation
+		max_limit := _parser_eff_right(p, g) + 1
 		for _ in 0..<param0 {
-			p.cursor.col = _parser_next_tab_stop(p, g.col_count, p.cursor.col)
+			p.cursor.col = _parser_next_tab_stop(p, max_limit, p.cursor.col)
 		}
 		p.cursor.pending_wrap = false
 
 	case 'Z': // CBT - Cursor Backward Tabulation
+		min_col := p.scroll_left if (p.declrmm && (p.origin_mode || p.cursor.col >= p.scroll_left)) else 0
 		for _ in 0..<param0 {
-			target := 0
+			target := min_col
 			c := p.cursor.col - 1
-			for c >= 1 {
+			for c >= min_col + 1 {
 				if c < len(p.tab_stops) && p.tab_stops[c] {
 					target = c
 					break
@@ -148,7 +155,13 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 	case 'G': // CHA - Cursor Horizontal Absolute (1-indexed)
 		c := 1
 		if p.csi_count >= 1 && p.csi_params[0] > 0 do c = p.csi_params[0]
-		p.cursor.col = clamp(c - 1, 0, g.col_count - 1)
+		if p.origin_mode {
+			left := _parser_eff_left(p)
+			right := _parser_eff_right(p, g)
+			p.cursor.col = clamp(left + c - 1, left, right)
+		} else {
+			p.cursor.col = clamp(c - 1, 0, g.col_count - 1)
+		}
 		p.cursor.pending_wrap = false
 
 	case 'd': // VPA - Line Position Absolute (1-indexed)
@@ -164,13 +177,15 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 		p.cursor.pending_wrap = false
 
 	case 'E': // CNL - Cursor Next Line
-		p.cursor.row = clamp(p.cursor.row + param0, 0, g.row_count - 1)
-		p.cursor.col = 0
+		max_row := p.scroll_bottom if (p.origin_mode || p.cursor.row <= p.scroll_bottom) else g.row_count - 1
+		p.cursor.row = clamp(p.cursor.row + param0, 0, max_row)
+		p.cursor.col = _parser_cr_col(p)
 		p.cursor.pending_wrap = false
 
 	case 'F': // CPL - Cursor Previous Line
-		p.cursor.row = clamp(p.cursor.row - param0, 0, g.row_count - 1)
-		p.cursor.col = 0
+		min_row := p.scroll_top if (p.origin_mode || p.cursor.row >= p.scroll_top) else 0
+		p.cursor.row = clamp(p.cursor.row - param0, min_row, g.row_count - 1)
+		p.cursor.col = _parser_cr_col(p)
 		p.cursor.pending_wrap = false
 
 	case 'J': // ED - Erase in Display (BCE aware)
@@ -215,12 +230,16 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 		}
 
 	case 'L': // IL - Insert Lines (BCE aware)
-		erase_c, erase_dc := _parser_erase_cell(p)
-		_parser_scroll_down(p, g, d, p.cursor.row, p.scroll_bottom, param0, erase_c, erase_dc)
+		if _parser_in_h_margins(p, g) && p.cursor.row >= p.scroll_top && p.cursor.row <= p.scroll_bottom {
+			erase_c, erase_dc := _parser_erase_cell(p)
+			_parser_scroll_down(p, g, d, p.cursor.row, p.scroll_bottom, param0, erase_c, erase_dc)
+		}
 
 	case 'M': // DL - Delete Lines (BCE aware)
-		erase_c, erase_dc := _parser_erase_cell(p)
-		_parser_scroll_up(p, g, d, p.cursor.row, p.scroll_bottom, param0, erase_c, erase_dc)
+		if _parser_in_h_margins(p, g) && p.cursor.row >= p.scroll_top && p.cursor.row <= p.scroll_bottom {
+			erase_c, erase_dc := _parser_erase_cell(p)
+			_parser_scroll_up(p, g, d, p.cursor.row, p.scroll_bottom, param0, erase_c, erase_dc)
+		}
 
 	case 'S': // SU - Scroll Up
 		erase_c, erase_dc := _parser_erase_cell(p)
@@ -231,24 +250,10 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 		_parser_scroll_down(p, g, d, p.scroll_top, p.scroll_bottom, param0, erase_c, erase_dc)
 
 	case 'P': // DCH - Delete Characters (BCE aware)
-		count := min(param0, g.col_count - p.cursor.col)
-		for c in p.cursor.col..<(g.col_count - count) {
-			src := grid.grid_get_cell(g, p.cursor.row, c + count)
-			src_dc := grid.grid_get_direct_color(g, p.cursor.row, c + count)
-			grid.grid_set_cell(g, d, p.cursor.row, c, src, src_dc)
-		}
-		erase_c, erase_dc := _parser_erase_cell(p)
-		grid.grid_clear_line(g, d, p.cursor.row, g.col_count - count, g.col_count, erase_c, erase_dc)
+		_parser_dch(p, g, d, param0)
 
 	case '@': // ICH - Insert Characters (BCE aware)
-		count := min(param0, g.col_count - p.cursor.col)
-		for c := g.col_count - 1; c >= p.cursor.col + count; c -= 1 {
-			src := grid.grid_get_cell(g, p.cursor.row, c - count)
-			src_dc := grid.grid_get_direct_color(g, p.cursor.row, c - count)
-			grid.grid_set_cell(g, d, p.cursor.row, c, src, src_dc)
-		}
-		erase_c, erase_dc := _parser_erase_cell(p)
-		grid.grid_clear_line(g, d, p.cursor.row, p.cursor.col, p.cursor.col + count, erase_c, erase_dc)
+		_parser_ich(p, g, d, param0)
 
 	case 'm': // SGR - Styling & Color Attributes
 		// Private-prefixed forms are NOT SGR: `CSI > 4 ; 1 m` is xterm's
@@ -426,15 +431,21 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 			p.scroll_top = t - 1
 			p.scroll_bottom = b - 1
 			p.cursor.row = p.scroll_top if p.origin_mode else 0
-			p.cursor.col = 0
+			p.cursor.col = _parser_eff_left(p) if p.origin_mode else 0
 			p.cursor.pending_wrap = false
 		}
 
-	case 's': // SCOSC - Save Cursor Position
-		p.cursor.saved_row = p.cursor.row
-		p.cursor.saved_col = p.cursor.col
-		p.cursor.saved_origin_mode = p.origin_mode
-		p.cursor.saved_autowrap = p.autowrap
+	case 's': // DECSLRM (when DECLRMM ?69 is set) or SCOSC - Save Cursor Position
+		if p.csi_prefix == 0 && p.csi_intermediate == 0 {
+			if p.declrmm {
+				_parser_handle_decslrm(p, g)
+			} else if p.csi_count == 0 {
+				p.cursor.saved_row = p.cursor.row
+				p.cursor.saved_col = p.cursor.col
+				p.cursor.saved_origin_mode = p.origin_mode
+				p.cursor.saved_autowrap = p.autowrap
+			}
+		}
 
 	case 'u': // KitKat keyboard protocol (prefixed) or SCORC - Restore Cursor
 		switch p.csi_prefix {
@@ -470,7 +481,7 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 				case 6:
 					p.origin_mode = true
 					p.cursor.row = p.scroll_top
-					p.cursor.col = 0
+					p.cursor.col = _parser_eff_left(p)
 					p.cursor.pending_wrap = false
 				case 7:
 					p.autowrap = true
@@ -478,6 +489,8 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 					p.mouse_mode = .X10
 				case 25:
 					p.cursor.visible = true
+				case 69:
+					p.declrmm = true
 				case 47, 1047, 1049:
 					if !p.in_alt_screen {
 						if mode == 1049 {
@@ -528,15 +541,22 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 					p.mouse_mode = .None
 				case 25:
 					p.cursor.visible = false
+				case 69:
+					p.declrmm = false
+					p.scroll_left = 0
+					p.scroll_right = max(0, g.col_count - 1)
 				case 47, 1047, 1049:
 					if p.in_alt_screen {
 						if p.on_alt_screen != nil do p.on_alt_screen(p.user_data, false, mode)
+						target_g := p.active_grid if p.active_grid != nil else g
 						p.in_alt_screen = false
 						if mode == 1049 {
-							p.cursor.row = clamp(p.cursor.saved_row, 0, g.row_count - 1)
-							p.cursor.col = clamp(p.cursor.saved_col, 0, g.col_count - 1)
+							p.cursor.row = clamp(p.cursor.saved_row, 0, target_g.row_count - 1)
+							p.cursor.col = clamp(p.cursor.saved_col, 0, target_g.col_count - 1)
 						}
 						p.cursor.pending_wrap = false
+					} else if p.on_alt_screen != nil {
+						p.on_alt_screen(p.user_data, false, mode)
 					}
 				case 1004:
 					p.report_focus = false
@@ -601,6 +621,34 @@ _parser_handle_csi :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 				buf[3 + r_len + c_len] = 'R'
 				parser_emit_response(p, buf[:4 + r_len + c_len])
 			}
+		}
+
+	case 'v': // DECCRA - Copy Rectangular Area (intermediate '$')
+		if p.csi_prefix == 0 && p.csi_intermediate == '$' {
+			_parser_handle_deccra(p, g, d)
+		} else if p.on_csi != nil {
+			p.on_csi(p.user_data, rune(cmd), p.csi_params[:p.csi_count])
+		}
+
+	case 'x': // DECFRA - Fill Rectangular Area (intermediate '$')
+		if p.csi_prefix == 0 && p.csi_intermediate == '$' {
+			_parser_handle_decfra(p, g, d)
+		} else if p.on_csi != nil {
+			p.on_csi(p.user_data, rune(cmd), p.csi_params[:p.csi_count])
+		}
+
+	case 'z': // DECERA - Erase Rectangular Area (intermediate '$')
+		if p.csi_prefix == 0 && p.csi_intermediate == '$' {
+			_parser_handle_decera(p, g, d)
+		} else if p.on_csi != nil {
+			p.on_csi(p.user_data, rune(cmd), p.csi_params[:p.csi_count])
+		}
+
+	case '{': // DECSERA - Selective Erase Rectangular Area (intermediate '$')
+		if p.csi_prefix == 0 && p.csi_intermediate == '$' {
+			_parser_handle_decsera(p, g, d)
+		} else if p.on_csi != nil {
+			p.on_csi(p.user_data, rune(cmd), p.csi_params[:p.csi_count])
 		}
 
 	case 'y': // DECRQCRA - Request Checksum of Rectangular Area (intermediate '*')

@@ -11,10 +11,11 @@ import uw "../../unicode_width"
 // takes the per-character path for that byte (wrap, scroll, prompt rows).
 _parser_print_ascii :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, text: []u8) {
 	_parser_mark_prompt_row(p, g)
+	has_h_margins := p.declrmm && (p.scroll_left > 0 || p.scroll_right < g.col_count - 1)
 	i := 0
 	for i < len(text) {
 		n := 0
-		if !p.cursor.pending_wrap && p.autowrap {
+		if !has_h_margins && !p.cursor.pending_wrap && p.autowrap {
 			c := cell.cell_make(0, p.cursor.active_fg, p.cursor.active_bg, p.cursor.active_style, p.cursor.active_flags)
 			linked, dc := _parser_apply_link(p, c, p.cursor.direct_color)
 			n = grid.grid_write_ascii(g, d, p.cursor.row, p.cursor.col, text[i:], linked, dc)
@@ -69,11 +70,14 @@ _parser_apply_pending_wrap :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_
 		return
 	}
 	if !p.cursor.pending_wrap do return
-	phys := grid.grid_physical_row(g, p.cursor.row)
-	if phys >= 0 && phys < len(g.rows) {
-		g.rows[phys].wrap = true
+	has_h_margins := p.declrmm && (p.scroll_left > 0 || p.scroll_right < g.col_count - 1)
+	if !has_h_margins {
+		phys := grid.grid_physical_row(g, p.cursor.row)
+		if phys >= 0 && phys < len(g.rows) {
+			g.rows[phys].wrap = true
+		}
 	}
-	p.cursor.col = 0
+	p.cursor.col = _parser_eff_left(p)
 	if p.cursor.row == p.scroll_bottom {
 		erase_c, erase_dc := _parser_erase_cell(p)
 		_parser_scroll_up(p, g, d, p.scroll_top, p.scroll_bottom, 1, erase_c, erase_dc)
@@ -211,13 +215,20 @@ _parser_put_char :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, c
 		}
 	}
 
+	eff_right := _parser_eff_right(p, g)
+	right_col := eff_right if (p.declrmm && p.cursor.col <= eff_right) else g.col_count - 1
+	has_h_margins := p.declrmm && (p.scroll_left > 0 || eff_right < g.col_count - 1)
+
 	if p.autowrap {
-		if p.cursor.pending_wrap || (w == 2 && p.cursor.col >= g.col_count - 1) {
-			phys := grid.grid_physical_row(g, p.cursor.row)
-			if phys >= 0 && phys < len(g.rows) {
-				g.rows[phys].wrap = true
+		if p.cursor.pending_wrap || (w == 2 && p.cursor.col >= right_col) {
+			if !has_h_margins {
+				phys := grid.grid_physical_row(g, p.cursor.row)
+				if phys >= 0 && phys < len(g.rows) {
+					g.rows[phys].wrap = true
+				}
 			}
-			p.cursor.col = 0
+			p.cursor.col = _parser_eff_left(p)
+			right_col = eff_right
 			if p.cursor.row == p.scroll_bottom {
 				erase_c, erase_dc := _parser_erase_cell(p)
 				_parser_scroll_up(p, g, d, p.scroll_top, p.scroll_bottom, 1, erase_c, erase_dc)
@@ -228,10 +239,10 @@ _parser_put_char :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, c
 		}
 	} else {
 		p.cursor.pending_wrap = false
-		if w == 2 && p.cursor.col >= g.col_count - 1 {
-			p.cursor.col = max(0, g.col_count - 2)
-		} else if p.cursor.col >= g.col_count {
-			p.cursor.col = max(0, g.col_count - 1)
+		if w == 2 && p.cursor.col >= right_col {
+			p.cursor.col = max(0, right_col - 1)
+		} else if p.cursor.col > right_col {
+			p.cursor.col = max(0, right_col)
 		}
 	}
 	_parser_mark_prompt_row(p, g)
@@ -256,24 +267,24 @@ _parser_put_char :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, c
 			grid.grid_set_cell(g, d, p.cursor.row, p.cursor.col + 1, linked_cont, cont_dc)
 		}
 
-		if p.cursor.col + 2 < g.col_count {
+		if p.cursor.col + 2 <= right_col {
 			p.cursor.col += 2
 		} else if p.autowrap {
 			p.cursor.pending_wrap = true
 		} else {
-			p.cursor.col = max(0, g.col_count - 2)
+			p.cursor.col = max(0, right_col - 1)
 		}
 	} else {
 		c := cell.cell_make(ch, p.cursor.active_fg, p.cursor.active_bg, p.cursor.active_style, p.cursor.active_flags)
 		linked_cell, link_dc := _parser_apply_link(p, c, p.cursor.direct_color)
 		grid.grid_set_cell(g, d, p.cursor.row, p.cursor.col, linked_cell, link_dc)
 
-		if p.cursor.col + 1 < g.col_count {
+		if p.cursor.col + 1 <= right_col {
 			p.cursor.col += 1
 		} else if p.autowrap {
 			p.cursor.pending_wrap = true
 		} else {
-			p.cursor.col = max(0, g.col_count - 1)
+			p.cursor.col = max(0, right_col)
 		}
 	}
 }

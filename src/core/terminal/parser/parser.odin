@@ -34,6 +34,9 @@ parser_init :: proc(p: ^Parser, rows, cols: int) {
 	p.state = .Ground
 	p.scroll_top = 0
 	p.scroll_bottom = max(0, rows - 1)
+	p.scroll_left = 0
+	p.scroll_right = max(0, cols - 1)
+	p.declrmm = false
 	p.cursor = Cursor{
 		row          = 0,
 		col          = 0,
@@ -116,7 +119,18 @@ parser_destroy :: proc(p: ^Parser) {
 }
 
 parser_reset :: proc(p: ^Parser, rows, cols: int) {
+	if p == nil do return
+	egc_pool := p.egc_pool
+	active_grid, active_damage := p.active_grid, p.active_damage
+	on_osc, on_csi, on_apc, on_dcs := p.on_osc, p.on_csi, p.on_apc, p.on_dcs
+	on_clear, on_scroll, on_alt_screen := p.on_clear, p.on_scroll, p.on_alt_screen
+	cell_w, cell_h, user_data := p.cell_w, p.cell_h, p.user_data
 	parser_init(p, rows, cols)
+	p.egc_pool = egc_pool
+	p.active_grid, p.active_damage = active_grid, active_damage
+	p.on_osc, p.on_csi, p.on_apc, p.on_dcs = on_osc, on_csi, on_apc, on_dcs
+	p.on_clear, p.on_scroll, p.on_alt_screen = on_clear, on_scroll, on_alt_screen
+	p.cell_w, p.cell_h, p.user_data = cell_w, cell_h, user_data
 }
 
 _parser_dispatch_apc :: proc(p: ^Parser) {
@@ -215,15 +229,17 @@ _parser_handle_osc_133 :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Trac
 
 _parser_dispatch_osc :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker) {
 	if p == nil do return
-	defer {
-		clear(&p.osc_buf)
-		p.osc_overflow = false
-	}
 	// Oversized/truncated OSC sequences are dropped whole so a clipboard or
 	// hyperlink payload can never be silently cut in half.
-	if p.osc_overflow || len(p.osc_buf) == 0 do return
+	if p.osc_overflow || len(p.osc_buf) == 0 {
+		clear(&p.osc_buf)
+		p.osc_overflow = false
+		return
+	}
 
 	s := string(p.osc_buf[:])
+	clear(&p.osc_buf)
+	p.osc_overflow = false
 	semi_idx := strings.index_byte(s, ';')
 
 	osc_id := 0
@@ -278,7 +294,7 @@ parser_parse_byte :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, 
 		case 0x1B: // ESC
 			p.state = .Escape
 		case '\r': // Carriage Return
-			p.cursor.col = 0
+			p.cursor.col = _parser_cr_col(p)
 			p.cursor.pending_wrap = false
 		case '\n', 0x0B, 0x0C: // Line Feed, VT, FF
 			phys := grid.grid_physical_row(g, p.cursor.row)
@@ -286,18 +302,21 @@ parser_parse_byte :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, 
 				g.rows[phys].wrap = false
 			}
 			if p.cursor.row == p.scroll_bottom {
-				erase_c, erase_dc := _parser_erase_cell(p)
-				_parser_scroll_up(p, g, d, p.scroll_top, p.scroll_bottom, 1, erase_c, erase_dc)
+				if _parser_in_h_margins(p, g) {
+					erase_c, erase_dc := _parser_erase_cell(p)
+					_parser_scroll_up(p, g, d, p.scroll_top, p.scroll_bottom, 1, erase_c, erase_dc)
+				}
 			} else if p.cursor.row < g.row_count - 1 {
 				p.cursor.row += 1
 			}
 			p.cursor.pending_wrap = false
 			_parser_mark_prompt_row(p, g)
 		case '\t': // Tab - advance to the next programmed stop
-			p.cursor.col = _parser_next_tab_stop(p, g.col_count, p.cursor.col)
+			p.cursor.col = _parser_next_tab_stop(p, _parser_eff_right(p, g) + 1, p.cursor.col)
 			p.cursor.pending_wrap = false
 		case 0x08: // Backspace
-			p.cursor.col = max(0, p.cursor.col - 1)
+			min_col := p.scroll_left if (p.declrmm && (p.origin_mode || p.cursor.col >= p.scroll_left)) else 0
+			p.cursor.col = max(min_col, p.cursor.col - 1)
 			p.cursor.pending_wrap = false
 		case 0x07: // BEL
 			// Bell ignored in core
@@ -371,8 +390,10 @@ parser_parse_byte :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, 
 			p.state = .Ground
 		case 'D': // IND - index (down one line, keep column)
 			if p.cursor.row == p.scroll_bottom {
-				erase_c, erase_dc := _parser_erase_cell(p)
-				_parser_scroll_up(p, g, d, p.scroll_top, p.scroll_bottom, 1, erase_c, erase_dc)
+				if _parser_in_h_margins(p, g) {
+					erase_c, erase_dc := _parser_erase_cell(p)
+					_parser_scroll_up(p, g, d, p.scroll_top, p.scroll_bottom, 1, erase_c, erase_dc)
+				}
 			} else if p.cursor.row < g.row_count - 1 {
 				p.cursor.row += 1
 			}
@@ -380,10 +401,12 @@ parser_parse_byte :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, 
 			_parser_mark_prompt_row(p, g)
 			p.state = .Ground
 		case 'E': // NEL - next line (CR + IND)
-			p.cursor.col = 0
+			p.cursor.col = _parser_cr_col(p)
 			if p.cursor.row == p.scroll_bottom {
-				erase_c, erase_dc := _parser_erase_cell(p)
-				_parser_scroll_up(p, g, d, p.scroll_top, p.scroll_bottom, 1, erase_c, erase_dc)
+				if _parser_in_h_margins(p, g) {
+					erase_c, erase_dc := _parser_erase_cell(p)
+					_parser_scroll_up(p, g, d, p.scroll_top, p.scroll_bottom, 1, erase_c, erase_dc)
+				}
 			} else if p.cursor.row < g.row_count - 1 {
 				p.cursor.row += 1
 			}
@@ -401,16 +424,21 @@ parser_parse_byte :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, 
 			p.state = .Dcs_String
 		case 'M': // Reverse Index (scroll down if at top margin)
 			if p.cursor.row == p.scroll_top {
-				erase_c, erase_dc := _parser_erase_cell(p)
-				_parser_scroll_down(p, g, d, p.scroll_top, p.scroll_bottom, 1, erase_c, erase_dc)
+				if _parser_in_h_margins(p, g) {
+					erase_c, erase_dc := _parser_erase_cell(p)
+					_parser_scroll_down(p, g, d, p.scroll_top, p.scroll_bottom, 1, erase_c, erase_dc)
+				}
 			} else {
 				p.cursor.row = max(0, p.cursor.row - 1)
 			}
 			p.state = .Ground
 		case 'c': // RIS - Reset to Initial State
-			parser_reset(p, g.row_count, g.col_count)
-			grid.grid_clear_all(g, d)
-			grid.grid_clear_history(g)
+			if p.on_clear != nil do p.on_clear(p.user_data, 4)
+			target_g := p.active_grid if p.active_grid != nil else g
+			target_d := p.active_damage if p.active_damage != nil else d
+			parser_reset(p, target_g.row_count, target_g.col_count)
+			grid.grid_clear_all(target_g, target_d)
+			grid.grid_clear_history(target_g)
 			if p.on_clear != nil do p.on_clear(p.user_data, 3)
 			p.state = .Ground
 		case '7': // Save Cursor
@@ -429,11 +457,17 @@ parser_parse_byte :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, 
 		case '=', '>': // DECKPAM / DECKPNM
 			p.keypad_app = b == '='
 			p.state = .Ground
+		case 0x1B: // Restart ESC sequence on consecutive ESC (DEC STD 070)
+			p.state = .Escape
 		case:
 			p.state = .Ground
 		}
 
 	case .Esc_Charset:
+		if b == 0x1B {
+			p.state = .Escape
+			return
+		}
 		// ISO 2022 designator: 'B' US-ASCII, '0' DEC Special Graphics, 'A' UK,
 		// 'U' Null. Anything else keeps the slot unchanged.
 		if p.esc_charset_slot < 4 {
@@ -463,9 +497,10 @@ parser_parse_byte :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, 
 		} else if b == 0x1B {
 			// Stay in Esc_In_Dcs
 		} else {
-			p.state = .Ground
+			p.state = .Escape
 			clear(&p.dcs_buf)
 			p.dcs_overflow = false
+			parser_parse_byte(p, g, d, b)
 		}
 
 	case .Apc_String:
@@ -487,11 +522,16 @@ parser_parse_byte :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, 
 		} else if b == 0x1B {
 			// Stay in Esc_In_Apc
 		} else {
-			p.state = .Ground
+			p.state = .Escape
+			clear(&p.apc_buf)
+			p.apc_overflow = false
+			parser_parse_byte(p, g, d, b)
 		}
 
 	case .Csi_Entry:
-		if b == '?' || b == '>' || b == '<' || b == '=' {
+		if b == 0x1B {
+			p.state = .Escape
+		} else if b == '?' || b == '>' || b == '<' || b == '=' {
 			p.csi_prefix = b
 			p.state = .Csi_Param
 		} else if b >= '0' && b <= '9' {
@@ -507,14 +547,16 @@ parser_parse_byte :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, 
 			p.state = .Csi_Param
 		} else if b >= 0x40 && b <= 0x7E {
 			// Instant CSI command with 0 parameters
-			_parser_handle_csi(p, g, d, b)
 			p.state = .Ground
+			_parser_handle_csi(p, g, d, b)
 		} else {
 			p.state = .Ground
 		}
 
 	case .Csi_Param:
-		if b >= '0' && b <= '9' {
+		if b == 0x1B {
+			p.state = .Escape
+		} else if b >= '0' && b <= '9' {
 			idx := max(0, p.csi_count - 1)
 			if p.csi_count == 0 {
 				idx = 0
@@ -531,16 +573,16 @@ parser_parse_byte :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, 
 			p.csi_intermediate = b
 		} else if b >= 0x40 && b <= 0x7E {
 			// End of CSI command
-			_parser_handle_csi(p, g, d, b)
 			p.state = .Ground
+			_parser_handle_csi(p, g, d, b)
 		} else {
 			p.state = .Ground
 		}
 
 	case .Osc_String:
 		if b == 0x07 { // BEL terminates OSC
-			_parser_dispatch_osc(p, g, d)
 			p.state = .Ground
+			_parser_dispatch_osc(p, g, d)
 		} else if b == 0x1B { // ESC inside OSC might be ST (ESC \)
 			p.state = .Esc_In_Osc
 		} else if len(p.osc_buf) < MAX_OSC_BUFFER {
@@ -551,13 +593,16 @@ parser_parse_byte :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, 
 
 	case .Esc_In_Osc:
 		if b == '\\' { // String Terminator (ST)
+			p.state = .Ground
 			_parser_dispatch_osc(p, g, d)
-			p.state = .Ground
+		} else if b == 0x1B {
+			// Stay in Esc_In_Osc
 		} else {
-			// Aborted OSC sequence
-			p.state = .Ground
+			// Aborted OSC sequence — treat previous ESC + current byte b as new Escape sequence
+			p.state = .Escape
 			clear(&p.osc_buf)
 			p.osc_overflow = false
+			parser_parse_byte(p, g, d, b)
 		}
 	}
 }
@@ -573,6 +618,10 @@ _parser_abort_sequence :: proc(p: ^Parser) {
 
 parser_parse_bytes :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, data: []u8) {
 	if p == nil || len(data) == 0 do return
+	cur_g := g
+	cur_d := d
+	p.active_grid = cur_g
+	p.active_damage = cur_d
 
 	i := 0
 	for i < len(data) {
@@ -581,27 +630,33 @@ parser_parse_bytes :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker,
 			start := i
 			for i < len(data) && data[i] >= 0x20 && data[i] <= 0x7E do i += 1
 			if i > start {
-				_parser_print_ascii(p, g, d, data[start:i])
+				_parser_print_ascii(p, cur_g, cur_d, data[start:i])
 				continue
 			}
 		}
 
-		parser_parse_byte(p, g, d, data[i])
+		parser_parse_byte(p, cur_g, cur_d, data[i])
+		cur_g = p.active_grid
+		cur_d = p.active_damage
 		i += 1
 	}
 }
 
 _parser_scroll_up :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, top, bottom, n: int, fill: cell.Semantic_Cell, dc: cell.Direct_Color) -> int {
-	scrolled := grid.grid_scroll_up(g, d, top, bottom, n, fill, dc)
-	if scrolled > 0 && p.on_scroll != nil {
+	left := _parser_eff_left(p)
+	right := _parser_eff_right(p, g)
+	scrolled := grid.grid_scroll_rect_up(g, d, top, bottom, left, right, n, fill, dc)
+	if scrolled > 0 && left == 0 && right == g.col_count - 1 && p.on_scroll != nil {
 		p.on_scroll(p.user_data, scrolled, top, bottom)
 	}
 	return scrolled
 }
 
 _parser_scroll_down :: proc(p: ^Parser, g: ^grid.Grid, d: ^damage.Damage_Tracker, top, bottom, n: int, fill: cell.Semantic_Cell, dc: cell.Direct_Color) -> int {
-	scrolled := grid.grid_scroll_down(g, d, top, bottom, n, fill, dc)
-	if scrolled > 0 && p.on_scroll != nil {
+	left := _parser_eff_left(p)
+	right := _parser_eff_right(p, g)
+	scrolled := grid.grid_scroll_rect_down(g, d, top, bottom, left, right, n, fill, dc)
+	if scrolled > 0 && left == 0 && right == g.col_count - 1 && p.on_scroll != nil {
 		p.on_scroll(p.user_data, -scrolled, top, bottom)
 	}
 	return scrolled

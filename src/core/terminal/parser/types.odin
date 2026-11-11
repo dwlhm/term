@@ -1,7 +1,9 @@
 package terminal_parser
 
 import cell "../cell"
+import damage "../damage"
 import egc "../egc"
+import grid "../grid"
 
 Parser_State :: enum u8 {
 	Ground,
@@ -78,7 +80,7 @@ MAX_CSI_PARAMS      :: 16
 MAX_OSC_BUFFER      :: 1 * 1024 * 1024
 MAX_APC_BUFFER      :: 16777216
 MAX_DCS_BUFFER      :: 16777216
-MAX_RESPONSE_BUFFER :: 256
+MAX_RESPONSE_BUFFER :: 1024
 
 Osc_Callback    :: #type proc(user_data: rawptr, osc_id: int, payload: string) -> bool
 Csi_Callback    :: #type proc(user_data: rawptr, cmd: rune, params: []int) -> bool
@@ -95,6 +97,9 @@ Parser :: struct {
 	cursor:           Cursor,
 	scroll_top:       int,
 	scroll_bottom:    int,
+	scroll_left:      int,
+	scroll_right:     int,
+	declrmm:          bool, // DECLRMM (?69) - Left and Right Margin Mode
 
 	csi_params:       [MAX_CSI_PARAMS]int,
 	// csi_sep[i] is the byte that terminated parameter i (';' or ':'), 0 when it
@@ -155,6 +160,8 @@ Parser :: struct {
 	utf8_buf:         [4]u8,
 
 	egc_pool:         ^egc.Egc_Pool,
+	active_grid:      ^grid.Grid,
+	active_damage:    ^damage.Damage_Tracker,
 
 	on_osc:           Osc_Callback,
 	on_csi:           Csi_Callback,

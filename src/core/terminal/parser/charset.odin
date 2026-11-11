@@ -105,6 +105,8 @@ _parser_next_tab_stop :: proc(p: ^Parser, cols: int, from: int) -> int {
 // without touching the screen buffers or the alternate screen.
 _parser_soft_reset :: proc(p: ^Parser, g: ^grid.Grid) {
 	if p == nil do return
+	if p.on_clear != nil do p.on_clear(p.user_data, 4)
+	target_g := p.active_grid if p.active_grid != nil else g
 	p.cursor.row = 0
 	p.cursor.col = 0
 	p.cursor.pending_wrap = false
@@ -118,7 +120,12 @@ _parser_soft_reset :: proc(p: ^Parser, g: ^grid.Grid) {
 	p.cursor.underline_style = .None
 	p.cursor.direct_color = {}
 	p.scroll_top = 0
-	if g != nil do p.scroll_bottom = max(0, g.row_count - 1)
+	p.scroll_left = 0
+	p.declrmm = false
+	if target_g != nil {
+		p.scroll_bottom = max(0, target_g.row_count - 1)
+		p.scroll_right = max(0, target_g.col_count - 1)
+	}
 	p.cursor_key_mode = false
 	p.keypad_app = false
 	p.origin_mode = false
@@ -144,6 +151,7 @@ _parser_report_mode :: proc(p: ^Parser, mode: int) {
 		case 7: state = p.autowrap ? 1 : 2
 		case 25: state = p.cursor.visible ? 1 : 2
 		case 47, 1047, 1049: state = p.in_alt_screen ? 1 : 2
+		case 69: state = p.declrmm ? 1 : 2
 		case 1000, 1002, 1003:
 			enabled := p.mouse_mode != .None
 			if mode == 1002 do enabled = p.mouse_mode == .Button_Event
