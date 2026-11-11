@@ -15,7 +15,6 @@ import chrome_render "../../core/render/chrome"
 import chrome_hit "../../core/chrome/hit_test"
 import chrome_splits "../../core/chrome/splits"
 import damage "../../core/terminal/damage"
-import core_terminal "../../core/terminal"
 import ie "../../core/terminal/input_encode"
 import tabs_feat "../../features/tabs"
 import mux_feat "../../features/multiplexer"
@@ -85,7 +84,9 @@ app_handle_window_resize :: proc(app: ^Term_App) -> bool {
 	app_sync_layout_and_winsize(app, false)
 	for &pane in app.mux.panes {
 		if pane.kind == .Terminal && pane.session != nil {
-			damage.damage_mark_all(&pane.session.term.damage)
+			if _, d, _ := sess_feat.session_pane_parts(pane.session, pane.surface_id); d != nil {
+				damage.damage_mark_all(d)
+			}
 		}
 	}
 	chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
@@ -166,22 +167,19 @@ app_handle_mouse_button_down :: proc(app: ^Term_App, ev: sdl3.MouseButtonEvent) 
 
 	// 1. Right-click on pane opens native macOS NSMenu
 	if ev.button == sdl3.BUTTON_RIGHT {
-		for &p in app.mux.panes {
-			if mouse_is_in_rect({mx, my}, p.rect) {
-				old_focus := app.mux.focused_pane_id
-				if old_focus != p.id {
-					if old_p := mux_feat.multiplexer_get_pane(&app.mux, old_focus); old_p != nil && old_p.session != nil {
-						mouse_protocol_report_focus(old_p.session, false)
-					}
-					mux_feat.multiplexer_focus_pane(&app.mux, p.id)
-					if p.session != nil {
-						mouse_protocol_report_focus(p.session, true)
-					}
+		if p := mux_feat.multiplexer_pane_at(&app.mux, mx, my); p != nil {
+			old_focus := app.mux.focused_pane_id
+			if old_focus != p.id {
+				if old_p := mux_feat.multiplexer_get_pane(&app.mux, old_focus); old_p != nil && old_p.session != nil {
+					mouse_protocol_report_focus(old_p.session, false, old_p.surface_id)
 				}
-				_, active_tab := tabs_feat.tabs_manager_get_active(&app.tabs_mgr)
-				if active_tab != nil do active_tab.active_pane_id = p.id
-				break
+				mux_feat.multiplexer_focus_pane(&app.mux, p.id)
+				if p.session != nil {
+					mouse_protocol_report_focus(p.session, true, p.surface_id)
+				}
 			}
+			_, active_tab := tabs_feat.tabs_manager_get_active(&app.tabs_mgr)
+			if active_tab != nil do active_tab.active_pane_id = p.id
 		}
 		app_show_pane_context_menu(app, mx, my)
 		return
@@ -221,41 +219,40 @@ app_handle_mouse_button_down :: proc(app: ^Term_App, ev: sdl3.MouseButtonEvent) 
 	}
 
 	// Focus clicked pane & initiate selection or mouse reporting
-	for &p in app.mux.panes {
-		if mouse_is_in_rect({mx, my}, p.rect) {
-			old_focus_id := app.mux.focused_pane_id
-			if old_focus_id != p.id {
-				if old_p := mux_feat.multiplexer_get_pane(&app.mux, old_focus_id); old_p != nil && old_p.session != nil {
-					mouse_protocol_report_focus(old_p.session, false)
-				}
-				mux_feat.multiplexer_focus_pane(&app.mux, p.id)
-				if p.session != nil {
-					mouse_protocol_report_focus(p.session, true)
-				}
+	if p := mux_feat.multiplexer_pane_at(&app.mux, mx, my); p != nil {
+		old_focus_id := app.mux.focused_pane_id
+		if old_focus_id != p.id {
+			if old_p := mux_feat.multiplexer_get_pane(&app.mux, old_focus_id); old_p != nil && old_p.session != nil {
+				mouse_protocol_report_focus(old_p.session, false, old_p.surface_id)
 			}
-			_, active_tab := tabs_feat.tabs_manager_get_active(&app.tabs_mgr)
-			if active_tab != nil {
-				active_tab.active_pane_id = p.id
+			mux_feat.multiplexer_focus_pane(&app.mux, p.id)
+			if p.session != nil {
+				mouse_protocol_report_focus(p.session, true, p.surface_id)
 			}
-			scroll_off := p.session.scroll_offset if p.session != nil else 0
-			mods := sdl3.GetModState()
-			is_shift := (mods & sdl3.KMOD_SHIFT) != sdl3.KMOD_NONE
-			is_alt   := (mods & sdl3.KMOD_ALT)   != sdl3.KMOD_NONE
-			is_ctrl  := (mods & sdl3.KMOD_CTRL)  != sdl3.KMOD_NONE
+		}
+		_, active_tab := tabs_feat.tabs_manager_get_active(&app.tabs_mgr)
+		if active_tab != nil {
+			active_tab.active_pane_id = p.id
+		}
+		scroll_ptr := sess_feat.session_pane_scroll_offset(p.session, p.surface_id)
+		scroll_off := scroll_ptr^ if scroll_ptr != nil else 0
+		mods := sdl3.GetModState()
+		is_shift := (mods & sdl3.KMOD_SHIFT) != sdl3.KMOD_NONE
+		is_alt   := (mods & sdl3.KMOD_ALT)   != sdl3.KMOD_NONE
+		is_ctrl  := (mods & sdl3.KMOD_CTRL)  != sdl3.KMOD_NONE
 
-			if mouse_protocol_should_handle(p.session, is_shift) {
-				eff_px, eff_py := pane_grid_pad(p.rect, p.session.term.rows, p.session.term.cols, app.layout.metrics.cell_w, app.layout.metrics.cell_h, app.layout.metrics.pane_pad_x, app.layout.metrics.pane_pad_y)
-				if seq, ok := mouse_protocol_encode(p.session, .Press, u8(ev.button), mx, my, p.rect, app.layout.metrics.cell_w, app.layout.metrics.cell_h, eff_px, eff_py, 0.0, is_shift, is_alt, is_ctrl); ok {
-					sess_feat.session_write(p.session, seq.bytes[:seq.len])
-					app_automation_note_input(app, p.session)
-				}
-				app.mouse.pos = {mx, my}
-				app.mouse.is_down = true
-				app.mouse.button = u8(ev.button)
-			} else {
-				mouse_on_button_down(&app.mouse, {mx, my}, u8(ev.button), p.id, p.rect, p.session, scroll_off, int(ev.clicks), is_shift, is_alt)
+		if mouse_protocol_should_handle(p.session, is_shift, p.surface_id) {
+			g, _, _ := sess_feat.session_pane_parts(p.session, p.surface_id)
+			eff_px, eff_py := pane_grid_pad(p.rect, g.row_count if g != nil else 1, g.col_count if g != nil else 1, app.layout.metrics.cell_w, app.layout.metrics.cell_h, app.layout.metrics.pane_pad_x, app.layout.metrics.pane_pad_y)
+			if seq, ok := mouse_protocol_encode(p.session, .Press, u8(ev.button), mx, my, p.rect, app.layout.metrics.cell_w, app.layout.metrics.cell_h, eff_px, eff_py, 0.0, is_shift, is_alt, is_ctrl, p.surface_id); ok {
+				sess_feat.session_write_pane(p.session, p.surface_id, seq.bytes[:seq.len])
+				app_automation_note_input(app, p.session)
 			}
-			break
+			app.mouse.pos = {mx, my}
+			app.mouse.is_down = true
+			app.mouse.button = u8(ev.button)
+		} else {
+			mouse_on_button_down(&app.mouse, {mx, my}, u8(ev.button), p.id, p.rect, p.session, scroll_off, int(ev.clicks), is_shift, is_alt, p.surface_id)
 		}
 	}
 }
@@ -287,19 +284,18 @@ app_handle_mouse_wheel :: proc(app: ^Term_App, ev: sdl3.MouseWheelEvent) {
 		return
 	}
 
-	target_pane: ^mux_feat.Pane_Entry = nil
-	for &p in app.mux.panes {
-		if mouse_is_in_rect({mx, my}, p.rect) {
-			target_pane = &p
-			break
-		}
-	}
+	target_pane := mux_feat.multiplexer_pane_at(&app.mux, mx, my)
 	if target_pane == nil {
 		target_pane = mux_feat.multiplexer_get_focused_pane(&app.mux)
 	}
 
 	if target_pane != nil && target_pane.session != nil {
 		sess := target_pane.session
+		sid := target_pane.surface_id
+		g, _, parser_ptr := sess_feat.session_pane_parts(sess, sid)
+		scroll_ptr := sess_feat.session_pane_scroll_offset(sess, sid)
+		if g == nil || parser_ptr == nil || scroll_ptr == nil do return
+
 		mods := sdl3.GetModState()
 		is_shift := (mods & sdl3.KMOD_SHIFT) != sdl3.KMOD_NONE
 		is_alt   := (mods & sdl3.KMOD_ALT)   != sdl3.KMOD_NONE
@@ -312,37 +308,36 @@ app_handle_mouse_wheel :: proc(app: ^Term_App, ev: sdl3.MouseWheelEvent) {
 		ticks := int(sess.scroll_accum)
 		sess.scroll_accum -= f32(ticks)
 
-		if mouse_protocol_should_handle(sess, is_shift) {
+		if mouse_protocol_should_handle(sess, is_shift, sid) {
 			wheel_dir: f32 = 1.0 if ticks > 0 else -1.0
 			count := abs(ticks)
 			for _ in 0..<count {
-				eff_px, eff_py := pane_grid_pad(target_pane.rect, sess.term.rows, sess.term.cols, app.layout.metrics.cell_w, app.layout.metrics.cell_h, app.layout.metrics.pane_pad_x, app.layout.metrics.pane_pad_y)
-				if seq, ok := mouse_protocol_encode(sess, .Wheel, 0, mx, my, target_pane.rect, app.layout.metrics.cell_w, app.layout.metrics.cell_h, eff_px, eff_py, wheel_dir, is_shift, is_alt, is_ctrl); ok {
-					sess_feat.session_write(sess, seq.bytes[:seq.len])
+				eff_px, eff_py := pane_grid_pad(target_pane.rect, g.row_count, g.col_count, app.layout.metrics.cell_w, app.layout.metrics.cell_h, app.layout.metrics.pane_pad_x, app.layout.metrics.pane_pad_y)
+				if seq, ok := mouse_protocol_encode(sess, .Wheel, 0, mx, my, target_pane.rect, app.layout.metrics.cell_w, app.layout.metrics.cell_h, eff_px, eff_py, wheel_dir, is_shift, is_alt, is_ctrl, sid); ok {
+					sess_feat.session_write_pane(sess, sid, seq.bytes[:seq.len])
 				}
 			}
 			return
 		}
 
-		if sess.term.parser.in_alt_screen {
+		if parser_ptr.in_alt_screen {
 			// In alternate screen (less, vim, man, nano), stream cursor keys to PTY
-			up_key := "\x1bOA" if sess.term.parser.cursor_key_mode else "\x1b[A"
-			down_key := "\x1bOB" if sess.term.parser.cursor_key_mode else "\x1b[B"
+			up_key := "\x1bOA" if parser_ptr.cursor_key_mode else "\x1b[A"
+			down_key := "\x1bOB" if parser_ptr.cursor_key_mode else "\x1b[B"
 			if ticks > 0 {
 				for _ in 0..<ticks {
-					sess_feat.session_write_string(sess, up_key)
+					sess_feat.session_write_pane_string(sess, sid, up_key)
 				}
 			} else if ticks < 0 {
 				for _ in 0..<(-ticks) {
-					sess_feat.session_write_string(sess, down_key)
+					sess_feat.session_write_pane_string(sess, sid, down_key)
 				}
 			}
 		} else {
 			// In normal screen (shell CLI output), scroll viewport into scrollback history
-			max_history := sess.term.grid.history_count
-			sess.scroll_offset = clamp(sess.scroll_offset + ticks, 0, max_history)
+			scroll_ptr^ = clamp(scroll_ptr^ + ticks, 0, g.history_count)
 			if app.mouse.is_down && app.mouse.button == sdl3.BUTTON_LEFT {
-				mouse_on_motion(&app.mouse, app.mouse.pos, target_pane.rect, sess, sess.scroll_offset)
+				mouse_on_motion(&app.mouse, app.mouse.pos, target_pane.rect, sess, scroll_ptr^, sid)
 			}
 		}
 	}
@@ -364,8 +359,10 @@ app_handle_text_input :: proc(app: ^Term_App, text: string) {
 			if app.mouse.selection.active {
 				mouse_clear_selection(&app.mouse)
 			}
-			p.session.scroll_offset = 0 // Auto-scroll to bottom on input
-			sess_feat.session_write_string(p.session, text)
+			if scroll_ptr := sess_feat.session_pane_scroll_offset(p.session, p.surface_id); scroll_ptr != nil {
+				scroll_ptr^ = 0
+			}
+			sess_feat.session_write_pane_string(p.session, p.surface_id, text)
 			app_automation_note_input(app, p.session)
 		}
 	}
@@ -416,9 +413,10 @@ app_handle_key_down :: proc(app: ^Term_App, ev: sdl3.KeyboardEvent) {
 
 	act, ok := keymap_evaluate(ev.key, ev.mod)
 	p := mux_feat.multiplexer_get_focused_pane(&app.mux)
+	_, _, parser_ptr := sess_feat.session_pane_parts(p.session if p != nil else nil, p.surface_id if p != nil else 0)
 
 	// In alternate screen (e.g. vim), allow Shift+Arrow to stream to application instead of GUI selection
-	if ok && p != nil && p.session != nil && p.session.term.parser.in_alt_screen && is_selection_action(act) {
+	if ok && parser_ptr != nil && parser_ptr.in_alt_screen && is_selection_action(act) {
 		ok = false
 	}
 
@@ -426,13 +424,15 @@ app_handle_key_down :: proc(app: ^Term_App, ev: sdl3.KeyboardEvent) {
 		app_execute_action(app, act)
 	} else {
 		if p == nil || p.session == nil do return
-		kev, res, encoded := _encode_sdl_key(p.session, ev, .Repeat if ev.repeat else .Press)
+		kev, res, encoded := _encode_sdl_key(p.session, ev, .Repeat if ev.repeat else .Press, p.surface_id)
 		if !encoded do return
 		if app.mouse.selection.active {
 			mouse_clear_selection(&app.mouse)
 		}
-		p.session.scroll_offset = 0 // Auto-scroll to bottom on input
-		sess_feat.session_write(p.session, res.bytes[:res.len])
+		if scroll_ptr := sess_feat.session_pane_scroll_offset(p.session, p.surface_id); scroll_ptr != nil {
+			scroll_ptr^ = 0
+		}
+		sess_feat.session_write_pane(p.session, p.surface_id, res.bytes[:res.len])
 		app_automation_note_input(app, p.session)
 		// A keystroke that SDL also reports as TEXT_INPUT must not be
 		// delivered twice: Option combos arrive as ESC+char and, under the
@@ -444,14 +444,16 @@ app_handle_key_down :: proc(app: ^Term_App, ev: sdl3.KeyboardEvent) {
 	}
 }
 
-// _encode_sdl_key encodes an SDL key for the program in sess, with the modes
+// _encode_sdl_key encodes an SDL key for the target pane's parser, with the modes
 // it asked for (DECCKM, Kitty keyboard flags).
 @(private = "file")
-_encode_sdl_key :: proc(sess: ^sess_feat.Terminal_Session, ev: sdl3.KeyboardEvent, kind: ie.Key_Event_Kind) -> (kev: ie.Key_Event, res: ie.Encoded, ok: bool) {
+_encode_sdl_key :: proc(sess: ^sess_feat.Terminal_Session, ev: sdl3.KeyboardEvent, kind: ie.Key_Event_Kind, surface_id: u16 = 0) -> (kev: ie.Key_Event, res: ie.Encoded, ok: bool) {
+	app_cur, k_flags, modes_ok := sess_feat.session_pane_key_modes(sess, surface_id)
+	if !modes_ok do return {}, {}, false
 	kev = sdl_key_event(ev.key, ev.mod, kind) or_return
 	modes := ie.Key_Modes{
-		app_cursor  = sess.term.parser.cursor_key_mode,
-		kitty_flags = core_terminal.terminal_kitty_keyboard_flags(&sess.term),
+		app_cursor  = app_cur,
+		kitty_flags = k_flags,
 	}
 	res = ie.encode_key(kev, modes) or_return
 	return kev, res, true
@@ -465,9 +467,9 @@ app_handle_key_up :: proc(app: ^Term_App, ev: sdl3.KeyboardEvent) {
 
 	// encode_key reports a release only under Kitty event-type reporting and
 	// never for keys sent as legacy bytes (they have no event field).
-	_, res, encoded := _encode_sdl_key(p.session, ev, .Release)
+	_, res, encoded := _encode_sdl_key(p.session, ev, .Release, p.surface_id)
 	if !encoded do return
-	sess_feat.session_write(p.session, res.bytes[:res.len])
+	sess_feat.session_write_pane(p.session, p.surface_id, res.bytes[:res.len])
 }
 
 // app_update_hyperlink_hover synchronizes the OSC 8 hover highlight and mouse
@@ -481,13 +483,7 @@ app_update_hyperlink_hover :: proc(app: ^Term_App) -> bool {
 	is_shift := (mods & sdl3.KMOD_SHIFT) != sdl3.KMOD_NONE
 	mx, my := app.mouse.pos.x, app.mouse.pos.y
 
-	hovered_pane: ^mux_feat.Pane_Entry = nil
-	for &p in app.mux.panes {
-		if mouse_is_in_rect({mx, my}, p.rect) {
-			hovered_pane = &p
-			break
-		}
-	}
+	hovered_pane := mux_feat.multiplexer_pane_at(&app.mux, mx, my)
 
 	new_hover: Hyperlink_Hover
 	if !app.mouse.is_down && hovered_pane != nil && hovered_pane.kind == .Terminal && hovered_pane.session != nil {
@@ -516,13 +512,8 @@ app_handle_drop_position :: proc(app: ^Term_App, drop: sdl3.DropEvent) {
 	mx := f32(drop.x) * ratio
 	my := f32(drop.y) * ratio
 
-	target_pane := mux_feat.multiplexer_get_focused_pane(&app.mux)
-	for &p in app.mux.panes {
-		if mouse_is_in_rect({mx, my}, p.rect) {
-			target_pane = &p
-			break
-		}
-	}
+	target_pane := mux_feat.multiplexer_pane_at(&app.mux, mx, my)
+	if target_pane == nil do target_pane = mux_feat.multiplexer_get_focused_pane(&app.mux)
 	p_id := target_pane.id if target_pane != nil else 0
 	p_rect := target_pane.rect if target_pane != nil else [4]f32{0, 0, app.layout.screen_w, app.layout.screen_h}
 	drop_effect_on_drag_pos(&app.drop_effect, {mx, my}, p_id, p_rect)
@@ -535,13 +526,8 @@ app_handle_drop_file :: proc(app: ^Term_App, drop: sdl3.DropEvent, is_text: bool
 	mx := f32(drop.x) * ratio
 	my := f32(drop.y) * ratio
 
-	target_pane := mux_feat.multiplexer_get_focused_pane(&app.mux)
-	for &p in app.mux.panes {
-		if mouse_is_in_rect({mx, my}, p.rect) {
-			target_pane = &p
-			break
-		}
-	}
+	target_pane := mux_feat.multiplexer_pane_at(&app.mux, mx, my)
+	if target_pane == nil do target_pane = mux_feat.multiplexer_get_focused_pane(&app.mux)
 	if target_pane != nil {
 		mux_feat.multiplexer_focus_pane(&app.mux, target_pane.id)
 	}
@@ -553,7 +539,7 @@ app_handle_drop_file :: proc(app: ^Term_App, drop: sdl3.DropEvent, is_text: bool
 		raw_data := string(drop.data)
 		payload := escape_shell_path(raw_data, context.temp_allocator) if !is_text else raw_data
 		if len(payload) > 0 {
-			sess_feat.session_write_string(target_pane.session, payload)
+			sess_feat.session_write_pane_string(target_pane.session, target_pane.surface_id, payload)
 		}
 	}
 	if app.drop_effect.enabled {
@@ -633,7 +619,7 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 			cursor_reset_blink(&app.cursor, u64(time.duration_nanoseconds(time.since(app.start_time))))
 			pane := mux_feat.multiplexer_get_focused_pane(&app.mux)
 			if pane != nil && pane.session != nil {
-				mouse_protocol_report_focus(pane.session, true)
+				mouse_protocol_report_focus(pane.session, true, pane.surface_id)
 			}
 			dirty.term = true
 			dirty.chrome = true
@@ -641,7 +627,7 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 			app.window_focused = false
 			pane := mux_feat.multiplexer_get_focused_pane(&app.mux)
 			if pane != nil && pane.session != nil {
-				mouse_protocol_report_focus(pane.session, false)
+				mouse_protocol_report_focus(pane.session, false, pane.surface_id)
 			}
 			if app.mouse.hover_link.active {
 				dirty.term = true
@@ -793,13 +779,7 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 			is_alt   := (mods & sdl3.KMOD_ALT)   != sdl3.KMOD_NONE
 			is_ctrl  := (mods & sdl3.KMOD_CTRL)  != sdl3.KMOD_NONE
 
-			hovered_pane: ^mux_feat.Pane_Entry = nil
-			for &p in app.mux.panes {
-				if mouse_is_in_rect({mx, my}, p.rect) {
-					hovered_pane = &p
-					break
-				}
-			}
+			hovered_pane := mux_feat.multiplexer_pane_at(&app.mux, mx, my)
 
 			// C. Autonomous Cursor Determination: Chrome View -> Hyperlink (Cmd-gated) -> Terminal/Session -> Window Default
 			if !divider_cursor_handled {
@@ -825,19 +805,22 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 			pane := hovered_pane if hovered_pane != nil else mux_feat.multiplexer_get_focused_pane(&app.mux)
 			pane_rect := pane.rect if pane != nil else [4]f32{0, 0, 0, 0}
 			sess := pane.session if pane != nil else nil
-			scroll_off := sess.scroll_offset if sess != nil else 0
+			sid := pane.surface_id if pane != nil else u16(0)
+			scroll_ptr := sess_feat.session_pane_scroll_offset(sess, sid)
+			scroll_off := scroll_ptr^ if scroll_ptr != nil else 0
 
 			// Report mouse motion only to the focused pane when hovered or when dragging within it
-			if pane != nil && pane.is_focused && mouse_protocol_should_handle(sess, is_shift) {
+			if pane != nil && pane.is_focused && mouse_protocol_should_handle(sess, is_shift, sid) {
 				// The tracking mode (?1002 drag / ?1003 any motion) decides what is reported.
 				btn := app.mouse.button if app.mouse.is_down else u8(0)
-				eff_px, eff_py := pane_grid_pad(pane_rect, sess.term.rows, sess.term.cols, app.layout.metrics.cell_w, app.layout.metrics.cell_h, app.layout.metrics.pane_pad_x, app.layout.metrics.pane_pad_y)
-				if seq, ok := mouse_protocol_encode(sess, .Motion, btn, mx, my, pane_rect, app.layout.metrics.cell_w, app.layout.metrics.cell_h, eff_px, eff_py, 0.0, is_shift, is_alt, is_ctrl); ok {
-					sess_feat.session_write(sess, seq.bytes[:seq.len])
+				g, _, _ := sess_feat.session_pane_parts(sess, sid)
+				eff_px, eff_py := pane_grid_pad(pane_rect, g.row_count if g != nil else 1, g.col_count if g != nil else 1, app.layout.metrics.cell_w, app.layout.metrics.cell_h, app.layout.metrics.pane_pad_x, app.layout.metrics.pane_pad_y)
+				if seq, ok := mouse_protocol_encode(sess, .Motion, btn, mx, my, pane_rect, app.layout.metrics.cell_w, app.layout.metrics.cell_h, eff_px, eff_py, 0.0, is_shift, is_alt, is_ctrl, sid); ok {
+					sess_feat.session_write_pane(sess, sid, seq.bytes[:seq.len])
 				}
 			} else {
 				prev_sel := app.mouse.selection
-				mouse_on_motion(&app.mouse, {mx, my}, pane_rect, sess, scroll_off)
+				mouse_on_motion(&app.mouse, {mx, my}, pane_rect, sess, scroll_off, sid)
 				if app.mouse.selection != prev_sel {
 					dirty.term = true
 				}
@@ -876,10 +859,11 @@ app_process_events :: proc(app: ^Term_App, non_blocking: bool = false) -> (dirty
 			is_shift := (mods & sdl3.KMOD_SHIFT) != sdl3.KMOD_NONE
 			is_alt   := (mods & sdl3.KMOD_ALT)   != sdl3.KMOD_NONE
 			is_ctrl  := (mods & sdl3.KMOD_CTRL)  != sdl3.KMOD_NONE
-			if pane != nil && mouse_protocol_should_handle(pane.session, is_shift) {
-				eff_px, eff_py := pane_grid_pad(pane.rect, pane.session.term.rows, pane.session.term.cols, app.layout.metrics.cell_w, app.layout.metrics.cell_h, app.layout.metrics.pane_pad_x, app.layout.metrics.pane_pad_y)
-				if seq, ok := mouse_protocol_encode(pane.session, .Release, u8(ev.button.button), mx, my, pane.rect, app.layout.metrics.cell_w, app.layout.metrics.cell_h, eff_px, eff_py, 0.0, is_shift, is_alt, is_ctrl); ok {
-					sess_feat.session_write(pane.session, seq.bytes[:seq.len])
+			if pane != nil && mouse_protocol_should_handle(pane.session, is_shift, pane.surface_id) {
+				g, _, _ := sess_feat.session_pane_parts(pane.session, pane.surface_id)
+				eff_px, eff_py := pane_grid_pad(pane.rect, g.row_count if g != nil else 1, g.col_count if g != nil else 1, app.layout.metrics.cell_w, app.layout.metrics.cell_h, app.layout.metrics.pane_pad_x, app.layout.metrics.pane_pad_y)
+				if seq, ok := mouse_protocol_encode(pane.session, .Release, u8(ev.button.button), mx, my, pane.rect, app.layout.metrics.cell_w, app.layout.metrics.cell_h, eff_px, eff_py, 0.0, is_shift, is_alt, is_ctrl, pane.surface_id); ok {
+					sess_feat.session_write_pane(pane.session, pane.surface_id, seq.bytes[:seq.len])
 				}
 			}
 			mouse_on_button_up(&app.mouse, u8(ev.button.button))

@@ -40,7 +40,7 @@ diagnostics_dump_grids :: proc(app: ^Term_App) {
 	d.dump_seq += 1
 	for &pane in app.mux.panes {
 		if pane.kind == .Terminal && pane.session != nil {
-			_ = telemetry.grid_dump_write(d.grid_dump_dir, d.dump_seq, pane.id, &pane.session.term)
+			_ = telemetry.grid_dump_write(d.grid_dump_dir, d.dump_seq, pane.id, &pane.session.term, pane.surface_id)
 		}
 	}
 }

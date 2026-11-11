@@ -129,8 +129,9 @@ chrome_view_build_draw_list :: proc(
 		for &pane in mux.panes {
 			if pane.rect[2] <= 0 || pane.rect[3] <= 0 do continue
 
-			// Draw focus boundary border when multiple split panes exist
-			if has_splits && layout != nil {
+			if pane.is_floating {
+				surface_view_emit_chrome(&cv.draw_list, layout, &pane)
+			} else if has_splits && layout != nil {
 				if pane.is_focused {
 					chrome_dl.ui_draw_border(&cv.draw_list, pane.rect, {0.30, 0.55, 0.90, 0.70}, layout.metrics.border_radius)
 				} else {
@@ -142,13 +143,15 @@ chrome_view_build_draw_list :: proc(
 
 			// 2. Draw Cursor for inactive split panes (focused pane cursor lives on dedicated CURSOR_LAYER_ID)
 			if pane.session != nil {
-				if !pane.is_focused && pane.session.term.parser.cursor.visible {
-					cur_c := pane.session.term.parser.cursor.col
-					cur_r := pane.session.term.parser.cursor.row + pane.session.scroll_offset
+				g, _, p := sess_feat.session_pane_parts(pane.session, pane.surface_id)
+				scroll_off := sess_feat.session_pane_scroll_offset(pane.session, pane.surface_id)
+				if !pane.is_focused && g != nil && p != nil && scroll_off != nil && p.cursor.visible {
+					cur_c := p.cursor.col
+					cur_r := p.cursor.row + scroll_off^
 					cur_pad_x, cur_pad_y := pane_grid_pad(
 						pane.rect,
-						pane.session.term.rows,
-						pane.session.term.cols,
+						g.row_count,
+						g.col_count,
 						layout.metrics.cell_w,
 						layout.metrics.cell_h,
 						layout.metrics.pane_pad_x,
@@ -158,7 +161,7 @@ chrome_view_build_draw_list :: proc(
 
 					if cur_r >= 0 && cur_r < rows_visible {
 						cur_shape: Cursor_Shape = .Block
-						switch pane.session.term.parser.cursor.shape {
+						switch p.cursor.shape {
 						case .Block:     cur_shape = .Block
 						case .Beam:      cur_shape = .Beam
 						case .Underline: cur_shape = .Underline

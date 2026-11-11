@@ -15,6 +15,7 @@ import mux_feat "../../features/multiplexer"
 import sess_feat "../../features/session"
 import terminal_grid "../../core/terminal/grid"
 import damage "../../core/terminal/damage"
+import core_terminal "../../core/terminal"
 import chrome_render "../../core/render/chrome"
 import telemetry "../../features/telemetry"
 
@@ -81,11 +82,11 @@ app_select_tab :: proc(app: ^Term_App, idx: int) {
 	_, active_tab := tabs_feat.tabs_manager_get_active(&app.tabs_mgr)
 	if active_tab != nil && active_tab.active_pane_id != 0 {
 		if old_p != nil && old_p.session != nil && old_p.id != active_tab.active_pane_id {
-			mouse_protocol_report_focus(old_p.session, false)
+			mouse_protocol_report_focus(old_p.session, false, old_p.surface_id)
 		}
 		mux_feat.multiplexer_focus_pane(&app.mux, active_tab.active_pane_id)
 		if new_p := mux_feat.multiplexer_get_pane(&app.mux, active_tab.active_pane_id); new_p != nil && new_p.session != nil {
-			mouse_protocol_report_focus(new_p.session, true)
+			mouse_protocol_report_focus(new_p.session, true, new_p.surface_id)
 		}
 	}
 
@@ -95,7 +96,9 @@ app_select_tab :: proc(app: ^Term_App, idx: int) {
 	// Mark all visible panes in this tab as damaged so their content renders immediately
 	for &pane in app.mux.panes {
 		if pane.kind == .Terminal && pane.session != nil && pane.rect[2] > 0 {
-			damage.damage_mark_all(&pane.session.term.damage)
+			if _, d, _ := sess_feat.session_pane_parts(pane.session, pane.surface_id); d != nil {
+				damage.damage_mark_all(d)
+			}
 		}
 	}
 
@@ -114,6 +117,15 @@ app_close_tab :: proc(app: ^Term_App, tab_idx: int) {
 	chrome_splits.split_tree_collect_pane_ids(app.tabs_mgr.entries[tab_idx].split_tree, &pane_ids)
 
 	for pid in pane_ids {
+		if cp := mux_feat.multiplexer_get_pane(&app.mux, pid); cp != nil && cp.session != nil && cp.surface_id == 0 {
+			core_terminal.terminal_surfaces_reset(&cp.session.term)
+		}
+	}
+	surface_prune_stale_panes(app, &app.tabs_mgr.entries[tab_idx])
+
+	clear(&pane_ids)
+	chrome_splits.split_tree_collect_pane_ids(app.tabs_mgr.entries[tab_idx].split_tree, &pane_ids)
+	for pid in pane_ids {
 		terminal_view_release_pane(&app.term_view, pid)
 		mux_feat.multiplexer_close_pane(&app.mux, pid)
 	}
@@ -131,10 +143,12 @@ app_close_tab :: proc(app: ^Term_App, tab_idx: int) {
 			mux_feat.multiplexer_focus_pane(&app.mux, active_tab.active_pane_id)
 		}
 		app.last_title_sync = {}
-	app_sync_layout_and_winsize(app, true)
+		app_sync_layout_and_winsize(app, true)
 		for &pane in app.mux.panes {
 			if pane.kind == .Terminal && pane.session != nil && pane.rect[2] > 0 {
-				damage.damage_mark_all(&pane.session.term.damage)
+				if _, d, _ := sess_feat.session_pane_parts(pane.session, pane.surface_id); d != nil {
+					damage.damage_mark_all(d)
+				}
 			}
 		}
 	}
@@ -149,6 +163,10 @@ app_close_tab :: proc(app: ^Term_App, tab_idx: int) {
 app_close_pane :: proc(app: ^Term_App, pane_id: u32) {
 	if app == nil || pane_id == 0 do return
 
+	if cp := mux_feat.multiplexer_get_pane(&app.mux, pane_id); cp != nil && cp.session != nil && cp.surface_id == 0 {
+		core_terminal.terminal_surfaces_reset(&cp.session.term)
+	}
+
 	terminal_view_release_pane(&app.term_view, pane_id)
 
 	found_tab_idx := -1
@@ -162,12 +180,16 @@ app_close_pane :: proc(app: ^Term_App, pane_id: u32) {
 
 	if found_tab_idx >= 0 {
 		tab := &app.tabs_mgr.entries[found_tab_idx]
+		surface_prune_stale_panes(app, tab)
 		_ = chrome_splits.split_tree_remove_pane(&tab.split_tree, pane_id, app.tabs_mgr.allocator)
 		if tab.split_tree == nil {
 			mux_feat.multiplexer_close_pane(&app.mux, pane_id)
 			app_close_tab(app, found_tab_idx)
 			return
 		}
+	} else {
+		_, active_tab := tabs_feat.tabs_manager_get_active(&app.tabs_mgr)
+		surface_prune_stale_panes(app, active_tab)
 	}
 
 	mux_feat.multiplexer_close_pane(&app.mux, pane_id)
@@ -183,13 +205,17 @@ app_close_pane :: proc(app: ^Term_App, pane_id: u32) {
 				tab.active_pane_id = app.mux.focused_pane_id
 			}
 		}
+	} else if _, active_tab := tabs_feat.tabs_manager_get_active(&app.tabs_mgr); active_tab != nil && active_tab.active_pane_id == pane_id {
+		active_tab.active_pane_id = app.mux.focused_pane_id
 	}
 
 	app.last_title_sync = {}
 	app_sync_layout_and_winsize(app, true)
 	for &pane in app.mux.panes {
 		if pane.kind == .Terminal && pane.session != nil && pane.rect[2] > 0 {
-			damage.damage_mark_all(&pane.session.term.damage)
+			if _, d, _ := sess_feat.session_pane_parts(pane.session, pane.surface_id); d != nil {
+				damage.damage_mark_all(d)
+			}
 		}
 	}
 	chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
@@ -204,7 +230,7 @@ app_reap_dead_sessions :: proc(app: ^Term_App) -> (reaped: bool) {
 	defer delete(dead_ids)
 
 	for &p in app.mux.panes {
-		if p.kind == .Terminal && p.session != nil {
+		if p.kind == .Terminal && p.surface_id == 0 && p.session != nil {
 			alive, _ := sess_feat.session_is_alive(p.session)
 			if !alive {
 				append(&dead_ids, p.id)
@@ -234,6 +260,11 @@ app_cycle_tab_pane :: proc(app: ^Term_App, forward: bool) {
 		pane_ids: [dynamic]u32
 		defer delete(pane_ids)
 		chrome_splits.split_tree_collect_pane_ids(active_tab.split_tree, &pane_ids)
+		for &fp in app.mux.panes {
+			if fp.is_floating && fp.rect[2] > 0 && fp.rect[3] > 0 {
+				append(&pane_ids, fp.id)
+			}
+		}
 		if len(pane_ids) > 1 {
 			cur_idx := 0
 			for id, i in pane_ids {
@@ -246,11 +277,11 @@ app_cycle_tab_pane :: proc(app: ^Term_App, forward: bool) {
 			next_id := pane_ids[(cur_idx + step + len(pane_ids)) % len(pane_ids)]
 			old_p := mux_feat.multiplexer_get_focused_pane(&app.mux)
 			if old_p != nil && old_p.session != nil && old_p.id != next_id {
-				mouse_protocol_report_focus(old_p.session, false)
+				mouse_protocol_report_focus(old_p.session, false, old_p.surface_id)
 			}
 			mux_feat.multiplexer_focus_pane(&app.mux, next_id)
 			if new_p := mux_feat.multiplexer_get_pane(&app.mux, next_id); new_p != nil && new_p.session != nil {
-				mouse_protocol_report_focus(new_p.session, true)
+				mouse_protocol_report_focus(new_p.session, true, new_p.surface_id)
 			}
 			active_tab.active_pane_id = next_id
 		}
@@ -405,10 +436,12 @@ app_execute_action :: proc(app: ^Term_App, act: Action_Id) {
 		if p != nil {
 			_ = mux_feat.multiplexer_toggle_zoom(&app.mux, p.id)
 			app.last_title_sync = {}
-	app_sync_layout_and_winsize(app, true)
+			app_sync_layout_and_winsize(app, true)
 			for &pane in app.mux.panes {
 				if pane.kind == .Terminal && pane.session != nil && pane.rect[2] > 0 {
-					damage.damage_mark_all(&pane.session.term.damage)
+					if _, d, _ := sess_feat.session_pane_parts(pane.session, pane.surface_id); d != nil {
+						damage.damage_mark_all(d)
+					}
 				}
 			}
 			chrome_render.chrome_renderer_mark_dirty(&app.chrome_view.rend, true)
@@ -417,7 +450,7 @@ app_execute_action :: proc(app: ^Term_App, act: Action_Id) {
 	case .Clipboard_Copy:
 		p := mux_feat.multiplexer_get_focused_pane(&app.mux)
 		if p != nil && p.session != nil {
-			_ = clipboard_copy_selection(&app.clipboard, p.session, app.mouse.selection)
+			_ = clipboard_copy_selection(&app.clipboard, p.session, app.mouse.selection, p.surface_id)
 		}
 
 	case .Clipboard_Paste:
@@ -426,67 +459,52 @@ app_execute_action :: proc(app: ^Term_App, act: Action_Id) {
 			if app.mouse.selection.active {
 				mouse_clear_selection(&app.mouse)
 			}
-			bracketed := p.session.term.parser.bracketed_paste
-			_ = clipboard_paste(&app.clipboard, p.session, bracketed)
+			_, _, parser_ptr := sess_feat.session_pane_parts(p.session, p.surface_id)
+			bracketed := parser_ptr.bracketed_paste if parser_ptr != nil else false
+			_ = clipboard_paste(&app.clipboard, p.session, bracketed, p.surface_id)
 		}
 
 	case .Select_All:
 		p := mux_feat.multiplexer_get_focused_pane(&app.mux)
 		if p != nil && p.session != nil {
-			mouse_select_all(&app.mouse, p.id, p.session)
+			mouse_select_all(&app.mouse, p.id, p.session, p.surface_id)
 		}
 
 	case .Select_Left, .Select_Right, .Select_Up, .Select_Down,
 	     .Select_Word_Left, .Select_Word_Right, .Select_Line_Start, .Select_Line_End:
 		p := mux_feat.multiplexer_get_focused_pane(&app.mux)
 		if p != nil && p.session != nil {
-			mouse_keyboard_select(&app.mouse, p.id, p.session, act)
+			mouse_keyboard_select(&app.mouse, p.id, p.session, act, p.surface_id)
 		}
 
-	case .Scroll_Page_Up:
+	case .Scroll_Page_Up, .Scroll_Page_Down, .Scroll_Line_Up, .Scroll_Line_Down, .Scroll_To_Top, .Scroll_To_Bottom:
 		p := mux_feat.multiplexer_get_focused_pane(&app.mux)
 		if p != nil && p.session != nil {
-			page := max(1, p.session.term.rows - 2)
-			p.session.scroll_offset = clamp(p.session.scroll_offset + page, 0, p.session.term.grid.history_count)
-		}
-
-	case .Scroll_Page_Down:
-		p := mux_feat.multiplexer_get_focused_pane(&app.mux)
-		if p != nil && p.session != nil {
-			page := max(1, p.session.term.rows - 2)
-			p.session.scroll_offset = clamp(p.session.scroll_offset - page, 0, p.session.term.grid.history_count)
-		}
-
-	case .Scroll_Line_Up:
-		p := mux_feat.multiplexer_get_focused_pane(&app.mux)
-		if p != nil && p.session != nil {
-			p.session.scroll_offset = clamp(p.session.scroll_offset + 3, 0, p.session.term.grid.history_count)
-		}
-
-	case .Scroll_Line_Down:
-		p := mux_feat.multiplexer_get_focused_pane(&app.mux)
-		if p != nil && p.session != nil {
-			p.session.scroll_offset = clamp(p.session.scroll_offset - 3, 0, p.session.term.grid.history_count)
-		}
-
-	case .Scroll_To_Top:
-		p := mux_feat.multiplexer_get_focused_pane(&app.mux)
-		if p != nil && p.session != nil {
-			p.session.scroll_offset = p.session.term.grid.history_count
-		}
-
-	case .Scroll_To_Bottom:
-		p := mux_feat.multiplexer_get_focused_pane(&app.mux)
-		if p != nil && p.session != nil {
-			p.session.scroll_offset = 0
+			g, _, _ := sess_feat.session_pane_parts(p.session, p.surface_id)
+			scroll_ptr := sess_feat.session_pane_scroll_offset(p.session, p.surface_id)
+			if g != nil && scroll_ptr != nil {
+				page := max(1, g.row_count - 2)
+				#partial switch act {
+				case .Scroll_Page_Up:   scroll_ptr^ = clamp(scroll_ptr^ + page, 0, g.history_count)
+				case .Scroll_Page_Down: scroll_ptr^ = clamp(scroll_ptr^ - page, 0, g.history_count)
+				case .Scroll_Line_Up:   scroll_ptr^ = clamp(scroll_ptr^ + 3, 0, g.history_count)
+				case .Scroll_Line_Down: scroll_ptr^ = clamp(scroll_ptr^ - 3, 0, g.history_count)
+				case .Scroll_To_Top:    scroll_ptr^ = g.history_count
+				case .Scroll_To_Bottom: scroll_ptr^ = 0
+				}
+			}
 		}
 
 	case .Scroll_Clear:
 		p := mux_feat.multiplexer_get_focused_pane(&app.mux)
 		if p != nil && p.session != nil {
-			terminal_grid.grid_clear_history(&p.session.term.grid)
-			p.session.scroll_offset = 0
-			sess_feat.session_write_string(p.session, "\x0c") // Form feed / clear
+			if g, _, _ := sess_feat.session_pane_parts(p.session, p.surface_id); g != nil {
+				terminal_grid.grid_clear_history(g)
+			}
+			if scroll_ptr := sess_feat.session_pane_scroll_offset(p.session, p.surface_id); scroll_ptr != nil {
+				scroll_ptr^ = 0
+			}
+			sess_feat.session_write_pane_string(p.session, p.surface_id, "\x0c")
 		}
 
 	case .Search_Toggle:

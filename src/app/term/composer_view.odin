@@ -10,6 +10,7 @@ import pipeline "../../core/composer/pipeline"
 import scheduler "../../core/composer/scheduler"
 
 TERMINAL_LAYER_ID: composer.Layer_Id : 101
+POPUP_LAYER_ID:    composer.Layer_Id : 125
 CURSOR_LAYER_ID:   composer.Layer_Id : 151
 CHROME_LAYER_ID:   composer.Layer_Id : 201
 
@@ -32,6 +33,18 @@ Composer_View :: struct {
 	screen_h: f32,
 }
 
+@(private)
+_acquire_full_layer :: proc(cv: ^Composer_View, id: composer.Layer_Id, kind: composer.Layer_Kind, w, h: u32) {
+	l, ok := pipeline.composer_pipeline_acquire_layer(&cv.pipe, id, kind, w, h)
+	if ok && l != nil {
+		l.dest_rect = composer.rect_make(0, 0, f32(l.width), f32(l.height))
+		l.scissor_rect = composer.rect_make(0, 0, cv.screen_w, cv.screen_h)
+		l.opacity = 1.0
+	}
+	pipeline.composer_pipeline_mark_dirty(&cv.pipe, id)
+	scheduler.scheduler_mark_damage(&cv.sched, id)
+}
+
 composer_view_init :: proc(
 	cv: ^Composer_View,
 	device: contract.Gpu_Device,
@@ -40,24 +53,17 @@ composer_view_init :: proc(
 	screen_w, screen_h: f32,
 ) -> bool {
 	if cv == nil do return false
-	cv.device = device
-	cv.queue = queue
-	cv.format = format
-	cv.screen_w = screen_w
-	cv.screen_h = screen_h
+	cv.device, cv.queue, cv.format = device, queue, format
+	cv.screen_w, cv.screen_h = screen_w, screen_h
 
 	if !pipeline.composer_pipeline_init(&cv.pipe, device, queue, format, screen_w, screen_h) do return false
 	scheduler.scheduler_init(&cv.sched)
 
 	w := _quantize_layer_cap(0, u32(screen_w))
 	h := _quantize_layer_cap(0, u32(screen_h))
-
-	lt, ok_t := pipeline.composer_pipeline_acquire_layer(&cv.pipe, TERMINAL_LAYER_ID, .Terminal, w, h)
-	if ok_t && lt != nil {
-		lt.dest_rect = composer.rect_make(0, 0, f32(lt.width), f32(lt.height))
-		lt.scissor_rect = composer.rect_make(0, 0, screen_w, screen_h)
-		lt.opacity = 1.0
-	}
+	_acquire_full_layer(cv, TERMINAL_LAYER_ID, .Terminal, w, h)
+	_acquire_full_layer(cv, POPUP_LAYER_ID, .Terminal, w, h)
+	_acquire_full_layer(cv, CHROME_LAYER_ID, .Chrome, w, h)
 
 	lcur, ok_cur := pipeline.composer_pipeline_acquire_layer(&cv.pipe, CURSOR_LAYER_ID, .Overlay, 16, 16)
 	if ok_cur && lcur != nil {
@@ -65,24 +71,11 @@ composer_view_init :: proc(
 		lcur.scissor_rect = lcur.dest_rect
 		lcur.opacity = 0.0
 	}
-
-	lc, ok_c := pipeline.composer_pipeline_acquire_layer(&cv.pipe, CHROME_LAYER_ID, .Chrome, w, h)
-	if ok_c && lc != nil {
-		lc.dest_rect = composer.rect_make(0, 0, f32(lc.width), f32(lc.height))
-		lc.scissor_rect = composer.rect_make(0, 0, screen_w, screen_h)
-		lc.opacity = 1.0
-	}
-
-	order := [3]composer.Layer_Id{TERMINAL_LAYER_ID, CURSOR_LAYER_ID, CHROME_LAYER_ID}
-	pipeline.composer_pipeline_set_layer_order(&cv.pipe, order[:])
-
-	pipeline.composer_pipeline_mark_dirty(&cv.pipe, TERMINAL_LAYER_ID)
 	pipeline.composer_pipeline_mark_dirty(&cv.pipe, CURSOR_LAYER_ID)
-	pipeline.composer_pipeline_mark_dirty(&cv.pipe, CHROME_LAYER_ID)
-	scheduler.scheduler_mark_damage(&cv.sched, TERMINAL_LAYER_ID)
 	scheduler.scheduler_mark_damage(&cv.sched, CURSOR_LAYER_ID)
-	scheduler.scheduler_mark_damage(&cv.sched, CHROME_LAYER_ID)
 
+	order := [4]composer.Layer_Id{TERMINAL_LAYER_ID, CHROME_LAYER_ID, POPUP_LAYER_ID, CURSOR_LAYER_ID}
+	pipeline.composer_pipeline_set_layer_order(&cv.pipe, order[:])
 	return true
 }
 
@@ -103,31 +96,19 @@ composer_view_resize :: proc(cv: ^Composer_View, screen_w, screen_h: f32) {
 	pipeline.composer_pipeline_resize(&cv.pipe, screen_w, screen_h)
 
 	cur_lt := pipeline.composer_pipeline_get_layer(&cv.pipe, TERMINAL_LAYER_ID)
+	cur_lp := pipeline.composer_pipeline_get_layer(&cv.pipe, POPUP_LAYER_ID)
 	cur_lc := pipeline.composer_pipeline_get_layer(&cv.pipe, CHROME_LAYER_ID)
 
 	tw := _quantize_layer_cap(cur_lt.width if cur_lt != nil else 0, u32(screen_w))
 	th := _quantize_layer_cap(cur_lt.height if cur_lt != nil else 0, u32(screen_h))
+	pw := _quantize_layer_cap(cur_lp.width if cur_lp != nil else 0, u32(screen_w))
+	ph := _quantize_layer_cap(cur_lp.height if cur_lp != nil else 0, u32(screen_h))
 	cw := _quantize_layer_cap(cur_lc.width if cur_lc != nil else 0, u32(screen_w))
 	ch := _quantize_layer_cap(cur_lc.height if cur_lc != nil else 0, u32(screen_h))
 
-	lt, _ := pipeline.composer_pipeline_acquire_layer(&cv.pipe, TERMINAL_LAYER_ID, .Terminal, tw, th)
-	if lt != nil {
-		lt.dest_rect = composer.rect_make(0, 0, f32(lt.width), f32(lt.height))
-		lt.scissor_rect = composer.rect_make(0, 0, screen_w, screen_h)
-		lt.opacity = 1.0
-	}
-
-	lc, _ := pipeline.composer_pipeline_acquire_layer(&cv.pipe, CHROME_LAYER_ID, .Chrome, cw, ch)
-	if lc != nil {
-		lc.dest_rect = composer.rect_make(0, 0, f32(lc.width), f32(lc.height))
-		lc.scissor_rect = composer.rect_make(0, 0, screen_w, screen_h)
-		lc.opacity = 1.0
-	}
-
-	pipeline.composer_pipeline_mark_dirty(&cv.pipe, TERMINAL_LAYER_ID)
-	pipeline.composer_pipeline_mark_dirty(&cv.pipe, CHROME_LAYER_ID)
-	scheduler.scheduler_mark_damage(&cv.sched, TERMINAL_LAYER_ID)
-	scheduler.scheduler_mark_damage(&cv.sched, CHROME_LAYER_ID)
+	_acquire_full_layer(cv, TERMINAL_LAYER_ID, .Terminal, tw, th)
+	_acquire_full_layer(cv, POPUP_LAYER_ID, .Terminal, pw, ph)
+	_acquire_full_layer(cv, CHROME_LAYER_ID, .Chrome, cw, ch)
 }
 
 composer_view_get_layers :: proc(

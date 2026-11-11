@@ -7,6 +7,7 @@ package term
 // handle. Dragging maps the pointer position back onto the scroll offset.
 
 import mux_feat "../../features/multiplexer"
+import sess_feat "../../features/session"
 
 SCROLLBAR_WIDTH     :: f32(5.0)  // logical points, scaled by the pane scale
 SCROLLBAR_MARGIN    :: f32(4.0)
@@ -51,11 +52,14 @@ scrollbar_geometry :: proc(
 
 scrollbar_geometry_for_pane :: proc(pane: ^mux_feat.Pane_Entry, scale: f32 = 1.0) -> Scrollbar_Geometry {
 	if pane == nil || pane.session == nil do return {}
+	g, _, _ := sess_feat.session_pane_parts(pane.session, pane.surface_id)
+	scroll_off := sess_feat.session_pane_scroll_offset(pane.session, pane.surface_id)
+	if g == nil || scroll_off == nil do return {}
 	return scrollbar_geometry(
 		pane.rect,
-		pane.session.term.rows,
-		pane.session.term.grid.history_count,
-		pane.session.scroll_offset,
+		g.row_count,
+		g.history_count,
+		scroll_off^,
 		scale,
 	)
 }
@@ -101,15 +105,16 @@ scrollbar_begin_drag :: proc(app: ^Term_App, pane: ^mux_feat.Pane_Entry, my: f32
 // scrollbar_update_drag maps the pointer position onto the scroll offset.
 scrollbar_update_drag :: proc(app: ^Term_App, pane: ^mux_feat.Pane_Entry, my: f32) {
 	if app == nil || pane == nil || pane.session == nil do return
-	history := pane.session.term.grid.history_count
-	if history <= 0 do return
+	g, _, _ := sess_feat.session_pane_parts(pane.session, pane.surface_id)
+	scroll_off := sess_feat.session_pane_scroll_offset(pane.session, pane.surface_id)
+	if g == nil || scroll_off == nil || g.history_count <= 0 do return
 
 	geometry := scrollbar_geometry_for_pane(pane, max(1.0, app.layout.metrics.scale))
-	pane.session.scroll_offset = scrollbar_offset_from_pointer(
+	scroll_off^ = scrollbar_offset_from_pointer(
 		geometry,
 		my,
 		app.mouse.scrollbar_drag_offset,
-		history,
+		g.history_count,
 	)
 }
 

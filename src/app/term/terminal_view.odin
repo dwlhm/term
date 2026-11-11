@@ -12,12 +12,13 @@ import core_terminal "../../core/terminal"
 import sess_feat "../../features/session"
 import plat_font "../../platform/font"
 
-MAX_TERMINAL_PANE_SLOTS :: 16
+MAX_TERMINAL_PANE_SLOTS :: 32
 
 Terminal_Pane_Slot :: struct {
-	pane_id: u32,
-	rend:    terminal_render.Terminal_Renderer,
-	active:  bool,
+	pane_id:    u32,
+	surface_id: u16,
+	rend:       terminal_render.Terminal_Renderer,
+	active:     bool,
 }
 
 Terminal_View :: struct {
@@ -55,16 +56,17 @@ terminal_view_init :: proc(
 	return true
 }
 
-terminal_view_get_or_create_renderer :: proc(tv: ^Terminal_View, pane_id: u32) -> ^terminal_render.Terminal_Renderer {
+terminal_view_get_or_create_renderer :: proc(tv: ^Terminal_View, pane_id: u32, surface_id: u16 = 0) -> ^terminal_render.Terminal_Renderer {
 	if tv == nil do return nil
 	for i in 0..<MAX_TERMINAL_PANE_SLOTS {
-		if tv.slots[i].active && tv.slots[i].pane_id == pane_id {
+		if tv.slots[i].active && tv.slots[i].pane_id == pane_id && tv.slots[i].surface_id == surface_id {
 			return &tv.slots[i].rend
 		}
 	}
 	for i in 0..<MAX_TERMINAL_PANE_SLOTS {
 		if !tv.slots[i].active {
 			tv.slots[i].pane_id = pane_id
+			tv.slots[i].surface_id = surface_id
 			if !terminal_render.terminal_renderer_init_with_pipelines(
 				&tv.slots[i].rend,
 				tv.device,
@@ -90,8 +92,8 @@ terminal_view_release_pane :: proc(tv: ^Terminal_View, pane_id: u32) {
 			terminal_render.terminal_renderer_destroy(&tv.slots[i].rend)
 			tv.slots[i].active = false
 			tv.slots[i].pane_id = 0
+			tv.slots[i].surface_id = 0
 			tv.slots[i].rend = {}
-			break
 		}
 	}
 }
@@ -190,10 +192,15 @@ terminal_view_encode_pane :: proc(
 	screen_w, screen_h: f32,
 	load_op: contract.Gpu_Load_Op = .Load,
 	hover_openable_bg, hover_blocked_bg: [4]f32,
+	surface_id: u16 = 0,
+	is_floating: bool = false,
 ) -> (dirty_cells: int) {
 	if tv == nil || rawptr(enc) == nil || sess == nil || rawptr(target_view) == nil || text_atlas == nil do return 0
+	g, d, _ := sess_feat.session_pane_parts(sess, surface_id)
+	scroll_ptr := sess_feat.session_pane_scroll_offset(sess, surface_id)
+	if g == nil || d == nil || scroll_ptr == nil do return 0
 
-	rend := terminal_view_get_or_create_renderer(tv, pane_id)
+	rend := terminal_view_get_or_create_renderer(tv, pane_id, surface_id)
 	if rend == nil do return 0
 
 	sel_active := mouse != nil && mouse.selection.active && mouse.selection.pane_id == pane_id
@@ -215,14 +222,31 @@ terminal_view_encode_pane :: proc(
 
 	eff_pad_x, eff_pad_y := pane_grid_pad(
 		pane_rect,
-		sess.term.rows,
-		sess.term.cols,
+		g.row_count,
+		g.col_count,
 		metrics.cell_w,
 		metrics.cell_h,
 		metrics.pane_pad_x,
 		metrics.pane_pad_y,
 	)
 
+	has_bg := sess.has_custom_bg
+	bg := sess.custom_bg
+	radius := metrics.border_radius
+	opacity := metrics.pane_opacity
+	if is_floating {
+		if s := core_terminal.terminal_surface_find(&sess.term, surface_id); s != nil && s.chrome != .None {
+			has_bg = true
+			bg = {0.08, 0.09, 0.12, 0.0}
+			radius = 0.0
+			opacity = 0.0
+		}
+	}
+
+	saved_g, saved_d := sess.term.grid, sess.term.damage
+	saved_r, saved_c := sess.term.rows, sess.term.cols
+	sess.term.grid, sess.term.damage = g^, d^
+	sess.term.rows, sess.term.cols = g.row_count, g.col_count
 	terminal_render.terminal_renderer_encode(
 		rend,
 		enc,
@@ -234,11 +258,11 @@ terminal_view_encode_pane :: proc(
 		metrics.cell_h,
 		eff_pad_x,
 		eff_pad_y,
-		sess.scroll_offset,
+		scroll_ptr^,
 		screen_w,
 		screen_h,
-		sess.has_custom_bg,
-		sess.custom_bg,
+		has_bg,
+		bg,
 		sel_r_start,
 		sel_c_start,
 		sel_r_end,
@@ -248,10 +272,13 @@ terminal_view_encode_pane :: proc(
 		hover_openable_bg,
 		hover_blocked_bg,
 		load_op,
-		metrics.border_radius,
+		radius,
 		is_focused,
-		metrics.pane_opacity,
+		opacity,
 	)
+	g^, d^ = sess.term.grid, sess.term.damage
+	sess.term.grid, sess.term.damage = saved_g, saved_d
+	sess.term.rows, sess.term.cols = saved_r, saved_c
 
 	return rend.last_dirty_cells
 }

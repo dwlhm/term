@@ -81,6 +81,7 @@ mouse_on_button_down :: proc(
 	clicks: int = 1,
 	is_shift: bool = false,
 	is_alt: bool = false,
+	surface_id: u16 = 0,
 ) {
 	if m == nil do return
 	m.pos = pos
@@ -89,9 +90,10 @@ mouse_on_button_down :: proc(
 	m.drag_started = false
 
 	if button == sdl3.BUTTON_LEFT {
+		g, _, _ := sess_feat.session_pane_parts(sess, surface_id)
 		eff_px, eff_py := m.pad_x, m.pad_y
-		if sess != nil {
-			eff_px, eff_py = pane_grid_pad(pane_rect, sess.term.rows, sess.term.cols, m.cell_w, m.cell_h, m.pad_x, m.pad_y)
+		if g != nil {
+			eff_px, eff_py = pane_grid_pad(pane_rect, g.row_count, g.col_count, m.cell_w, m.cell_h, m.pad_x, m.pad_y)
 		}
 		screen_r, cell_c := feat_inter.pixel_to_cell(pos, pane_rect, m.cell_w, m.cell_h, eff_px, eff_py)
 		cell_r := screen_r - scroll_offset
@@ -104,7 +106,7 @@ mouse_on_button_down :: proc(
 
 		// 2. Triple Click: Select entire line via line_find_bounds
 		if clicks >= 3 {
-			cols := sess.term.cols if sess != nil else 80
+			cols := g.col_count if g != nil else 80
 			start_c, end_c := feat_inter.line_find_bounds(cols)
 			m.selection.active = true
 			m.selection.mode = .Line
@@ -119,10 +121,10 @@ mouse_on_button_down :: proc(
 		// 3. Double Click: Auto-select word under cursor via word_find_bounds
 		if clicks == 2 {
 			start_c, end_c := cell_c, cell_c
-			if sess != nil {
-				phy_r := terminal_grid.grid_physical_row(&sess.term.grid, cell_r)
-				if phy_r < len(sess.term.grid.rows) {
-					start_c, end_c = feat_inter.word_find_bounds(&sess.term.grid.rows[phy_r], cell_c)
+			if g != nil {
+				phy_r := terminal_grid.grid_physical_row(g, cell_r)
+				if phy_r < len(g.rows) {
+					start_c, end_c = feat_inter.word_find_bounds(&g.rows[phy_r], cell_c)
 				}
 			}
 			m.selection.active = true
@@ -149,14 +151,16 @@ mouse_on_motion :: proc(
 	pane_rect: [4]f32,
 	sess: ^sess_feat.Terminal_Session = nil,
 	scroll_offset: int = 0,
+	surface_id: u16 = 0,
 ) {
 	if m == nil do return
 	m.pos = pos
 
 	if m.is_down && m.button == sdl3.BUTTON_LEFT {
+		g, _, _ := sess_feat.session_pane_parts(sess, surface_id)
 		eff_px, eff_py := m.pad_x, m.pad_y
-		if sess != nil {
-			eff_px, eff_py = pane_grid_pad(pane_rect, sess.term.rows, sess.term.cols, m.cell_w, m.cell_h, m.pad_x, m.pad_y)
+		if g != nil {
+			eff_px, eff_py = pane_grid_pad(pane_rect, g.row_count, g.col_count, m.cell_w, m.cell_h, m.pad_x, m.pad_y)
 		}
 		screen_r, cell_c := feat_inter.pixel_to_cell(pos, pane_rect, m.cell_w, m.cell_h, eff_px, eff_py)
 		cell_r := screen_r - scroll_offset
@@ -172,7 +176,7 @@ mouse_on_motion :: proc(
 		} else {
 			#partial switch m.selection.mode {
 			case .Line:
-				cols := sess.term.cols if sess != nil else 80
+				cols := g.col_count if g != nil else 80
 				_, end_c := feat_inter.line_find_bounds(cols)
 				if cell_r >= m.pending_start.row {
 					m.selection.start_cell = {row = m.pending_start.row, col = 0}
@@ -183,10 +187,10 @@ mouse_on_motion :: proc(
 				}
 
 			case .Word:
-				if sess != nil {
-					phy_r := terminal_grid.grid_physical_row(&sess.term.grid, cell_r)
-					if phy_r < len(sess.term.grid.rows) {
-						wb_start, wb_end := feat_inter.word_find_bounds(&sess.term.grid.rows[phy_r], cell_c)
+				if g != nil {
+					phy_r := terminal_grid.grid_physical_row(g, cell_r)
+					if phy_r < len(g.rows) {
+						wb_start, wb_end := feat_inter.word_find_bounds(&g.rows[phy_r], cell_c)
 						if cell_r > m.pending_start.row || (cell_r == m.pending_start.row && cell_c >= m.pending_start.col) {
 							m.selection.start_cell = m.pending_start
 							m.selection.end_cell = {row = cell_r, col = wb_end}
@@ -222,14 +226,15 @@ mouse_clear_selection :: proc(m: ^Mouse_State) {
 	feat_inter.selection_clear(&m.selection)
 }
 
-mouse_select_all :: proc(m: ^Mouse_State, pane_id: u32, sess: ^sess_feat.Terminal_Session) {
+mouse_select_all :: proc(m: ^Mouse_State, pane_id: u32, sess: ^sess_feat.Terminal_Session, surface_id: u16 = 0) {
 	if m == nil || sess == nil do return
-	g := &sess.term.grid
+	g, _, _ := sess_feat.session_pane_parts(sess, surface_id)
+	if g == nil do return
 	m.selection.active = true
 	m.selection.mode = .Stream
 	m.selection.pane_id = pane_id
 	m.selection.start_cell = {row = -g.history_count, col = 0}
-	m.selection.end_cell = {row = sess.term.rows - 1, col = max(0, sess.term.cols - 1)}
+	m.selection.end_cell = {row = g.row_count - 1, col = max(0, g.col_count - 1)}
 	m.drag_started = false
 }
 
@@ -238,16 +243,19 @@ mouse_keyboard_select :: proc(
 	pane_id: u32,
 	sess: ^sess_feat.Terminal_Session,
 	action: Action_Id,
+	surface_id: u16 = 0,
 ) {
 	if m == nil || sess == nil do return
-	g := &sess.term.grid
+	g, _, p := sess_feat.session_pane_parts(sess, surface_id)
+	scroll_ptr := sess_feat.session_pane_scroll_offset(sess, surface_id)
+	if g == nil || p == nil || scroll_ptr == nil do return
 	min_row := -g.history_count
-	max_row := sess.term.rows - 1
-	cols    := max(1, sess.term.cols)
+	max_row := g.row_count - 1
+	cols    := max(1, g.col_count)
 
 	if !m.selection.active || m.selection.pane_id != pane_id {
-		cur_r := sess.term.parser.cursor.row - sess.scroll_offset
-		cur_c := clamp(sess.term.parser.cursor.col, 0, cols - 1)
+		cur_r := p.cursor.row - scroll_ptr^
+		cur_c := clamp(p.cursor.col, 0, cols - 1)
 		m.selection.active = true
 		m.selection.mode = .Stream
 		m.selection.pane_id = pane_id
@@ -328,10 +336,10 @@ mouse_keyboard_select :: proc(
 	}
 
 	// Auto-scroll viewport if keyboard selection extends beyond screen top/bottom
-	screen_r := m.selection.end_cell.row + sess.scroll_offset
+	screen_r := m.selection.end_cell.row + scroll_ptr^
 	if screen_r < 0 {
-		sess.scroll_offset = clamp(-m.selection.end_cell.row, 0, g.history_count)
-	} else if screen_r >= sess.term.rows {
-		sess.scroll_offset = clamp(sess.term.rows - 1 - m.selection.end_cell.row, 0, g.history_count)
+		scroll_ptr^ = clamp(-m.selection.end_cell.row, 0, g.history_count)
+	} else if screen_r >= g.row_count {
+		scroll_ptr^ = clamp(g.row_count - 1 - m.selection.end_cell.row, 0, g.history_count)
 	}
 }

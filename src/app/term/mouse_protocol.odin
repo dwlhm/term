@@ -16,15 +16,16 @@ Mouse_Event_Kind :: enum {
 	Wheel,
 }
 
-// mouse_protocol_should_handle returns true if mouse tracking is active on the session
+// mouse_protocol_should_handle returns true if mouse tracking is active on the pane
 // and the user is NOT holding Shift (universal Shift-bypass convention).
-mouse_protocol_should_handle :: proc(sess: ^sess_feat.Terminal_Session, is_shift: bool) -> bool {
+mouse_protocol_should_handle :: proc(sess: ^sess_feat.Terminal_Session, is_shift: bool, surface_id: u16 = 0) -> bool {
 	if sess == nil || is_shift do return false
-	return sess.term.parser.mouse_mode != .None
+	_, _, p := sess_feat.session_pane_parts(sess, surface_id)
+	return p != nil && p.mouse_mode != .None
 }
 
 // mouse_protocol_encode maps a window mouse event onto the pane's cells and
-// encodes it the way the program asked for (core/terminal/input_encode).
+// encodes it the way the pane's parser asked for (core/terminal/input_encode).
 mouse_protocol_encode :: proc(
 	sess: ^sess_feat.Terminal_Session,
 	kind: Mouse_Event_Kind,
@@ -37,14 +38,19 @@ mouse_protocol_encode :: proc(
 	is_shift: bool = false,
 	is_alt: bool = false,
 	is_ctrl: bool = false,
+	surface_id: u16 = 0,
 ) -> (res: ie.Encoded, ok: bool) {
 	if sess == nil do return {}, false
+	g, _, p := sess_feat.session_pane_parts(sess, surface_id)
+	if g == nil || p == nil do return {}, false
 	rel_x := max(0.0, pixel_x - pane_rect[0] - pad_x)
 	rel_y := max(0.0, pixel_y - pane_rect[1] - pad_y)
+	c0 := int(rel_x / max(1.0, cell_w))
+	r0 := int(rel_y / max(1.0, cell_h))
 	ev := ie.Mouse_Event{
 		button = _mouse_button(button),
-		col    = clamp(int(rel_x / max(1.0, cell_w)) + 1, 1, sess.term.cols),
-		row    = clamp(int(rel_y / max(1.0, cell_h)) + 1, 1, sess.term.rows),
+		col    = clamp(c0 + 1, 1, max(1, g.col_count)),
+		row    = clamp(r0 + 1, 1, max(1, g.row_count)),
 		px     = int(rel_x) + 1,
 		py     = int(rel_y) + 1,
 	}
@@ -59,7 +65,7 @@ mouse_protocol_encode :: proc(
 	if is_shift do ev.mods += {.Shift}
 	if is_alt do ev.mods += {.Alt}
 	if is_ctrl do ev.mods += {.Ctrl}
-	return ie.encode_mouse(ev, ie.mouse_modes(&sess.term.parser))
+	return ie.encode_mouse(ev, ie.mouse_modes(p))
 }
 
 @(private = "file")
@@ -73,9 +79,11 @@ _mouse_button :: proc(button: u8) -> ie.Mouse_Button {
 }
 
 // mouse_protocol_report_focus emits Focus In (\x1b[I) or Focus Out (\x1b[O) if DECSET 1004 is active.
-mouse_protocol_report_focus :: proc(sess: ^sess_feat.Terminal_Session, gained: bool) {
-	if sess != nil && sess.term.parser.report_focus {
-		sess_feat.session_write_string(sess, "\x1b[I" if gained else "\x1b[O")
+mouse_protocol_report_focus :: proc(sess: ^sess_feat.Terminal_Session, gained: bool, surface_id: u16 = 0) {
+	if sess == nil do return
+	_, _, p := sess_feat.session_pane_parts(sess, surface_id)
+	if p != nil && p.report_focus {
+		sess_feat.session_write_pane_string(sess, surface_id, "\x1b[I" if gained else "\x1b[O")
 	}
 }
 
