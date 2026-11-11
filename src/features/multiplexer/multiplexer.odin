@@ -20,6 +20,9 @@ Pane_Entry :: struct {
 	id:          u32,
 	kind:        Pane_Kind,
 	session:     ^session.Terminal_Session, // Nil if Three_D
+	surface_id:  u16,                       // 0 = Root session pane, >0 = OSC 7502 surface
+	is_floating: bool,                      // true for floating/popup panes (OSC 7502;3)
+	z:           int,                       // stacking order for floating panes
 	interactor:  three_d.Three_D_Interactor, // For 3D camera/orbit
 	rect:        [4]f32,
 	is_focused:  bool,
@@ -51,7 +54,9 @@ multiplexer_init :: proc(m: ^Multiplexer, provider: session.Session_Provider, al
 multiplexer_destroy :: proc(m: ^Multiplexer, kill_sessions: bool) {
 	if m == nil do return
 	for &p in m.panes {
-		session.session_provider_release(&m.provider, p.session, kill_sessions)
+		if p.surface_id == 0 {
+			session.session_provider_release(&m.provider, p.session, kill_sessions)
+		}
 		p.session = nil
 	}
 	delete(m.panes)
@@ -69,7 +74,7 @@ multiplexer_create_terminal_pane :: proc(m: ^Multiplexer, config: session.Sessio
 }
 
 // multiplexer_add_terminal_pane shows an existing session (an attached background one) in a new pane.
-multiplexer_add_terminal_pane :: proc(m: ^Multiplexer, sess: ^session.Terminal_Session) -> (pane_id: u32) {
+multiplexer_add_terminal_pane :: proc(m: ^Multiplexer, sess: ^session.Terminal_Session, surface_id: u16 = 0) -> (pane_id: u32) {
 	if m == nil || sess == nil do return 0
 	pane_id = m.next_pane_id
 	m.next_pane_id += 1
@@ -78,6 +83,7 @@ multiplexer_add_terminal_pane :: proc(m: ^Multiplexer, sess: ^session.Terminal_S
 	p.id = pane_id
 	p.kind = .Terminal
 	p.session = sess
+	p.surface_id = surface_id
 	p.is_focused = (len(m.panes) == 0)
 	p.is_zoomed = false
 
@@ -87,6 +93,16 @@ multiplexer_add_terminal_pane :: proc(m: ^Multiplexer, sess: ^session.Terminal_S
 	}
 
 	return pane_id
+}
+
+multiplexer_find_surface_pane :: proc(m: ^Multiplexer, sess: ^session.Terminal_Session, surface_id: u16) -> ^Pane_Entry {
+	if m == nil || sess == nil do return nil
+	for i in 0 ..< len(m.panes) {
+		if m.panes[i].session == sess && m.panes[i].surface_id == surface_id {
+			return &m.panes[i]
+		}
+	}
+	return nil
 }
 
 multiplexer_create_3d_pane :: proc(m: ^Multiplexer) -> u32 {
@@ -123,7 +139,11 @@ multiplexer_close_pane :: proc(m: ^Multiplexer, pane_id: u32) -> bool {
 	}
 	if idx < 0 do return false
 
-	session.session_provider_release(&m.provider, m.panes[idx].session, true)
+	if m.panes[idx].surface_id == 0 {
+		session.session_provider_release(&m.provider, m.panes[idx].session, true)
+	} else {
+		session.session_close_pane(m.panes[idx].session, m.panes[idx].surface_id)
+	}
 	m.panes[idx].session = nil
 
 	ordered_remove(&m.panes, idx)
@@ -166,6 +186,9 @@ multiplexer_focus_pane :: proc(m: ^Multiplexer, pane_id: u32) -> bool {
 	for i in 0..<len(m.panes) {
 		if m.panes[i].id == pane_id {
 			m.panes[i].is_focused = true
+			if m.panes[i].kind == .Terminal && m.panes[i].session != nil {
+				session.session_focus_pane(m.panes[i].session, m.panes[i].surface_id)
+			}
 			found = true
 		} else {
 			m.panes[i].is_focused = false
@@ -175,6 +198,29 @@ multiplexer_focus_pane :: proc(m: ^Multiplexer, pane_id: u32) -> bool {
 		m.focused_pane_id = pane_id
 	}
 	return found
+}
+
+// multiplexer_pane_at resolves the topmost visible pane under `(x, y)` (floating
+// panes ordered by highest `z` first, then tiled panes).
+multiplexer_pane_at :: proc(m: ^Multiplexer, x, y: f32) -> ^Pane_Entry {
+	if m == nil do return nil
+	var_top: ^Pane_Entry = nil
+	for i in 0 ..< len(m.panes) {
+		p := &m.panes[i]
+		if !p.is_floating || p.rect[2] <= 0 || p.rect[3] <= 0 do continue
+		if x >= p.rect[0] && x <= p.rect[0] + p.rect[2] && y >= p.rect[1] && y <= p.rect[1] + p.rect[3] {
+			if var_top == nil || p.z >= var_top.z do var_top = p
+		}
+	}
+	if var_top != nil do return var_top
+	for i in 0 ..< len(m.panes) {
+		p := &m.panes[i]
+		if p.is_floating || p.rect[2] <= 0 || p.rect[3] <= 0 do continue
+		if x >= p.rect[0] && x <= p.rect[0] + p.rect[2] && y >= p.rect[1] && y <= p.rect[1] + p.rect[3] {
+			return p
+		}
+	}
+	return nil
 }
 
 multiplexer_cycle_focus :: proc(m: ^Multiplexer, forward: bool = true) -> u32 {
@@ -231,7 +277,7 @@ multiplexer_drain_all :: proc(m: ^Multiplexer) -> int {
 	if m == nil do return 0
 	total_drained := 0
 	for &p in m.panes {
-		if p.session != nil {
+		if p.session != nil && p.surface_id == 0 {
 			total_drained += session.session_drain(p.session)
 		}
 	}
@@ -241,7 +287,7 @@ multiplexer_drain_all :: proc(m: ^Multiplexer) -> int {
 multiplexer_has_pending_data :: proc(m: ^Multiplexer) -> bool {
 	if m == nil do return false
 	for &p in m.panes {
-		if p.session != nil && session.session_inbox_pending(p.session) {
+		if p.session != nil && p.surface_id == 0 && session.session_inbox_pending(p.session) {
 			return true
 		}
 	}

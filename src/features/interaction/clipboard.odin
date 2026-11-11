@@ -53,12 +53,13 @@ clipboard_init :: proc(
 
 // session_extract_selection extracts clean UTF-8 text from the grid selection.
 // Decoupled from host OS facilities; reusable for drag & drop, text search, and headless tests.
-session_extract_selection :: proc(sess: ^session.Terminal_Session, sel: Mouse_Selection, allocator: runtime.Allocator = context.temp_allocator) -> (string, bool) {
+session_extract_selection :: proc(sess: ^session.Terminal_Session, sel: Mouse_Selection, allocator: runtime.Allocator = context.temp_allocator, surface_id: u16 = 0) -> (string, bool) {
 	if sess == nil do return "", false
 	norm, ok := selection_normalize(sel)
 	if !ok do return "", false
 
-	g := &sess.term.grid
+	g, _, _ := session.session_pane_parts(sess, surface_id)
+	if g == nil do return "", false
 	b := strings.builder_make(allocator)
 
 	min_valid_row := -g.history_count
@@ -129,25 +130,25 @@ clipboard_get_text :: proc(cb: ^Clipboard_Bridge, allocator: runtime.Allocator =
 }
 
 // clipboard_copy_selection extracts active selection and sends it to the host clipboard.
-clipboard_copy_selection :: proc(cb: ^Clipboard_Bridge, sess: ^session.Terminal_Session, sel: Mouse_Selection) -> bool {
+clipboard_copy_selection :: proc(cb: ^Clipboard_Bridge, sess: ^session.Terminal_Session, sel: Mouse_Selection, surface_id: u16 = 0) -> bool {
 	if cb == nil do return false
-	text, ok := session_extract_selection(sess, sel, context.temp_allocator)
+	text, ok := session_extract_selection(sess, sel, context.temp_allocator, surface_id)
 	if !ok do return false
 	return clipboard_set_text(cb, text)
 }
 
-// clipboard_paste retrieves text from the host clipboard and streams it to the PTY.
-clipboard_paste :: proc(cb: ^Clipboard_Bridge, sess: ^session.Terminal_Session, bracketed: bool = false) -> bool {
+// clipboard_paste retrieves text from the host clipboard and streams it to the active pane.
+clipboard_paste :: proc(cb: ^Clipboard_Bridge, sess: ^session.Terminal_Session, bracketed: bool = false, surface_id: u16 = 0) -> bool {
 	if cb == nil || sess == nil do return false
 	text, ok := clipboard_get_text(cb, context.temp_allocator)
 	if !ok || len(text) == 0 do return false
 
 	if bracketed {
-		session.session_write_string(sess, "\x1b[200~")
-		session.session_write_string(sess, text)
-		session.session_write_string(sess, "\x1b[201~")
+		session.session_write_pane_string(sess, surface_id, "\x1b[200~")
+		session.session_write_pane_string(sess, surface_id, text)
+		session.session_write_pane_string(sess, surface_id, "\x1b[201~")
 	} else {
-		session.session_write_string(sess, text)
+		session.session_write_pane_string(sess, surface_id, text)
 	}
 	return true
 }
