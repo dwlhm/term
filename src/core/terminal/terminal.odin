@@ -27,9 +27,17 @@ Terminal :: struct {
 	rows:       int,
 	cols:       int,
 	// Window title from OSC 0/2, kept as VT state so a paint can restore it.
-	title_buf:  [256]u8,
-	title_len:  int,
-	allocator:  runtime.Allocator,
+	title_buf:          [256]u8,
+	title_len:          int,
+	surfaces:           [dynamic]Terminal_Surface,
+	root_cell_rect:     [4]int,
+	root_norm_rect:     [4]f32,
+	active_surface_id:  u16,
+	focused_surface_id: u16,
+	focus_requested:    bool,
+	surface_cells_used: int,
+	surfaces_dirty:     bool,
+	allocator:          runtime.Allocator,
 }
 
 terminal_init :: proc(t: ^Terminal, rows, cols: int, allocator: runtime.Allocator = context.allocator) {
@@ -57,6 +65,8 @@ terminal_init :: proc(t: ^Terminal, rows, cols: int, allocator: runtime.Allocato
 	t.parser.on_alt_screen = _terminal_on_alt_screen
 	_ = extension.registry_register_osc(&t.extensions, 8, extension.osc_8_handler, rawptr(&t.hyperlinks))
 	t.parser.user_data = rawptr(t)
+	t.root_cell_rect = {0, 0, t.cols, t.rows}
+	t.root_norm_rect = {0, 0, 1, 1}
 }
 
 _terminal_set_active_link :: proc(term: rawptr, link_id: u16) {
@@ -120,6 +130,9 @@ _terminal_on_osc :: proc(user_data: rawptr, osc_id: int, payload: string) -> boo
 	if osc_id == extension.OSC_PROGRAM_STATUS && len(payload) > 0 && payload[0] == '?' {
 		return parser.parser_emit_response(&t.parser, transmute([]u8)string(OSC_7501_SUPPORTED))
 	}
+	if osc_id == extension.OSC_SURFACE_LAYER {
+		return _terminal_handle_osc_7502(t, payload)
+	}
 	return extension.registry_dispatch_osc(&t.extensions, osc_id, payload, user_data)
 }
 
@@ -144,6 +157,10 @@ _terminal_on_dcs :: proc(user_data: rawptr, payload: []u8) -> bool {
 _terminal_on_clear :: proc(user_data: rawptr, mode: int) {
 	if user_data == nil do return
 	t := (^Terminal)(user_data)
+	if mode == 4 {
+		terminal_surfaces_reset(t)
+		return
+	}
 	extension.registry_dispatch_clear(&t.extensions, mode, user_data)
 }
 
@@ -152,6 +169,11 @@ _terminal_on_clear :: proc(user_data: rawptr, mode: int) {
 _terminal_on_alt_screen :: proc(user_data: rawptr, enter: bool, mode: int) {
 	if user_data == nil do return
 	t := (^Terminal)(user_data)
+	if !enter && !t.parser.in_alt_screen do return
+
+	if !enter {
+		terminal_surfaces_reset(t)
+	}
 
 	// When leaving alternate screen: clear its grid and alternate screen placements (mode 47 preserves)
 	if !enter && mode != 47 {
@@ -167,6 +189,8 @@ _terminal_on_alt_screen :: proc(user_data: rawptr, enter: bool, mode: int) {
 
 	t.parser.scroll_top = 0
 	t.parser.scroll_bottom = max(0, t.rows - 1)
+	t.parser.scroll_left = 0
+	t.parser.scroll_right = max(0, t.cols - 1)
 	damage.damage_mark_all(&t.damage, 1)
 }
 
@@ -178,6 +202,7 @@ _terminal_on_scroll :: proc(user_data: rawptr, n: int, top, bottom: int) {
 
 terminal_destroy :: proc(t: ^Terminal) {
 	if t == nil do return
+	terminal_surfaces_destroy(t)
 	grid.grid_destroy(&t.grid)
 	grid.grid_destroy(&t.alt_grid)
 	damage.damage_destroy(&t.damage)
@@ -191,6 +216,7 @@ terminal_destroy :: proc(t: ^Terminal) {
 
 terminal_reset :: proc(t: ^Terminal) {
 	if t == nil do return
+	terminal_surfaces_reset(t)
 	grid.grid_clear_all(&t.grid, &t.damage)
 	grid.grid_clear_history(&t.grid)
 	egc.egc_pool_init(&t.egc_pool)
@@ -218,7 +244,29 @@ terminal_advance_cursor_for_image :: proc(t: ^Terminal, cols, rows: int) {
 
 terminal_feed_bytes :: proc(t: ^Terminal, data: []u8) {
 	if t == nil || len(data) == 0 do return
-	parser.parser_parse_bytes(&t.parser, &t.grid, &t.damage, data)
+	cur_id := t.active_surface_id
+	g, d, p := terminal_surface_parts(t, cur_id)
+	p.active_grid = g
+	p.active_damage = d
+	i := 0
+	for i < len(data) {
+		if p.state == .Ground && p.utf8_state == 0 {
+			start := i
+			for i < len(data) && data[i] >= 0x20 && data[i] <= 0x7E do i += 1
+			if i > start {
+				parser.parser_parse_bytes(p, g, d, data[start:i])
+				continue
+			}
+		}
+		parser.parser_parse_byte(p, g, d, data[i])
+		if t.active_surface_id != cur_id || cur_id != 0 {
+			cur_id = t.active_surface_id
+			g, d, p = terminal_surface_parts(t, cur_id)
+			p.active_grid = g
+			p.active_damage = d
+		}
+		i += 1
+	}
 }
 
 terminal_feed_string :: proc(t: ^Terminal, s: string) {
@@ -226,11 +274,13 @@ terminal_feed_string :: proc(t: ^Terminal, s: string) {
 }
 
 terminal_resize :: proc(t: ^Terminal, new_rows, new_cols: int) {
-	if t == nil || (new_rows == t.rows && new_cols == t.cols) do return
+	if t == nil || (new_rows == t.rows && new_cols == t.cols && t.grid.row_count == new_rows && t.grid.col_count == new_cols) do return
 	old_cur_r := t.parser.cursor.row
 	cmd_lines := _cmd_output_lines(t)
 	t.rows = max(1, new_rows)
 	t.cols = max(1, new_cols)
+	t.root_cell_rect = {0, 0, t.cols, t.rows}
+	t.root_norm_rect = {0, 0, 1, 1}
 	disp := 0
 	grid.grid_resize(&t.grid, &t.damage, t.rows, t.cols, &t.parser.cursor.row, &t.parser.cursor.col, &t.parser.cursor.pending_wrap, &disp)
 	// Keep the hidden buffer in sync without letting its damage leak into the
@@ -248,6 +298,8 @@ terminal_resize :: proc(t: ^Terminal, new_rows, new_cols: int) {
 	t.parser.cursor.col = clamp(t.parser.cursor.col, 0, t.cols - 1)
 	t.parser.scroll_top = clamp(t.parser.scroll_top, 0, t.rows - 1)
 	t.parser.scroll_bottom = max(0, t.rows - 1)
+	t.parser.scroll_left = clamp(t.parser.scroll_left, 0, t.cols - 1)
+	t.parser.scroll_right = max(0, t.cols - 1)
 	_cmd_output_relocate(t, cmd_lines)
 
 	// Keep saved cursor in sync with reflow displacement so DECRC (\x1b8 / CSI u) restores accurately
@@ -523,13 +575,21 @@ terminal_emit_response_string :: proc(term_ptr: rawptr, s: string) -> bool {
 
 terminal_drain_response :: proc(t: ^Terminal, out: []u8) -> int {
 	if t == nil do return 0
-	return parser.parser_drain_response(&t.parser, out)
+	if n := parser.parser_drain_response(&t.parser, out); n > 0 do return n
+	for i in 0 ..< len(t.surfaces) {
+		if n := parser.parser_drain_response(&t.surfaces[i].parser, out); n > 0 do return n
+	}
+	return 0
 }
 
 terminal_set_cell_size :: proc(t: ^Terminal, cell_w, cell_h: int) {
 	if t == nil do return
 	t.parser.cell_w = cell_w
 	t.parser.cell_h = cell_h
+	for i in 0 ..< len(t.surfaces) {
+		t.surfaces[i].parser.cell_w = cell_w
+		t.surfaces[i].parser.cell_h = cell_h
+	}
 }
 
 // terminal_cursor maps terminal state and active mouse tracking to a platform-neutral Mouse_Cursor.

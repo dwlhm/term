@@ -36,14 +36,17 @@ terminal_paint :: proc(t: ^Terminal, out: ^[dynamic]u8, history: int) {
 	alt := t.parser.in_alt_screen
 	main_grid := &t.alt_grid if alt else &t.grid
 	h := clamp(history, 0, main_grid.history_count)
+	if !alt do _paint_surfaces_splits_init(t, out)
 	_paint_lines(t, main_grid, -h, main_grid.row_count, out, &pen)
 	if alt {
 		_paint_set_pen(t, out, &pen, PAINT_PEN_DEFAULT)
 		_paint_str(out, "\x1b[?1049h\x1b[H")
+		_paint_surfaces_splits_init(t, out)
 		_paint_lines(t, &t.grid, 0, t.grid.row_count, out, &pen)
 	}
 	_paint_kitty(t, out)
 	_paint_state(t, out, &pen)
+	_paint_surfaces_content(t, out, &pen)
 }
 
 // _paint_lines writes logical rows [from, to) as one continuous text stream so

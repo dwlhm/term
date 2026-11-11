@@ -14,8 +14,16 @@ _relay_advance :: proc(r: ^Relay, b: u8) -> (done: bool) {
 	case .Escape:
 		return _relay_advance_escape(r, b)
 	case .Charset:
+		if b == 0x1B {
+			r.state = .Escape
+			return false
+		}
 		return true
 	case .Csi_Entry:
+		if b == 0x1B {
+			r.state = .Escape
+			return false
+		}
 		switch b {
 		case '?', '>', '<', '=', '0' ..= '9', ';', ':', 0x20 ..= 0x2F:
 			r.state = .Csi
@@ -23,6 +31,10 @@ _relay_advance :: proc(r: ^Relay, b: u8) -> (done: bool) {
 		}
 		return true
 	case .Csi:
+		if b == 0x1B {
+			r.state = .Escape
+			return false
+		}
 		switch b {
 		case '0' ..= '9', ';', ':', 0x20 ..= 0x2F:
 			return false
@@ -32,17 +44,28 @@ _relay_advance :: proc(r: ^Relay, b: u8) -> (done: bool) {
 		if b == 0x1B do r.state = .Osc_Esc
 		return b == 0x07
 	case .Osc_Esc:
+		if b == 0x1B do return false
+		if b != '\\' {
+			r.state = .Escape
+			return _relay_advance_escape(r, b)
+		}
 		return true
 	case .Dcs, .Apc:
 		if b == 0x1B do r.state = .Dcs_Esc if r.state == .Dcs else .Apc_Esc
 		return b == 0x07
 	case .Dcs_Esc, .Apc_Esc:
-		return b != 0x1B
+		if b == 0x1B do return false
+		if b != '\\' {
+			r.state = .Escape
+			return _relay_advance_escape(r, b)
+		}
+		return true
 	}
 	return true
 }
 
 _relay_advance_escape :: proc(r: ^Relay, b: u8) -> bool {
+	if b == 0x1B do return false
 	switch b {
 	case '[':
 		r.state = .Csi_Entry
@@ -77,6 +100,9 @@ _relay_is_query :: proc(seq: []u8) -> bool {
 			return bytes.index_byte(body, '*') >= 0
 		}
 	case ']':
+		if bytes.has_prefix(body, {'7', '5', '0', '2', ';'}) {
+			return bytes.has_prefix(body, {'7', '5', '0', '2', ';', '?'})
+		}
 		return bytes.index_byte(body, '?') >= 0
 	case 'P':
 		return bytes.has_prefix(body, {'$', 'q'}) || bytes.has_prefix(body, {'+', 'q'})

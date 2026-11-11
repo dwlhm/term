@@ -1,7 +1,5 @@
 package core_terminal
 
-import cell "cell"
-import grid "grid"
 import parser "parser"
 
 // _paint_state restores everything but the cells, after the cells are written
@@ -11,19 +9,11 @@ import parser "parser"
 _paint_state :: proc(t: ^Terminal, out: ^[dynamic]u8, pen: ^Paint_Pen) {
 	p := &t.parser
 	_paint_tab_stops(t, out)
-	_paint_saved_cursor(p, out)
-	if p.scroll_top != 0 || p.scroll_bottom != t.rows - 1 {
-		_paint_csi_int(out, "", p.scroll_top + 1, ";")
-		_paint_int(out, p.scroll_bottom + 1)
-		_paint_str(out, "r")
-	}
-	_paint_dec_mode(out, 6, p.origin_mode)
-	_paint_dec_mode(out, 7, p.autowrap)
-	_paint_cursor(t, out, pen)
+	_paint_surface_vt(t, &t.grid, p, out, pen)
 	if !p.in_alt_screen && p.prompt_state == .Prompt {
 		_paint_str(out, "\x1b]133;P\x07")
 	}
-	_paint_set_pen(t, out, pen, _paint_active_pen(p))
+	_paint_set_pen(t, out, pen, _paint_vt_pen(t, p))
 	_paint_input_modes(p, out)
 	_paint_cursor_style(p, out)
 	_paint_charsets(p, out)
@@ -50,41 +40,6 @@ _paint_tab_stops :: proc(t: ^Terminal, out: ^[dynamic]u8) {
 		_paint_cup(out, 1, i + 1)
 		_paint_str(out, "\x1bH")
 	}
-}
-
-// _paint_saved_cursor rebuilds the DECSC slot (shared with mode 1049): the
-// position plus the DECOM/DECAWM state it captured.
-_paint_saved_cursor :: proc(p: ^parser.Parser, out: ^[dynamic]u8) {
-	_paint_dec_mode(out, 6, p.cursor.saved_origin_mode)
-	_paint_dec_mode(out, 7, p.cursor.saved_autowrap)
-	_paint_cup(out, p.cursor.saved_row + 1, p.cursor.saved_col + 1)
-	_paint_str(out, "\x1b7")
-}
-
-// _paint_cursor positions the cursor. A pending wrap (cursor parked past the
-// last column) can only be recreated by printing that last glyph again.
-_paint_cursor :: proc(t: ^Terminal, out: ^[dynamic]u8, pen: ^Paint_Pen) {
-	p := &t.parser
-	row := p.cursor.row - p.scroll_top if p.origin_mode else p.cursor.row
-	col := p.cursor.col
-	g_row := grid.grid_get_row(&t.grid, p.cursor.row)
-	if !p.cursor.pending_wrap || !p.autowrap || g_row == nil || col >= len(g_row.cells) {
-		_paint_cup(out, row + 1, col + 1)
-		return
-	}
-	if col > 0 && .Wide_Continuation in g_row.cells[col].flags do col -= 1
-	_paint_cup(out, row + 1, col + 1)
-	_paint_cell(t, g_row, col, out, pen)
-}
-
-_paint_active_pen :: proc(p: ^parser.Parser) -> Paint_Pen {
-	flags := p.cursor.active_flags
-	if p.cursor.direct_color.has_fg || p.cursor.direct_color.has_bg do flags += {.Has_Direct_Color}
-	if p.active_link != 0 do flags += {.Has_Hyperlink}
-	dc := p.cursor.direct_color
-	dc.link_id = p.active_link
-	sc := cell.Semantic_Cell{fg = p.cursor.active_fg, bg = p.cursor.active_bg, style = p.cursor.active_style, flags = flags}
-	return _paint_pen_of_cell(sc, dc)
 }
 
 @(rodata)
