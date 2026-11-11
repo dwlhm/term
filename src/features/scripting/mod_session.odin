@@ -36,9 +36,13 @@ open_mod_session :: proc "c" (L: ^lua.State) -> c.int {
 		fn:   lua.CFunction,
 	}{
 		{"new", _session_new},
+		{"spawn", _session_new},
 		{"get", _session_get},
+		{"find", _session_get},
 		{"ls", _session_ls},
+		{"list", _session_ls},
 		{"whoami", _session_whoami},
+		{"me", _session_whoami},
 	}
 
 	for m in methods {
@@ -166,12 +170,22 @@ _session_whoami :: proc "c" (L: ^lua.State) -> c.int {
 }
 
 @(private = "file")
-_parse_spawn_table :: proc(L: ^lua.State, idx: c.int, spec: ^proto.Spawn_Msg) -> bool {
-	lua.getfield(L, idx, "dir")
+_parse_spawn_meta :: proc(L: ^lua.State, idx: c.int, spec: ^proto.Spawn_Msg) -> bool {
+	lua.getfield(L, idx, "cwd")
+	if lua.type(L, -1) != .String {
+		lua.pop(L, 1)
+		lua.getfield(L, idx, "dir")
+	}
 	if lua.type(L, -1) == .String {
 		spec.cwd = strings.clone(lua.tostring(L, -1), context.temp_allocator)
 	}
 	lua.pop(L, 1)
+
+	if strings.has_prefix(spec.cwd, "~/") {
+		if home := os.get_env("HOME", context.temp_allocator); len(home) > 0 {
+			spec.cwd = strings.concatenate({home, spec.cwd[1:]}, context.temp_allocator)
+		}
+	}
 
 	lua.getfield(L, idx, "name")
 	if lua.type(L, -1) == .String {
@@ -181,28 +195,50 @@ _parse_spawn_table :: proc(L: ^lua.State, idx: c.int, spec: ^proto.Spawn_Msg) ->
 
 	owned := false
 	lua.getfield(L, idx, "owned")
-	if lua.type(L, -1) == .Boolean {
-		owned = lua.toboolean(L, -1) != 0
-	}
+	if lua.type(L, -1) == .Boolean do owned = lua.toboolean(L, -1) != 0
 	lua.pop(L, 1)
+	return owned
+}
 
+@(private = "file")
+_parse_spawn_cmd :: proc(L: ^lua.State, idx: c.int, spec: ^proto.Spawn_Msg) {
 	lua.getfield(L, idx, "cmd")
+	if lua.type(L, -1) == .Nil {
+		lua.pop(L, 1)
+		lua.getfield(L, idx, "command")
+	}
+
 	if lua.type(L, -1) == .Table {
-		n := int(lua.rawlen(L, -1))
-		spec.argc = min(n, proto.STREAM_MAX_ARGV)
-		for i in 0 ..< spec.argc {
+		n := min(int(lua.rawlen(L, -1)), proto.STREAM_MAX_ARGV)
+		spec.argc = n
+		for i in 0 ..< n {
 			lua.rawgeti(L, -1, lua.Integer(i + 1))
 			spec.argv[i] = strings.clone(lua.tostring(L, -1), context.temp_allocator)
 			lua.pop(L, 1)
 		}
 	} else if lua.type(L, -1) == .String {
-		spec.argc = 1
-		spec.argv[0] = strings.clone(lua.tostring(L, -1), context.temp_allocator)
+		s := lua.tostring(L, -1)
+		if strings.contains_any(s, " \t|;&") {
+			shell := os.get_env("SHELL", context.temp_allocator)
+			spec.argv[0] = shell if len(shell) > 0 else "/bin/sh"
+			spec.argv[1] = "-c"
+			spec.argv[2] = strings.clone(s, context.temp_allocator)
+			spec.argc = 3
+		} else {
+			spec.argv[0] = strings.clone(s, context.temp_allocator)
+			spec.argc = 1
+		}
 	} else {
 		shell := os.get_env("SHELL", context.temp_allocator)
 		spec.argv[0] = shell if len(shell) > 0 else "/bin/sh"
 		spec.argc = 1
 	}
 	lua.pop(L, 1)
+}
+
+@(private = "file")
+_parse_spawn_table :: proc(L: ^lua.State, idx: c.int, spec: ^proto.Spawn_Msg) -> bool {
+	owned := _parse_spawn_meta(L, idx, spec)
+	_parse_spawn_cmd(L, idx, spec)
 	return owned
 }

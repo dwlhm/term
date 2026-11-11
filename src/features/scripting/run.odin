@@ -6,6 +6,7 @@ import "core:c"
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import posix "core:sys/posix"
 import api "../session_api"
 import ipc "../../platform/ipc"
 import lua "../../platform/lua"
@@ -45,10 +46,24 @@ _spawn_script_root :: proc(vm: ^Script_Vm, args: []string) -> ^Fiber {
 }
 
 run_script :: proc(path: string, args: []string, trust := false) -> int {
-	content, read_err := os.read_entire_file(path, context.temp_allocator)
+	real_path := path
+	if strings.has_prefix(real_path, "~/") {
+		if home := os.get_env("HOME", context.temp_allocator); len(home) > 0 {
+			real_path = strings.concatenate({home, real_path[1:]}, context.temp_allocator)
+		}
+	}
+
+	content, read_err := os.read_entire_file(real_path, context.temp_allocator)
 	if read_err != nil {
 		fmt.eprintfln("term: cannot read script %s", path)
 		return 1
+	}
+
+	defer {
+		if _raw_mode_active {
+			posix.tcsetattr(posix.FD(0), .TCSAFLUSH, &_orig_termios)
+			_raw_mode_active = false
+		}
 	}
 
 	ipc_cli: ipc.Client

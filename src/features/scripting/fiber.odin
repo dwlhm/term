@@ -17,6 +17,13 @@ fiber_create :: proc(sched: ^Scheduler, parent_id: Fiber_Id, co: ^lua.State) -> 
 	f.group = make([dynamic]Fiber_Id, sched.allocator)
 	scope_init(&f.scope, sched.allocator)
 
+	if co != nil {
+		top := int(lua.gettop(co))
+		if top > 1 {
+			f.initial_args = top - 1
+		}
+	}
+
 	sched.fibers[f.id] = f
 
 	// Register with parent if exists
@@ -64,8 +71,14 @@ fiber_resume :: proc(sched: ^Scheduler, f: ^Fiber, nargs: int) -> int {
 	f.state = .Running
 	sched.current = f
 
+	actual_nargs := c.int(nargs)
+	if f.initial_args > 0 {
+		actual_nargs = c.int(f.initial_args)
+		f.initial_args = 0
+	}
+
 	nres: c.int
-	status := lua.resume(f.co, nil, c.int(nargs), &nres)
+	status := lua.resume(f.co, nil, actual_nargs, &nres)
 	sched.current = nil
 
 	switch status {

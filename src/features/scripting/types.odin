@@ -42,11 +42,12 @@ Scope :: struct {
 }
 
 Fiber :: struct {
-	id:          Fiber_Id,
-	parent_id:   Fiber_Id,
-	co:          ^lua.State,
-	state:       Fiber_State,
-	scope:       Scope,
+	id:           Fiber_Id,
+	parent_id:    Fiber_Id,
+	co:           ^lua.State,
+	state:        Fiber_State,
+	initial_args: int,
+	scope:        Scope,
 
 	// Suspension details
 	wait_kind:   Wait_Kind,

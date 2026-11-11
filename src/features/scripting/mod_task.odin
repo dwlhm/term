@@ -18,6 +18,7 @@ open_mod_task :: proc "c" (L: ^lua.State) -> c.int {
 		{"fork", _task_fork},
 		{"race", _task_race},
 		{"all", _task_all},
+		{"now", _task_now},
 	}
 
 	for m in methods {
@@ -46,6 +47,15 @@ _task_sleep :: proc "c" (L: ^lua.State) -> c.int {
 }
 
 @(private = "file")
+_task_now :: proc "c" (L: ^lua.State) -> c.int {
+	context = runtime.default_context()
+	now := time.now()
+	sec := f64(time.to_unix_nanoseconds(now)) / 1e9
+	lua.pushnumber(L, lua.Number(sec))
+	return 1
+}
+
+@(private = "file")
 _task_fork :: proc "c" (L: ^lua.State) -> c.int {
 	context = runtime.default_context()
 	vm := script_vm_of(L)
@@ -61,7 +71,7 @@ _task_fork :: proc "c" (L: ^lua.State) -> c.int {
 	}
 
 	// Create child coroutine
-	child_co := lua.newthread(vm.sched.main_L)
+	child_co := lua.newthread(L)
 	// Push function to top of L and move to child_co
 	lua.pushvalue(L, 1)
 	lua.xmove(L, child_co, 1)
@@ -94,7 +104,7 @@ _task_race :: proc "c" (L: ^lua.State) -> c.int {
 	for i in 1 ..= n {
 		lua.rawgeti(L, 1, lua.Integer(i))
 		if lua.type(L, -1) == .Function {
-			child_co := lua.newthread(vm.sched.main_L)
+			child_co := lua.newthread(L)
 			lua.insert(L, -2) // put child_co below function
 			lua.xmove(L, child_co, 1)
 			lua.pop(L, 1) // pop child_co
@@ -136,7 +146,7 @@ _task_all :: proc "c" (L: ^lua.State) -> c.int {
 	for i in 1 ..= n {
 		lua.rawgeti(L, 1, lua.Integer(i))
 		if lua.type(L, -1) == .Function {
-			child_co := lua.newthread(vm.sched.main_L)
+			child_co := lua.newthread(L)
 			lua.insert(L, -2)
 			lua.xmove(L, child_co, 1)
 			lua.pop(L, 1)
